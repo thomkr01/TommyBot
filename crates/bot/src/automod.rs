@@ -243,6 +243,11 @@ async fn filter_action(
 ) -> Result<()> {
     let uid = m.author.id;
     app.http.delete_message(m.channel_id, m.id).await.ok();
+    if action != FilterAction::Delete && cfg.automod.strike.reset_heat_on_timeout {
+        if let Some((s, _)) = app.heat.lock().unwrap().get_mut(&(gid.get(), uid.get())) {
+            s.value = 0.0;
+        }
+    }
     let secs = duration_secs.unwrap_or(cfg.misc.timeout_secs() as i64);
     match action {
         FilterAction::Delete => {}
