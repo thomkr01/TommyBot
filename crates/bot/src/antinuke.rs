@@ -95,7 +95,11 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
 }
 
 /// Strips the member's roles (saving them) so their permissions are gone.
-async fn quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
+pub(crate) async fn quarantine(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let member = app.http.guild_member(gid, user).await?.model().await?;
     let saved: Vec<i64> = member.roles.iter().map(|r| r.get() as i64).collect();
@@ -315,7 +319,7 @@ async fn record_nuke(
     Ok(case.id)
 }
 
-async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
+pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
     match op {
         Inverse::Unban { user } => {
             app.http.delete_ban(gid, Id::new(*user)).await?;

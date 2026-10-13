@@ -24,6 +24,7 @@ use twilight_util::builder::command::{
 use crate::{
     app::App,
     commands::{self, ModKind},
+    modcmds::{self, ModCmd},
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub enum Cmd {
         since_s: i64,
     },
     Backup(BackupCmd),
+    Ext(ModCmd, Option<String>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -54,7 +56,7 @@ pub enum BackupCmd {
     Delete { id: i64 },
 }
 
-fn user(o: &[CommandDataOption], name: &str) -> Option<Id<UserMarker>> {
+pub(crate) fn user(o: &[CommandDataOption], name: &str) -> Option<Id<UserMarker>> {
     o.iter()
         .find(|o| o.name == name)
         .and_then(|o| match o.value {
@@ -63,7 +65,7 @@ fn user(o: &[CommandDataOption], name: &str) -> Option<Id<UserMarker>> {
         })
 }
 
-fn string<'a>(o: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
+pub(crate) fn string<'a>(o: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
     o.iter()
         .find(|o| o.name == name)
         .and_then(|o| match &o.value {
@@ -72,7 +74,7 @@ fn string<'a>(o: &'a [CommandDataOption], name: &str) -> Option<&'a str> {
         })
 }
 
-fn int(o: &[CommandDataOption], name: &str) -> Option<i64> {
+pub(crate) fn int(o: &[CommandDataOption], name: &str) -> Option<i64> {
     o.iter()
         .find(|o| o.name == name)
         .and_then(|o| match o.value {
@@ -135,6 +137,10 @@ pub fn parse(
         }
         "unlock" => return Ok(Cmd::Unlock),
         "backup" => return backup(o),
+        "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
+        | "slowmode" | "cases" => {
+            return modcmds::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
+        }
         "revert" => {
             return Ok(Cmd::Revert {
                 target: user(o, "actor").ok_or("missing actor")?,
@@ -170,7 +176,8 @@ pub fn definitions() -> Vec<Command> {
     let guild_only = |b: CommandBuilder| b.contexts([InteractionContextType::Guild]).build();
     let chat = |n: &str, d: &str| CommandBuilder::new(n, d, CommandType::ChatInput);
     let menu = |n: &str| CommandBuilder::new(n, "", CommandType::User);
-    vec![
+    let mut defs = modcmds::definitions();
+    defs.extend([
         guild_only(
             chat("ban", "Ban a member")
                 .option(user())
@@ -224,7 +231,8 @@ pub fn definitions() -> Vec<Command> {
         guild_only(menu("Ban")),
         guild_only(menu("Kick")),
         guild_only(menu("Timeout")),
-    ]
+    ]);
+    defs
 }
 
 pub async fn register(app: &App) -> Result<()> {
@@ -312,6 +320,23 @@ async fn run(
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }
         Cmd::Backup(b) => commands::backup_cmd(app, gid, (actor_id, &actor), b).await,
+        Cmd::Ext(c, reason) => {
+            let ch = i
+                .channel
+                .as_ref()
+                .map(|c| c.id)
+                .ok_or(anyhow::anyhow!("no channel"))?;
+            modcmds::run(
+                app,
+                gid,
+                owner,
+                (actor_id, &actor),
+                ch,
+                c,
+                reason.as_deref(),
+            )
+            .await
+        }
     }
 }
 
