@@ -92,7 +92,7 @@ impl App {
             pool,
             me,
             cfgs: Default::default(),
-            logger: Default::default(),
+            logger: Mutex::new(Logger::new(me)),
             antinuke: Mutex::new(AntiNuke::new(HashMap::new())),
             rate_limiter: Default::default(),
             heat: Default::default(),

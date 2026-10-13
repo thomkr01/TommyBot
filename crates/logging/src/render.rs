@@ -4,7 +4,7 @@ use twilight_model::{
     channel::Message,
     guild::audit_log::{AuditLogEntry, AuditLogEventType as A},
     id::{
-        marker::{ChannelMarker, MessageMarker},
+        marker::{ChannelMarker, MessageMarker, UserMarker},
         Id,
     },
     user::User,
@@ -28,14 +28,18 @@ pub fn message_delete(
     id: Id<MessageMarker>,
     channel: Id<ChannelMarker>,
     cached: Option<&CachedMessage>,
+    deleter: Option<Id<UserMarker>>,
 ) -> String {
+    let by = deleter.map_or(String::new(), |d| format!(" by <@{d}>"));
     match cached {
         Some(c) => format!(
-            "**Message deleted** in <#{channel}> (posted by <@{}>, message {id})\n{}",
+            "**Message deleted**{by} in <#{channel}> (posted by <@{}>, message {id})\n{}",
             c.author,
             quote(&c.content)
         ),
-        None => format!("**Message deleted** in <#{channel}> (message {id}, content not cached)"),
+        None => {
+            format!("**Message deleted**{by} in <#{channel}> (message {id}, content not cached)")
+        }
     }
 }
 
