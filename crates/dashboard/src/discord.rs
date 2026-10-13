@@ -81,6 +81,18 @@ impl Discord {
             .await?)
     }
 
+    /// Ids of guilds the bot is in. shortcut: first 200 only, page with `after` for more.
+    pub async fn bot_guild_ids(&self) -> Result<Vec<String>> {
+        let g: Vec<Guild> = self
+            .bot("/users/@me/guilds?limit=200".into())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(g.into_iter().map(|g| g.id).collect())
+    }
+
     fn bot(&self, path: String) -> reqwest::RequestBuilder {
         self.http
             .get(format!("{API}{path}"))

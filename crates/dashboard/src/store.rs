@@ -3,9 +3,10 @@ use crate::ApiError;
 use serde_json::{json, Value};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
-pub async fn current(db: &PgPool, guild: i64) -> Result<Option<(i32, Value)>, ApiError> {
+/// Version 0 with an empty config until the first save: nothing else creates a guild's first row.
+pub async fn current(db: &PgPool, guild: i64) -> Result<(i32, Value), ApiError> {
     Ok(sqlx::query_as("select version, config from guild_config where guild_id = $1 order by version desc limit 1")
-        .bind(guild).fetch_optional(db).await?)
+        .bind(guild).fetch_optional(db).await?.unwrap_or((0, json!({}))))
 }
 
 /// Appends a new config version if `expected` is still the newest, then tells the bot.
@@ -166,6 +167,7 @@ mod tests {
         };
         let db = tommybot_core::db::connect(&url).await.unwrap();
         let g = 9_000_000_000 + (std::process::id() as i64);
+        assert_eq!(current(&db, g).await.unwrap(), (0, json!({})));
         let mut tx = db.begin().await.unwrap();
         assert_eq!(commit(&mut tx, g, 0, &json!({"a": 1}), 7).await.unwrap(), 1);
         assert!(matches!(
