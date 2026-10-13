@@ -19,3 +19,4 @@ serde.workspace = true
 tommybot-antinuke.workspace = true
 tommybot-automod.workspace = true
 tommybot-logging.workspace = true
+captcha = "1"

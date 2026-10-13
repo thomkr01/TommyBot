@@ -12,6 +12,9 @@ pub struct StrikeCfg {
     /// Strikes below the cap are forgotten after this long without a trigger.
     pub strike_expiry_ms: i64,
     pub reset_heat_on_timeout: bool,
+    /// Lock the server when a member reaches this strike number.
+    #[serde(default)]
+    pub lock_at_strikes: Option<u32>,
 }
 
 impl Default for StrikeCfg {
@@ -23,6 +26,7 @@ impl Default for StrikeCfg {
             reoffend_window_ms: 60 * 60_000,
             strike_expiry_ms: 60 * 60_000,
             reset_heat_on_timeout: true,
+            lock_at_strikes: None,
         }
     }
 }

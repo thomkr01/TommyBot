@@ -1,5 +1,6 @@
 //! Shared bot state and the per-guild config cache. The dashboard appends a `guild_config` row and
 //! sends `NOTIFY config_changed <guild>`; we drop that guild's cached copy and reload lazily.
+use crate::verify::VerificationCfg;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -8,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
+use tommybot_automod::discord_api::Api;
 use tommybot_automod::{
     heat::{HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
@@ -15,7 +17,7 @@ use tommybot_automod::{
 };
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
-    sections::{AntinukeCfg, AutomodCfg, LockdownCfg, MiscCfg, PanicCfg},
+    sections::{AntinukeCfg, AutomodCfg, LockdownCfg, MiscCfg, PanicCfg, WhitelistCfg},
 };
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
@@ -34,6 +36,8 @@ pub struct GuildCfg {
     pub lockdown: LockdownCfg,
     pub panic: PanicCfg,
     pub misc: MiscCfg,
+    pub whitelist: WhitelistCfg,
+    pub verification: VerificationCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -59,6 +63,8 @@ impl GuildCfg {
             lockdown: section(cfg, "lockdown"),
             panic: section(cfg, "panic"),
             misc: section(cfg, "misc"),
+            whitelist: section(cfg, "whitelist"),
+            verification: section(cfg, "verification"),
         }
     }
 }
@@ -68,6 +74,7 @@ pub struct App {
     /// Own client and rate-limit bucket for backup restore and panic mode.
     pub restore_http: Client,
     pub pool: PgPool,
+    pub api: Api,
     pub me: Id<UserMarker>,
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
     pub logger: Mutex<Logger>,
@@ -75,6 +82,8 @@ pub struct App {
     pub rate_limiter: Mutex<RateLimiter>,
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
+    /// Pending image-captcha answers per (guild, user); lost on restart, the member just clicks again.
+    pub captchas: Mutex<HashMap<(u64, u64), String>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
     /// The open nuke case per guild and when it last grew; a long quiet gap starts a new case.
     pub nukes: Mutex<HashMap<u64, (NukeCase, Instant)>>,
@@ -89,11 +98,18 @@ pub struct PanicRun {
 }
 
 impl App {
-    pub fn new(http: Client, restore_http: Client, pool: PgPool, me: Id<UserMarker>) -> Self {
+    pub fn new(
+        http: Client,
+        restore_http: Client,
+        pool: PgPool,
+        api: Api,
+        me: Id<UserMarker>,
+    ) -> Self {
         Self {
             http,
             restore_http,
             pool,
+            api,
             me,
             cfgs: Default::default(),
             logger: Mutex::new(Logger::new(me)),
@@ -101,6 +117,7 @@ impl App {
             rate_limiter: Default::default(),
             heat: Default::default(),
             raids: Default::default(),
+            captchas: Default::default(),
             mentions: Default::default(),
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
@@ -195,6 +212,7 @@ impl App {
             let n = l.recv().await?;
             if let Ok(g) = n.payload().parse::<u64>() {
                 self.cfgs.write().unwrap().remove(&g);
+                tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
             }
         }
     }
