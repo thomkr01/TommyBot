@@ -1,0 +1,15 @@
+[package]
+name = "tommybot"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+tommybot-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+twilight-gateway.workspace = true
+twilight-http.workspace = true
+twilight-model.workspace = true
+twilight-cache-inmemory.workspace = true
