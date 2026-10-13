@@ -228,3 +228,22 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         <StepUp need enrolled />
     }
 }
+
+/// Logging page: Wick and Discord tabs, each with essential and customize sub-tabs.
+#[component]
+pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+    let tab = if tab == "discord" { "discord" } else { "wick" };
+    let sub = if sub == "customize" { "customize" } else { "essential" };
+    let part = format!("{tab}_{sub}");
+    view! {
+        <div class="tabs">
+            <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"wick"</a>
+            <a class:on=tab == "discord" href=format!("#/{guild}/logging/discord/{sub}")>"discord"</a>
+        </div>
+        <div class="tabs">
+            <a class:on=sub == "essential" href=format!("#/{guild}/logging/{tab}/essential")>"essential"</a>
+            <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
+        </div>
+        <Section guild=guild.clone() name="logging".to_string() part enrolled />
+    }
+}

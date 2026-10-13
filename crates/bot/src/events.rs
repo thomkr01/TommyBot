@@ -43,7 +43,7 @@ async fn send(
 }
 
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, text: &str) -> Result<()> {
-    match app.cfg(guild).await?.logging.target(kind) {
+    match app.cfg(guild).await?.logging.target(kind, None) {
         Some(ch) => send(app, ch, text, &AllowedMentions::default()).await,
         None => Ok(()),
     }
@@ -57,7 +57,7 @@ pub async fn send_log_pinging(
     text: &str,
     roles: &[Id<RoleMarker>],
 ) -> Result<()> {
-    let Some(ch) = app.cfg(guild).await?.logging.target(kind) else {
+    let Some(ch) = app.cfg(guild).await?.logging.target(kind, None) else {
         return Ok(());
     };
     let pings: String = roles.iter().map(|r| format!("<@&{r}> ")).collect();

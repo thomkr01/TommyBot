@@ -8,7 +8,7 @@ mod pages;
 use appeals::{AppealBlacklist, AppealForm, AppealList};
 use common::*;
 use form::Section;
-use pages::{Rescue, Revert, Score, Wizard};
+use pages::{Logging, Rescue, Revert, Score, Wizard};
 
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
 const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
@@ -228,6 +228,7 @@ fn App() -> impl IntoView {
                             let sec = |name: &str, part: &str| view! { <Section guild=g.clone() name=name.to_string() part=part.to_string() enrolled /> }.into_any();
                             let page = match (p.as_str(), rest.first()) {
                                 ("permits", _) => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
+                                ("logging", _) => view! { <Logging guild=g.clone() tab=rest.first().cloned().unwrap_or_default() sub=rest.get(1).cloned().unwrap_or_default() enrolled /> }.into_any(),
                                 ("history", _) => view! { <History guild=g.clone() enrolled /> }.into_any(),
                                 ("overview", _) => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),

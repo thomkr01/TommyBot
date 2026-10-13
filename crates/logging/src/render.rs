@@ -1,4 +1,4 @@
-use crate::{cache::CachedMessage, Entry, LogKind};
+use crate::{cache::CachedMessage, Entry, LogEvent, LogKind};
 use serde_json::Value;
 use twilight_model::{
     channel::Message,
@@ -76,6 +76,8 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         | A::MemberBanRemove
         | A::MemberUpdate
         | A::MemberRoleUpdate
+        | A::MemberMove
+        | A::MemberDisconnect
         | A::BotAdd => LogKind::Member,
         A::InviteCreate | A::InviteUpdate | A::InviteDelete => LogKind::Invite,
         A::WebhookCreate | A::WebhookUpdate | A::WebhookDelete => LogKind::Webhook,
@@ -118,6 +120,7 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
 
     Some(Entry {
         kind,
+        event: LogEvent::from_action(e.action_type),
         channel: None,
         user: None,
         text,

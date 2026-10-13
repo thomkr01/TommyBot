@@ -12,6 +12,7 @@ use axum::{
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tommybot_logging::LogEvent;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -141,12 +142,53 @@ const FILTER_ACTIONS: [&str; 5] = ["delete", "warn", "timeout", "kick", "ban"];
 
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
 fn schema() -> Vec<Value> {
-    let mut log = vec![f("fallback", "channel"), f("ignored_channels", "channels")];
-    log.extend(
-        LOG_KINDS
-            .iter()
-            .map(|k| f(&format!("routes.{k}"), "channel")),
-    );
+    let mut log = vec![
+        ti(pg(f("fallback", "channel"), "wick_essential"), "Wick logs"),
+        ti(
+            pg(
+                fg("Channels", "routes.mod_command", "channel"),
+                "wick_essential",
+            ),
+            "Mod logs",
+        ),
+        pg(
+            fg("Ignored", "ignored_channels", "channels"),
+            "wick_customize",
+        ),
+    ];
+    log.extend(LOG_KINDS.iter().filter(|k| **k != "mod_command").map(|k| {
+        pg(
+            fg("Log types", &format!("routes.{k}"), "channel"),
+            "wick_customize",
+        )
+    }));
+    log.extend(LogEvent::ALL.iter().map(|e| {
+        let name = serde_json::to_value(e).unwrap_or(Value::Null);
+        let key = name.as_str().unwrap_or_default();
+        let group = match key.split('_').next().unwrap_or_default() {
+            "channel" | "channels" => "Channels",
+            "message" => "Messages",
+            "member" | "bot" => "Members",
+            "role" => "Roles",
+            "invite" => "Invites",
+            "webhook" => "Webhooks",
+            "emoji" => "Emojis",
+            "sticker" => "Stickers",
+            "thread" => "Threads",
+            "guild" if key == "guild_update" => "Server",
+            _ => "Scheduled events",
+        };
+        pg(
+            fg(group, &format!("events.{key}"), "channel"),
+            "discord_essential",
+        )
+    }));
+    let mut custom = fg("Logging types", "custom", "customs");
+    custom["options"] = json!(LogEvent::ALL
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+        .collect::<Vec<_>>());
+    log.push(pg(custom, "discord_customize"));
     let mut nuke = vec![
         dv(fg("Status", "enabled", "bool"), true),
         fg("Auto quarantine", "quarantine_role", "role"),
@@ -553,6 +595,7 @@ mod tests {
                         .clone(),
                     "channel" | "role" => json!("1"),
                     "form" => json!([{"label": "x"}]),
+                    "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
                     _ => json!(["1"]),
                 };
                 let mut cur = &mut obj;
