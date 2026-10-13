@@ -3,6 +3,8 @@ mod api;
 mod auth;
 mod diff;
 mod discord;
+mod ops;
+mod sections;
 mod store;
 
 use axum::{
@@ -74,6 +76,8 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .route(&format!("{g}/history"), get(api::history))
         .route(&format!("{g}/history/{{from}}/{{to}}"), get(api::diff_versions))
         .route(&format!("{g}/history/{{version}}/rollback"), post(api::rollback))
+        .merge(sections::routes())
+        .merge(ops::routes())
         .fallback_service(ServeDir::new(dist).fallback(ServeFile::new(format!("{dist}/index.html"))))
         .with_state(st)
 }

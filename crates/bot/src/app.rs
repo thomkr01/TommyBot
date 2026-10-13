@@ -6,45 +6,19 @@ use serde_json::Value;
 use sqlx::{postgres::PgListener, PgPool};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
-use tommybot_antinuke::{Action as NukeAction, AntiNuke, Limit};
+use tommybot_antinuke::AntiNuke;
 use tommybot_automod::{
-    heat::{HeatCfg, HeatState, UserHistory},
+    heat::{HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
     lockdown::{JoinLock, MentionWatch},
-    strike::StrikeCfg,
 };
-use tommybot_core::permits::{self, Level};
+use tommybot_core::{permits::{self, Level}, sections::{AntinukeCfg, AutomodCfg, LockdownCfg}};
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
 use twilight_model::id::{
-    marker::{GuildMarker, RoleMarker, UserMarker},
+    marker::{GuildMarker, UserMarker},
     Id,
 };
-
-#[derive(Default, serde::Deserialize)]
-#[serde(default)]
-pub struct AntinukeCfg {
-    pub limits: HashMap<NukeAction, Limit>,
-    /// Quarantined members are moved to this role (none: all roles removed).
-    pub quarantine_role: Option<Id<RoleMarker>>,
-}
-
-#[derive(Default, serde::Deserialize)]
-#[serde(default)]
-pub struct AutomodCfg {
-    pub enabled: bool,
-    pub heat: HeatCfg,
-    pub strike: StrikeCfg,
-    /// (mentions, window ms): that many mentions in the window locks the server.
-    pub mention_lock: Option<(usize, i64)>,
-}
-
-#[derive(Default, serde::Deserialize)]
-#[serde(default)]
-pub struct LockdownCfg {
-    /// Roles that lose Send Messages in a server lock; empty means @everyone.
-    pub main_roles: Vec<Id<RoleMarker>>,
-}
 
 #[derive(Default)]
 pub struct GuildCfg {

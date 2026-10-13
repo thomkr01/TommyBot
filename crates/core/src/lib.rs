@@ -5,4 +5,5 @@ pub mod db;
 pub mod duration;
 pub mod models;
 pub mod permits;
+pub mod sections;
 pub mod warn;

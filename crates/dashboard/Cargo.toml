@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 tommybot-core.workspace = true
+tommybot-antinuke = { path = "../antinuke" }
+tommybot-automod = { path = "../automod" }
+tommybot-logging = { path = "../logging" }
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
