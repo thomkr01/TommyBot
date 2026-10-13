@@ -69,9 +69,6 @@ pub async fn send_log_pinging(
 }
 
 pub async fn handle(app: Arc<App>, ev: Event) {
-    if let Err(e) = crate::panic::end_due(&app).await {
-        tracing::warn!(?e, "ending panic mode failed");
-    }
     if let Err(e) = run(&app, &ev).await {
         tracing::warn!(?e, kind = ?ev.kind(), "event handler failed");
     }

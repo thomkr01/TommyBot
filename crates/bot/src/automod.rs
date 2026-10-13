@@ -9,6 +9,7 @@ use tommybot_automod::{
     store,
     strike::strike,
 };
+use tommybot_core::jobs;
 use tommybot_logging::LogKind;
 use twilight_model::{
     gateway::payload::incoming::{MemberAdd, MessageCreate},
@@ -183,6 +184,14 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             .or_default()
             .on_join(&j, suspicious, raid, now);
         if out.triggered {
+            jobs::replace(
+                &app.pool,
+                gid.get() as i64,
+                "raid_end",
+                serde_json::Value::Null,
+                (now / 1000) + raid.active_ms / 1000,
+            )
+            .await?;
             send_log(
                 app,
                 gid.get(),

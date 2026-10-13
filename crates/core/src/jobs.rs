@@ -9,6 +9,7 @@ pub struct Job {
     pub guild_id: i64,
     pub kind: String,
     pub payload: Value,
+    pub attempts: i32,
 }
 
 pub async fn enqueue(
@@ -31,20 +32,62 @@ pub async fn enqueue(
     Ok(())
 }
 
-/// Removes and returns due jobs; SKIP LOCKED keeps two instances from claiming the same row.
-// shortcut: a crash after the claim loses that job, move to a lease column if jobs must never be lost.
+/// Jobs that fail this many times are dropped by the scheduler.
+pub const MAX_ATTEMPTS: i32 = 5;
+const LEASE_SECS: i32 = 60;
+
+/// Replaces any pending job of the same guild and kind (e.g. panic mode restarted).
+pub async fn replace(
+    pool: &PgPool,
+    guild: i64,
+    kind: &str,
+    payload: Value,
+    run_at_secs: i64,
+) -> Result<()> {
+    sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = $2")
+        .bind(guild)
+        .bind(kind)
+        .execute(pool)
+        .await?;
+    enqueue(pool, guild, kind, payload, run_at_secs).await
+}
+
+/// Leases due jobs for a minute and returns them; call [`finish`] when done. SKIP LOCKED keeps
+/// two instances from claiming the same row, and a crashed claimer's jobs return after the lease.
 pub async fn claim_due(pool: &PgPool, limit: i64) -> Result<Vec<Job>> {
     Ok(sqlx::query_as(
         "WITH c AS (
-             DELETE FROM scheduled_jobs WHERE id IN (
-                 SELECT id FROM scheduled_jobs WHERE run_at <= now()
+             UPDATE scheduled_jobs
+             SET locked_until = now() + make_interval(secs => $2), attempts = attempts + 1
+             WHERE id IN (
+                 SELECT id FROM scheduled_jobs
+                 WHERE run_at <= now() AND (locked_until IS NULL OR locked_until < now())
                  ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT $1)
-             RETURNING id, guild_id, kind, payload, run_at)
-         SELECT id, guild_id, kind, payload FROM c ORDER BY run_at",
+             RETURNING id, guild_id, kind, payload, run_at, attempts)
+         SELECT id, guild_id, kind, payload, attempts FROM c ORDER BY run_at",
     )
     .bind(limit)
+    .bind(LEASE_SECS)
     .fetch_all(pool)
     .await?)
+}
+
+pub async fn finish(pool: &PgPool, id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM scheduled_jobs WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Pending jobs of one kind as (guild, payload), for rebuilding in-memory state at boot.
+pub async fn pending(pool: &PgPool, kind: &str) -> Result<Vec<(i64, Value)>> {
+    Ok(
+        sqlx::query_as("SELECT guild_id, payload FROM scheduled_jobs WHERE kind = $1")
+            .bind(kind)
+            .fetch_all(pool)
+            .await?,
+    )
 }
 
 /// Deactivates cases whose expiry passed; returns how many.
@@ -106,6 +149,12 @@ mod tests {
             .map(|j| j.kind.as_str())
             .collect();
         assert_eq!(kinds, ["a", "b"]);
+        // Leased jobs are not handed out again until finished or the lease runs out.
+        let again = claim_due(&pool, 1000).await.unwrap();
+        assert!(again.iter().all(|j| j.guild_id != gid));
+        for j in got.iter().filter(|j| j.guild_id == gid) {
+            finish(&pool, j.id).await.unwrap();
+        }
         let (left,): (i64,) =
             sqlx::query_as("SELECT count(*) FROM scheduled_jobs WHERE guild_id=$1")
                 .bind(gid)
@@ -132,6 +181,42 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), total);
+        clean(&pool, gid).await;
+        lease_expiry_and_replace(&pool, gid).await;
+    }
+
+    /// Called from the claim test: claim_due takes every guild's rows, so it cannot run in parallel.
+    async fn lease_expiry_and_replace(pool: &PgPool, gid: i64) {
+        let pool = pool.clone();
+        enqueue(&pool, gid, "x", Value::Null, now() - 5)
+            .await
+            .unwrap();
+        let first = claim_due(&pool, 1000).await.unwrap();
+        assert!(first.iter().any(|j| j.guild_id == gid && j.attempts == 1));
+        // Simulate a crash: the claimer never finished and the lease ran out.
+        sqlx::query("UPDATE scheduled_jobs SET locked_until = now() - interval '1 second' WHERE guild_id=$1")
+            .bind(gid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second = claim_due(&pool, 1000).await.unwrap();
+        assert!(second.iter().any(|j| j.guild_id == gid && j.attempts == 2));
+        clean(&pool, gid).await;
+
+        replace(&pool, gid, "p", Value::from(1), now() + 60)
+            .await
+            .unwrap();
+        replace(&pool, gid, "p", Value::from(2), now() + 120)
+            .await
+            .unwrap();
+        let p: Vec<_> = pending(&pool, "p")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.0 == gid)
+            .collect();
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].1, Value::from(2));
         clean(&pool, gid).await;
     }
 
