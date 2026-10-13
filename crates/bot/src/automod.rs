@@ -3,13 +3,18 @@ use anyhow::Result;
 use std::collections::{hash_map::Entry, HashMap};
 use tommybot_antinuke::{webhooks_to_delete, Webhook};
 use tommybot_automod::{
-    heat::{heat, MsgFacts},
+    filters,
+    heat::{heat, Breakdown, HeatCfg, MsgFacts},
     join::{gate, harshest, is_suspicious, Action, Joiner},
     lockdown::{JoinLock, LockKind},
     store,
     strike::strike,
 };
-use tommybot_core::jobs;
+use tommybot_core::{
+    cases::{self, NewCase},
+    jobs,
+    sections::{FilterAction, FilterCfg, FiltersCfg},
+};
 use tommybot_logging::LogKind;
 use twilight_model::{
     gateway::payload::incoming::{MemberAdd, MessageCreate},
@@ -17,7 +22,7 @@ use twilight_model::{
 };
 
 use crate::{
-    app::{now_secs, App},
+    app::{now_secs, App, GuildCfg},
     commands::timeout,
     events::send_log,
     lockdown,
@@ -35,8 +40,29 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !cfg.automod.enabled {
         return Ok(());
     }
+    let wl = &cfg.whitelist;
+    if wl.channels.contains(&m.channel_id)
+        || wl.users.contains(&m.author.id)
+        || m.webhook_id
+            .is_some_and(|w| wl.webhooks.iter().any(|x| x.get() == w.get()))
+        || m.member
+            .as_ref()
+            .is_some_and(|mem| mem.roles.iter().any(|r| wl.roles.contains(r)))
+    {
+        return Ok(());
+    }
     let now = now_ms();
     let content = m.content.as_str();
+    let f = &cfg.automod.filters;
+    let hosts = filters::hosts(content);
+    let (upper_chars, lower_chars) = filters::case_counts(content);
+    let words: Vec<String> = f
+        .words
+        .strict
+        .iter()
+        .cloned()
+        .chain(f.words.wildcard.iter().map(|w| format!("*{w}*")))
+        .collect();
     let facts = MsgFacts {
         content,
         // shortcut: custom emoji only, unicode emoji are not counted.
@@ -47,9 +73,22 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         attachments: m.attachments.len(),
         embeds: m.embeds.len(),
         stickers: m.sticker_items.len(),
-        invite_link: ["discord.gg/", "discord.com/invite/"]
-            .iter()
-            .any(|p| content.to_lowercase().contains(p)),
+        invite_link: f.invites.enabled
+            && ["discord.gg/", "discord.com/invite/"]
+                .iter()
+                .any(|p| content.to_lowercase().contains(p)),
+        // shortcut: no phishing/NSFW site lists are bundled, so bad_sites and nsfw_links never trip.
+        malicious_link: f.scam_links.enabled && filters::is_nitro_steam_scam(content),
+        blacklisted_link: f.links.enabled
+            && filters::any_on_domains(&hosts, &f.blacklisted_domains),
+        blacklisted_words: if f.words.filter.enabled {
+            filters::word_hits(content, &words)
+        } else {
+            0
+        },
+        zalgo: filters::is_zalgo(content),
+        upper_chars,
+        lower_chars,
         from_webhook: m.webhook_id.is_some(),
         ..Default::default()
     };
@@ -65,16 +104,17 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
                 .on_mentions(n, now, limit, span)
     });
     let key = (gid.get(), m.author.id.get());
-    let triggered = {
+    let heat_cfg = enabled_weights(&cfg.automod.heat, f);
+    let (triggered, breakdown) = {
         let mut map = app.heat.lock().unwrap();
         // shortcut: heat state is dropped wholesale past 100k users, move to a TTL cache when that bites.
         if map.len() > 100_000 {
             map.clear();
         }
         let (state, hist) = map.entry(key).or_default();
-        let b = heat(&facts, hist, &cfg.automod.heat);
+        let b = heat(&facts, hist, &heat_cfg);
         hist.remember(content);
-        state.apply(&b, now, &cfg.automod.heat)
+        (state.apply(&b, now, &heat_cfg), b)
     };
     if !triggered && !mention_lock {
         return Ok(());
@@ -99,6 +139,11 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         app.http.delete_message(m.channel_id, m.id).await.ok();
         return delete_new_webhooks(app, gid).await;
     }
+    if let Some(fc) = tripped_filter(&breakdown, &facts, f) {
+        if let Some(action) = fc.action {
+            return filter_action(app, &cfg, gid, m, action, fc.duration_secs).await;
+        }
+    }
     let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
     let act = strike(&mut st, &cfg.automod.strike, now);
     store::save_strikes(&app.pool, gid.get(), m.author.id.get(), &st).await?;
@@ -117,7 +162,121 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         act.timeout_ms / 1000,
         if act.purge { ", cap" } else { "" }
     );
-    send_log(app, gid.get(), LogKind::AutoMod, &text).await
+    send_log(app, gid.get(), LogKind::AutoMod, &text).await?;
+    if cfg
+        .automod
+        .strike
+        .lock_at_strikes
+        .is_some_and(|n| act.strike >= n)
+        && lockdown::lock(app, gid, LockKind::Server).await?
+    {
+        send_log(
+            app,
+            gid.get(),
+            LogKind::Panic,
+            &format!(
+                "<@{}> reached strike {}: server locked",
+                m.author.id, act.strike
+            ),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Heat weights with every disabled filter zeroed.
+fn enabled_weights(h: &HeatCfg, f: &FiltersCfg) -> HeatCfg {
+    let mut h = h.clone();
+    for (on, w) in [
+        (f.regular.enabled, &mut h.base),
+        (f.similar.enabled, &mut h.similarity),
+        (f.emojis.enabled, &mut h.per_emoji),
+        (f.newlines.enabled, &mut h.per_newline),
+        (f.chars_upper.enabled, &mut h.per_upper),
+        (f.chars_lower.enabled, &mut h.per_lower),
+        (f.zalgo.enabled, &mut h.zalgo),
+        (f.suspicion.enabled, &mut h.suspicious_account),
+        (f.inactive_channel.enabled, &mut h.inactive_channel),
+    ] {
+        if !on {
+            *w = 0.0;
+        }
+    }
+    h
+}
+
+/// The filter that pushed the message over: the link filter behind an instant trip, else the biggest contributor.
+fn tripped_filter<'a>(b: &Breakdown, m: &MsgFacts, f: &'a FiltersCfg) -> Option<&'a FilterCfg> {
+    if b.instant_max {
+        return Some(if m.invite_link {
+            &f.invites
+        } else if m.malicious_link {
+            &f.scam_links
+        } else {
+            &f.links
+        });
+    }
+    let (name, _) = b.parts.iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    Some(match *name {
+        "message" => &f.regular,
+        "similarity" => &f.similar,
+        "emojis" => &f.emojis,
+        "newlines" => &f.newlines,
+        "uppercase" => &f.chars_upper,
+        "lowercase" => &f.chars_lower,
+        "zalgo" => &f.zalgo,
+        "suspicious_account" => &f.suspicion,
+        "inactive_channel" => &f.inactive_channel,
+        "blacklisted_words" => &f.words.filter,
+        _ => return None,
+    })
+}
+
+/// A filter's own action replaces the strike system: no strike is recorded.
+async fn filter_action(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    m: &MessageCreate,
+    action: FilterAction,
+    duration_secs: Option<i64>,
+) -> Result<()> {
+    let uid = m.author.id;
+    app.http.delete_message(m.channel_id, m.id).await.ok();
+    let secs = duration_secs.unwrap_or(cfg.misc.timeout_secs() as i64);
+    match action {
+        FilterAction::Delete => {}
+        FilterAction::Warn => {
+            cases::create(
+                &app.pool,
+                NewCase {
+                    guild_id: gid.get() as i64,
+                    kind: "warn",
+                    user_id: uid.get() as i64,
+                    mod_id: app.me.get() as i64,
+                    reason: Some("automod filter"),
+                    points: cfg.misc.warn_base_points,
+                    duration_s: None,
+                    inverse: None,
+                },
+            )
+            .await?;
+        }
+        FilterAction::Timeout => timeout(&app.http, gid, uid, secs).await?,
+        FilterAction::Kick => {
+            app.http.remove_guild_member(gid, uid).await?;
+        }
+        FilterAction::Ban => {
+            app.http.create_ban(gid, uid).await?;
+        }
+    }
+    send_log(
+        app,
+        gid.get(),
+        LogKind::AutoMod,
+        &format!("<@{uid}>: {action:?} (filter)"),
+    )
+    .await
 }
 
 /// Deletes webhooks made in the last 10 minutes unless their owner is immune.
@@ -140,8 +299,13 @@ async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
             created_at: created_at as i64,
         });
     }
-    // shortcut: no per-webhook whitelist in the config yet.
-    let doomed = webhooks_to_delete(&hooks, now_secs() - 600, |o| immune[&o], |_| false);
+    let cfg = app.cfg(gid.get()).await?;
+    let doomed = webhooks_to_delete(
+        &hooks,
+        now_secs() - 600,
+        |o| immune[&o],
+        |id| cfg.whitelist.webhooks.iter().any(|w| w.get() == id),
+    );
     for id in &doomed {
         app.http.delete_webhook(Id::new(*id)).await.ok();
     }
@@ -173,7 +337,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     if let Some(action) = harshest(&gate(&j, &cfg.joingate, now)) {
         punish(app, gid, j.id, action, "join gate").await?;
     }
-    if let Some(raid) = &cfg.joinraid {
+    if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
         let min_age = cfg.joingate.min_age.map_or(0, |a| a.0);
         let suspicious = is_suspicious(&j, &cfg.joingate, min_age, now);
         let out = app
@@ -199,6 +363,9 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
                 &format!("Raid detected, {} accounts flagged", out.flagged.len()),
             )
             .await?;
+        }
+        if let Some(kind) = out.triggered.then(|| raid.lock.clone()).flatten() {
+            lockdown::lock(app, gid, kind).await?;
         }
         for id in out.flagged {
             punish(app, gid, id, raid.action, "join raid").await?;
@@ -233,4 +400,42 @@ async fn punish(
         &format!("<@{user}>: {action:?} ({why})"),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_filters_lose_their_weight() {
+        let mut f = FiltersCfg::default();
+        f.zalgo.enabled = false;
+        f.regular.enabled = false;
+        let h = enabled_weights(&HeatCfg::default(), &f);
+        assert_eq!((h.zalgo, h.base), (0.0, 0.0));
+        assert_eq!(h.per_emoji, HeatCfg::default().per_emoji);
+    }
+
+    #[test]
+    fn biggest_part_picks_the_filter_and_links_win_on_instant() {
+        let mut f = FiltersCfg::default();
+        f.zalgo.action = Some(FilterAction::Ban);
+        let b = Breakdown {
+            parts: vec![("message", 18.0), ("zalgo", 40.0)],
+            instant_max: false,
+        };
+        let got = tripped_filter(&b, &MsgFacts::default(), &f).unwrap();
+        assert_eq!(got.action, Some(FilterAction::Ban));
+        f.invites.action = Some(FilterAction::Kick);
+        let facts = MsgFacts {
+            invite_link: true,
+            ..Default::default()
+        };
+        let b = Breakdown {
+            parts: vec![],
+            instant_max: true,
+        };
+        let got = tripped_filter(&b, &facts, &f).unwrap();
+        assert_eq!(got.action, Some(FilterAction::Kick));
+    }
 }

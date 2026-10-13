@@ -31,8 +31,10 @@ pub enum Filter {
     UsernameFilter,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateCfg {
+    #[serde(default = "yes")]
+    pub enabled: bool,
     pub no_avatar: Option<Action>,
     pub min_age: Option<(i64, Action)>,
     pub unauthorized_bot: Option<Action>,
@@ -44,6 +46,27 @@ pub struct GateCfg {
     pub username_terms: Vec<String>,
     /// Join Guard style: act only when every enabled filter matches, with the harshest action.
     pub require_all: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for GateCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            no_avatar: None,
+            min_age: None,
+            unauthorized_bot: None,
+            unverified_bot: None,
+            invite_in_name: None,
+            suspicious: None,
+            username_filter: None,
+            username_terms: vec![],
+            require_all: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,6 +122,9 @@ pub fn is_suspicious(j: &Joiner, cfg: &GateCfg, min_age_ms: i64, now: i64) -> bo
 
 /// Filters that matched, with the action each wants.
 pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
+    if !cfg.enabled {
+        return vec![];
+    }
     let age = now - account_created_ms(j.id);
     let mut enabled = 0;
     let mut hits = vec![];
@@ -178,6 +204,8 @@ pub fn parse_pattern(p: &str) -> (StringOp, String) {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaidCfg {
+    #[serde(default = "yes")]
+    pub enabled: bool,
     pub count: usize,
     pub span_ms: i64,
     /// Count only suspicious accounts toward the static trigger.
@@ -192,6 +220,9 @@ pub struct RaidCfg {
     /// What happens to flagged raiders.
     #[serde(default = "default_raid_action")]
     pub action: Action,
+    /// Also lock the server (join lock) when a raid is detected.
+    #[serde(default)]
+    pub lock: Option<crate::lockdown::LockKind>,
 }
 
 fn default_raid_action() -> Action {
@@ -201,6 +232,7 @@ fn default_raid_action() -> Action {
 impl Default for RaidCfg {
     fn default() -> Self {
         Self {
+            enabled: true,
             count: 10,
             span_ms: 10 * 60_000,
             suspicious_only: false,
@@ -210,6 +242,7 @@ impl Default for RaidCfg {
             flag_no_avatar: false,
             id_flag_min: None,
             action: Action::Kick,
+            lock: None,
         }
     }
 }
@@ -449,6 +482,21 @@ mod tests {
         );
         let j = joiner(id_aged(DAY_MS / 2, 0), "nitro giveaway", false);
         assert_eq!(harshest(&gate(&j, &cfg, NOW)), Some(Action::Ban));
+    }
+
+    #[test]
+    fn disabled_gate_matches_nothing() {
+        let cfg = GateCfg {
+            enabled: false,
+            no_avatar: Some(Action::Ban),
+            ..Default::default()
+        };
+        assert!(gate(&joiner(id_aged(1000, 0), "a", false), &cfg, NOW).is_empty());
+        assert!(
+            serde_json::from_str::<GateCfg>("{\"username_terms\":[],\"require_all\":false}")
+                .unwrap()
+                .enabled
+        );
     }
 
     #[test]

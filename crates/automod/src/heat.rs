@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HeatCfg {
     pub max: f64,
     /// Fraction of total heat lost per second (0.1 = 10%/s).
@@ -27,6 +28,10 @@ pub struct HeatCfg {
     /// Only similarities above this count.
     pub similarity_floor: f64,
     pub webhook_multiplier: f64,
+    pub zalgo: f64,
+    /// Per uppercase / lowercase letter, on top of `per_char`.
+    pub per_upper: f64,
+    pub per_lower: f64,
 }
 
 impl Default for HeatCfg {
@@ -50,6 +55,9 @@ impl Default for HeatCfg {
             similarity: 40.0,
             similarity_floor: 0.8,
             webhook_multiplier: 1.5,
+            zalgo: 40.0,
+            per_upper: 0.0,
+            per_lower: 0.0,
         }
     }
 }
@@ -82,6 +90,9 @@ pub struct MsgFacts<'a> {
     pub blacklisted_link: bool,
     pub from_webhook: bool,
     pub suspicious_account: bool,
+    pub zalgo: bool,
+    pub upper_chars: usize,
+    pub lower_chars: usize,
     pub whitelist: Whitelist,
 }
 
@@ -170,6 +181,11 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
             "characters",
             cfg.per_char * m.content.chars().count().saturating_sub(cfg.free_chars) as f64,
         );
+        b.add("uppercase", cfg.per_upper * m.upper_chars as f64);
+        b.add("lowercase", cfg.per_lower * m.lower_chars as f64);
+        if m.zalgo {
+            b.add("zalgo", cfg.zalgo);
+        }
         b.add(
             "newlines",
             cfg.per_newline * m.content.matches('\n').count() as f64,
@@ -304,6 +320,25 @@ mod tests {
         assert!(heat(&m, &UserHistory::default(), &cfg).total() < full);
         m.whitelist.mention_spam = true;
         assert_eq!(heat(&m, &UserHistory::default(), &cfg).total(), cfg.base);
+    }
+
+    #[test]
+    fn zalgo_and_case_weights() {
+        let cfg = HeatCfg {
+            per_upper: 2.0,
+            per_lower: 1.0,
+            ..Default::default()
+        };
+        let mut m = msg("x");
+        m.zalgo = true;
+        m.upper_chars = 3;
+        m.lower_chars = 4;
+        let b = heat(&m, &UserHistory::default(), &cfg);
+        let part = |n| b.parts.iter().find(|p| p.0 == n).map(|p| p.1);
+        assert_eq!(
+            (part("uppercase"), part("lowercase"), part("zalgo")),
+            (Some(6.0), Some(4.0), Some(40.0))
+        );
     }
 
     #[test]
