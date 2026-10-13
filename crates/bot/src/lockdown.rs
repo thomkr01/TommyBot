@@ -1,7 +1,7 @@
 //! Runs automod lockdown plans against Discord and restores them from the stored snapshot.
 use anyhow::Result;
 use tommybot_automod::{
-    lockdown::{plan, unlock_ops, LockKind, Op, RoleInfo},
+    lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot},
     store,
 };
 use twilight_model::{
@@ -35,9 +35,8 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
         Op::CreateLockedChannel => {
             app.http.create_guild_channel(gid, "server-locked").await?;
         }
-        Op::EnableJoinLock(j) => {
-            app.join_locks.lock().unwrap().insert(gid.get(), *j);
-        }
+        // No-op: the saved snapshot records the join lock and `join_lock` reads it from there.
+        Op::EnableJoinLock(_) => {}
         // shortcut: no twilight call for the INVITES_DISABLED feature, kick-lock still kicks joiners.
         Op::PauseInvites => {}
     }
@@ -88,8 +87,29 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
     Ok(true)
 }
 
+/// Join lock of the guild's stored snapshot, if it has one.
+pub async fn join_lock(app: &App, gid: Id<GuildMarker>) -> Result<Option<JoinLock>> {
+    load_join_lock(&app.pool, gid.get()).await
+}
+
+async fn load_join_lock(pool: &sqlx::PgPool, guild: u64) -> Result<Option<JoinLock>> {
+    let row: Option<(sqlx::types::Json<Snapshot>,)> =
+        sqlx::query_as("SELECT snapshot FROM lock_snapshots WHERE guild_id = $1")
+            .bind(guild as i64)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.and_then(|(s,)| s.0.kind.as_ref().and_then(join_lock_of)))
+}
+
+fn join_lock_of(kind: &LockKind) -> Option<JoinLock> {
+    match kind {
+        LockKind::Join(j) => Some(*j),
+        LockKind::All => Some(JoinLock::Ban),
+        _ => None,
+    }
+}
+
 pub async fn unlock(app: &App, gid: Id<GuildMarker>) -> Result<()> {
-    app.join_locks.lock().unwrap().remove(&gid.get());
     let Some(snap) = store::take_lock(&app.pool, gid.get()).await? else {
         return Ok(());
     };
@@ -103,4 +123,30 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>) -> Result<()> {
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_lock_maps_from_kind() {
+        assert_eq!(join_lock_of(&LockKind::Join(JoinLock::Kick)), Some(JoinLock::Kick));
+        assert_eq!(join_lock_of(&LockKind::All), Some(JoinLock::Ban));
+        assert_eq!(join_lock_of(&LockKind::Server), None);
+        assert_eq!(join_lock_of(&LockKind::Channel(1)), None);
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn join_lock_reads_saved_snapshot() {
+        let Ok(url) = std::env::var("DATABASE_URL") else { return };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let gid = 4_000_000_000_000_000_000 + std::process::id() as u64;
+        let p = plan(&LockKind::Join(JoinLock::Kick), gid, &[], &[], 0);
+        store::save_lock(&pool, gid, &p.snapshot).await.unwrap();
+        assert_eq!(load_join_lock(&pool, gid).await.unwrap(), Some(JoinLock::Kick));
+        store::take_lock(&pool, gid).await.unwrap();
+        assert_eq!(load_join_lock(&pool, gid).await.unwrap(), None);
+    }
 }

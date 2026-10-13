@@ -3,7 +3,7 @@ use anyhow::Result;
 use tommybot_automod::{
     heat::{heat, MsgFacts},
     join::{gate, harshest, is_suspicious, Action, Joiner},
-    lockdown::LockKind,
+    lockdown::{JoinLock, LockKind},
     store,
     strike::strike,
 };
@@ -111,19 +111,12 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     let (gid, user) = (m.guild_id, &m.member.user);
     let cfg = app.cfg(gid.get()).await?;
     let now = now_ms();
-    let join_lock = app.join_locks.lock().unwrap().get(&gid.get()).copied();
-    if let Some(lock) = join_lock {
-        return punish(
-            app,
-            gid,
-            user.id.get(),
-            match lock {
-                tommybot_automod::lockdown::JoinLock::Kick => Action::Kick,
-                tommybot_automod::lockdown::JoinLock::Ban => Action::Ban,
-            },
-            "join lock",
-        )
-        .await;
+    if let Some(lock) = lockdown::join_lock(app, gid).await? {
+        let action = match lock {
+            JoinLock::Kick => Action::Kick,
+            JoinLock::Ban => Action::Ban,
+        };
+        return punish(app, gid, user.id.get(), action, "join lock").await;
     }
     // shortcut: names are not run through decancer, and bot adders/verification are not looked up
     // (bots count as authorized so the unauthorized-bot filter never fires).
@@ -157,9 +150,8 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             )
             .await?;
         }
-        // shortcut: the raid action is fixed to kick, the config has no action field yet.
         for id in out.flagged {
-            punish(app, gid, id, Action::Kick, "join raid").await?;
+            punish(app, gid, id, raid.action, "join raid").await?;
         }
     }
     Ok(())
