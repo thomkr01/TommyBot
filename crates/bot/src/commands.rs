@@ -17,7 +17,7 @@ use crate::{
     app::{now_secs, App},
     backup,
     hierarchy::top_position,
-    lockdown,
+    lockdown, modcmds,
     prefix::Parsed,
     reply,
     slash::BackupCmd,
@@ -49,7 +49,11 @@ fn above_bot(target_top: Option<i64>, bot_top: i64, target_is_owner: bool) -> bo
     target_is_owner || target_top.is_some_and(|t| t >= bot_top)
 }
 
-async fn target_above_bot(app: &App, gid: Id<GuildMarker>, target: Id<UserMarker>) -> Result<bool> {
+pub(crate) async fn target_above_bot(
+    app: &App,
+    gid: Id<GuildMarker>,
+    target: Id<UserMarker>,
+) -> Result<bool> {
     let info = app.guild_info(gid).await?;
     if target == info.owner {
         return Ok(true);
@@ -62,7 +66,7 @@ async fn target_above_bot(app: &App, gid: Id<GuildMarker>, target: Id<UserMarker
 }
 
 /// Refuses while panic mode locks mod commands; on a rate-limit breach the actor is quarantined.
-async fn gated(
+pub(crate) async fn gated(
     app: &App,
     gid: Id<GuildMarker>,
     actor_id: Id<UserMarker>,
@@ -208,6 +212,10 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
             let actor = app.level(gid, owner, msg.author.id).await?;
             let text = lockdown_cmd(app, gid, &actor, p.command == "unlock", p.duration_s).await?;
             return say(app, msg, &text).await;
+        }
+        "unban" | "hackban" | "untimeout" | "unmute" | "unwarn" | "quarantine" | "unquarantine"
+        | "purge" | "clear" | "slowmode" | "cases" | "case" => {
+            return modcmds::run_prefix(app, msg, p).await
         }
         _ => return Ok(()),
     };

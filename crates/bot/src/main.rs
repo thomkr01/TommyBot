@@ -6,6 +6,7 @@ mod commands;
 mod events;
 mod hierarchy;
 mod lockdown;
+mod modcmds;
 mod panic;
 mod prefix;
 mod reply;
