@@ -1,11 +1,15 @@
 //! Panic mode (spec 4.2): runs the antinuke crate's plans when several accounts get quarantined at once.
 use anyhow::Result;
 use serde_json::json;
+use std::time::{Duration, Instant};
 use tommybot_antinuke::{panic_end_plan, panic_plan, PanicStep};
 use tommybot_automod::lockdown::LockKind;
 use tommybot_core::{jobs, sections::PanicCfg};
 use tommybot_logging::LogKind;
-use twilight_model::id::{marker::GuildMarker, Id};
+use twilight_model::id::{
+    marker::{GuildMarker, UserMarker},
+    Id,
+};
 
 use crate::{
     app::{App, PanicRun},
@@ -13,6 +17,25 @@ use crate::{
     events::{send_log, send_log_pinging},
     lockdown,
 };
+
+/// Counts `user` towards panic mode (a quarantined nuker, or a heat trigger) and starts it when
+/// enough distinct accounts hit the window. No-op while panic mode is already running.
+pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
+    let cfg = app.cfg(gid.get()).await?.panic.clone();
+    if cfg.executors == 0 || app.panic_runs.lock().unwrap().contains_key(&gid.get()) {
+        return Ok(());
+    }
+    let tripped = {
+        let mut t = app.panic.lock().unwrap();
+        t.window = Duration::from_secs(cfg.window_secs);
+        t.executors = cfg.executors;
+        t.record(gid.get(), user.get(), Instant::now())
+    };
+    if tripped {
+        start(app, gid, &cfg).await?;
+    }
+    Ok(())
+}
 
 pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()> {
     app.panic_runs.lock().unwrap().insert(

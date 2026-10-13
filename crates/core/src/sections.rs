@@ -8,12 +8,24 @@ use twilight_model::id::{
     Id,
 };
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default)]
 pub struct AntinukeCfg {
+    /// Master switch for the dashboard overview; on unless a saved config turns it off.
+    pub enabled: bool,
     pub limits: HashMap<NukeAction, Limit>,
     /// Quarantined members are moved to this role (none: all roles removed).
     pub quarantine_role: Option<Id<RoleMarker>>,
+}
+
+impl Default for AntinukeCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            limits: HashMap::new(),
+            quarantine_role: None,
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -263,6 +275,15 @@ impl Default for PanicCfg {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn antinuke_is_enabled_unless_saved_off() {
+        assert!(AntinukeCfg::default().enabled);
+        let on: AntinukeCfg = serde_json::from_value(json!({"quarantine_role": "7"})).unwrap();
+        assert!(on.enabled);
+        let off: AntinukeCfg = serde_json::from_value(json!({"enabled": false})).unwrap();
+        assert!(!off.enabled);
+    }
 
     #[test]
     fn misc_defaults_fill_missing_fields_and_clamp() {
