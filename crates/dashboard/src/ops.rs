@@ -42,17 +42,17 @@ pub fn routes() -> Router<AppState> {
 const DANGEROUS: u64 = 0x8 | 0x20 | 0x1000_0000 | 0x10 | 0x4 | 0x2 | 0x2000_0000;
 
 #[derive(Deserialize, Clone)]
-struct Role {
-    id: String,
+pub(crate) struct Role {
+    pub id: String,
     name: String,
-    position: i64,
+    pub position: i64,
     #[serde(default)]
-    managed: bool,
+    pub managed: bool,
     permissions: String,
 }
 
 impl Role {
-    fn perms(&self) -> u64 {
+    pub fn perms(&self) -> u64 {
         self.permissions.parse().unwrap_or(0)
     }
 }
@@ -166,10 +166,12 @@ async fn roles_of(st: &AppState, guild: i64) -> Result<Vec<Role>, ApiError> {
     .map_err(anyhow::Error::from)?)
 }
 
-async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
-    require(&st, &s, guild, Level::Viewer, false).await?;
-    let (_, config) = crate::store::current(&st.db, guild).await?;
-    let roles = roles_of(&st, guild).await?;
+/// Guild roles and the position of the bot's top role.
+pub(crate) async fn roles_and_bot_pos(
+    st: &AppState,
+    guild: i64,
+) -> Result<(Vec<Role>, i64), ApiError> {
+    let roles = roles_of(st, guild).await?;
     let me = st.discord.call(Method::GET, "/users/@me", None).await?;
     let mine = st
         .discord
@@ -181,6 +183,13 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
         .map(|r| r.position)
         .max()
         .unwrap_or(0);
+    Ok((roles, bot_pos))
+}
+
+async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    require(&st, &s, guild, Level::Viewer, false).await?;
+    let (_, config) = crate::store::current(&st.db, guild).await?;
+    let (roles, bot_pos) = roles_and_bot_pos(&st, guild).await?;
     Ok(Json(json!(checks(&roles, guild, bot_pos, &config))))
 }
 

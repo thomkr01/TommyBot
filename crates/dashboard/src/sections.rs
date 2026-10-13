@@ -353,6 +353,11 @@ fn schema() -> Vec<Value> {
         fg("General", "require_all", "bool"),
         fg("Username", "username_terms", "list"),
     ]);
+    let choice = |g: &str, path: &str, opts: &[&str]| {
+        let mut v = fg(g, path, "choice");
+        v["options"] = json!(opts);
+        v
+    };
     let raid = vec![
         dv(fg("General", "enabled", "bool"), true),
         f("count", "int"),
@@ -363,6 +368,12 @@ fn schema() -> Vec<Value> {
         f("flag_younger_than_ms", "int"),
         f("flag_no_avatar", "bool"),
         f("id_flag_min", "int"),
+        dv(
+            choice("Response", "action", &["Log", "Kick", "Ban"]),
+            "Kick",
+        ),
+        choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+        fg("Response", "warned_roles", "roles"),
     ];
     // "heat" is the Auto Mod page, "nuke" the Anti Nuke page; the fields without a page are shared.
     let panic = vec![
@@ -419,11 +430,6 @@ fn schema() -> Vec<Value> {
         dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true),
         dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
     ];
-    let choice = |g: &str, path: &str, opts: &[&str]| {
-        let mut v = fg(g, path, "choice");
-        v["options"] = json!(opts);
-        v
-    };
     let verification = vec![
         fg("General", "enabled", "bool"),
         dv(
@@ -467,7 +473,26 @@ fn schema() -> Vec<Value> {
         ("automod", "Automod", auto),
         ("joingate", "Join gate", gate),
         ("joinraid", "Join raid", raid),
-        ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
+        (
+            "lockdown",
+            "Lockdown",
+            vec![
+                f("main_roles", "roles"),
+                ti(
+                    dv(fg("Lock scope", "channels", "bool"), true),
+                    "Lock server channels",
+                ),
+                ti(
+                    dv(fg("Lock scope", "roles", "bool"), false),
+                    "Lock staff roles",
+                ),
+                ti(
+                    dv(fg("Lock scope", "joins", "bool"), false),
+                    "Lock server joins",
+                ),
+                ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
+            ],
+        ),
         ("panic", "Panic mode", panic),
         ("backups", "Backups", vec![dv(f("auto", "bool"), true)]),
         ("appeals", "Appeals", appeals),

@@ -11,7 +11,11 @@ use twilight_model::{
     id::{marker::GuildMarker, Id},
 };
 
-use crate::app::{now_secs, App};
+use crate::{
+    app::{now_secs, App},
+    events::send_log,
+};
+use tommybot_logging::LogKind;
 
 async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
     match op {
@@ -89,6 +93,7 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
     for op in &plan.ops {
         exec(app, gid, op).await?;
     }
+    announce(app, gid, "Server locked").await;
     Ok(true)
 }
 
@@ -107,10 +112,18 @@ async fn load_join_lock(pool: &sqlx::PgPool, guild: u64) -> Result<Option<JoinLo
 }
 
 fn join_lock_of(kind: &LockKind) -> Option<JoinLock> {
-    match kind {
-        LockKind::Join(j) => Some(*j),
-        LockKind::All => Some(JoinLock::Ban),
-        _ => None,
+    kind.covers().2
+}
+
+async fn announce(app: &App, gid: Id<GuildMarker>, text: &str) {
+    let on = app
+        .cfg(gid.get())
+        .await
+        .is_ok_and(|c| c.lockdown_prefs.updates);
+    if on {
+        if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, text).await {
+            tracing::warn!(?e, "lockdown update log failed");
+        }
     }
 }
 
@@ -130,6 +143,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>) -> Result<()> {
             .role(Id::new(*role))
             .await?;
     }
+    announce(app, gid, "Server unlocked").await;
     Ok(())
 }
 

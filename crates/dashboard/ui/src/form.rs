@@ -24,7 +24,7 @@ fn best_unit(secs: f64) -> usize {
     UNITS.iter().rposition(|(_, m)| secs >= *m && secs % *m == 0.0).unwrap_or(0)
 }
 
-fn strs(v: &Value) -> Vec<String> {
+pub fn strs(v: &Value) -> Vec<String> {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
 }
 
@@ -44,7 +44,7 @@ fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
 }
 
 #[component]
-fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
+pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
     let path = f["path"].as_str().unwrap_or("").to_string();
     let kind = f["kind"].as_str().unwrap_or("text").to_string();
     let p = StoredValue::new(path.clone());

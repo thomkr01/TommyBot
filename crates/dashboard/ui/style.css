@@ -64,5 +64,7 @@ details { margin:12px 0; }
 .qr { background:#fff; display:inline-block; padding:8px; border-radius:6px; } .qr svg { width:200px; height:200px; display:block; }
 @media (max-width:900px) { header .menu-btn { display:block; } nav { display:none; position:fixed; top:80px; z-index:20; } nav.open { display:flex; } main { padding:16px 16px 96px; } .head h1 { font-size:30px; } }
 .stack { display:flex; flex-direction:column; gap:16px; max-width:900px; margin:0 auto; } .stack .card { margin:0; }
+.lockrow h3, .card.empty h3 { margin:0; } .lockrow .sp { flex:1; } .chip.ok { background:var(--ok); color:#000; }
+.card.empty { text-align:center; } button.dashed { border-style:dashed; width:100%; padding:16px; }
 .banner { background:var(--warn); color:#000; border-radius:8px; padding:10px 16px; margin:0 0 16px; font-weight:600; }
 button.ghost.on { background:var(--primary); color:#fff; border-color:var(--primary); }

@@ -2,11 +2,17 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
+use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
 use tommybot_logging::LogKind;
 use twilight_model::id::{marker::UserMarker, Id};
 
-use crate::{app::App, backup, commands, events::send_log, lockdown, panic, verify};
+use crate::{
+    app::{now_secs, App},
+    backup, commands,
+    events::send_log,
+    lockdown, panic, verify,
+};
 
 fn user(payload: &Value) -> Result<Id<UserMarker>> {
     Ok(Id::new(
@@ -21,6 +27,27 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
     match job.kind.as_str() {
         "unban" => {
             app.http.delete_ban(gid, user(&job.payload)?).await?;
+        }
+        "lock" => {
+            let p = &job.payload;
+            let channel = p["channel"]
+                .as_u64()
+                .or_else(|| p["channel"].as_str()?.parse().ok());
+            let kind = kind_from(p["kind"].as_str().unwrap_or_default(), channel)
+                .context("job payload has no valid lock kind")?;
+            if let (true, Some(d)) = (
+                lockdown::lock(app, gid, kind).await?,
+                p["duration_s"].as_i64(),
+            ) {
+                jobs::replace(
+                    &app.pool,
+                    job.guild_id,
+                    "unlock",
+                    Value::Null,
+                    now_secs() + d,
+                )
+                .await?;
+            }
         }
         "unlock" => lockdown::unlock(app, gid).await?,
         "timeout_renew" => {

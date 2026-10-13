@@ -41,6 +41,62 @@ pub enum LockKind {
     Join(JoinLock),
     /// Server + role + join (ban).
     All,
+    Mixed {
+        channels: bool,
+        roles: bool,
+        joins: bool,
+    },
+}
+
+impl LockKind {
+    pub fn covers(&self) -> (bool, bool, Option<JoinLock>) {
+        match self {
+            LockKind::Server | LockKind::Blind => (true, false, None),
+            LockKind::Role => (false, true, None),
+            LockKind::Join(j) => (false, false, Some(*j)),
+            LockKind::All => (true, true, Some(JoinLock::Ban)),
+            LockKind::Mixed {
+                channels,
+                roles,
+                joins,
+            } => (*channels, *roles, joins.then_some(JoinLock::Ban)),
+            LockKind::Channel(_) => (false, false, None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct LockdownPrefs {
+    pub channels: bool,
+    pub roles: bool,
+    pub joins: bool,
+    pub updates: bool,
+}
+
+impl Default for LockdownPrefs {
+    fn default() -> Self {
+        Self {
+            channels: true,
+            roles: false,
+            joins: false,
+            updates: false,
+        }
+    }
+}
+
+impl LockdownPrefs {
+    pub fn kind(&self) -> LockKind {
+        if self.channels || self.roles || self.joins {
+            LockKind::Mixed {
+                channels: self.channels,
+                roles: self.roles,
+                joins: self.joins,
+            }
+        } else {
+            LockKind::Server
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -110,11 +166,9 @@ pub fn plan(
             p.ops.push(Op::SetRolePerms { role: r.id, perms });
         }
     };
-    let (server, blind) = (
-        matches!(kind, LockKind::Server | LockKind::All),
-        matches!(kind, LockKind::Blind),
-    );
-    if server || blind {
+    let (channels, role_lock, join) = kind.covers();
+    if channels {
+        let blind = matches!(kind, LockKind::Blind);
         let mask = if blind {
             SEND_MESSAGES | VIEW_CHANNEL
         } else {
@@ -134,18 +188,13 @@ pub fn plan(
             p.ops.push(Op::DenyChannelSend { channel: *c, role });
         }
     }
-    if matches!(kind, LockKind::Role | LockKind::All) {
+    if role_lock {
         // Bot-managed roles and anything at/above the bot are left alone.
         roles
             .iter()
             .filter(|r| r.position < bot_position && !r.managed)
             .for_each(|r| strip(&mut p, r, DANGEROUS));
     }
-    let join = match kind {
-        LockKind::Join(j) => Some(*j),
-        LockKind::All => Some(JoinLock::Ban),
-        _ => None,
-    };
     if let Some(j) = join {
         p.snapshot.join_lock = true;
         p.ops.push(Op::EnableJoinLock(j));
@@ -155,6 +204,78 @@ pub fn plan(
         }
     }
     p
+}
+
+pub fn kind_from(name: &str, channel: Option<u64>) -> Option<LockKind> {
+    Some(match name {
+        "server" => LockKind::Server,
+        "blind" => LockKind::Blind,
+        "role" => LockKind::Role,
+        "all" => LockKind::All,
+        "kick" => LockKind::Join(JoinLock::Kick),
+        "ban" => LockKind::Join(JoinLock::Ban),
+        "channel" => LockKind::Channel(channel?),
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Problem {
+    pub id: String,
+    pub text: String,
+    pub fix: Option<Op>,
+}
+
+pub fn tshoot(
+    guild_id: u64,
+    main_roles: &[u64],
+    roles: &[RoleInfo],
+    bot_position: i32,
+) -> Vec<Problem> {
+    let main: Vec<u64> = if main_roles.is_empty() {
+        vec![guild_id]
+    } else {
+        main_roles.to_vec()
+    };
+    let mut out = vec![];
+    for r in roles
+        .iter()
+        .filter(|r| main.contains(&r.id) && r.id != guild_id)
+    {
+        if r.position >= bot_position {
+            out.push(Problem {
+                id: format!("main_above_bot_{}", r.id),
+                text: format!(
+                    "Main role <@&{}> is not below the bot, so it cannot be locked.",
+                    r.id
+                ),
+                fix: None,
+            });
+        }
+    }
+    for r in roles.iter().filter(|r| !main.contains(&r.id) && !r.managed) {
+        if r.perms & (1 << 3) != 0 {
+            out.push(Problem {
+                id: format!("admin_{}", r.id),
+                text: format!(
+                    "Role <@&{}> has Administrator and ignores every lock.",
+                    r.id
+                ),
+                fix: None,
+            });
+        } else if r.perms & SEND_MESSAGES != 0 {
+            let fixable = r.position < bot_position;
+            out.push(Problem {
+                id: format!("bypass_{}", r.id),
+                text: format!("Role <@&{}> grants Send Messages, so members with it can still talk during a lock.", r.id),
+                fix: fixable.then_some(Op::SetRolePerms {
+                    role: r.id,
+                    perms: r.perms & !SEND_MESSAGES,
+                }),
+            });
+        }
+    }
+    out
 }
 
 /// Ops that put every saved perm back exactly; join lock / invites are lifted by the caller via the flags.
@@ -297,6 +418,70 @@ mod tests {
         );
         let p = plan(&LockKind::Channel(77), G, &[10, 11], &[], 5);
         assert_eq!(p.ops.len(), 2);
+    }
+
+    #[test]
+    fn tshoot_flags_bypass_roles_and_unlockable_main_roles() {
+        let p = tshoot(G, &[10], &roles(), 5);
+        let ids: Vec<&str> = p.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["bypass_1", "admin_12"]);
+        assert_eq!(
+            p[0].fix,
+            Some(Op::SetRolePerms {
+                role: 1,
+                perms: VIEW_CHANNEL
+            })
+        );
+        assert!(tshoot(G, &[12], &roles(), 5)[0]
+            .id
+            .starts_with("main_above_bot"));
+        assert_eq!(kind_from("channel", None), None);
+        assert_eq!(
+            kind_from("kick", None),
+            Some(LockKind::Join(JoinLock::Kick))
+        );
+    }
+
+    #[test]
+    fn mixed_lock_covers_what_the_settings_switch_on() {
+        let prefs = LockdownPrefs {
+            channels: true,
+            roles: true,
+            joins: false,
+            updates: false,
+        };
+        let p = plan(&prefs.kind(), G, &[10], &roles(), 5);
+        assert!(p.ops.contains(&Op::SetRolePerms {
+            role: 10,
+            perms: VIEW_CHANNEL
+        }));
+        assert!(p
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::SetRolePerms { role: 11, .. })));
+        assert!(!p.snapshot.join_lock);
+        assert_eq!(
+            LockKind::Mixed {
+                channels: false,
+                roles: false,
+                joins: true
+            }
+            .covers()
+            .2,
+            Some(JoinLock::Ban)
+        );
+        let none = LockdownPrefs {
+            channels: false,
+            ..prefs
+        };
+        assert_eq!(
+            LockdownPrefs {
+                roles: false,
+                ..none
+            }
+            .kind(),
+            LockKind::Server
+        );
     }
 
     #[test]

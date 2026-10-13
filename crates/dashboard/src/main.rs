@@ -4,6 +4,7 @@ mod appeals;
 mod auth;
 mod diff;
 mod discord;
+mod lockdown;
 mod ops;
 mod recovery;
 mod sections;
@@ -100,6 +101,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         )
         .merge(sections::routes())
         .merge(ops::routes())
+        .merge(lockdown::routes())
         .merge(recovery::routes())
         .merge(appeals::routes())
         // Hash routing means the server never needs an index.html fallback; one would also hide

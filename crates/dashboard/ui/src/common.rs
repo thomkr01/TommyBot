@@ -10,6 +10,7 @@ pub async fn api(method: &str, path: &str, body: Option<Value>) -> Result<Value,
     let b = match method {
         "GET" => Request::get(path),
         "PUT" => Request::put(path),
+        "DELETE" => Request::delete(path),
         _ => Request::post(path),
     }
     .header("x-csrf-token", &csrf);
