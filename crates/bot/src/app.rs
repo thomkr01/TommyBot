@@ -5,8 +5,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{postgres::PgListener, PgPool};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
 use tommybot_automod::{
     heat::{HeatState, UserHistory},
@@ -132,7 +132,11 @@ impl App {
     }
 
     pub fn mod_commands_locked(&self, guild: u64) -> bool {
-        self.panic_runs.lock().unwrap().get(&guild).is_some_and(|r| r.lock_mod_commands)
+        self.panic_runs
+            .lock()
+            .unwrap()
+            .get(&guild)
+            .is_some_and(|r| r.lock_mod_commands)
     }
 
     /// Owner, Extra Owner or Trusted Admin: untouchable by every bot system.
@@ -200,8 +204,8 @@ pub fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tommybot_antinuke::Action as NukeAction;
     use serde_json::json;
+    use tommybot_antinuke::Action as NukeAction;
 
     #[test]
     fn parses_sections_and_survives_bad_ones() {

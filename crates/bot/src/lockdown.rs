@@ -131,7 +131,10 @@ mod tests {
 
     #[test]
     fn join_lock_maps_from_kind() {
-        assert_eq!(join_lock_of(&LockKind::Join(JoinLock::Kick)), Some(JoinLock::Kick));
+        assert_eq!(
+            join_lock_of(&LockKind::Join(JoinLock::Kick)),
+            Some(JoinLock::Kick)
+        );
         assert_eq!(join_lock_of(&LockKind::All), Some(JoinLock::Ban));
         assert_eq!(join_lock_of(&LockKind::Server), None);
         assert_eq!(join_lock_of(&LockKind::Channel(1)), None);
@@ -140,12 +143,17 @@ mod tests {
     /// Runs only when DATABASE_URL points at a scratch Postgres.
     #[tokio::test]
     async fn join_lock_reads_saved_snapshot() {
-        let Ok(url) = std::env::var("DATABASE_URL") else { return };
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let gid = 4_000_000_000_000_000_000 + std::process::id() as u64;
         let p = plan(&LockKind::Join(JoinLock::Kick), gid, &[], &[], 0);
         store::save_lock(&pool, gid, &p.snapshot).await.unwrap();
-        assert_eq!(load_join_lock(&pool, gid).await.unwrap(), Some(JoinLock::Kick));
+        assert_eq!(
+            load_join_lock(&pool, gid).await.unwrap(),
+            Some(JoinLock::Kick)
+        );
         store::take_lock(&pool, gid).await.unwrap();
         assert_eq!(load_join_lock(&pool, gid).await.unwrap(), None);
     }

@@ -46,8 +46,14 @@ pub async fn end_due(app: &App) -> Result<()> {
     let due: Vec<(u64, bool)> = {
         let mut runs = app.panic_runs.lock().unwrap();
         let now = Instant::now();
-        let ids: Vec<u64> = runs.iter().filter(|(_, r)| r.ends <= now).map(|(g, _)| *g).collect();
-        ids.into_iter().filter_map(|g| runs.remove(&g).map(|r| (g, r.unlock_when_ending))).collect()
+        let ids: Vec<u64> = runs
+            .iter()
+            .filter(|(_, r)| r.ends <= now)
+            .map(|(g, _)| *g)
+            .collect();
+        ids.into_iter()
+            .filter_map(|g| runs.remove(&g).map(|r| (g, r.unlock_when_ending)))
+            .collect()
     };
     for (g, unlock) in due {
         let gid = Id::new(g);

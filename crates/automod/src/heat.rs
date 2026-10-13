@@ -103,7 +103,10 @@ impl UserHistory {
 
     fn best_similarity(&self, content: &str) -> f64 {
         let c = content.to_lowercase();
-        self.recent.iter().map(|r| similarity(r, &c)).fold(0.0, f64::max)
+        self.recent
+            .iter()
+            .map(|r| similarity(r, &c))
+            .fold(0.0, f64::max)
     }
 }
 
@@ -137,7 +140,11 @@ pub fn similarity(a: &str, b: &str) -> f64 {
     for (i, ca) in a.iter().enumerate() {
         let mut cur = vec![i + 1];
         for (j, cb) in b.iter().enumerate() {
-            cur.push((prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+            cur.push(
+                (prev[j] + usize::from(ca != cb))
+                    .min(prev[j + 1] + 1)
+                    .min(cur[j] + 1),
+            );
         }
         prev = cur;
     }
@@ -147,7 +154,10 @@ pub fn similarity(a: &str, b: &str) -> f64 {
 pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     let w = m.whitelist;
     let mut b = Breakdown {
-        instant_max: (m.invite_link && !w.advertising) || m.nsfw_link || m.malicious_link || m.blacklisted_link,
+        instant_max: (m.invite_link && !w.advertising)
+            || m.nsfw_link
+            || m.malicious_link
+            || m.blacklisted_link,
         ..Default::default()
     };
     b.add("message", cfg.base);
@@ -156,8 +166,14 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
         if sim >= cfg.similarity_floor && !m.content.is_empty() {
             b.add("similarity", cfg.similarity * sim);
         }
-        b.add("characters", cfg.per_char * m.content.chars().count().saturating_sub(cfg.free_chars) as f64);
-        b.add("newlines", cfg.per_newline * m.content.matches('\n').count() as f64);
+        b.add(
+            "characters",
+            cfg.per_char * m.content.chars().count().saturating_sub(cfg.free_chars) as f64,
+        );
+        b.add(
+            "newlines",
+            cfg.per_newline * m.content.matches('\n').count() as f64,
+        );
         b.add("emojis", cfg.per_emoji * m.emojis as f64);
         b.add("attachments", cfg.per_attachment * m.attachments as f64);
         b.add("embeds", cfg.per_embed * m.embeds as f64);
@@ -169,11 +185,19 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     if !w.mention_spam {
         b.add("mentions", cfg.per_mention * m.user_mentions as f64);
     }
-    let mass = m.everyone_mentions + if w.public_role_mention { 0 } else { m.role_mentions };
+    let mass = m.everyone_mentions
+        + if w.public_role_mention {
+            0
+        } else {
+            m.role_mentions
+        };
     if !w.mention_spam {
         b.add("mass_mentions", cfg.per_mass_mention * mass as f64);
     }
-    b.add("blacklisted_words", cfg.per_blacklisted_word * m.blacklisted_words as f64);
+    b.add(
+        "blacklisted_words",
+        cfg.per_blacklisted_word * m.blacklisted_words as f64,
+    );
     if m.suspicious_account {
         b.add("suspicious_account", cfg.suspicious_account);
     }
@@ -200,7 +224,11 @@ impl HeatState {
 
     /// Apply a message's breakdown; returns true when the automod should trigger.
     pub fn apply(&mut self, b: &Breakdown, now: i64, cfg: &HeatCfg) -> bool {
-        self.value = if b.instant_max { cfg.max } else { self.decayed(now, cfg) + b.total() };
+        self.value = if b.instant_max {
+            cfg.max
+        } else {
+            self.decayed(now, cfg) + b.total()
+        };
         self.at_ms = now;
         self.value >= cfg.max
     }
@@ -211,13 +239,19 @@ mod tests {
     use super::*;
 
     fn msg(content: &str) -> MsgFacts<'_> {
-        MsgFacts { content, ..Default::default() }
+        MsgFacts {
+            content,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn decay_is_exponential() {
         let cfg = HeatCfg::default();
-        let s = HeatState { value: 100.0, at_ms: 0 };
+        let s = HeatState {
+            value: 100.0,
+            at_ms: 0,
+        };
         assert!((s.decayed(2000, &cfg) - 81.0).abs() < 1e-9);
         assert_eq!(s.decayed(-5, &cfg), 100.0);
     }
@@ -227,7 +261,9 @@ mod tests {
         let cfg = HeatCfg::default();
         let hist = UserHistory::default();
         let mut fast = HeatState::default();
-        let hits: Vec<bool> = (0..6).map(|i| fast.apply(&heat(&msg("hi"), &hist, &cfg), i * 100, &cfg)).collect();
+        let hits: Vec<bool> = (0..6)
+            .map(|i| fast.apply(&heat(&msg("hi"), &hist, &cfg), i * 100, &cfg))
+            .collect();
         assert!(!hits[0] && hits[5]);
         let mut slow = HeatState::default();
         assert!((0..20).all(|i| !slow.apply(&heat(&msg("hi"), &hist, &cfg), i * 10_000, &cfg)));
@@ -240,7 +276,10 @@ mod tests {
         h.remember("buy my cool stuff now");
         let b = heat(&msg("Buy my cool stuff now"), &h, &cfg);
         assert!(b.parts.iter().any(|p| p.0 == "similarity"));
-        assert!(heat(&msg("something else entirely"), &h, &cfg).parts.iter().all(|p| p.0 != "similarity"));
+        assert!(heat(&msg("something else entirely"), &h, &cfg)
+            .parts
+            .iter()
+            .all(|p| p.0 != "similarity"));
     }
 
     #[test]

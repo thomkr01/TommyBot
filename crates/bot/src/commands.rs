@@ -13,7 +13,13 @@ use twilight_model::{
     util::Timestamp,
 };
 
-use crate::{antinuke, app::{now_secs, App}, lockdown, prefix::Parsed, targets};
+use crate::{
+    antinuke,
+    app::{now_secs, App},
+    lockdown,
+    prefix::Parsed,
+    targets,
+};
 
 pub const PREFIX: &str = "w!";
 

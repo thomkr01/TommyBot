@@ -1,5 +1,7 @@
 //! Message heat -> strikes -> timeouts, join gate and raid detection, mention-triggered lockdown.
 use anyhow::Result;
+use std::collections::{hash_map::Entry, HashMap};
+use tommybot_antinuke::{webhooks_to_delete, Webhook};
 use tommybot_automod::{
     heat::{heat, MsgFacts},
     join::{gate, harshest, is_suspicious, Action, Joiner},
@@ -7,15 +9,18 @@ use tommybot_automod::{
     store,
     strike::strike,
 };
-use std::collections::{hash_map::Entry, HashMap};
-use tommybot_antinuke::{webhooks_to_delete, Webhook};
 use tommybot_logging::LogKind;
 use twilight_model::{
     gateway::payload::incoming::{MemberAdd, MessageCreate},
     id::{marker::GuildMarker, Id},
 };
 
-use crate::{app::{now_secs, App}, commands::timeout, events::send_log, lockdown};
+use crate::{
+    app::{now_secs, App},
+    commands::timeout,
+    events::send_log,
+    lockdown,
+};
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -120,13 +125,19 @@ async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     let mut immune: HashMap<u64, bool> = HashMap::new();
     for h in app.http.guild_webhooks(gid).await?.models().await? {
         // shortcut: hooks without an owner (integrations) are never deleted.
-        let Some(owner) = h.user.as_ref().map(|u| u.id) else { continue };
+        let Some(owner) = h.user.as_ref().map(|u| u.id) else {
+            continue;
+        };
         if let Entry::Vacant(e) = immune.entry(owner.get()) {
             e.insert(app.is_immune(gid, owner).await?);
         }
         // Snowflake timestamp: ms since the Discord epoch in the top bits.
         let created_at = ((h.id.get() >> 22) + 1_420_070_400_000) / 1000;
-        hooks.push(Webhook { id: h.id.get(), owner: owner.get(), created_at: created_at as i64 });
+        hooks.push(Webhook {
+            id: h.id.get(),
+            owner: owner.get(),
+            created_at: created_at as i64,
+        });
     }
     // shortcut: no per-webhook whitelist in the config yet.
     let doomed = webhooks_to_delete(&hooks, now_secs() - 600, |o| immune[&o], |_| false);

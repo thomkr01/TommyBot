@@ -53,7 +53,12 @@ pub fn parse(s: &str) -> Option<Parsed> {
     }
     let joined = name_words.join(" ");
     p.names = if joined.contains(',') {
-        joined.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect()
+        joined
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .collect()
     } else {
         name_words.into_iter().map(String::from).collect()
     };

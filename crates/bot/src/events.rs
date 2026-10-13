@@ -61,7 +61,10 @@ pub async fn send_log_pinging(
         return Ok(());
     };
     let pings: String = roles.iter().map(|r| format!("<@&{r}> ")).collect();
-    let mentions = AllowedMentions { roles: roles.to_vec(), ..Default::default() };
+    let mentions = AllowedMentions {
+        roles: roles.to_vec(),
+        ..Default::default()
+    };
     send(app, ch, &format!("{pings}{text}"), &mentions).await
 }
 

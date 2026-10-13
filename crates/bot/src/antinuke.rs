@@ -16,7 +16,10 @@ use twilight_model::{
     },
 };
 
-use crate::{app::{now_secs, App}, events::send_log};
+use crate::{
+    app::{now_secs, App},
+    events::send_log,
+};
 
 fn watched(t: A) -> Option<Action> {
     Some(match t {
@@ -240,14 +243,21 @@ async fn quarantine_and_revert(
 const NUKE_GAP: Duration = Duration::from_secs(600);
 
 /// Adds the quarantined actor and their reverted ops to the guild's open nuke case and saves it.
-async fn record_nuke(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, ops: &[Inverse]) -> Result<String> {
+async fn record_nuke(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    ops: &[Inverse],
+) -> Result<String> {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos() as u64
         ^ gid.get();
     let case = {
         let mut open = app.nukes.lock().unwrap();
-        let entry = open.entry(gid.get()).or_insert_with(|| (NukeCase::new(seed), Instant::now()));
+        let entry = open
+            .entry(gid.get())
+            .or_insert_with(|| (NukeCase::new(seed), Instant::now()));
         if entry.1.elapsed() > NUKE_GAP {
             *entry = (NukeCase::new(seed), Instant::now());
         }
@@ -322,12 +332,18 @@ mod tests {
     /// Runs only when DATABASE_URL points at a scratch Postgres.
     #[tokio::test]
     async fn nuke_case_grows_and_is_saved() {
-        let Ok(url) = std::env::var("DATABASE_URL") else { return };
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let app = App::new(twilight_http::Client::new(String::new()), pool, Id::new(1));
         let gid = Id::new(6_000_000_000 + std::process::id() as u64);
-        let first = record_nuke(&app, gid, Id::new(10), &[Inverse::DeleteChannel { id: 5 }]).await.unwrap();
-        let second = record_nuke(&app, gid, Id::new(11), &[Inverse::Unban { user: 7 }]).await.unwrap();
+        let first = record_nuke(&app, gid, Id::new(10), &[Inverse::DeleteChannel { id: 5 }])
+            .await
+            .unwrap();
+        let second = record_nuke(&app, gid, Id::new(11), &[Inverse::Unban { user: 7 }])
+            .await
+            .unwrap();
         assert_eq!(first, second);
         let (data,): (serde_json::Value,) =
             sqlx::query_as("SELECT data FROM nuke_incidents WHERE guild_id=$1 AND case_id=$2")
@@ -338,6 +354,10 @@ mod tests {
                 .unwrap();
         assert_eq!(data["quarantined"], serde_json::json!([10, 11]));
         assert_eq!(data["reverted"].as_array().unwrap().len(), 2);
-        sqlx::query("DELETE FROM nuke_incidents WHERE guild_id=$1").bind(gid.get() as i64).execute(&app.pool).await.unwrap();
+        sqlx::query("DELETE FROM nuke_incidents WHERE guild_id=$1")
+            .bind(gid.get() as i64)
+            .execute(&app.pool)
+            .await
+            .unwrap();
     }
 }

@@ -7,8 +7,21 @@ pub const VIEW_CHANNEL: u64 = 1 << 10;
 pub const SEND_MESSAGES: u64 = 1 << 11;
 /// Perms stripped by role lock: admin, kick, ban, manage channels/guild/messages/roles/webhooks/
 /// expressions/nicknames/events/threads, mention everyone, moderate members, view audit log.
-pub const DANGEROUS: u64 = (1 << 3) | (1 << 1) | (1 << 2) | (1 << 4) | (1 << 5) | (1 << 7) | (1 << 13)
-    | (1 << 17) | (1 << 27) | (1 << 28) | (1 << 29) | (1 << 30) | (1 << 33) | (1 << 34) | (1 << 40);
+pub const DANGEROUS: u64 = (1 << 3)
+    | (1 << 1)
+    | (1 << 2)
+    | (1 << 4)
+    | (1 << 5)
+    | (1 << 7)
+    | (1 << 13)
+    | (1 << 17)
+    | (1 << 27)
+    | (1 << 28)
+    | (1 << 29)
+    | (1 << 30)
+    | (1 << 33)
+    | (1 << 34)
+    | (1 << 40);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JoinLock {
@@ -40,9 +53,15 @@ pub struct RoleInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
-    SetRolePerms { role: u64, perms: u64 },
+    SetRolePerms {
+        role: u64,
+        perms: u64,
+    },
     /// Deny Send Messages for `role` on `channel` (channel lock).
-    DenyChannelSend { channel: u64, role: u64 },
+    DenyChannelSend {
+        channel: u64,
+        role: u64,
+    },
     CreateLockedChannel,
     EnableJoinLock(JoinLock),
     PauseInvites,
@@ -65,9 +84,25 @@ pub struct Plan {
 }
 
 /// `main_roles` empty means @everyone (whose role id equals the guild id) is the main role.
-pub fn plan(kind: &LockKind, guild_id: u64, main_roles: &[u64], roles: &[RoleInfo], bot_position: i32) -> Plan {
-    let mut p = Plan { ops: vec![], snapshot: Snapshot { kind: Some(kind.clone()), ..Default::default() } };
-    let main: Vec<u64> = if main_roles.is_empty() { vec![guild_id] } else { main_roles.to_vec() };
+pub fn plan(
+    kind: &LockKind,
+    guild_id: u64,
+    main_roles: &[u64],
+    roles: &[RoleInfo],
+    bot_position: i32,
+) -> Plan {
+    let mut p = Plan {
+        ops: vec![],
+        snapshot: Snapshot {
+            kind: Some(kind.clone()),
+            ..Default::default()
+        },
+    };
+    let main: Vec<u64> = if main_roles.is_empty() {
+        vec![guild_id]
+    } else {
+        main_roles.to_vec()
+    };
     let strip = |p: &mut Plan, r: &RoleInfo, mask: u64| {
         let perms = r.perms & !mask;
         if perms != r.perms && !p.snapshot.role_perms.iter().any(|(id, _)| *id == r.id) {
@@ -75,10 +110,20 @@ pub fn plan(kind: &LockKind, guild_id: u64, main_roles: &[u64], roles: &[RoleInf
             p.ops.push(Op::SetRolePerms { role: r.id, perms });
         }
     };
-    let (server, blind) = (matches!(kind, LockKind::Server | LockKind::All), matches!(kind, LockKind::Blind));
+    let (server, blind) = (
+        matches!(kind, LockKind::Server | LockKind::All),
+        matches!(kind, LockKind::Blind),
+    );
     if server || blind {
-        let mask = if blind { SEND_MESSAGES | VIEW_CHANNEL } else { SEND_MESSAGES };
-        roles.iter().filter(|r| main.contains(&r.id)).for_each(|r| strip(&mut p, r, mask));
+        let mask = if blind {
+            SEND_MESSAGES | VIEW_CHANNEL
+        } else {
+            SEND_MESSAGES
+        };
+        roles
+            .iter()
+            .filter(|r| main.contains(&r.id))
+            .for_each(|r| strip(&mut p, r, mask));
         if blind {
             p.ops.push(Op::CreateLockedChannel);
         }
@@ -91,7 +136,10 @@ pub fn plan(kind: &LockKind, guild_id: u64, main_roles: &[u64], roles: &[RoleInf
     }
     if matches!(kind, LockKind::Role | LockKind::All) {
         // Bot-managed roles and anything at/above the bot are left alone.
-        roles.iter().filter(|r| r.position < bot_position && !r.managed).for_each(|r| strip(&mut p, r, DANGEROUS));
+        roles
+            .iter()
+            .filter(|r| r.position < bot_position && !r.managed)
+            .for_each(|r| strip(&mut p, r, DANGEROUS));
     }
     let join = match kind {
         LockKind::Join(j) => Some(*j),
@@ -111,7 +159,10 @@ pub fn plan(kind: &LockKind, guild_id: u64, main_roles: &[u64], roles: &[RoleInf
 
 /// Ops that put every saved perm back exactly; join lock / invites are lifted by the caller via the flags.
 pub fn unlock_ops(s: &Snapshot) -> Vec<Op> {
-    s.role_perms.iter().map(|&(role, perms)| Op::SetRolePerms { role, perms }).collect()
+    s.role_perms
+        .iter()
+        .map(|&(role, perms)| Op::SetRolePerms { role, perms })
+        .collect()
 }
 
 /// Auto lockdown: N mentions from non-whitelisted members within T locks the server.
@@ -137,7 +188,13 @@ pub struct Panic {
 
 impl Panic {
     /// Call when a raider triggers the automod; returns true if panic just started.
-    pub fn on_raider_trigger(&mut self, now: i64, limit: usize, span_ms: i64, duration_ms: i64) -> bool {
+    pub fn on_raider_trigger(
+        &mut self,
+        now: i64,
+        limit: usize,
+        span_ms: i64,
+        duration_ms: i64,
+    ) -> bool {
         if self.window.push(now, span_ms) >= limit && !self.active(now) {
             self.active_until = now + duration_ms;
             return true;
@@ -156,7 +213,12 @@ mod tests {
 
     const G: u64 = 1;
     fn role(id: u64, perms: u64, position: i32) -> RoleInfo {
-        RoleInfo { id, perms, position, managed: false }
+        RoleInfo {
+            id,
+            perms,
+            position,
+            managed: false,
+        }
     }
     fn roles() -> Vec<RoleInfo> {
         vec![
@@ -170,20 +232,44 @@ mod tests {
     #[test]
     fn server_lock_is_one_patch_per_main_role_and_restores_exactly() {
         let p = plan(&LockKind::Server, G, &[10], &roles(), 5);
-        assert_eq!(p.ops, vec![Op::SetRolePerms { role: 10, perms: VIEW_CHANNEL }]);
-        assert_eq!(unlock_ops(&p.snapshot), vec![Op::SetRolePerms { role: 10, perms: VIEW_CHANNEL | SEND_MESSAGES }]);
+        assert_eq!(
+            p.ops,
+            vec![Op::SetRolePerms {
+                role: 10,
+                perms: VIEW_CHANNEL
+            }]
+        );
+        assert_eq!(
+            unlock_ops(&p.snapshot),
+            vec![Op::SetRolePerms {
+                role: 10,
+                perms: VIEW_CHANNEL | SEND_MESSAGES
+            }]
+        );
     }
 
     #[test]
     fn no_main_roles_falls_back_to_everyone_and_blind_hides_channels() {
         let p = plan(&LockKind::Blind, G, &[], &roles(), 5);
-        assert_eq!(p.ops, vec![Op::SetRolePerms { role: G, perms: 0 }, Op::CreateLockedChannel]);
+        assert_eq!(
+            p.ops,
+            vec![
+                Op::SetRolePerms { role: G, perms: 0 },
+                Op::CreateLockedChannel
+            ]
+        );
     }
 
     #[test]
     fn role_lock_skips_roles_at_or_above_bot() {
         let p = plan(&LockKind::Role, G, &[], &roles(), 5);
-        assert_eq!(p.ops, vec![Op::SetRolePerms { role: 11, perms: VIEW_CHANNEL }]);
+        assert_eq!(
+            p.ops,
+            vec![Op::SetRolePerms {
+                role: 11,
+                perms: VIEW_CHANNEL
+            }]
+        );
         assert_eq!(p.snapshot.role_perms, vec![(11, (1 << 2) | VIEW_CHANNEL)]);
     }
 
@@ -191,14 +277,24 @@ mod tests {
     fn all_combines_without_double_snapshotting() {
         let p = plan(&LockKind::All, G, &[11], &roles(), 5);
         // role 11 is both a main role and dangerous: snapshotted once, with the original perms
-        assert_eq!(p.snapshot.role_perms.iter().filter(|(id, _)| *id == 11).count(), 1);
+        assert_eq!(
+            p.snapshot
+                .role_perms
+                .iter()
+                .filter(|(id, _)| *id == 11)
+                .count(),
+            1
+        );
         assert!(p.ops.contains(&Op::EnableJoinLock(JoinLock::Ban)));
     }
 
     #[test]
     fn kick_join_lock_pauses_invites_and_channel_lock_denies_main() {
         let p = plan(&LockKind::Join(JoinLock::Kick), G, &[], &[], 5);
-        assert_eq!(p.ops, vec![Op::EnableJoinLock(JoinLock::Kick), Op::PauseInvites]);
+        assert_eq!(
+            p.ops,
+            vec![Op::EnableJoinLock(JoinLock::Kick), Op::PauseInvites]
+        );
         let p = plan(&LockKind::Channel(77), G, &[10, 11], &[], 5);
         assert_eq!(p.ops.len(), 2);
     }
