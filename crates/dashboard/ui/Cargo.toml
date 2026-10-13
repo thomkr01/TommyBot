@@ -1,0 +1,16 @@
+[package]
+name = "tommybot-dashboard-ui"
+version = "0.1.0"
+edition = "2021"
+
+# Built with `trunk build` (wasm32); deliberately not a member of the root workspace.
+[workspace]
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+gloo-net = { version = "0.6", features = ["http", "json"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+console_error_panic_hook = "0.1"
