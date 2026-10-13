@@ -321,15 +321,26 @@ fn schema() -> Vec<Value> {
         f("flag_no_avatar", "bool"),
         f("id_flag_min", "int"),
     ];
+    // "heat" is the Auto Mod page, "nuke" the Anti Nuke page; the fields without a page are shared.
     let panic = vec![
-        f("executors", "int"),
-        dv(f("window_secs", "int"), 600),
-        dv(f("duration_secs", "int"), 600),
-        f("lock_mod_commands", "bool"),
-        f("unlock_when_ending", "bool"),
-        f("warned_roles", "roles"),
-        f("heat_algorithm", "bool"),
-        f("whitelisted_categories", "channels"),
+        ti(
+            pg(fg("Trigger", "executors", "int"), "nuke"),
+            "Quarantined accounts to trip",
+        ),
+        ti(
+            pg(fg("Trigger", "heat_algorithm", "bool"), "heat"),
+            "Panic on heat",
+        ),
+        ti(
+            pg(dv(fg("Trigger", "heat_executors", "int"), 3), "heat"),
+            "Punished accounts to trip",
+        ),
+        dv(fg("Trigger", "window_secs", "int"), 600),
+        dv(fg("Response", "duration_secs", "int"), 600),
+        fg("Response", "lock_mod_commands", "bool"),
+        fg("Response", "unlock_when_ending", "bool"),
+        fg("Response", "warned_roles", "roles"),
+        fg("Response", "whitelisted_categories", "channels"),
     ];
     let whitelist = vec![
         f("users", "list"),
@@ -411,6 +422,7 @@ fn schema() -> Vec<Value> {
         ("joinraid", "Join raid", raid),
         ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
         ("panic", "Panic mode", panic),
+        ("backups", "Backups", vec![dv(f("auto", "bool"), true)]),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),
         ("whitelist", "Whitelist", whitelist),

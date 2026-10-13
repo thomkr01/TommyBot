@@ -252,6 +252,8 @@ pub struct PanicCfg {
     pub unlock_when_ending: bool,
     /// Also trip on automod heat, not only on anti-nuke quarantines.
     pub heat_algorithm: bool,
+    /// Distinct accounts that must hit the heat limit within `window_secs` to trip it.
+    pub heat_executors: usize,
     /// Categories panic mode leaves unlocked.
     pub whitelisted_categories: Vec<Id<ChannelMarker>>,
 }
@@ -266,8 +268,22 @@ impl Default for PanicCfg {
             warned_roles: vec![],
             unlock_when_ending: false,
             heat_algorithm: false,
+            heat_executors: 3,
             whitelisted_categories: vec![],
         }
+    }
+}
+
+/// Server backups: the 3-hour auto backup can be switched off per guild.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct BackupsCfg {
+    pub auto: bool,
+}
+
+impl Default for BackupsCfg {
+    fn default() -> Self {
+        Self { auto: true }
     }
 }
 
@@ -283,6 +299,13 @@ mod tests {
         assert!(on.enabled);
         let off: AntinukeCfg = serde_json::from_value(json!({"enabled": false})).unwrap();
         assert!(!off.enabled);
+    }
+
+    #[test]
+    fn backups_are_automatic_unless_saved_off() {
+        assert!(BackupsCfg::default().auto);
+        let off: BackupsCfg = serde_json::from_value(json!({"auto": false})).unwrap();
+        assert!(!off.auto);
     }
 
     #[test]

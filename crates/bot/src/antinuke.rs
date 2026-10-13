@@ -269,7 +269,7 @@ async fn quarantine_and_revert(
         if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
     );
     send_log(app, gid.get(), LogKind::AntiNuke, &text).await?;
-    crate::panic::note(app, gid, actor).await
+    crate::panic::note(app, gid, actor, false).await
 }
 
 /// A quiet gap this long starts a new nuke case instead of extending the last one.
