@@ -369,7 +369,7 @@ fn count(r: Result<()>, done: &mut usize, what: &str) {
     }
 }
 
-/// Backs up every guild the bot is in, every 3 hours.
+/// Backs up every guild the bot is in, every 3 hours, unless its backups setting turned that off.
 pub async fn auto_backup(app: std::sync::Arc<App>) {
     let mut tick = tokio::time::interval(INTERVAL);
     loop {
@@ -377,6 +377,9 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
         match app.http.current_user_guilds().await {
             Ok(r) => {
                 for g in r.models().await.unwrap_or_default() {
+                    if !app.cfg(g.id.get()).await.map_or(true, |c| c.backups.auto) {
+                        continue;
+                    }
                     if let Err(e) = save(&app, g.id).await {
                         tracing::warn!(?e, guild = g.id.get(), "auto backup failed");
                     }

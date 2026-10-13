@@ -6,20 +6,22 @@ mod common;
 mod form;
 mod lockdown;
 mod pages;
+mod recovery;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealBlacklist, AppealForm, AppealList};
 use common::*;
 use form::Section;
 use pages::{Rescue, Revert, Score, Wizard};
+use recovery::{Backups, Panic};
 
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
-const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
-    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("panic", "Panic Mode")]),
-    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("panic", "Panic Mode")]),
+    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
+    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("backups", "Backups"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
+    ("Raw JSON", &[("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
@@ -41,6 +43,8 @@ fn title(p: &str) -> String {
         "discord_automod" => "Discord AutoMod".into(),
         "antinuke" | "antinuke_filters" => format!("Anti Nuke {}", if p == "antinuke" { "General" } else { "Filters" }),
         "automod" => "Auto Mod General".into(),
+        "automod_panic" => "Auto Mod Panic Mode".into(),
+        "antinuke_panic" => "Anti Nuke Panic Mode".into(),
         "filters" => "Auto Mod Filters".into(),
         _ => NAV.iter().flat_map(|(_, i)| i.iter()).chain(TOP).find(|(k, _)| *k == p).map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()),
     }
@@ -237,6 +241,9 @@ fn App() -> impl IntoView {
                                 ("overview", _) => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 ("revert", _) => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
+                                ("backups", _) => view! { <Backups guild=g.clone() enrolled /> }.into_any(),
+                                ("automod_panic", _) => view! { <Panic guild=g.clone() part="heat,general" enrolled /> }.into_any(),
+                                ("antinuke_panic", _) => view! { <Panic guild=g.clone() part="nuke,general" enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                                 ("lockdown", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownManage guild=g.clone() /> }.into_any(),
                                 ("lockdown_settings", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownSettings guild=g.clone() enrolled /> }.into_any(),
