@@ -8,14 +8,19 @@ mod sections;
 mod store;
 
 use axum::{
-    http::StatusCode,
+    http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
 };
 use serde_json::json;
 use sqlx::PgPool;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::{
+    services::ServeDir,
+    set_header::SetResponseHeaderLayer,
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -92,8 +97,17 @@ pub fn router(st: AppState, dist: &str) -> Router {
         )
         .merge(sections::routes())
         .merge(ops::routes())
-        .fallback_service(
-            ServeDir::new(dist).fallback(ServeFile::new(format!("{dist}/index.html"))),
+        // Hash routing means the server never needs an index.html fallback; one would also hide
+        // missing assets by answering a stale hashed .js/.wasm request with HTML.
+        .fallback_service(ServeDir::new(dist))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .with_state(st)
 }
@@ -101,7 +115,9 @@ pub fn router(st: AppState, dist: &str) -> Router {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     let env = |k: &str| std::env::var(k).map_err(|_| anyhow::anyhow!("{k} not set"));
     let base = env("DASHBOARD_URL")?;
@@ -117,14 +133,16 @@ async fn main() -> anyhow::Result<()> {
             redirect_uri: format!("{}/auth/callback", base.trim_end_matches('/')),
         },
     };
-    let app = router(
-        st,
-        &std::env::var("DASHBOARD_DIST").unwrap_or_else(|_| "crates/dashboard/ui/dist".into()),
-    );
-    let listener = tokio::net::TcpListener::bind(
-        std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
-    )
-    .await?;
-    axum::serve(listener, app).await?;
+    let dist =
+        std::env::var("DASHBOARD_DIST").unwrap_or_else(|_| "crates/dashboard/ui/dist".into());
+    if !std::path::Path::new(&dist).join("index.html").is_file() {
+        tracing::error!(
+            "no index.html in {dist}: the web UI was not built or copied, pages will be blank"
+        );
+    }
+    let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    tracing::info!("dashboard listening on {bind}, UI from {dist}, public URL {base}");
+    axum::serve(listener, router(st, &dist)).await?;
     Ok(())
 }
