@@ -2,8 +2,10 @@
 //! and enforce the quarantine hold.
 use anyhow::Result;
 use serde_json::json;
-use std::time::Instant;
-use tommybot_antinuke::{hold_violation, plan_revert, Action, Inverse, LogEntry, Verdict};
+use std::time::{Duration, Instant};
+use tommybot_antinuke::{
+    hold_violation, plan_revert, Action, Inverse, LogEntry, NukeCase, Verdict,
+};
 use tommybot_core::cases::{self, NewCase};
 use tommybot_logging::LogKind;
 use twilight_model::{
@@ -14,7 +16,7 @@ use twilight_model::{
     },
 };
 
-use crate::{app::App, events::send_log};
+use crate::{app::{now_secs, App}, events::send_log};
 
 fn watched(t: A) -> Option<Action> {
     Some(match t {
@@ -61,8 +63,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if !cfg.antinuke.limits.contains_key(&action) {
         return Ok(());
     }
-    // shortcut: only Owner/EO/TA are exempt, permit-level anti-nuke whitelists are not read yet.
-    let exempt = app.is_immune(gid, actor).await?;
+    let exempt = app.whitelisted(gid, actor, "antinuke").await?;
     let inv = inverse(action, e.target_id.map(|t| t.get()));
     if !exempt {
         sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
@@ -109,17 +110,57 @@ async fn quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Re
     Ok(())
 }
 
-async fn quarantine_and_revert(
+/// Quarantine without a revert, for a command-rate-limit breach.
+pub(crate) async fn quarantine_actor(
     app: &App,
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     why: &str,
 ) -> Result<()> {
     quarantine(app, gid, actor).await?;
-    let since = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64
-        - 3600;
+    let case = open_case(app, gid, actor, why).await?;
+    let text = format!("**Anti-nuke** case #{case}: <@{actor}> quarantined, {why}.");
+    send_log(app, gid.get(), LogKind::AntiNuke, &text).await
+}
+
+async fn open_case(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+) -> Result<i32> {
+    cases::create(
+        &app.pool,
+        NewCase {
+            guild_id: gid.get() as i64,
+            kind: "quarantine",
+            user_id: actor.get() as i64,
+            mod_id: app.me.get() as i64,
+            reason: Some(why),
+            points: 0,
+            duration_s: None,
+            inverse: Some(json!({"op": "unquarantine", "user": actor.get()})),
+        },
+    )
+    .await
+}
+
+/// Result of undoing an actor's logged actions.
+pub(crate) struct RevertSummary {
+    pub ops: usize,
+    pub done: Vec<Inverse>,
+    pub failed: usize,
+    pub reinvite: Vec<u64>,
+}
+
+/// Undoes the actor's unreverted logged actions since `since_secs` (unix seconds) and marks them reverted.
+pub(crate) async fn revert_actor(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    since_secs: i64,
+) -> Result<RevertSummary> {
+    let since = since_secs;
     let rows: Vec<(serde_json::Value, i64)> = sqlx::query_as(
         "SELECT inverse, EXTRACT(EPOCH FROM created_at)::BIGINT FROM action_log
          WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)",
@@ -154,28 +195,76 @@ async fn quarantine_and_revert(
         .bind(since)
         .execute(&app.pool)
         .await?;
-    let case = cases::create(
-        &app.pool,
-        NewCase {
-            guild_id: gid.get() as i64,
-            kind: "quarantine",
-            user_id: actor.get() as i64,
-            mod_id: app.me.get() as i64,
-            reason: Some(why),
-            points: 0,
-            duration_s: None,
-            inverse: Some(json!({"op": "unquarantine", "user": actor.get()})),
-        },
-    )
-    .await?;
-    let reinvite: Vec<String> = plan.reinvite.iter().map(|u| format!("<@{u}>")).collect();
+    Ok(RevertSummary {
+        ops: plan.ops.len(),
+        done: plan.ops,
+        failed,
+        reinvite: plan.reinvite,
+    })
+}
+
+async fn quarantine_and_revert(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+) -> Result<()> {
+    quarantine(app, gid, actor).await?;
+    let sum = revert_actor(app, gid, actor, now_secs() - 3600).await?;
+    let case = open_case(app, gid, actor, why).await?;
+    let nuke = record_nuke(app, gid, actor, &sum.done).await?;
+    let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     let text = format!(
-        "**Anti-nuke** case #{case}: <@{actor}> quarantined, {why}. Reverted {}/{} actions. Kicked, re-invite: {}",
-        plan.ops.len() - failed,
-        plan.ops.len(),
+        "**Anti-nuke** case #{case} (nuke `{nuke}`): <@{actor}> quarantined, {why}. Reverted {}/{} actions. Kicked, re-invite: {}",
+        sum.ops - sum.failed,
+        sum.ops,
         if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
     );
-    send_log(app, gid.get(), LogKind::AntiNuke, &text).await
+    send_log(app, gid.get(), LogKind::AntiNuke, &text).await?;
+    let cfg = app.cfg(gid.get()).await?.panic.clone();
+    if cfg.executors > 0 {
+        let tripped = {
+            let mut t = app.panic.lock().unwrap();
+            t.window = Duration::from_secs(cfg.window_secs);
+            t.executors = cfg.executors;
+            t.record(gid.get(), actor.get(), Instant::now())
+        };
+        if tripped {
+            crate::panic::start(app, gid, &cfg).await?;
+        }
+    }
+    Ok(())
+}
+
+/// A quiet gap this long starts a new nuke case instead of extending the last one.
+const NUKE_GAP: Duration = Duration::from_secs(600);
+
+/// Adds the quarantined actor and their reverted ops to the guild's open nuke case and saves it.
+async fn record_nuke(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, ops: &[Inverse]) -> Result<String> {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos() as u64
+        ^ gid.get();
+    let case = {
+        let mut open = app.nukes.lock().unwrap();
+        let entry = open.entry(gid.get()).or_insert_with(|| (NukeCase::new(seed), Instant::now()));
+        if entry.1.elapsed() > NUKE_GAP {
+            *entry = (NukeCase::new(seed), Instant::now());
+        }
+        entry.1 = Instant::now();
+        entry.0.add(actor.get(), ops.iter().cloned());
+        entry.0.clone()
+    };
+    sqlx::query(
+        "INSERT INTO nuke_incidents (guild_id, case_id, data) VALUES ($1,$2,$3)
+         ON CONFLICT (guild_id, case_id) DO UPDATE SET data = $3",
+    )
+    .bind(gid.get() as i64)
+    .bind(&case.id)
+    .bind(sqlx::types::Json(&case))
+    .execute(&app.pool)
+    .await?;
+    Ok(case.id)
 }
 
 async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
@@ -213,8 +302,7 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     if saved.is_none() {
         return Ok(());
     }
-    // shortcut: quarantine-whitelisted permits are not read, only Owner/EO/TA may touch the held member.
-    let whitelisted = app.is_immune(gid, actor).await?;
+    let whitelisted = app.whitelisted(gid, actor, "quarantine").await?;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
         return Ok(());
     }
@@ -225,4 +313,31 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         .roles(&roles)
         .await?;
     quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn nuke_case_grows_and_is_saved() {
+        let Ok(url) = std::env::var("DATABASE_URL") else { return };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(twilight_http::Client::new(String::new()), pool, Id::new(1));
+        let gid = Id::new(6_000_000_000 + std::process::id() as u64);
+        let first = record_nuke(&app, gid, Id::new(10), &[Inverse::DeleteChannel { id: 5 }]).await.unwrap();
+        let second = record_nuke(&app, gid, Id::new(11), &[Inverse::Unban { user: 7 }]).await.unwrap();
+        assert_eq!(first, second);
+        let (data,): (serde_json::Value,) =
+            sqlx::query_as("SELECT data FROM nuke_incidents WHERE guild_id=$1 AND case_id=$2")
+                .bind(gid.get() as i64)
+                .bind(&first)
+                .fetch_one(&app.pool)
+                .await
+                .unwrap();
+        assert_eq!(data["quarantined"], serde_json::json!([10, 11]));
+        assert_eq!(data["reverted"].as_array().unwrap().len(), 2);
+        sqlx::query("DELETE FROM nuke_incidents WHERE guild_id=$1").bind(gid.get() as i64).execute(&app.pool).await.unwrap();
+    }
 }

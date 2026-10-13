@@ -5,14 +5,18 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{postgres::PgListener, PgPool};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex, RwLock};
-use tommybot_antinuke::AntiNuke;
+use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
 use tommybot_automod::{
     heat::{HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
-    lockdown::{JoinLock, MentionWatch},
+    lockdown::MentionWatch,
 };
-use tommybot_core::{permits::{self, Level}, sections::{AntinukeCfg, AutomodCfg, LockdownCfg}};
+use tommybot_core::{
+    permits::{self, Level, RateLimiter},
+    sections::{AntinukeCfg, AutomodCfg, LockdownCfg, PanicCfg},
+};
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
 use twilight_model::id::{
@@ -28,6 +32,7 @@ pub struct GuildCfg {
     pub joingate: GateCfg,
     pub joinraid: Option<RaidCfg>,
     pub lockdown: LockdownCfg,
+    pub panic: PanicCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -51,6 +56,7 @@ impl GuildCfg {
             joingate: section(cfg, "joingate"),
             joinraid: section(cfg, "joinraid"),
             lockdown: section(cfg, "lockdown"),
+            panic: section(cfg, "panic"),
         }
     }
 }
@@ -62,11 +68,21 @@ pub struct App {
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
     pub logger: Mutex<Logger>,
     pub antinuke: Mutex<AntiNuke>,
+    pub rate_limiter: Mutex<RateLimiter>,
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
-    /// Active join locks. shortcut: lost on restart, persist via the lock snapshot when needed.
-    pub join_locks: Mutex<HashMap<u64, JoinLock>>,
+    /// The open nuke case per guild and when it last grew; a long quiet gap starts a new case.
+    pub nukes: Mutex<HashMap<u64, (NukeCase, Instant)>>,
+    pub panic: Mutex<PanicTracker>,
+    pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
+}
+
+/// Active panic mode for one guild. shortcut: kept in memory, a restart ends panic mode early.
+pub struct PanicRun {
+    pub ends: Instant,
+    pub lock_mod_commands: bool,
+    pub unlock_when_ending: bool,
 }
 
 impl App {
@@ -78,10 +94,13 @@ impl App {
             cfgs: Default::default(),
             logger: Default::default(),
             antinuke: Mutex::new(AntiNuke::new(HashMap::new())),
+            rate_limiter: Default::default(),
             heat: Default::default(),
             raids: Default::default(),
             mentions: Default::default(),
-            join_locks: Default::default(),
+            nukes: Default::default(),
+            panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
+            panic_runs: Default::default(),
         }
     }
 
@@ -112,10 +131,36 @@ impl App {
         .await
     }
 
+    pub fn mod_commands_locked(&self, guild: u64) -> bool {
+        self.panic_runs.lock().unwrap().get(&guild).is_some_and(|r| r.lock_mod_commands)
+    }
+
     /// Owner, Extra Owner or Trusted Admin: untouchable by every bot system.
     pub async fn is_immune(&self, guild: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
         let owner = self.http.guild(guild).await?.model().await?.owner_id;
         Ok(self.level(guild, owner, user).await?.immune())
+    }
+
+    /// Exempt from one system via the permit whitelist (immune levels are exempt from all).
+    pub async fn whitelisted(
+        &self,
+        guild: Id<GuildMarker>,
+        user: Id<UserMarker>,
+        flag: &str,
+    ) -> Result<bool> {
+        let owner = self.http.guild(guild).await?.model().await?.owner_id;
+        Ok(self.level(guild, owner, user).await?.whitelisted(flag))
+    }
+
+    /// Records a command use against the permit's limit; `false` means the actor breached it.
+    pub fn command_allowed(&self, actor: Id<UserMarker>, level: &Level, action: &str) -> bool {
+        permits::command_allowed(
+            &mut self.rate_limiter.lock().unwrap(),
+            actor.get() as i64,
+            level,
+            action,
+            std::time::Instant::now(),
+        )
     }
 
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {
@@ -144,6 +189,12 @@ impl App {
             }
         }
     }
+}
+
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 #[cfg(test)]
