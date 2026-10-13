@@ -3,7 +3,7 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 
-thread_local! { static CSRF: RefCell<String> = RefCell::new(String::new()); }
+thread_local! { static CSRF: RefCell<String> = const { RefCell::new(String::new()) }; }
 
 async fn api(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
     let csrf = CSRF.with(|c| c.borrow().clone());

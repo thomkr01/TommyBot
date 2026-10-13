@@ -22,6 +22,8 @@ pub async fn commit(tx: &mut Transaction<'_, Postgres>, guild: i64, expected: i3
     Ok(cur + 1)
 }
 
+type PermitRow = (i64, String, i32, Vec<String>, Value, Vec<String>);
+
 fn ids(v: &Value) -> Vec<i64> {
     v.as_array().into_iter().flatten().filter_map(|x| x.as_str()?.parse().ok()).collect()
 }
@@ -33,7 +35,7 @@ fn strs(v: &Value) -> Vec<String> {
 pub async fn read_permits(c: &mut PgConnection, guild: i64) -> Result<Value, ApiError> {
     let eo: Vec<i64> = sqlx::query_scalar("select user_id from extra_owners where guild_id = $1 order by user_id").bind(guild).fetch_all(&mut *c).await?;
     let ta: Vec<i64> = sqlx::query_scalar("select user_id from trusted_admins where guild_id = $1 order by user_id").bind(guild).fetch_all(&mut *c).await?;
-    let rows: Vec<(i64, String, i32, Vec<String>, Value, Vec<String>)> =
+    let rows: Vec<PermitRow> =
         sqlx::query_as("select id, name, rank, perms, limits, whitelist from permits where guild_id = $1 order by rank desc, name").bind(guild).fetch_all(&mut *c).await?;
     let mut custom = vec![];
     for (id, name, rank, perms, limits, whitelist) in rows {

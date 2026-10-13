@@ -135,12 +135,12 @@ pub struct Rollback {
 /// Rolling back re-applies an old snapshot as a new version, so history stays append-only.
 pub async fn rollback(State(st): State<AppState>, s: Sess, Path((guild, v)): Path<(i64, i32)>, Json(b): Json<Rollback>) -> Res {
     // Config may hold sensitive sections and permits, so a rollback needs the same bar as editing them.
-    require(&st, &s, guild, Level::Admin, true).await?;
+    let level = require(&st, &s, guild, Level::Admin, true).await?;
     let old = version(&st, guild, v).await?;
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
     if let Some(p) = old.get("permits") {
-        if level_of(&st, &s, guild).await? < Level::Owner && (p["eo"] != cur["eo"] || p["ta"] != cur["ta"]) {
+        if level < Level::Owner && (p["eo"] != cur["eo"] || p["ta"] != cur["ta"]) {
             return Err(ApiError::Forbidden("only owners can roll back the EO and TA lists"));
         }
         store::write_permits(&mut tx, guild, p).await?;
