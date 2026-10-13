@@ -6,7 +6,7 @@ mod cache;
 mod config;
 mod render;
 
-pub use cache::{CachedMessage, MessageCache};
+use cache::{CachedMessage, MessageCache};
 pub use config::{LogConfig, LogKind};
 
 use std::time::Instant;
@@ -65,8 +65,7 @@ impl Logger {
         match event {
             Event::MessageCreate(m) => {
                 if let Some(guild) = m.guild_id {
-                    let cached =
-                        CachedMessage::new(m.author.id, m.channel_id, m.content.clone(), now);
+                    let cached = CachedMessage::new(m.author.id, m.content.clone(), now);
                     self.cache.insert(guild, m.id, cached, now);
                 }
                 None
@@ -78,8 +77,7 @@ impl Logger {
                     .cache
                     .get(guild, msg.id, now)
                     .map(|c| c.content.clone());
-                let cached =
-                    CachedMessage::new(msg.author.id, msg.channel_id, msg.content.clone(), now);
+                let cached = CachedMessage::new(msg.author.id, msg.content.clone(), now);
                 self.cache.insert(guild, msg.id, cached, now);
                 // Embed-only updates keep the content and are not worth a log.
                 if old.as_deref() == Some(msg.content.as_str()) {

@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 use twilight_model::id::{
-    marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
+    marker::{GuildMarker, MessageMarker, UserMarker},
     Id,
 };
 
@@ -15,21 +15,14 @@ pub const CAPACITY: usize = 10_000;
 #[derive(Clone, Debug)]
 pub struct CachedMessage {
     pub author: Id<UserMarker>,
-    pub channel: Id<ChannelMarker>,
     pub content: String,
     inserted: Instant,
 }
 
 impl CachedMessage {
-    pub fn new(
-        author: Id<UserMarker>,
-        channel: Id<ChannelMarker>,
-        content: String,
-        now: Instant,
-    ) -> Self {
+    pub fn new(author: Id<UserMarker>, content: String, now: Instant) -> Self {
         Self {
             author,
-            channel,
             content,
             inserted: now,
         }
@@ -106,7 +99,7 @@ mod tests {
     use super::*;
 
     fn msg(now: Instant) -> CachedMessage {
-        CachedMessage::new(Id::new(9), Id::new(8), "hi".into(), now)
+        CachedMessage::new(Id::new(9), "hi".into(), now)
     }
 
     #[test]
