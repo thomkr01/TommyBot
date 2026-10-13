@@ -61,8 +61,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if !cfg.antinuke.limits.contains_key(&action) {
         return Ok(());
     }
-    // shortcut: only Owner/EO/TA are exempt, permit-level anti-nuke whitelists are not read yet.
-    let exempt = app.is_immune(gid, actor).await?;
+    let exempt = app.whitelisted(gid, actor, "antinuke").await?;
     let inv = inverse(action, e.target_id.map(|t| t.get()));
     if !exempt {
         sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
@@ -107,6 +106,41 @@ async fn quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Re
         .roles(&roles)
         .await?;
     Ok(())
+}
+
+/// Quarantine without a revert, for a command-rate-limit breach.
+pub(crate) async fn quarantine_actor(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+) -> Result<()> {
+    quarantine(app, gid, actor).await?;
+    let case = open_case(app, gid, actor, why).await?;
+    let text = format!("**Anti-nuke** case #{case}: <@{actor}> quarantined, {why}.");
+    send_log(app, gid.get(), LogKind::AntiNuke, &text).await
+}
+
+async fn open_case(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+) -> Result<i32> {
+    cases::create(
+        &app.pool,
+        NewCase {
+            guild_id: gid.get() as i64,
+            kind: "quarantine",
+            user_id: actor.get() as i64,
+            mod_id: app.me.get() as i64,
+            reason: Some(why),
+            points: 0,
+            duration_s: None,
+            inverse: Some(json!({"op": "unquarantine", "user": actor.get()})),
+        },
+    )
+    .await
 }
 
 async fn quarantine_and_revert(
@@ -154,20 +188,7 @@ async fn quarantine_and_revert(
         .bind(since)
         .execute(&app.pool)
         .await?;
-    let case = cases::create(
-        &app.pool,
-        NewCase {
-            guild_id: gid.get() as i64,
-            kind: "quarantine",
-            user_id: actor.get() as i64,
-            mod_id: app.me.get() as i64,
-            reason: Some(why),
-            points: 0,
-            duration_s: None,
-            inverse: Some(json!({"op": "unquarantine", "user": actor.get()})),
-        },
-    )
-    .await?;
+    let case = open_case(app, gid, actor, why).await?;
     let reinvite: Vec<String> = plan.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     let text = format!(
         "**Anti-nuke** case #{case}: <@{actor}> quarantined, {why}. Reverted {}/{} actions. Kicked, re-invite: {}",
@@ -213,8 +234,7 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     if saved.is_none() {
         return Ok(());
     }
-    // shortcut: quarantine-whitelisted permits are not read, only Owner/EO/TA may touch the held member.
-    let whitelisted = app.is_immune(gid, actor).await?;
+    let whitelisted = app.whitelisted(gid, actor, "quarantine").await?;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
         return Ok(());
     }

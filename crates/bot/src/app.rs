@@ -13,7 +13,7 @@ use tommybot_automod::{
     lockdown::{JoinLock, MentionWatch},
     strike::StrikeCfg,
 };
-use tommybot_core::permits::{self, Level};
+use tommybot_core::permits::{self, Level, RateLimiter};
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
 use twilight_model::id::{
@@ -88,6 +88,7 @@ pub struct App {
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
     pub logger: Mutex<Logger>,
     pub antinuke: Mutex<AntiNuke>,
+    pub rate_limiter: Mutex<RateLimiter>,
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
@@ -104,6 +105,7 @@ impl App {
             cfgs: Default::default(),
             logger: Default::default(),
             antinuke: Mutex::new(AntiNuke::new(HashMap::new())),
+            rate_limiter: Default::default(),
             heat: Default::default(),
             raids: Default::default(),
             mentions: Default::default(),
@@ -142,6 +144,28 @@ impl App {
     pub async fn is_immune(&self, guild: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
         let owner = self.http.guild(guild).await?.model().await?.owner_id;
         Ok(self.level(guild, owner, user).await?.immune())
+    }
+
+    /// Exempt from one system via the permit whitelist (immune levels are exempt from all).
+    pub async fn whitelisted(
+        &self,
+        guild: Id<GuildMarker>,
+        user: Id<UserMarker>,
+        flag: &str,
+    ) -> Result<bool> {
+        let owner = self.http.guild(guild).await?.model().await?.owner_id;
+        Ok(self.level(guild, owner, user).await?.whitelisted(flag))
+    }
+
+    /// Records a command use against the permit's limit; `false` means the actor breached it.
+    pub fn command_allowed(&self, actor: Id<UserMarker>, level: &Level, action: &str) -> bool {
+        permits::command_allowed(
+            &mut self.rate_limiter.lock().unwrap(),
+            actor.get() as i64,
+            level,
+            action,
+            std::time::Instant::now(),
+        )
     }
 
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {
