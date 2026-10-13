@@ -188,8 +188,17 @@ async fn discord_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
     let roles = list(st.discord.call(Method::GET, &format!("/guilds/{guild}/roles"), None).await?).into_iter()
         .map(|r| json!({"id": r["id"], "name": r["name"], "managed": r["managed"], "position": r["position"], "permissions": r["permissions"]}))
         .collect::<Vec<_>>();
-    let info = st.discord.call(Method::GET, &format!("/guilds/{guild}?with_counts=true"), None).await?;
-    Ok(Json(json!({"channels": channels, "roles": roles, "members": info["approximate_member_count"]})))
+    let info = st
+        .discord
+        .call(
+            Method::GET,
+            &format!("/guilds/{guild}?with_counts=true"),
+            None,
+        )
+        .await?;
+    Ok(Json(
+        json!({"channels": channels, "roles": roles, "members": info["approximate_member_count"]}),
+    ))
 }
 
 #[derive(Deserialize)]
