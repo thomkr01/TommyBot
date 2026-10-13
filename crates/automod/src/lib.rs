@@ -9,3 +9,4 @@ pub mod lockdown;
 pub mod store;
 pub mod strike;
 pub mod window;
+pub mod filters;
