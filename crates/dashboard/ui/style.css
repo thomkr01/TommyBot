@@ -19,3 +19,7 @@ textarea { width:100%; min-height:320px; font-family:ui-monospace, monospace; fo
 .err { color:var(--bad); } .muted { color:var(--muted); }
 pre { overflow:auto; background:none; border:1px solid var(--line); border-radius:6px; padding:8px; }
 @media (max-width:700px) { .shell { flex-direction:column; } nav { width:auto; flex-direction:row; flex-wrap:wrap; border-right:0; border-bottom:1px solid var(--line); } main { padding:16px; } }
+select { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
+.row select { flex:1; min-width:180px; }
+.pick { display:flex; flex-wrap:wrap; gap:4px 12px; max-height:140px; overflow:auto; flex:1; }
+.warn { color:#e8590c; } .ok { color:#2f9e44; } details { margin:12px 0; }

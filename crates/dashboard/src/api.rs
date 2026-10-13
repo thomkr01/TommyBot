@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 type Res = Result<Json<Value>, ApiError>;
 
 /// Re-resolved on every request, including writes (spec 3.1).
-async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Level, ApiError> {
+pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Level, ApiError> {
     let flag = |table: &'static str| async move {
         sqlx::query_scalar::<_, bool>(&format!("select exists(select 1 from {table} where guild_id = $1 and user_id = $2)"))
             .bind(guild).bind(s.user_id).fetch_one(&st.db).await
@@ -23,7 +23,7 @@ async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Level, ApiError
     Ok(access::level(&Facts { discord_owner, extra_owner, trusted_admin, permit_perms: &perms }))
 }
 
-async fn require(st: &AppState, s: &Sess, guild: i64, min: Level, step_up: bool) -> Result<Level, ApiError> {
+pub(crate) async fn require(st: &AppState, s: &Sess, guild: i64, min: Level, step_up: bool) -> Result<Level, ApiError> {
     let l = level_of(st, s, guild).await?;
     if l < min {
         return Err(ApiError::Forbidden("insufficient dashboard access"));
@@ -62,7 +62,7 @@ pub struct Put {
     value: Value,
 }
 
-async fn log_change(st: &AppState, config: &Value, text: String) {
+pub(crate) async fn log_change(st: &AppState, config: &Value, text: String) {
     if let Some(ch) = config["logging"]["config_changes"].as_str().map(String::from) {
         let d = st.discord.clone();
         tokio::spawn(async move {
@@ -80,6 +80,7 @@ pub async fn put_section(State(st): State<AppState>, s: Sess, Path((guild, secti
     if !b.value.is_object() {
         return Err(ApiError::BadRequest("section must be an object".into()));
     }
+    validate(&section, &b.value)?;
     let sensitive = access::SENSITIVE.contains(&section.as_str());
     require(&st, &s, guild, if sensitive { Level::Admin } else { Level::Editor }, sensitive).await?;
     let (_, mut config) = store::current(&st.db, guild).await?.ok_or(ApiError::NotFound)?;
@@ -149,4 +150,20 @@ pub async fn rollback(State(st): State<AppState>, s: Sess, Path((guild, v)): Pat
     tx.commit().await?;
     log_change(&st, &old, format!("{} (<@{}>) rolled config back to v{v} -> v{version}", s.username, s.user_id)).await;
     Ok(Json(json!({"version": version})))
+}
+
+/// Sections the bot parses must deserialize into its types; the rest are stored as-is.
+pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
+    use tommybot_core::sections::{AntinukeCfg, AutomodCfg, LockdownCfg};
+    let v = v.clone();
+    let r = match section {
+        "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),
+        "antinuke" => serde_json::from_value::<AntinukeCfg>(v).map(drop),
+        "automod" => serde_json::from_value::<AutomodCfg>(v).map(drop),
+        "joingate" => serde_json::from_value::<tommybot_automod::join::GateCfg>(v).map(drop),
+        "joinraid" => serde_json::from_value::<tommybot_automod::join::RaidCfg>(v).map(drop),
+        "lockdown" => serde_json::from_value::<LockdownCfg>(v).map(drop),
+        _ => Ok(()),
+    };
+    r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
 }

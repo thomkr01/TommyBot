@@ -73,6 +73,16 @@ impl Discord {
         Ok(r.error_for_status()?.json::<M>().await?.roles)
     }
 
+    /// Bot-authenticated call for the less common endpoints; returns the JSON body (Null when empty).
+    pub async fn call(&self, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+        let mut r = self.http.request(method, format!("{API}{path}")).header("Authorization", format!("Bot {}", self.bot_token));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        let text = r.send().await?.error_for_status()?.text().await?;
+        Ok(serde_json::from_str(&text).unwrap_or_default())
+    }
+
     pub async fn post_message(&self, channel: &str, content: &str) -> Result<()> {
         self.http.post(format!("{API}/channels/{channel}/messages"))
             .header("Authorization", format!("Bot {}", self.bot_token))

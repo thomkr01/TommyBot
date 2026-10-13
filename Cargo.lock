@@ -2469,8 +2469,12 @@ name = "tommybot-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde",
  "serde_json",
  "sqlx",
+ "tommybot-antinuke",
+ "tommybot-automod",
+ "twilight-model",
 ]
 
 [[package]]
@@ -2486,9 +2490,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
+ "tommybot-antinuke",
+ "tommybot-automod",
  "tommybot-core",
+ "tommybot-logging",
  "totp-rs",
  "tower-http",
  "tracing",
