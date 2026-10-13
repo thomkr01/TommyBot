@@ -17,7 +17,10 @@ use tommybot_automod::{
 };
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
-    sections::{AntinukeCfg, AppealsCfg, AutomodCfg, LockdownCfg, MiscCfg, PanicCfg, WhitelistCfg},
+    sections::{
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, LockdownCfg, MiscCfg, PanicCfg,
+        WhitelistCfg,
+    },
 };
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
@@ -35,6 +38,7 @@ pub struct GuildCfg {
     pub joinraid: Option<RaidCfg>,
     pub lockdown: LockdownCfg,
     pub panic: PanicCfg,
+    pub backups: BackupsCfg,
     pub misc: MiscCfg,
     pub appeals: AppealsCfg,
     pub whitelist: WhitelistCfg,
@@ -63,6 +67,7 @@ impl GuildCfg {
             joinraid: section(cfg, "joinraid"),
             lockdown: section(cfg, "lockdown"),
             panic: section(cfg, "panic"),
+            backups: section(cfg, "backups"),
             misc: section(cfg, "misc"),
             appeals: section(cfg, "appeals"),
             whitelist: section(cfg, "whitelist"),
@@ -89,7 +94,9 @@ pub struct App {
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
     /// The open nuke case per guild and when it last grew; a long quiet gap starts a new case.
     pub nukes: Mutex<HashMap<u64, (NukeCase, Instant)>>,
+    /// Anti-nuke quarantines and automod heat trips are counted apart, each with its own threshold.
     pub panic: Mutex<PanicTracker>,
+    pub panic_heat: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
 }
@@ -123,6 +130,7 @@ impl App {
             mentions: Default::default(),
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
+            panic_heat: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
             panic_runs: Default::default(),
             guilds: Default::default(),
         }

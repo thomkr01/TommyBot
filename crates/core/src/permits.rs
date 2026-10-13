@@ -50,7 +50,10 @@ impl Level {
     pub fn whitelisted(&self, flag: &str) -> bool {
         match self {
             Level::None => false,
-            Level::Custom { whitelist, .. } => whitelist.iter().any(|w| w == flag || w == "all"),
+            Level::Custom { whitelist, .. } => whitelist.iter().any(|w| {
+                // The per-action `wl_` flags are narrower forms of the older blanket `antinuke` flag.
+                w == flag || w == "all" || (flag.starts_with("wl_") && w == "antinuke")
+            }),
             _ => true,
         }
     }
@@ -67,11 +70,173 @@ pub enum Denied {
 /// Permits that predate a command keep working: holders of these older permits also get the new one.
 fn implied_by(perm: &str) -> &'static [&'static str] {
     match perm {
+        "lockdown" => &["lock_channels", "lock_staff_roles", "lock_joins"],
         "quarantine" => &["kick", "ban"],
         "purge" | "slowmode" => &["timeout", "kick", "ban"],
         "cases" => &["warn", "timeout", "kick", "ban"],
         _ => &[],
     }
+}
+
+/// One toggle in the dashboard's permit editor. `flag` entries live in a permit's whitelist, the
+/// rest in its perms. `locked` ones are shown but never stored.
+pub struct PermDef {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub help: &'static str,
+    pub flag: bool,
+    pub locked: bool,
+}
+
+pub struct PermSection {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub items: &'static [PermDef],
+}
+
+const fn perm(key: &'static str, label: &'static str, help: &'static str) -> PermDef {
+    PermDef {
+        key,
+        label,
+        help,
+        flag: false,
+        locked: false,
+    }
+}
+
+const fn flag(key: &'static str, label: &'static str, help: &'static str) -> PermDef {
+    PermDef {
+        key,
+        label,
+        help,
+        flag: true,
+        locked: false,
+    }
+}
+
+/// Everything a permit can hold, in the order the editor shows it (Wick's five-section layout).
+pub const CATALOG: &[PermSection] = &[
+    PermSection {
+        id: "immunity",
+        title: "Immunity",
+        items: &[
+            PermDef {
+                key: "owner",
+                label: "Owner",
+                help: "Anyone with this can do ANYTHING and is IMMUNE from anything",
+                flag: false,
+                locked: true,
+            },
+            flag(
+                "all",
+                "Full Immunity",
+                "Entirely immune, can't change settings, total whitelist",
+            ),
+            flag(
+                "automod",
+                "Automod Immunity",
+                "Safe from the automod, but not other things",
+            ),
+            perm(
+                "dashboard_view",
+                "Dashboard Access",
+                "See this server's dashboard",
+            ),
+            perm(
+                "dashboard_edit",
+                "Dashboard Edit",
+                "Change settings on this server's dashboard",
+            ),
+            flag(
+                "reports",
+                "Report Immunity",
+                "Safe from being reported by server members",
+            ),
+        ],
+    },
+    PermSection {
+        id: "moderation",
+        title: "Moderation",
+        items: &[
+            perm("cases", "Manage Cases", "View and edit cases"),
+            perm("ban", "Ban Command", "Ban, unban and hackban"),
+            perm("kick", "Kick Command", ""),
+            perm("timeout", "Timeout Command", "Timeout and untimeout"),
+            perm(
+                "quarantine",
+                "Quarantine Command",
+                "Quarantine and unquarantine",
+            ),
+            perm("warn", "Warn Command", "Warn and unwarn"),
+            perm("slowmode", "Slowmode Command", ""),
+            perm("purge", "Purge Command", ""),
+            perm("verify", "Verify Command", "Manually verify members"),
+            perm("sanitize", "Sanitize Command", "Sanitize/Dehoist"),
+            perm("reports", "Manage Reports", ""),
+            perm("backups", "Backups", "Take/Load/Delete backups"),
+            perm("notes_view", "View Notes", ""),
+            perm(
+                "notes_manage",
+                "Manage Notes",
+                "View/edit/remove/sweep notes",
+            ),
+            perm("appeals", "Review Appeals", ""),
+            perm("revert", "Revert Center", "Undo anti-nuke actions"),
+        ],
+    },
+    PermSection {
+        id: "lockdown",
+        title: "Lockdown",
+        items: &[
+            perm("lock_channels", "Lock Server Channels", ""),
+            perm(
+                "lock_staff_roles",
+                "Lock Staff Roles",
+                "Lock/Unlock all dangerous roles",
+            ),
+            perm(
+                "lock_joins",
+                "Lock Server Joins",
+                "Kick/Ban new members joining",
+            ),
+            perm(
+                "lock_updates",
+                "Make Lockdown Updates",
+                "Make updates in the lock-updates channel",
+            ),
+        ],
+    },
+    PermSection {
+        id: "whitelist",
+        title: "Whitelist",
+        items: &[
+            flag("wl_kick_ban", "Kick/Ban Whitelist", ""),
+            flag("wl_channel_create", "Channel Creations Whitelist", ""),
+            flag("wl_channel_delete", "Channel Deletions Whitelist", ""),
+            flag("wl_role_create", "Role Creations Whitelist", ""),
+            flag("wl_role_delete", "Role Deletions Whitelist", ""),
+            flag("wl_webhook_create", "Webhook Creations Whitelist", ""),
+            flag(
+                "quarantine",
+                "Quarantine Whitelist",
+                "Never quarantined by the quarantine hold",
+            ),
+            flag("words", "Profanity Whitelist", "Bypass the words blacklist"),
+            flag("links", "Link Whitelist", "Bypass the links blacklist"),
+        ],
+    },
+];
+
+/// Keys older setups may already hold; saving them stays allowed.
+const LEGACY: &[&str] = &["lockdown", "antinuke"];
+
+/// Whether `key` may be stored as a perm (`flag` false) or a whitelist flag (`flag` true).
+pub fn known(key: &str, flag: bool) -> bool {
+    LEGACY.contains(&key)
+        || CATALOG
+            .iter()
+            .flat_map(|s| s.items)
+            .any(|d| d.key == key && d.flag == flag && !d.locked)
 }
 
 /// `target_above_bot`: target's top role is not below the bot's top role (Discord hierarchy).
@@ -205,6 +370,36 @@ pub async fn resolve(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn catalog_keys_are_unique_per_kind_and_known() {
+        let mut seen = std::collections::HashSet::new();
+        for d in CATALOG.iter().flat_map(|s| s.items) {
+            assert!(seen.insert((d.key, d.flag)), "duplicate {}", d.key);
+            assert_eq!(known(d.key, d.flag), !d.locked);
+        }
+        assert!(known("antinuke", true) && !known("made_up", false) && !known("ban", true));
+    }
+
+    #[test]
+    fn per_action_whitelist_is_narrower_than_antinuke() {
+        let w = |f: &[&str]| Level::Custom {
+            rank: 1,
+            perms: vec![],
+            whitelist: f.iter().map(|x| x.to_string()).collect(),
+            limits: Default::default(),
+        };
+        assert!(w(&["wl_kick_ban"]).whitelisted("wl_kick_ban"));
+        assert!(!w(&["wl_kick_ban"]).whitelisted("wl_role_delete"));
+        assert!(w(&["antinuke"]).whitelisted("wl_role_delete"));
+        let locker = Level::Custom {
+            rank: 1,
+            perms: vec!["lock_joins".into()],
+            whitelist: vec![],
+            limits: Default::default(),
+        };
+        assert!(locker.has("lockdown"));
+    }
+
     #[test]
     fn older_permits_imply_the_new_commands() {
         let permit = |perms: &[&str]| Level::Custom {

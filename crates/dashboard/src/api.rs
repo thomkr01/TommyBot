@@ -73,6 +73,18 @@ pub(crate) async fn require(
     Ok(l)
 }
 
+/// The toggles of the permit editor, so the page never carries its own copy of the permission list.
+pub async fn permit_catalog(_: Sess) -> Json<Value> {
+    Json(json!(tommybot_core::permits::CATALOG
+        .iter()
+        .map(
+            |s| json!({"id": s.id, "title": s.title, "items": s.items.iter().map(|d| json!({
+            "key": d.key, "label": d.label, "help": d.help, "flag": d.flag, "locked": d.locked,
+        })).collect::<Vec<_>>()})
+        )
+        .collect::<Vec<_>>()))
+}
+
 pub async fn guilds(State(st): State<AppState>, s: Sess) -> Res {
     let mut out = vec![];
     let bot_in = st.discord.bot_guild_ids().await?;
@@ -270,7 +282,8 @@ pub async fn rollback(
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is.
 pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, LockdownCfg, MiscCfg, PanicCfg, WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, LockdownCfg, MiscCfg, PanicCfg,
+        WhitelistCfg,
     };
     let v = v.clone();
     let r = match section {
@@ -280,6 +293,7 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "joingate" => serde_json::from_value::<tommybot_automod::join::GateCfg>(v).map(drop),
         "verification" => serde_json::from_value::<tommybot_automod::join::VerifyCfg>(v).map(drop),
         "joinraid" => serde_json::from_value::<tommybot_automod::join::RaidCfg>(v).map(drop),
+        "backups" => serde_json::from_value::<BackupsCfg>(v).map(drop),
         "panic" => serde_json::from_value::<PanicCfg>(v).map(drop),
         "lockdown" => serde_json::from_value::<LockdownCfg>(v).map(drop),
         "misc" => serde_json::from_value::<MiscCfg>(v).map(drop),

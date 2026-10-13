@@ -50,6 +50,19 @@ fn inverse(action: Action, target: Option<u64>) -> Option<Inverse> {
     })
 }
 
+/// The permit whitelist flag that exempts an action; the rest fall back to the blanket one.
+fn whitelist_flag(a: Action) -> &'static str {
+    match a {
+        Action::Ban | Action::Kick => "wl_kick_ban",
+        Action::ChannelCreate => "wl_channel_create",
+        Action::ChannelDelete => "wl_channel_delete",
+        Action::RoleCreate => "wl_role_create",
+        Action::RoleDelete => "wl_role_delete",
+        Action::WebhookCreate => "wl_webhook_create",
+        _ => "antinuke",
+    }
+}
+
 pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     let (Some(gid), Some(actor)) = (e.guild_id, e.user_id) else {
         return Ok(());
@@ -70,7 +83,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if !cfg.antinuke.limits.contains_key(&action) {
         return Ok(());
     }
-    let exempt = app.whitelisted(gid, actor, "antinuke").await?;
+    let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?;
     let inv = inverse(action, e.target_id.map(|t| t.get()));
     if !exempt {
         sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
@@ -269,7 +282,7 @@ async fn quarantine_and_revert(
         if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
     );
     send_log(app, gid.get(), LogKind::AntiNuke, &text).await?;
-    crate::panic::note(app, gid, actor).await
+    crate::panic::note(app, gid, actor, false).await
 }
 
 /// A quiet gap this long starts a new nuke case instead of extending the last one.

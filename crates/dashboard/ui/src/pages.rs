@@ -39,8 +39,19 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             </div>
             <div class="chips"><span class="chip blue">"You can choose a certain step if you want."</span><span class="chip orange">"The full setup could take around 3 minutes of your time."</span></div>
         </div>
+        <p class="muted">{move || [
+            "Creates the quarantine role and log channels for you.",
+            "General bot behavior: moderation commands, replies and the default timeout.",
+            "Turn Auto Mod on and set its strike and heat basics. Filters have their own pages.",
+            "Turn Anti Nuke on and pick the quarantine role. Per-action limits are under Filters.",
+            "Members and roles the automatic systems should ignore.",
+            "Instant filters for new members and bots.",
+            "Reaction to a burst of joins.",
+            "The gate new members must pass to get access.",
+            "Your rescue key for locked-out recovery.",
+        ][step.get()]}</p>
         {move || match step.get() {
-            0 => view! { <div class="card"><p class="muted">"Creates the quarantine role and the log channels."</p><button on:click=auto.clone()>"Run auto setup"</button><p class="info">{move || msg.get()}</p></div> }.into_any(),
+            0 => view! { <div class="card"><button on:click=auto.clone()>"Run auto setup"</button><p class="info">{move || msg.get()}</p></div> }.into_any(),
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
             i => view! { <Section guild=g.clone() name=["", "misc", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() part=if i == 2 || i == 3 { "general" } else { "" } enrolled /> }.into_any(),
         }}

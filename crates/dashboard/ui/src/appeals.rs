@@ -29,14 +29,14 @@ pub fn AppealList(guild: String) -> impl IntoView {
     });
     view! {
         <div class="card row">
-            <select on:change=move |e| { kind.set(event_target_value(&e)); load() }>
-                <option value="">"All"</option><option value="ban">"Ban"</option><option value="timeout">"Timeout"</option>
-            </select>
-            <input placeholder="User ID or name" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
+            <div class="chips">
+                {[("", "All"), ("ban", "Ban"), ("timeout", "Timeout")].map(|(k, l)| view! { <button class="ghost" class:on=move || kind.get() == k on:click=move |_| { kind.set(k.into()); load() }>{l}</button> }).collect_view()}
+            </div>
+            <input placeholder="User ID/tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
             <button class="ghost" on:click=move |_| load()>"Search"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rows.get().is_empty()><p class="muted">"No appeals."</p></Show>
+        <Show when=move || rows.get().is_empty()><div class="banner">"No pending appeals.."</div></Show>
         <For each=move || rows.get() key=|r| (r["id"].as_i64(), r["status"].as_str().map(String::from)) let:r>
             {
                 let id = r["id"].as_i64().unwrap_or(0);
@@ -81,7 +81,7 @@ pub fn AppealBlacklist(guild: String) -> impl IntoView {
             <button class="ghost" on:click=move |_| if web_sys::window().is_some_and(|w| w.confirm_with_message("Remove every user from the appeals blacklist?").unwrap_or(false)) { post("/purge".into(), None) }>"Purge all"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rows.get().is_empty()><p class="muted">"Nobody is blacklisted."</p></Show>
+        <Show when=move || rows.get().is_empty()><div class="banner">"No blacklisted users.."</div></Show>
         <For each=move || rows.get() key=|r| s(&r["user_id"]) let:r>
             {
                 let id = s(&r["user_id"]);

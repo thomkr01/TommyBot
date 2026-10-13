@@ -364,15 +364,26 @@ fn schema() -> Vec<Value> {
         f("flag_no_avatar", "bool"),
         f("id_flag_min", "int"),
     ];
+    // "heat" is the Auto Mod page, "nuke" the Anti Nuke page; the fields without a page are shared.
     let panic = vec![
-        f("executors", "int"),
-        dv(f("window_secs", "int"), 600),
-        dv(f("duration_secs", "int"), 600),
-        f("lock_mod_commands", "bool"),
-        f("unlock_when_ending", "bool"),
-        f("warned_roles", "roles"),
-        f("heat_algorithm", "bool"),
-        f("whitelisted_categories", "channels"),
+        ti(
+            pg(fg("Trigger", "executors", "int"), "nuke"),
+            "Quarantined accounts to trip",
+        ),
+        ti(
+            pg(fg("Trigger", "heat_algorithm", "bool"), "heat"),
+            "Panic on heat",
+        ),
+        ti(
+            pg(dv(fg("Trigger", "heat_executors", "int"), 3), "heat"),
+            "Punished accounts to trip",
+        ),
+        dv(fg("Trigger", "window_secs", "int"), 600),
+        dv(fg("Response", "duration_secs", "int"), 600),
+        fg("Response", "lock_mod_commands", "bool"),
+        fg("Response", "unlock_when_ending", "bool"),
+        fg("Response", "warned_roles", "roles"),
+        fg("Response", "whitelisted_categories", "channels"),
     ];
     let whitelist = vec![
         f("users", "list"),
@@ -393,10 +404,14 @@ fn schema() -> Vec<Value> {
         fg("Moderation commands", "always_dm", "bool"),
         fg("Moderation commands", "delete_invocation", "bool"),
         fg("Moderation commands", "hide_staff_in_dms", "bool"),
-        dv(
-            fg("Moderation commands", "default_timeout_secs", "int"),
-            600,
-        ),
+        {
+            let mut v = dv(
+                fg("Moderation commands", "default_timeout_secs", "int"),
+                600,
+            );
+            v["help"] = json!("0 means 28 days");
+            v
+        },
         dv(fg("Moderation commands", "ban_purge_days", "int"), 0),
         dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true),
         fg("Auto moderation", "purge_last_100", "bool"),
@@ -442,9 +457,9 @@ fn schema() -> Vec<Value> {
         fg("General", "roles", "roles"),
     ];
     let appeals = vec![
-        f("enabled", "bool"),
-        f("channel", "channel"),
-        f("fields", "form"),
+        ti(fg("General", "enabled", "bool"), "Appeals System Status"),
+        ti(fg("General", "channel", "channel"), "Appeals channel"),
+        fg("Appeal Form", "fields", "form"),
     ];
     [
         ("logging", "Logging", log),
@@ -454,6 +469,7 @@ fn schema() -> Vec<Value> {
         ("joinraid", "Join raid", raid),
         ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
         ("panic", "Panic mode", panic),
+        ("backups", "Backups", vec![dv(f("auto", "bool"), true)]),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),
         ("whitelist", "Whitelist", whitelist),

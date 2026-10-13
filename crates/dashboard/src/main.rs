@@ -5,6 +5,7 @@ mod auth;
 mod diff;
 mod discord;
 mod ops;
+mod recovery;
 mod sections;
 mod store;
 
@@ -84,6 +85,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .route("/api/totp/enroll", post(auth::totp_enroll))
         .route("/api/totp/verify", post(auth::totp_verify))
         .route("/api/guilds", get(api::guilds))
+        .route("/api/permit-catalog", get(api::permit_catalog))
         .route(&format!("{g}/config"), get(api::get_config))
         .route(&format!("{g}/config/{{section}}"), put(api::put_section))
         .route(&format!("{g}/permits"), put(api::put_permits))
@@ -98,6 +100,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         )
         .merge(sections::routes())
         .merge(ops::routes())
+        .merge(recovery::routes())
         .merge(appeals::routes())
         // Hash routing means the server never needs an index.html fallback; one would also hide
         // missing assets by answering a stale hashed .js/.wasm request with HTML.

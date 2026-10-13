@@ -2,6 +2,7 @@
 use crate::ApiError;
 use serde_json::{json, Value};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use tommybot_core::permits;
 
 /// Version 0 with an empty config until the first save: nothing else creates a guild's first row.
 pub async fn current(db: &PgPool, guild: i64) -> Result<(i32, Value), ApiError> {
@@ -111,17 +112,19 @@ pub async fn write_permits(c: &mut PgConnection, guild: i64, p: &Value) -> Resul
         }
         names.push(name);
         let perms = strs(&x["perms"]);
-        if perms
+        let whitelist = strs(&x["whitelist"]);
+        if let Some(k) = perms
             .iter()
-            .any(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .find(|k| !permits::known(k, false))
+            .or(whitelist.iter().find(|k| !permits::known(k, true)))
         {
-            return Err(bad("permission names are lowercase snake_case"));
+            return Err(ApiError::BadRequest(format!("unknown permission `{k}`")));
         }
         let id: i64 = sqlx::query_scalar(
             "insert into permits (guild_id, name, rank, perms, limits, whitelist) values ($1,$2,$3,$4,$5,$6)
              on conflict (guild_id, name) do update set rank = $3, perms = $4, limits = $5, whitelist = $6 returning id")
             .bind(guild).bind(name).bind(x["rank"].as_i64().unwrap_or(0) as i32).bind(&perms)
-            .bind(if x["limits"].is_object() { x["limits"].clone() } else { json!({}) }).bind(strs(&x["whitelist"]))
+            .bind(if x["limits"].is_object() { x["limits"].clone() } else { json!({}) }).bind(&whitelist)
             .fetch_one(&mut *c).await?;
         sqlx::query("delete from permit_roles where permit_id = $1")
             .bind(id)

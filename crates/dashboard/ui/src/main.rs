@@ -5,19 +5,23 @@ mod appeals;
 mod common;
 mod form;
 mod pages;
+mod permits;
+mod recovery;
 use appeals::{AppealBlacklist, AppealForm, AppealList};
 use common::*;
 use form::Section;
+use permits::Permits;
 use pages::{Logging, Rescue, Revert, Score, Wizard};
+use recovery::{Backups, Panic};
 
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
-const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
-    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist"), ("panic", "Panic Mode")]),
-    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("panic", "Panic Mode")]),
+    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
+    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
+    ("Raw JSON", &[("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
 const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
@@ -36,6 +40,8 @@ fn title(p: &str) -> String {
         _ if p.starts_with("appeal") => "Appeals".into(),
         "antinuke" | "antinuke_filters" => format!("Anti Nuke {}", if p == "antinuke" { "General" } else { "Filters" }),
         "automod" => "Auto Mod General".into(),
+        "automod_panic" => "Auto Mod Panic Mode".into(),
+        "antinuke_panic" => "Anti Nuke Panic Mode".into(),
         "filters" => "Auto Mod Filters".into(),
         _ => NAV.iter().flat_map(|(_, i)| i.iter()).chain(TOP).find(|(k, _)| *k == p).map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()),
     }
@@ -55,54 +61,6 @@ fn toggle_theme() {
 fn hash() -> Vec<String> {
     let h = web_sys::window().unwrap().location().hash().unwrap_or_default();
     h.trim_start_matches('#').split('/').filter(|s| !s.is_empty()).map(String::from).collect()
-}
-
-#[component]
-fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let (cfg, set_cfg) = signal(json!({}));
-    let version = RwSignal::new(0i64);
-    let msg = RwSignal::new(String::new());
-    let need = RwSignal::new(false);
-    let g = guild.clone();
-    spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
-            version.set(v["version"].as_i64().unwrap_or(0));
-            set_cfg.set(v["config"]["permits"].clone());
-        }
-    });
-    let save = move |_| {
-        let (g, p, v) = (guild.clone(), cfg.get_untracked(), version.get_untracked());
-        run_save(async move { api("PUT", &format!("/api/guilds/{g}/permits"), Some(json!({"expected_version": v, "value": p}))).await }, version, msg, need);
-    };
-    let edit = move |key: &'static str, i: Option<usize>, field: &'static str, val: String| {
-        set_cfg.update(|c| match i {
-            None => c[key] = from_csv(&val),
-            Some(i) => c[key][i][field] = match field { "rank" => json!(val.parse::<i64>().unwrap_or(0)), "name" => json!(val), _ => from_csv(&val) },
-        })
-    };
-    view! {
-        <div class="card">
-            <div class="row"><label>"Owners (EO)"</label><input prop:value=move || csv(&cfg.get()["eo"]) on:change=move |e| edit("eo", None, "", event_target_value(&e)) /></div>
-            <div class="row"><label>"Trusted admins"</label><input prop:value=move || csv(&cfg.get()["ta"]) on:change=move |e| edit("ta", None, "", event_target_value(&e)) /></div>
-            <p class="muted">"Comma-separated Discord user IDs. Only owners can change these two lists."</p>
-        </div>
-        <For each=move || 0..cfg.get()["custom"].as_array().map_or(0, Vec::len) key=|i| *i let:i>
-            <div class="card">
-                <div class="row"><label>"Name"</label><input prop:value=move || cfg.get()["custom"][i]["name"].as_str().unwrap_or("").to_string() on:change=move |e| edit("custom", Some(i), "name", event_target_value(&e)) /></div>
-                <div class="row"><label>"Rank"</label><input prop:value=move || cfg.get()["custom"][i]["rank"].to_string() on:change=move |e| edit("custom", Some(i), "rank", event_target_value(&e)) /></div>
-                <div class="row"><label>"Role IDs"</label><input prop:value=move || csv(&cfg.get()["custom"][i]["roles"]) on:change=move |e| edit("custom", Some(i), "roles", event_target_value(&e)) /></div>
-                <div class="row"><label>"Permissions"</label><input prop:value=move || csv(&cfg.get()["custom"][i]["perms"]) on:change=move |e| edit("custom", Some(i), "perms", event_target_value(&e)) /></div>
-                <div class="row"><label>"Whitelist"</label><input prop:value=move || csv(&cfg.get()["custom"][i]["whitelist"]) on:change=move |e| edit("custom", Some(i), "whitelist", event_target_value(&e)) /></div>
-                <button class="ghost" on:click=move |_| set_cfg.update(|c| { c["custom"].as_array_mut().map(|a| a.remove(i)); })>"Remove"</button>
-            </div>
-        </For>
-        <div class="row">
-            <button class="ghost" on:click=move |_| set_cfg.update(|c| { if !c["custom"].is_array() { c["custom"] = json!([]); } c["custom"].as_array_mut().unwrap().push(json!({"name": "New permit", "rank": 0, "perms": [], "roles": [], "whitelist": [], "limits": {}})); })>"Add permit"</button>
-            <button on:click=save>"Save"</button>
-            <span>{move || msg.get()}</span>
-        </div>
-        <StepUp need enrolled />
-    }
 }
 
 #[component]
@@ -233,6 +191,9 @@ fn App() -> impl IntoView {
                                 ("overview", _) => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 ("revert", _) => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
+                                ("backups", _) => view! { <Backups guild=g.clone() enrolled /> }.into_any(),
+                                ("automod_panic", _) => view! { <Panic guild=g.clone() part="heat,general" enrolled /> }.into_any(),
+                                ("antinuke_panic", _) => view! { <Panic guild=g.clone() part="nuke,general" enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                                 ("appeal_list", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealList guild=g.clone() /> }.into_any(),
                                 ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealBlacklist guild=g.clone() /> }.into_any(),

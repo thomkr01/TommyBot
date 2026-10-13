@@ -6,7 +6,7 @@ use tommybot_core::jobs::{self, Job};
 use tommybot_logging::LogKind;
 use twilight_model::id::{marker::UserMarker, Id};
 
-use crate::{app::App, commands, events::send_log, lockdown, panic, verify};
+use crate::{app::App, backup, commands, events::send_log, lockdown, panic, verify};
 
 fn user(payload: &Value) -> Result<Id<UserMarker>> {
     Ok(Id::new(
@@ -29,8 +29,29 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 .context("job payload has no until_secs")?;
             commands::timeout_until(app, gid, user(&job.payload)?, until).await?;
         }
-        "panic_end" => {
-            panic::end(app, gid, job.payload["unlock"].as_bool().unwrap_or(false)).await?
+        "panic_end" => panic::end(app, gid, &job.payload).await?,
+        "panic_start" => {
+            if !app.panic_runs.lock().unwrap().contains_key(&gid.get()) {
+                let cfg = app.cfg(gid.get()).await?.panic.clone();
+                panic::start(app, gid, &cfg).await?;
+            }
+        }
+        "backup_create" => {
+            let id = backup::save(app, gid).await?;
+            send_log(
+                app,
+                gid.get(),
+                LogKind::Server,
+                &format!("Backup #{id} created"),
+            )
+            .await?;
+        }
+        "backup_load" => {
+            let id = job.payload["id"]
+                .as_i64()
+                .context("job payload has no id")?;
+            let text = backup::load(app, gid, id, true).await?;
+            send_log(app, gid.get(), LogKind::Server, &text).await?;
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
