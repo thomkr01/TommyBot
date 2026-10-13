@@ -43,8 +43,11 @@ fn schema() -> Vec<Value> {
     gate.extend([f("username_terms", "list"), f("require_all", "bool")]);
     let raid = vec![f("count", "int"), f("span_ms", "int"), f("suspicious_only", "bool"), f("active_ms", "int"), f("string_patterns", "list"),
         f("flag_younger_than_ms", "int"), f("flag_no_avatar", "bool"), f("id_flag_min", "int")];
+    let panic = vec![f("executors", "int"), f("window_secs", "int"), f("duration_secs", "int"), f("lock_mod_commands", "bool"),
+        f("unlock_when_ending", "bool"), f("warned_roles", "roles")];
     [("logging", "Logging", log), ("antinuke", "Anti-nuke", nuke), ("automod", "Automod", auto), ("joingate", "Join gate", gate),
-        ("joinraid", "Join raid", raid), ("lockdown", "Lockdown", vec![f("main_roles", "roles")])]
+        ("joinraid", "Join raid", raid), ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
+        ("panic", "Panic mode", panic)]
         .into_iter().map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields})).collect()
 }
 
