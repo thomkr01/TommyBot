@@ -1,10 +1,8 @@
-use crate::{access::Level, api, store, ApiError, AppState, auth::Sess};
+use crate::{access::Level, api::{self, Res}, store, ApiError, AppState, auth::Sess};
 use axum::{extract::{Path, State}, routing::{get, post}, Json, Router};
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
-
-type Res = Result<Json<Value>, ApiError>;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

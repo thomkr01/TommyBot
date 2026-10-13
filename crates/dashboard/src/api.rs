@@ -3,7 +3,7 @@ use axum::{extract::{Path, State}, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-type Res = Result<Json<Value>, ApiError>;
+pub(crate) type Res = Result<Json<Value>, ApiError>;
 
 /// Re-resolved on every request, including writes (spec 3.1).
 pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Level, ApiError> {
