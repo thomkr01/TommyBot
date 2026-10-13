@@ -147,6 +147,11 @@ fn schema() -> Vec<Value> {
         f("unlock_when_ending", "bool"),
         f("warned_roles", "roles"),
     ];
+    let appeals = vec![
+        f("enabled", "bool"),
+        f("channel", "channel"),
+        f("fields", "form"),
+    ];
     [
         ("logging", "Logging", log),
         ("antinuke", "Anti-nuke", nuke),
@@ -155,6 +160,7 @@ fn schema() -> Vec<Value> {
         ("joinraid", "Join raid", raid),
         ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
         ("panic", "Panic mode", panic),
+        ("appeals", "Appeals", appeals),
     ]
     .into_iter()
     .map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields}))
@@ -286,6 +292,7 @@ mod tests {
                     "list" => json!(["a"]),
                     "choice" => fd["options"][0].clone(),
                     "channel" | "role" => json!("1"),
+                    "form" => json!([{"label": "x"}]),
                     _ => json!(["1"]),
                 };
                 let mut cur = &mut obj;

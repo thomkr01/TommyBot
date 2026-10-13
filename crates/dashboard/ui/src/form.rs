@@ -70,6 +70,20 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
                     view! { <option value=v.clone() selected=move || show(&get()) == v>{l}</option> } }).collect_view()}
             </select> }.into_any()
         }
+        "form" => {
+            let upd = move |i: usize, k: &'static str, x: Value| { let mut cur = get(); cur[i][k] = x; set(cur) };
+            view! { <div class="pick">
+                {move || (0..get().as_array().map_or(0, Vec::len)).map(|i| view! { <div class="row">
+                    <input prop:value=move || get()[i]["label"].as_str().unwrap_or("").to_string() on:change=move |e| upd(i, "label", json!(event_target_value(&e))) />
+                    <label><input type="checkbox" prop:checked=move || get()[i]["long"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "long", json!(event_target_checked(&e))) /> "long"</label>
+                    <label><input type="checkbox" prop:checked=move || get()[i]["required"].as_bool().unwrap_or(true) on:change=move |e| upd(i, "required", json!(event_target_checked(&e))) /> "required"</label>
+                    <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
+                </div> }).collect_view()}
+                <Show when=move || get().as_array().map_or(0, Vec::len) < 6>
+                    <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); } if let Some(a) = cur.as_array_mut() { a.push(json!({"label": "New question", "long": false, "required": true})); } set(cur) }>"Add field"</button>
+                </Show>
+            </div> }.into_any()
+        }
         "channel" | "role" => {
             let key = if kind == "channel" { "channels" } else { "roles" };
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
