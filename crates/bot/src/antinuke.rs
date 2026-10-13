@@ -160,6 +160,14 @@ async fn guard_perms(
         return Ok(());
     };
     let an = &cfg.antinuke;
+    let guarded = an.strict_mode
+        || an.strict_member_roles
+        || an.monitor_public_roles
+        || an.monitor_channel_perms
+        || an.vanity_guard;
+    if !guarded || app.whitelisted(gid, actor, "antinuke").await? {
+        return Ok(());
+    }
     let public = |id: u64| id == gid.get() || cfg.lockdown.main_roles.iter().any(|r| r.get() == id);
     let gained = |old: Option<Permissions>, new: Option<Permissions>| {
         let bits = |p: Option<Permissions>| p.map_or(0, |p| p.bits());
@@ -173,9 +181,6 @@ async fn guard_perms(
             }) else {
                 return Ok(());
             };
-            if app.whitelisted(gid, actor, "antinuke").await? {
-                return Ok(());
-            }
             app.http
                 .update_role(gid, target.cast())
                 .permissions(old)
@@ -195,7 +200,7 @@ async fn guard_perms(
                 .map(|r| r.id)
                 .filter(|r| info.role_perms.get(r).is_some_and(|p| has_dangerous(*p)))
                 .collect();
-            if added.is_empty() || app.whitelisted(gid, actor, "antinuke").await? {
+            if added.is_empty() {
                 return Ok(());
             }
             for r in added {
@@ -220,9 +225,6 @@ async fn guard_perms(
             }) else {
                 return Ok(());
             };
-            if app.whitelisted(gid, actor, "antinuke").await? {
-                return Ok(());
-            }
             let channel = target.cast();
             if e.action_type == A::ChannelOverwriteCreate {
                 app.http
@@ -230,11 +232,23 @@ async fn guard_perms(
                     .role(role.cast())
                     .await?;
             } else {
+                // Keep the overwrite's current denies; only the allow change is undone.
+                let deny = app
+                    .http
+                    .channel(channel)
+                    .await?
+                    .model()
+                    .await?
+                    .permission_overwrites
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|o| o.id == role.cast())
+                    .map(|o| o.deny);
                 let o = PermissionOverwrite {
                     id: role.cast(),
                     kind: PermissionOverwriteType::Role,
                     allow: Some(old),
-                    deny: None,
+                    deny,
                 };
                 app.http.update_channel_permission(channel, &o).await?;
             }
@@ -245,7 +259,7 @@ async fn guard_perms(
                 .changes
                 .iter()
                 .any(|c| matches!(c, AuditLogChange::VanityUrlCode { .. }));
-            if !changed || app.whitelisted(gid, actor, "antinuke").await? {
+            if !changed {
                 return Ok(());
             }
             "changed the vanity URL (bots cannot set it back, do it by hand)"

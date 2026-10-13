@@ -7,6 +7,7 @@ mod discord;
 mod lockdown;
 mod ops;
 mod recovery;
+mod schema;
 mod sections;
 mod store;
 

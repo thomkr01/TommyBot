@@ -159,7 +159,6 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     }
 }
 
-/// A detail with a copy button.
 #[component]
 fn Stat(label: &'static str, value: String) -> impl IntoView {
     let copied = RwSignal::new(false);

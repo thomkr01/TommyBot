@@ -15,7 +15,6 @@ pub struct HeatCfg {
     pub free_chars: usize,
     pub per_newline: f64,
     pub per_emoji: f64,
-    /// Per @user, @role and @everyone/@here mention.
     pub per_mention: f64,
     pub per_role_mention: f64,
     pub per_everyone: f64,

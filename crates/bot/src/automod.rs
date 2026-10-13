@@ -139,16 +139,16 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .entry(gid.get())
             .or_default()
             .on_mentions(pings, now, lock.mention_count, lock.mention_window_ms);
-    let over_hour_cap = am.anti_spam
-        && f.mentions.enabled
-        && pings > 0
-        && app
-            .pings
-            .lock()
-            .unwrap()
-            .entry((gid.get(), m.author.id.get()))
+    let over_hour_cap = am.anti_spam && f.mentions.enabled && pings > 0 && {
+        let mut map = app.pings.lock().unwrap();
+        // shortcut: dropped wholesale past 100k members, like the heat map.
+        if map.len() > 100_000 {
+            map.clear();
+        }
+        map.entry((gid.get(), m.author.id.get()))
             .or_default()
-            .on_mentions(pings, now, f.mention_hour_cap + 1, 3_600_000);
+            .on_mentions(pings, now, f.mention_hour_cap + 1, 3_600_000)
+    };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
     let (triggered, breakdown) = {
@@ -557,7 +557,8 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     else {
         return Ok(());
     };
-    // A timeout fires another member update; without this a matching name would loop.
+    // shortcut: without the old name every update of a matching member (a new role too) acts again;
+    // keep a name cache if that gets noisy. A timeout fires another update, so it must not loop.
     let timed_out = m
         .communication_disabled_until
         .is_some_and(|t| t.as_secs() > now_secs());
@@ -586,8 +587,13 @@ async fn punish(
 ) -> Result<()> {
     let uid = Id::new(user);
     let punishing = !matches!(action, Action::Log | Action::Timeout(..=-1));
-    if punishing && (cfg.misc.show_reason_on_auto || cfg.joingate.dm_punished) {
-        reply::dm(app, uid, &format!("Automod action: {why}")).await;
+    if punishing && cfg.joingate.dm_punished {
+        let text = if cfg.misc.show_reason_on_auto {
+            format!("Automod action: {action:?} ({why})")
+        } else {
+            format!("Automod action: {action:?}")
+        };
+        reply::dm(app, uid, &text).await;
     }
     match action {
         Action::Log => {}

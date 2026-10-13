@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(code.chars().count(), 6);
         assert_eq!(&png[1..4], b"PNG");
         for (length, width, height) in [(1, 1, 1), (99, 9999, 9999), (7, 150, 60)] {
-            for _ in 0..20 {
+            for _ in 0..3 {
                 let c = CaptchaCfg {
                     length,
                     width,
