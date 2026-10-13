@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
     let intents = Intents::GUILDS
         | Intents::GUILD_MEMBERS
         | Intents::GUILD_MODERATION
+        | Intents::AUTO_MODERATION_EXECUTION
         | Intents::GUILD_MESSAGES
         | Intents::MESSAGE_CONTENT;
     let mut shard = Shard::new(ShardId::ONE, cfg.discord_token, intents);

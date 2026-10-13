@@ -223,7 +223,6 @@ pub struct RaidCfg {
     /// Also lock the server (join lock) when a raid is detected.
     #[serde(default)]
     pub lock: Option<crate::lockdown::LockKind>,
-    /// Roles pinged in the raid log when a raid starts.
     #[serde(default)]
     pub warned_roles: Vec<String>,
 }

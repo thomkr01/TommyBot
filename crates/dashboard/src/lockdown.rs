@@ -1,4 +1,3 @@
-//! Lockdown page (manage + settings check) and native Discord AutoMod rules.
 use crate::{
     access::Level,
     api::{log_change, require, Res},
@@ -14,8 +13,8 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tommybot_automod::{
-    discord_api::{rule_body, RuleSpec},
-    lockdown::{kind_from, tshoot, Op, RoleInfo},
+    discord_api::{rule_body, BotAction, DiscordAutomodCfg, RuleSpec},
+    lockdown::{kind_from, tshoot, LockKind, Op, RoleInfo, Snapshot},
 };
 use tommybot_core::jobs;
 
@@ -46,8 +45,8 @@ fn now() -> i64 {
 
 async fn status(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
-    let row: Option<(String, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as("select kind, created_at from lock_snapshots where guild_id = $1")
+    let row: Option<(sqlx::types::Json<Snapshot>, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("select snapshot, created_at from lock_snapshots where guild_id = $1")
             .bind(guild)
             .fetch_optional(&st.db)
             .await?;
@@ -58,7 +57,12 @@ async fn status(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> 
     .fetch_optional(&st.db)
     .await?;
     Ok(Json(json!({
-        "locked": row.as_ref().map(|(k, at)| json!({"kind": k, "since": at})),
+        "locked": row.as_ref().map(|(snap, at)| {
+            let kind = snap.0.kind.as_ref();
+            let (channels, roles, join) = kind.map(LockKind::covers).unwrap_or_default();
+            json!({"channels": channels, "roles": roles, "join": join.map(|j| format!("{j:?}")),
+                   "channel": matches!(kind, Some(LockKind::Channel(_))), "since": at})
+        }),
         "unlock_at": unlock_at.map(|(t,)| t),
     })))
 }
@@ -117,39 +121,18 @@ async fn audit(st: &AppState, s: &Sess, guild: i64, what: String) -> Result<(), 
     Ok(())
 }
 
-/// Roles as the lock planner sees them, plus the bot's top role position.
 async fn roles(st: &AppState, guild: i64) -> Result<(Vec<RoleInfo>, i32), ApiError> {
-    let raw = st
-        .discord
-        .call(Method::GET, &format!("/guilds/{guild}/roles"), None)
-        .await?;
-    let id = |v: &Value| v["id"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let info: Vec<RoleInfo> = raw
-        .as_array()
-        .into_iter()
-        .flatten()
+    let (roles, bot_pos) = crate::ops::roles_and_bot_pos(st, guild).await?;
+    let info = roles
+        .iter()
         .map(|r| RoleInfo {
-            id: id(r),
-            perms: r["permissions"]
-                .as_str()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(0),
-            position: r["position"].as_i64().unwrap_or(0) as i32,
-            managed: r["managed"].as_bool().unwrap_or(false),
+            id: r.id.parse().unwrap_or(0),
+            perms: r.perms(),
+            position: r.position as i32,
+            managed: r.managed,
         })
         .collect();
-    let me = st.discord.call(Method::GET, "/users/@me", None).await?;
-    let mine = st
-        .discord
-        .member_roles(guild, me["id"].as_str().unwrap_or_default())
-        .await?;
-    let bot_pos = info
-        .iter()
-        .filter(|r| mine.contains(&r.id.to_string()))
-        .map(|r| r.position)
-        .max()
-        .unwrap_or(0);
-    Ok((info, bot_pos))
+    Ok((info, bot_pos as i32))
 }
 
 async fn problems(
@@ -221,6 +204,9 @@ async fn rules(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
             None,
         )
         .await?;
+    let (_, config) = crate::store::current(&st.db, guild).await?;
+    let mine: DiscordAutomodCfg =
+        serde_json::from_value(config["discord_automod"].clone()).unwrap_or_default();
     let list: Vec<Value> = raw
         .as_array()
         .into_iter()
@@ -228,6 +214,7 @@ async fn rules(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
         .map(|r| {
             let mut v = json!(RuleSpec::from_discord(r));
             v["id"] = r["id"].clone();
+            v["bot_actions"] = json!(r["id"].as_str().and_then(|id| mine.actions.get(id)));
             v
         })
         .collect();
@@ -246,13 +233,16 @@ async fn create_rule(
 ) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
     let b = body(&spec)?;
-    st.discord
+    let made = st
+        .discord
         .call(
             Method::POST,
             &format!("/guilds/{guild}/auto-moderation/rules"),
             Some(b),
         )
         .await?;
+    let id = made["id"].as_str().unwrap_or_default();
+    set_bot_actions(&st, &s, guild, id, &spec.bot_actions).await?;
     audit(
         &st,
         &s,
@@ -261,6 +251,28 @@ async fn create_rule(
     )
     .await?;
     Ok(Json(json!({"ok": true})))
+}
+
+async fn set_bot_actions(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+    rule: &str,
+    actions: &[BotAction],
+) -> Result<(), ApiError> {
+    let (version, mut config) = crate::store::current(&st.db, guild).await?;
+    let slot = &mut config["discord_automod"]["actions"];
+    if actions.is_empty() {
+        if slot.as_object_mut().and_then(|m| m.remove(rule)).is_none() {
+            return Ok(());
+        }
+    } else {
+        slot[rule] = json!(actions);
+    }
+    let mut tx = st.db.begin().await?;
+    crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Rule ids are snowflakes; anything else would let a caller reach other Discord endpoints.
@@ -282,6 +294,7 @@ async fn update_rule(
     st.discord
         .call(Method::PATCH, &rule_path(guild, &rule)?, Some(b))
         .await?;
+    set_bot_actions(&st, &s, guild, &rule, &spec.bot_actions).await?;
     audit(
         &st,
         &s,
@@ -337,6 +350,7 @@ async fn delete_rule(
     st.discord
         .call(Method::DELETE, &rule_path(guild, &rule)?, None)
         .await?;
+    set_bot_actions(&st, &s, guild, &rule, &[]).await?;
     audit(&st, &s, guild, "deleted a Discord AutoMod rule".into()).await?;
     Ok(Json(json!({"ok": true})))
 }

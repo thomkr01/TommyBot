@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
-use tommybot_automod::discord_api::Api;
+use tommybot_automod::discord_api::{Api, DiscordAutomodCfg};
 use tommybot_automod::{
     heat::{HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
-    lockdown::MentionWatch,
+    lockdown::{LockdownPrefs, MentionWatch},
 };
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
@@ -34,6 +34,8 @@ pub struct GuildCfg {
     pub joingate: GateCfg,
     pub joinraid: Option<RaidCfg>,
     pub lockdown: LockdownCfg,
+    pub lockdown_prefs: LockdownPrefs,
+    pub discord_automod: DiscordAutomodCfg,
     pub panic: PanicCfg,
     pub misc: MiscCfg,
     pub appeals: AppealsCfg,
@@ -62,6 +64,8 @@ impl GuildCfg {
             joingate: section(cfg, "joingate"),
             joinraid: section(cfg, "joinraid"),
             lockdown: section(cfg, "lockdown"),
+            lockdown_prefs: section(cfg, "lockdown"),
+            discord_automod: section(cfg, "discord_automod"),
             panic: section(cfg, "panic"),
             misc: section(cfg, "misc"),
             appeals: section(cfg, "appeals"),

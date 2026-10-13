@@ -281,7 +281,12 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "verification" => serde_json::from_value::<tommybot_automod::join::VerifyCfg>(v).map(drop),
         "joinraid" => serde_json::from_value::<tommybot_automod::join::RaidCfg>(v).map(drop),
         "panic" => serde_json::from_value::<PanicCfg>(v).map(drop),
-        "lockdown" => serde_json::from_value::<LockdownCfg>(v).map(drop),
+        "lockdown" => serde_json::from_value::<LockdownCfg>(v.clone())
+            .and_then(|_| serde_json::from_value::<tommybot_automod::lockdown::LockdownPrefs>(v))
+            .map(drop),
+        "discord_automod" => {
+            serde_json::from_value::<tommybot_automod::discord_api::DiscordAutomodCfg>(v).map(drop)
+        }
         "misc" => serde_json::from_value::<MiscCfg>(v).map(drop),
         "appeals" => serde_json::from_value::<AppealsCfg>(v).map(drop),
         "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),

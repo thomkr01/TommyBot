@@ -407,7 +407,8 @@ pub async fn lockdown_cmd(
         lockdown::unlock(app, gid).await?;
         return Ok("Server unlocked".into());
     }
-    let done = lockdown::lock(app, gid, tommybot_automod::lockdown::LockKind::Server).await?;
+    let kind = app.cfg(gid.get()).await?.lockdown_prefs.kind();
+    let done = lockdown::lock(app, gid, kind).await?;
     if done {
         if let Some(d) = duration_s {
             jobs::enqueue(

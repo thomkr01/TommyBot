@@ -415,7 +415,26 @@ fn schema() -> Vec<Value> {
         ("automod", "Automod", auto),
         ("joingate", "Join gate", gate),
         ("joinraid", "Join raid", raid),
-        ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
+        (
+            "lockdown",
+            "Lockdown",
+            vec![
+                f("main_roles", "roles"),
+                ti(
+                    dv(fg("Lock scope", "channels", "bool"), true),
+                    "Lock server channels",
+                ),
+                ti(
+                    dv(fg("Lock scope", "roles", "bool"), false),
+                    "Lock staff roles",
+                ),
+                ti(
+                    dv(fg("Lock scope", "joins", "bool"), false),
+                    "Lock server joins",
+                ),
+                ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
+            ],
+        ),
         ("panic", "Panic mode", panic),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),

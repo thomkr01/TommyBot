@@ -3,10 +3,11 @@ use anyhow::Result;
 use std::collections::{hash_map::Entry, HashMap};
 use tommybot_antinuke::{webhooks_to_delete, Webhook};
 use tommybot_automod::{
+    discord_api::BotAction,
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts},
     join::{gate, harshest, is_suspicious, Action, Joiner},
-    lockdown::{JoinLock, LockKind},
+    lockdown::JoinLock,
     store,
     strike::strike,
 };
@@ -17,7 +18,8 @@ use tommybot_core::{
 };
 use tommybot_logging::LogKind;
 use twilight_model::{
-    gateway::payload::incoming::{MemberAdd, MessageCreate},
+    gateway::payload::incoming::{AutoModerationActionExecution, MemberAdd, MessageCreate},
+    guild::auto_moderation::AutoModerationActionType,
     id::{marker::GuildMarker, Id},
 };
 
@@ -120,7 +122,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if app.is_immune(gid, m.author.id).await? {
         return Ok(());
     }
-    if mention_lock && lockdown::lock(app, gid, LockKind::Server).await? {
+    if mention_lock && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await? {
         send_log(
             app,
             gid.get(),
@@ -179,7 +181,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         .strike
         .lock_at_strikes
         .is_some_and(|n| act.strike >= n)
-        && lockdown::lock(app, gid, LockKind::Server).await?
+        && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?
     {
         send_log(
             app,
@@ -432,6 +434,63 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         }
         for id in out.flagged {
             punish(app, gid, id, raid.action, "join raid").await?;
+        }
+    }
+    Ok(())
+}
+
+/// Bot-side actions for a native rule; the rule's block-message event fires once per hit.
+pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Result<()> {
+    if e.action.kind != AutoModerationActionType::BlockMessage {
+        return Ok(());
+    }
+    let gid = e.guild_id;
+    let cfg = app.cfg(gid.get()).await?;
+    let Some(actions) = cfg.discord_automod.actions.get(&e.rule_id.to_string()) else {
+        return Ok(());
+    };
+    for &a in actions {
+        if let Err(err) = native_action(app, &cfg, e, a).await {
+            tracing::warn!(?err, ?a, "native rule action failed");
+        }
+    }
+    Ok(())
+}
+
+async fn native_action(
+    app: &App,
+    cfg: &GuildCfg,
+    e: &AutoModerationActionExecution,
+    action: BotAction,
+) -> Result<()> {
+    const WHY: &str = "discord automod rule";
+    let (gid, uid) = (e.guild_id, e.user_id);
+    match action {
+        BotAction::Report => {
+            let text = format!("<@{uid}> broke a Discord AutoMod rule: {}", e.content);
+            send_log(app, gid.get(), LogKind::AutoMod, &text).await?;
+        }
+        BotAction::Warn => {
+            cases::create(
+                &app.pool,
+                NewCase {
+                    guild_id: gid.get() as i64,
+                    kind: "warn",
+                    user_id: uid.get() as i64,
+                    mod_id: app.me.get() as i64,
+                    reason: Some(WHY),
+                    points: cfg.misc.warn_base_points,
+                    duration_s: None,
+                    inverse: None,
+                },
+            )
+            .await?;
+        }
+        BotAction::Timeout => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
+        BotAction::Kick => punish(app, gid, uid.get(), Action::Kick, WHY).await?,
+        BotAction::Ban => punish(app, gid, uid.get(), Action::Ban, WHY).await?,
+        BotAction::Lock => {
+            lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?;
         }
     }
     Ok(())

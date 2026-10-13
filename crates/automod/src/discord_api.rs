@@ -119,14 +119,28 @@ impl Api {
     }
 }
 
-/// What the dashboard's rule editor sends; `rule_body` turns it into Discord's shape.
-/// shortcut: only Discord's native actions (block, alert, timeout); report/warn/kick/ban/lock as bot actions are not wired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BotAction {
+    Report,
+    Warn,
+    Timeout,
+    Kick,
+    Ban,
+    Lock,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct DiscordAutomodCfg {
+    pub actions: std::collections::HashMap<String, Vec<BotAction>>,
+}
+
 #[derive(Debug, Default, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct RuleSpec {
     pub name: String,
     pub enabled: bool,
-    /// "keyword", "spam", "preset" or "mention".
     pub trigger: String,
     pub keywords: Vec<String>,
     pub allow: Vec<String>,
@@ -139,10 +153,10 @@ pub struct RuleSpec {
     pub timeout_s: u32,
     pub exempt_roles: Vec<String>,
     pub exempt_channels: Vec<String>,
+    pub bot_actions: Vec<BotAction>,
 }
 
 impl RuleSpec {
-    /// Reads a rule back from Discord's JSON so the editor can show and re-save it.
     pub fn from_discord(v: &Value) -> Self {
         let strs = |x: &Value| -> Vec<String> {
             x.as_array()
@@ -235,6 +249,9 @@ pub fn rule_body(r: &RuleSpec) -> Result<Value> {
     if actions.is_empty() {
         bail!("rule needs at least one action");
     }
+    if !r.bot_actions.is_empty() && !r.block_message {
+        bail!("bot actions need the block message action");
+    }
     Ok(json!({
         "name": r.name,
         "event_type": 1,
@@ -301,13 +318,20 @@ mod tests {
             (back.trigger.as_str(), back.mention_limit, back.timeout_s),
             ("mention", 50, 60)
         );
+        r.timeout_s = 0;
         r.trigger = "spam".into();
         assert_eq!(
             rule_body(&r).unwrap()["actions"].as_array().unwrap().len(),
             1
         );
+        r.bot_actions = vec![BotAction::Warn];
+        assert!(rule_body(&r).is_ok());
         r.block_message = false;
-        assert!(rule_body(&r).is_err());
+        r.alert_channel = "1".into();
+        assert!(rule_body(&r).is_err(), "bot actions need block message");
+        r.alert_channel.clear();
+        r.bot_actions.clear();
+        assert!(rule_body(&r).is_err(), "no actions");
         r.trigger = "nope".into();
         assert!(rule_body(&r).is_err());
     }

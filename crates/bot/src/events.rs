@@ -22,6 +22,7 @@ fn guild_of(ev: &Event) -> Option<u64> {
         Event::MemberAdd(m) => Some(m.guild_id),
         Event::MemberRemove(m) => Some(m.guild_id),
         Event::GuildAuditLogEntryCreate(e) => e.0.guild_id,
+        Event::AutoModerationActionExecution(e) => Some(e.guild_id),
         _ => None,
     };
     g.map(|g| g.get())
@@ -128,6 +129,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
         }
         Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,
+        Event::AutoModerationActionExecution(e) => automod::on_native_hit(app, e).await?,
         _ => {}
     }
     Ok(())

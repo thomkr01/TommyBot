@@ -8,7 +8,6 @@ fn s(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
-/// Runs `f` after `ms`; the bot picks lock jobs up on its next 5 second tick.
 fn later(ms: i32, f: impl Fn() + 'static) {
     let cb = wasm_bindgen::closure::Closure::<dyn Fn()>::new(f);
     if let Some(w) = web_sys::window() {
@@ -17,15 +16,13 @@ fn later(ms: i32, f: impl Fn() + 'static) {
     cb.forget();
 }
 
-/// (row title, what it does, lock kind, stored snapshot kinds that mean this row is on).
-const LOCKS: [(&str, &str, &str, &[&str]); 4] = [
-    ("Server Channels", "Members can no longer send messages in any channel.", "server", &["Server", "Blind", "All"]),
-    ("Server Roles", "Every role below the bot loses its dangerous permissions.", "role", &["Role", "All"]),
-    ("Kick New Members", "New members are kicked on join and invites are paused.", "kick", &["Join(Kick)"]),
-    ("Ban New Members", "New members are banned on join.", "ban", &["Join(Ban)", "All"]),
+const LOCKS: [(&str, &str, &str, fn(&Value) -> bool); 4] = [
+    ("Server Channels", "Members can no longer send messages in any channel.", "server", |l| l["channels"] == true),
+    ("Server Roles", "Every role below the bot loses its dangerous permissions.", "role", |l| l["roles"] == true),
+    ("Kick New Members", "New members are kicked on join and invites are paused.", "kick", |l| l["join"] == "Kick"),
+    ("Ban New Members", "New members are banned on join.", "ban", |l| l["join"] == "Ban"),
 ];
 
-/// Manage tab: one row per lock with its state; only one lock can be active at a time.
 #[component]
 pub fn LockdownManage(guild: String) -> impl IntoView {
     let status = RwSignal::new(json!({}));
@@ -50,7 +47,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
         }
     });
     let lock = move |kind: &'static str, channel: Option<String>| act("lock", json!({"kind": kind, "channel": channel, "duration_s": (secs.get_untracked() > 0).then(|| secs.get_untracked())}));
-    let locked = move || status.get()["locked"]["kind"].as_str().map(String::from);
+    let locked = move || Some(status.get()["locked"].clone()).filter(|l| !l.is_null());
     view! {
         <div class="card row">
             <label>"Lock length"</label>
@@ -60,8 +57,8 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
             </select>
             <button class="ghost" on:click=move |_| load()>"Refresh"</button>
         </div>
-        {LOCKS.iter().map(|(title, what, kind, on)| {
-            let is_on = move || locked().is_some_and(|k| on.contains(&k.as_str()));
+        {LOCKS.iter().map(|(title, what, kind, covers)| {
+            let is_on = move || locked().is_some_and(|l| covers(&l));
             view! { <div class="card row lockrow">
                 <div><h3>{*title}</h3><span class="muted">{*what}</span></div><span class="sp"></span>
                 <Show when=move || *kind == "server" && !is_on()><button class="ghost" on:click=move |_| single.update(|x| *x = !*x)>"Individual channels"</button></Show>
@@ -85,7 +82,6 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
     }
 }
 
-/// Settings tab: compatibility check, main roles, and what triggers an automatic lock.
 #[component]
 pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let problems = RwSignal::new(None::<Vec<Value>>);
@@ -119,10 +115,9 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
     }
 }
 
-/// Automatic lock triggers: mention flood (automod), strikes (automod) and raids (joinraid).
 #[component]
 fn AutoLockdown(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let cfg = RwSignal::new(json!({}));
+    let (cfg, orig) = (RwSignal::new(json!({})), RwSignal::new(json!({})));
     let version = RwSignal::new(0i64);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = StoredValue::new(guild);
@@ -130,6 +125,7 @@ fn AutoLockdown(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         if let Ok(v) = api("GET", &format!("/api/guilds/{}/config", g.get_value()), None).await {
             version.set(v["version"].as_i64().unwrap_or(0));
             cfg.set(v["config"].clone());
+            orig.set(v["config"].clone());
         }
     });
     let num = |v: &Value| v.as_i64().map(|n| n.to_string()).unwrap_or_default();
@@ -139,12 +135,13 @@ fn AutoLockdown(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         c["automod"]["mention_lock"] = if n > 0 { json!([n, t]) } else { Value::Null };
     });
     let save = move |_| {
-        let c = cfg.get_untracked();
+        let (c, before) = (cfg.get_untracked(), orig.get_untracked());
+        orig.set(c.clone());
         let g = g.get_value();
         run_act(async move {
-            let mut v = version.get_untracked();
-            let mut last = Value::Null;
-            for name in ["automod", "joinraid"] {
+            let mut v = api("GET", &format!("/api/guilds/{g}/config"), None).await?["version"].as_i64().unwrap_or(0);
+            let mut last = json!({"version": v});
+            for name in ["automod", "joinraid"].into_iter().filter(|n| c[n] != before[n] && c[n].is_object()) {
                 last = api("PUT", &format!("/api/guilds/{g}/config/{name}"), Some(json!({"expected_version": v, "value": c[name]}))).await?;
                 v = last["version"].as_i64().unwrap_or(v);
             }
@@ -170,10 +167,9 @@ fn AutoLockdown(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     }
 }
 
-/// One native AutoMod rule as the editor sees it.
 fn blank_rule() -> Value {
     json!({"name": "New rule", "enabled": true, "trigger": "keyword", "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 10,
-        "custom_message": "", "alert_channel": "", "timeout_s": 0, "exempt_roles": [], "exempt_channels": []})
+        "custom_message": "", "alert_channel": "", "timeout_s": 0, "exempt_roles": [], "exempt_channels": [], "bot_actions": []})
 }
 
 #[component]
@@ -215,6 +211,9 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
             {fld("custom_message", "text", "message shown to the member")}
             {fld("alert_channel", "channel", "send an alert to")}
             <Show when=move || matches!(trigger().as_str(), "keyword" | "mention")>{fld("timeout_s", "int", "timeout (seconds, 0 = none)")}</Show>
+            <Show when=move || val.get()["block_message"] == true><div class="row"><label>"Bot actions"</label>
+                {["report", "warn", "timeout", "kick", "ban", "lock"].into_iter().map(|a| view! { <label><input type="checkbox" prop:checked=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!(a)))
+                    on:change=move |e| val.update(|v| { let mut l: Vec<String> = v["bot_actions"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).filter(|x| x != a).collect()).unwrap_or_default(); if event_target_checked(&e) { l.push(a.into()); } v["bot_actions"] = json!(l); }) /> {a}</label> }).collect_view()}</div></Show>
             <h3>"Exempt"</h3>
             {fld("exempt_roles", "roles", "roles")}
             {fld("exempt_channels", "channels", "channels")}
@@ -223,7 +222,6 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
     }
 }
 
-/// Discord's native AutoMod rules: list, activate, edit, delete.
 #[component]
 pub fn DiscordRules(guild: String) -> impl IntoView {
     let rules = RwSignal::new(Vec::<Value>::new());
