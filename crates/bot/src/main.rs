@@ -11,6 +11,7 @@ mod prefix;
 mod scheduler;
 mod slash;
 mod targets;
+mod verify;
 mod welcome;
 
 use anyhow::Result;

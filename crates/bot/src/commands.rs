@@ -173,6 +173,13 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
         "kick" => ModKind::Kick,
         "warn" => ModKind::Warn,
         "timeout" | "mute" => ModKind::Timeout,
+        "verifysetup" => {
+            if !app.is_immune(gid, msg.author.id).await? {
+                return Ok(());
+            }
+            let text = crate::verify::setup(app, gid).await?;
+            return say(app, msg, &text).await;
+        }
         "lock" | "unlock" => {
             let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;

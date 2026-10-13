@@ -25,7 +25,7 @@ use crate::{
     app::{now_secs, App, GuildCfg},
     commands::timeout,
     events::send_log,
-    lockdown,
+    lockdown, verify,
 };
 
 fn now_ms() -> i64 {
@@ -371,6 +371,13 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         bot_verified: false,
         added_by_authorized: true,
     };
+    let suspicious = is_suspicious(
+        &j,
+        &cfg.joingate,
+        cfg.joingate.min_age.map_or(0, |a| a.0),
+        now,
+    );
+    verify::on_join(app, gid, user.id, suspicious).await;
     if let Some(action) = harshest(&gate(&j, &cfg.joingate, now)) {
         punish(app, gid, j.id, action, "join gate").await?;
     }

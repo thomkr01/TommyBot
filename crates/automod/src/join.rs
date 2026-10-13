@@ -400,6 +400,7 @@ pub enum FailAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VerifyCfg {
     pub mode: VerifyMode,
     pub target: VerifyTarget,

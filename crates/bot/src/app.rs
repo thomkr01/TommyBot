@@ -1,5 +1,6 @@
 //! Shared bot state and the per-guild config cache. The dashboard appends a `guild_config` row and
 //! sends `NOTIFY config_changed <guild>`; we drop that guild's cached copy and reload lazily.
+use crate::verify::VerificationCfg;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -36,6 +37,7 @@ pub struct GuildCfg {
     pub panic: PanicCfg,
     pub misc: MiscCfg,
     pub whitelist: WhitelistCfg,
+    pub verification: VerificationCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -62,6 +64,7 @@ impl GuildCfg {
             panic: section(cfg, "panic"),
             misc: section(cfg, "misc"),
             whitelist: section(cfg, "whitelist"),
+            verification: section(cfg, "verification"),
         }
     }
 }
@@ -79,6 +82,8 @@ pub struct App {
     pub rate_limiter: Mutex<RateLimiter>,
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
+    /// Pending image-captcha answers per (guild, user); lost on restart, the member just clicks again.
+    pub captchas: Mutex<HashMap<(u64, u64), String>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
     /// The open nuke case per guild and when it last grew; a long quiet gap starts a new case.
     pub nukes: Mutex<HashMap<u64, (NukeCase, Instant)>>,
@@ -112,6 +117,7 @@ impl App {
             rate_limiter: Default::default(),
             heat: Default::default(),
             raids: Default::default(),
+            captchas: Default::default(),
             mentions: Default::default(),
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
