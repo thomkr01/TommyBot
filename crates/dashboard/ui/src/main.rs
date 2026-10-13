@@ -1,30 +1,15 @@
-use gloo_net::http::Request;
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
-use std::cell::RefCell;
 
-thread_local! { static CSRF: RefCell<String> = const { RefCell::new(String::new()) }; }
-
-async fn api(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
-    let csrf = CSRF.with(|c| c.borrow().clone());
-    let b = match method {
-        "GET" => Request::get(path),
-        "PUT" => Request::put(path),
-        _ => Request::post(path),
-    }
-    .header("x-csrf-token", &csrf);
-    let req = match body {
-        Some(v) => b.json(&v).map_err(|e| e.to_string())?,
-        None => b.build().map_err(|e| e.to_string())?,
-    };
-    let resp = req.send().await.map_err(|e| e.to_string())?;
-    let ok = resp.ok();
-    let v: Value = resp.json().await.unwrap_or(Value::Null);
-    if ok { Ok(v) } else { Err(v["error"].as_str().unwrap_or("request failed").to_string()) }
-}
+mod common;
+mod form;
+mod pages;
+use common::*;
+use form::Section;
+use pages::{Revert, Rescue, Score, Wizard};
 
 const SECTIONS: &[&str] = &[
-    "wizard", "whitelist", "antinuke", "panic", "backups", "automod", "filters", "discord_automod",
+    "whitelist", "antinuke", "panic", "backups", "automod", "filters", "discord_automod",
     "condition_automod", "joingate", "joinraid", "verification", "lockdown", "moderation",
     "warn_points", "punish", "appeals", "logging", "utility",
 ];
@@ -32,58 +17,6 @@ const SECTIONS: &[&str] = &[
 fn hash() -> Vec<String> {
     let h = web_sys::window().unwrap().location().hash().unwrap_or_default();
     h.trim_start_matches('#').split('/').filter(|s| !s.is_empty()).map(String::from).collect()
-}
-
-fn csv(v: &Value) -> String {
-    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
-}
-
-fn from_csv(s: &str) -> Value {
-    json!(s.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>())
-}
-
-/// Asks for a TOTP code (or enrollment) when a save was refused with `step_up_required`.
-#[component]
-fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let (code, set_code) = signal(String::new());
-    let (info, set_info) = signal(String::new());
-    let enroll = move |_| spawn_local(async move {
-        match api("POST", "/api/totp/enroll", None).await {
-            Ok(v) => set_info.set(format!("Add this key to your authenticator app, then enter a code: {} ({})", v["secret"], v["uri"])),
-            Err(e) => set_info.set(e),
-        }
-    });
-    let verify = move |_| spawn_local(async move {
-        match api("POST", "/api/totp/verify", Some(json!({"code": code.get_untracked()}))).await {
-            Ok(_) => { need.set(false); set_info.set(String::new()); }
-            Err(e) => set_info.set(e),
-        }
-    });
-    view! {
-        <Show when=move || need.get()>
-            <div class="card">
-                <b>"Confirm it's you"</b>
-                <p class="muted">"This change needs your authenticator code. After verifying, save again."</p>
-                <Show when=move || !enrolled.get()><button class="ghost" on:click=enroll>"Set up authenticator"</button></Show>
-                <div class="row">
-                    <input placeholder="123456" prop:value=code on:input=move |e| set_code.set(event_target_value(&e)) />
-                    <button on:click=verify>"Verify"</button>
-                </div>
-                <p class="err">{move || info.get()}</p>
-            </div>
-        </Show>
-    }
-}
-
-/// Runs a save, routing the `step_up_required` error to the prompt.
-fn run_save(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, version: RwSignal<i64>, msg: RwSignal<String>, need: RwSignal<bool>) {
-    spawn_local(async move {
-        match fut.await {
-            Ok(v) => { version.set(v["version"].as_i64().unwrap_or(0)); msg.set(format!("Saved as version {}", version.get_untracked())); }
-            Err(e) if e == "step_up_required" => need.set(true),
-            Err(e) => msg.set(e),
-        }
-    });
 }
 
 #[component]
@@ -131,31 +64,6 @@ fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <button on:click=save>"Save"</button>
             <span>{move || msg.get()}</span>
         </div>
-        <StepUp need enrolled />
-    }
-}
-
-/// Every feature section edits its slice of the guild config as JSON until typed forms land.
-#[component]
-fn Section(guild: String, name: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let text = RwSignal::new(String::new());
-    let version = RwSignal::new(0i64);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
-    let (g, n) = (guild.clone(), name.clone());
-    spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
-            version.set(v["version"].as_i64().unwrap_or(0));
-            text.set(serde_json::to_string_pretty(&v["config"][&n]).unwrap_or_default().replace("null", "{}"));
-        }
-    });
-    let save = move |_| {
-        let Ok(value) = serde_json::from_str::<Value>(&text.get_untracked()) else { return msg.set("Not valid JSON".into()) };
-        let (g, n, v) = (guild.clone(), name.clone(), version.get_untracked());
-        run_save(async move { api("PUT", &format!("/api/guilds/{g}/config/{n}"), Some(json!({"expected_version": v, "value": value}))).await }, version, msg, need);
-    };
-    view! {
-        <textarea prop:value=move || text.get() on:input=move |e| text.set(event_target_value(&e))></textarea>
-        <div class="row"><button on:click=save>"Save"</button><span>{move || msg.get()}</span></div>
         <StepUp need enrolled />
     }
 }
@@ -230,19 +138,23 @@ fn App() -> impl IntoView {
                         let g = g.clone();
                         let page = route.get().get(1).cloned().unwrap_or_default();
                         let link = |p: &str| { let on = page == p; view! { <a class:on=on href=format!("#/{g}/{p}")>{p.replace('_', " ")}</a> } };
-                        view! { {link("permits")} {link("history")} {SECTIONS.iter().map(|s| link(s)).collect_view()} }
+                        view! { {link("overview")} {link("wizard")} {link("revert")} {link("rescue")} {link("permits")} {link("history")} {SECTIONS.iter().map(|s| link(s)).collect_view()} }
                     })}
                 </nav>
                 <main>
                     {move || match route.get().as_slice() {
                         [] => view! {
                             <h1>"Servers"</h1>
-                            {guilds.get().iter().map(|g| view! { <div class="card"><a href=format!("#/{}/permits", g["id"].as_str().unwrap_or(""))>{g["name"].as_str().unwrap_or("").to_string()}</a> <span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></div> }).collect_view()}
+                            {guilds.get().iter().map(|g| view! { <div class="card"><a href=format!("#/{}/overview", g["id"].as_str().unwrap_or(""))>{g["name"].as_str().unwrap_or("").to_string()}</a> <span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></div> }).collect_view()}
                         }.into_any(),
                         [g, p, ..] if p == "permits" => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
                         [g, p, ..] if p == "history" => view! { <History guild=g.clone() enrolled /> }.into_any(),
+                        [g, p, ..] if p == "overview" => view! { <Score guild=g.clone() enrolled /> }.into_any(),
+                        [g, p, ..] if p == "wizard" => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
+                        [g, p, ..] if p == "revert" => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
+                        [g, p, ..] if p == "rescue" => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                         [g, p, ..] => view! { <h1>{p.replace('_', " ")}</h1><Section guild=g.clone() name=p.clone() enrolled /> }.into_any(),
-                        [g] => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
+                        [g] => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                     }}
                 </main>
             </div>
