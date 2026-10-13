@@ -42,7 +42,7 @@ pub fn has_shortener(hosts: &[String]) -> bool {
     hosts.iter().any(|h| SHORTENERS.iter().any(|d| on_domain(h, d)))
 }
 
-const OFFICIAL: &[&str] = &["discord.com", "discord.gg", "discordapp.com", "discord.media", "steampowered.com", "steamcommunity.com", "store.steampowered.com"];
+const OFFICIAL: &[&str] = &["discord.com", "discord.gg", "discordapp.com", "discord.media", "steampowered.com", "steamcommunity.com"];
 
 /// Nitro/Steam scam links: a lure word in the text with a link that is not an official host,
 /// or a lookalike host such as `discorcl-gift.com`.
@@ -52,7 +52,7 @@ pub fn is_nitro_steam_scam(s: &str) -> bool {
         return false;
     }
     let lower = s.to_lowercase();
-    let lure = ["nitro", "gift", "steam", "free"].iter().any(|w| lower.contains(w));
+    let lure = ["nitro", "steam"].iter().any(|w| lower.contains(w));
     let brand_host = hosts.iter().any(|h| ["discord", "steam", "nitro"].iter().any(|b| h.contains(b)) && !OFFICIAL.iter().any(|d| on_domain(h, d)));
     brand_host || (lure && hosts.iter().any(|h| !OFFICIAL.iter().any(|d| on_domain(h, d))))
 }
