@@ -176,7 +176,8 @@ fn schema() -> Vec<Value> {
             "sticker" => "Stickers",
             "thread" => "Threads",
             "guild" if key == "guild_update" => "Server",
-            _ => "Scheduled events",
+            "guild" => "Scheduled events",
+            _ => "Other",
         };
         pg(
             fg(group, &format!("events.{key}"), "channel"),
