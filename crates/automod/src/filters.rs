@@ -118,6 +118,22 @@ pub fn word_hits(s: &str, words: &[String]) -> usize {
         .count()
 }
 
+/// Bundled word lists the dashboard toggles, one word per line, `#` lines are comments.
+pub fn premade_words(profane: bool, vulgar: bool, racist: bool) -> Vec<String> {
+    [
+        (profane, include_str!("../wordlists/profane.txt")),
+        (vulgar, include_str!("../wordlists/vulgar.txt")),
+        (racist, include_str!("../wordlists/racist.txt")),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .flat_map(|(_, list)| list.lines())
+    .map(str::trim)
+    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    .map(String::from)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +191,13 @@ mod tests {
         assert_eq!(word_hits("what a class act", &w), 0);
         assert_eq!(word_hits("you ASS", &w), 1);
         assert_eq!(word_hits("so badddword here, x", &w), 2);
+    }
+
+    #[test]
+    fn premade_lists_toggle_and_skip_comments() {
+        assert!(premade_words(false, false, false).is_empty());
+        let p = premade_words(true, false, true);
+        assert!(p.contains(&"shit".to_string()) && !p.contains(&"porn".to_string()));
+        assert!(p.iter().all(|w| !w.starts_with('#')));
     }
 }
