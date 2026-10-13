@@ -4,6 +4,9 @@
 //! audit-log events in and executes the returned verdicts / inverse ops. Ids are raw `u64`
 //! snowflakes and times are passed in, to avoid depending on core or a clock.
 
+mod incident;
+pub use incident::*;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
