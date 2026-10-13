@@ -23,8 +23,6 @@ use crate::{
     targets,
 };
 
-pub const PREFIX: &str = "w!";
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ModKind {
     Ban,
@@ -113,9 +111,13 @@ pub async fn apply(
         return Ok(msg);
     }
     let t = target.get();
+    let cfg = app.cfg(gid.get()).await?;
     let (inverse, points) = match kind {
         ModKind::Ban => {
-            app.http.create_ban(gid, target).await?;
+            app.http
+                .create_ban(gid, target)
+                .delete_message_seconds(cfg.misc.purge_secs())
+                .await?;
             if let Some(d) = duration_s {
                 let job = json!({"user":t});
                 jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d).await?;
@@ -127,7 +129,13 @@ pub async fn apply(
             (None, 0)
         }
         ModKind::Timeout => {
-            timeout_until(app, gid, target, now_secs() + duration_s.unwrap_or(600)).await?;
+            timeout_until(
+                app,
+                gid,
+                target,
+                now_secs() + duration_s.unwrap_or(cfg.misc.timeout_secs() as i64),
+            )
+            .await?;
             (Some(json!({"op":"untimeout","user":t})), 0)
         }
         ModKind::Warn => (None, points),
@@ -147,7 +155,7 @@ pub async fn apply(
     )
     .await?;
     let mut text = format!("Case #{case_no}: {perm} <@{t}>");
-    if kind == ModKind::Warn {
+    if kind == ModKind::Warn && cfg.misc.auto_warn_actions {
         if let Some(extra) = apply_warn_thresholds(app, gid.get() as i64, t as i64, points).await? {
             text += &format!("\n{extra}");
         }
@@ -174,6 +182,12 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
         _ => return Ok(()),
     };
     let owner = app.guild_info(gid).await?.owner;
+    let cfg = app.cfg(gid.get()).await?;
+    if cfg.misc.ignore_no_permit
+        && app.level(gid, owner, msg.author.id).await? == permits::Level::None
+    {
+        return Ok(());
+    }
     let mut targets: Vec<Id<UserMarker>> = p.targets.iter().map(|t| Id::new(*t)).collect();
     for n in &p.names {
         match targets::resolve(app, gid, n).await? {
@@ -193,7 +207,7 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
             t,
             p.reason.as_deref(),
             p.duration_s,
-            1,
+            cfg.misc.warn_base_points,
         )
         .await
         {

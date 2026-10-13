@@ -78,7 +78,8 @@ DATABASE_URL=postgres://... cargo test --workspace
 | `DATABASE_URL` | bot, dashboard | yes | Postgres connection string |
 | `DISCORD_CLIENT_ID` | dashboard | yes | OAuth2 login |
 | `DISCORD_CLIENT_SECRET` | dashboard | yes | OAuth2 login |
-| `DASHBOARD_URL` | dashboard | yes | Public base URL, used for the OAuth redirect |
+| `DASHBOARD_URL` | dashboard, bot | yes | Public base URL, used for the OAuth redirect |
+| `SUPPORT_URL` | bot | no | Link behind the Support button in the welcome message |
 | `BIND` | dashboard | no | Listen address, default `0.0.0.0:8080` |
 | `DASHBOARD_DIST` | dashboard | no | Built UI folder |
 | `RUST_LOG` | both | no | Log level, default `info` in Docker |

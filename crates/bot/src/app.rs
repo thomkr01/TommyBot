@@ -15,7 +15,7 @@ use tommybot_automod::{
 };
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
-    sections::{AntinukeCfg, AutomodCfg, LockdownCfg, PanicCfg},
+    sections::{AntinukeCfg, AutomodCfg, LockdownCfg, MiscCfg, PanicCfg},
 };
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
@@ -33,6 +33,7 @@ pub struct GuildCfg {
     pub joinraid: Option<RaidCfg>,
     pub lockdown: LockdownCfg,
     pub panic: PanicCfg,
+    pub misc: MiscCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -57,6 +58,7 @@ impl GuildCfg {
             joinraid: section(cfg, "joinraid"),
             lockdown: section(cfg, "lockdown"),
             panic: section(cfg, "panic"),
+            misc: section(cfg, "misc"),
         }
     }
 }

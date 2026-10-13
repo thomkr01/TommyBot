@@ -11,6 +11,7 @@ mod prefix;
 mod scheduler;
 mod slash;
 mod targets;
+mod welcome;
 
 use anyhow::Result;
 use std::sync::Arc;

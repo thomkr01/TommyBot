@@ -28,6 +28,9 @@ services:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
       DATABASE_URL: postgres://tommybot:${POSTGRES_PASSWORD}@postgres:5432/tommybot
       RUST_LOG: ${RUST_LOG:-info}
+      # Links in the welcome message.
+      DASHBOARD_URL: ${DASHBOARD_URL:-}
+      SUPPORT_URL: ${SUPPORT_URL:-}
 
   dashboard:
     build:
