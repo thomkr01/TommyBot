@@ -7,7 +7,7 @@ mod config;
 mod render;
 
 use cache::{CachedMessage, MessageCache};
-pub use config::{LogConfig, LogKind};
+pub use config::{CustomLog, LogConfig, LogEvent, LogKind};
 
 use std::{
     collections::VecDeque,
@@ -42,6 +42,7 @@ pub struct LogMessage {
 
 pub(crate) struct Entry {
     kind: LogKind,
+    event: Option<LogEvent>,
     channel: Option<Id<ChannelMarker>>,
     user: Option<Id<UserMarker>>,
     text: String,
@@ -95,7 +96,7 @@ impl Logger {
             };
             let cached = self.cache.remove(guild, m.id);
             let user = cached.as_ref().map(|c| c.author);
-            if let Some(log) = cfg.target(LogKind::Message) {
+            if let Some(log) = cfg.target(LogKind::Message, Some(LogEvent::MessageDelete)) {
                 if !ignored(cfg, Some(m.channel_id), user) {
                     self.held.push_back(HeldDelete {
                         at: now,
@@ -111,7 +112,7 @@ impl Logger {
         let Some(entry) = self.entry(event, now) else {
             return out;
         };
-        if let Some(channel_id) = cfg.target(entry.kind) {
+        if let Some(channel_id) = cfg.target(entry.kind, entry.event) {
             if !ignored(cfg, entry.channel, entry.user) {
                 out.push(LogMessage {
                     channel_id,
@@ -177,6 +178,7 @@ impl Logger {
                 }
                 Some(Entry {
                     kind: LogKind::Message,
+                    event: Some(LogEvent::MessageUpdate),
                     channel: Some(msg.channel_id),
                     user: Some(msg.author.id),
                     text: render::message_edit(old.as_deref(), msg),
@@ -184,12 +186,14 @@ impl Logger {
             }
             Event::MessageDeleteBulk(m) => Some(Entry {
                 kind: LogKind::Message,
+                event: Some(LogEvent::MessageDeleteBulk),
                 channel: Some(m.channel_id),
                 user: None,
                 text: render::bulk_delete(m.channel_id, m.ids.len()),
             }),
             Event::MemberAdd(m) => Some(Entry {
                 kind: LogKind::Member,
+                event: None,
                 channel: None,
                 user: Some(m.member.user.id),
                 text: render::member_add(&m.member.user),
@@ -200,6 +204,7 @@ impl Logger {
                 }
                 Some(Entry {
                     kind: LogKind::Member,
+                    event: None,
                     channel: None,
                     user: Some(m.user.id),
                     text: render::member_remove(&m.user),
@@ -447,6 +452,21 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].content.contains("**Message deleted** by <@10>"));
         assert!(logger.flush(t0 + HOLD).is_empty());
+    }
+
+    #[test]
+    fn custom_type_takes_its_event_channel() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(5)),
+            custom: vec![CustomLog {
+                events: vec![LogEvent::MemberKick],
+                channel: Id::new(6),
+            }],
+            ..Default::default()
+        };
+        let out = Logger::new(Id::new(1)).handle(&cfg, &audit_event(20, 10), Instant::now());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].channel_id, Id::new(6));
     }
 
     #[test]
