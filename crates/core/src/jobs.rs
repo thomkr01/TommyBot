@@ -182,13 +182,12 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), total);
         clean(&pool, gid).await;
+        lease_expiry_and_replace(&pool, gid).await;
     }
 
-    #[tokio::test]
-    async fn expired_lease_returns_the_job_and_replace_keeps_one() {
-        let Some((pool, gid)) = setup(4).await else {
-            return;
-        };
+    /// Called from the claim test: claim_due takes every guild's rows, so it cannot run in parallel.
+    async fn lease_expiry_and_replace(pool: &PgPool, gid: i64) {
+        let pool = pool.clone();
         enqueue(&pool, gid, "x", Value::Null, now() - 5)
             .await
             .unwrap();
