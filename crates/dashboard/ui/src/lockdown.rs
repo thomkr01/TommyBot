@@ -16,7 +16,8 @@ fn later(ms: i32, f: impl Fn() + 'static) {
     cb.forget();
 }
 
-const LOCKS: [(&str, &str, &str, fn(&Value) -> bool); 4] = [
+type Covers = fn(&Value) -> bool;
+const LOCKS: [(&str, &str, &str, Covers); 4] = [
     ("Server Channels", "Members can no longer send messages in any channel.", "server", |l| l["channels"] == true),
     ("Server Roles", "Every role below the bot loses its dangerous permissions.", "role", |l| l["roles"] == true),
     ("Kick New Members", "New members are kicked on join and invites are paused.", "kick", |l| l["join"] == "Kick"),
