@@ -174,14 +174,14 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: i64, confirm: bool) -> Re
     if lines.is_empty() {
         return Ok(format!("Backup #{id} already matches the server"));
     }
-    let more = lines.len().saturating_sub(15);
+    let shown = lines.len().min(15);
     let mut text = format!(
         "Loading backup #{id} would change {} things:\n{}",
         lines.len(),
-        lines[..lines.len() - more].join("\n")
+        lines[..shown].join("\n")
     );
-    if more > 0 {
-        text += &format!("\n...and {more} more");
+    if lines.len() > shown {
+        text += &format!("\n...and {} more", lines.len() - shown);
     }
     text += "\nRun again with confirm:true to apply.";
     Ok(text)

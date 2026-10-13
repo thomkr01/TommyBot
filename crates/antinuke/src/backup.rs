@@ -69,39 +69,28 @@ pub struct Plan {
 /// One line per change for the diff preview: `+` create, `~` update, `-` delete. Deletes are
 /// named from the live server.
 pub fn describe(plan: &Plan, live: &Image) -> Vec<String> {
-    fn line<T>(
-        c: &Change<T>,
-        what: &str,
-        name: impl Fn(&T) -> &str,
-        live_name: impl Fn(u64) -> String,
-    ) -> String {
-        match c {
-            Change::Create(x) => format!("+ {what} {}", name(x)),
-            Change::Update { to, .. } => format!("~ {what} {}", name(to)),
-            Change::Delete(id) => format!("- {what} {}", live_name(*id)),
-        }
+    let mut out = vec![];
+    for c in &plan.roles {
+        out.push(match c {
+            Change::Create(r) => format!("+ role {}", r.name),
+            Change::Update { to, .. } => format!("~ role {}", to.name),
+            Change::Delete(id) => {
+                let name = live.roles.iter().find(|r| r.id == *id).map(|r| &r.name);
+                format!("- role {}", name.map_or(id.to_string(), Clone::clone))
+            }
+        });
     }
-    let role = |id: u64| {
-        live.roles
-            .iter()
-            .find(|r| r.id == id)
-            .map_or(id.to_string(), |r| r.name.clone())
-    };
-    let chan = |id: u64| {
-        live.channels
-            .iter()
-            .find(|c| c.id == id)
-            .map_or(id.to_string(), |c| c.name.clone())
-    };
-    let roles = plan
-        .roles
-        .iter()
-        .map(|c| line(c, "role", |r| &r.name, role));
-    let chans = plan
-        .channels
-        .iter()
-        .map(|c| line(c, "channel", |c| &c.name, chan));
-    roles.chain(chans).collect()
+    for c in &plan.channels {
+        out.push(match c {
+            Change::Create(c) => format!("+ channel {}", c.name),
+            Change::Update { to, .. } => format!("~ channel {}", to.name),
+            Change::Delete(id) => {
+                let name = live.channels.iter().find(|c| c.id == *id).map(|c| &c.name);
+                format!("- channel {}", name.map_or(id.to_string(), Clone::clone))
+            }
+        });
+    }
+    out
 }
 
 /// Rewrites overwrite targets from image ids to live ids; unmapped targets are dropped.
