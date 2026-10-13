@@ -139,6 +139,14 @@ fn schema() -> Vec<Value> {
         f("flag_no_avatar", "bool"),
         f("id_flag_min", "int"),
     ];
+    let panic = vec![
+        f("executors", "int"),
+        f("window_secs", "int"),
+        f("duration_secs", "int"),
+        f("lock_mod_commands", "bool"),
+        f("unlock_when_ending", "bool"),
+        f("warned_roles", "roles"),
+    ];
     [
         ("logging", "Logging", log),
         ("antinuke", "Anti-nuke", nuke),
@@ -146,6 +154,7 @@ fn schema() -> Vec<Value> {
         ("joingate", "Join gate", gate),
         ("joinraid", "Join raid", raid),
         ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
+        ("panic", "Panic mode", panic),
     ]
     .into_iter()
     .map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields}))

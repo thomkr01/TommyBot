@@ -264,7 +264,7 @@ pub async fn rollback(
 
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is.
 pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
-    use tommybot_core::sections::{AntinukeCfg, AutomodCfg, LockdownCfg};
+    use tommybot_core::sections::{AntinukeCfg, AutomodCfg, LockdownCfg, PanicCfg};
     let v = v.clone();
     let r = match section {
         "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),
@@ -272,6 +272,7 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "automod" => serde_json::from_value::<AutomodCfg>(v).map(drop),
         "joingate" => serde_json::from_value::<tommybot_automod::join::GateCfg>(v).map(drop),
         "joinraid" => serde_json::from_value::<tommybot_automod::join::RaidCfg>(v).map(drop),
+        "panic" => serde_json::from_value::<PanicCfg>(v).map(drop),
         "lockdown" => serde_json::from_value::<LockdownCfg>(v).map(drop),
         _ => Ok(()),
     };
