@@ -146,8 +146,10 @@ pub fn similarity(a: &str, b: &str) -> f64 {
 
 pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     let w = m.whitelist;
-    let mut b = Breakdown::default();
-    b.instant_max = (m.invite_link && !w.advertising) || m.nsfw_link || m.malicious_link || m.blacklisted_link;
+    let mut b = Breakdown {
+        instant_max: (m.invite_link && !w.advertising) || m.nsfw_link || m.malicious_link || m.blacklisted_link,
+        ..Default::default()
+    };
     b.add("message", cfg.base);
     if !w.spam {
         let sim = hist.best_similarity(m.content);
@@ -201,10 +203,6 @@ impl HeatState {
         self.value = if b.instant_max { cfg.max } else { self.decayed(now, cfg) + b.total() };
         self.at_ms = now;
         self.value >= cfg.max
-    }
-
-    pub fn reset(&mut self) {
-        self.value = 0.0;
     }
 }
 

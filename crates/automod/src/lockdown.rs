@@ -148,11 +148,6 @@ impl Panic {
     pub fn active(&self, now: i64) -> bool {
         now < self.active_until
     }
-
-    /// Raiders messaging during panic get timed out; regular members keep the normal rules.
-    pub fn punish(&self, now: i64, is_raider: bool) -> bool {
-        is_raider && self.active(now)
-    }
 }
 
 #[cfg(test)]
@@ -221,6 +216,6 @@ mod tests {
         assert!(!p.on_raider_trigger(0, 3, 10_000, 600_000));
         assert!(!p.on_raider_trigger(1000, 3, 10_000, 600_000));
         assert!(p.on_raider_trigger(2000, 3, 10_000, 600_000));
-        assert!(p.punish(5000, true) && !p.punish(5000, false) && !p.punish(700_000, true));
+        assert!(p.active(5000) && !p.active(700_000));
     }
 }
