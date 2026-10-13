@@ -310,7 +310,7 @@ async fn record_nuke(
     Ok(case.id)
 }
 
-async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
+pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
     match op {
         Inverse::Unban { user } => {
             app.http.delete_ban(gid, Id::new(*user)).await?;

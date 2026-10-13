@@ -40,7 +40,9 @@ impl Level {
     pub fn has(&self, perm: &str) -> bool {
         match self {
             Level::None => false,
-            Level::Custom { perms, .. } => perms.iter().any(|p| p == perm),
+            Level::Custom { perms, .. } => perms
+                .iter()
+                .any(|p| p == perm || implied_by(perm).contains(&p.as_str())),
             _ => true,
         }
     }
@@ -60,6 +62,16 @@ pub enum Denied {
     TargetProtected,
     TargetAboveBot,
     SelfTarget,
+}
+
+/// Permits that predate a command keep working: holders of these older permits also get the new one.
+fn implied_by(perm: &str) -> &'static [&'static str] {
+    match perm {
+        "quarantine" => &["kick", "ban"],
+        "purge" | "slowmode" => &["timeout", "kick", "ban"],
+        "cases" => &["warn", "timeout", "kick", "ban"],
+        _ => &[],
+    }
 }
 
 /// `target_above_bot`: target's top role is not below the bot's top role (Discord hierarchy).
@@ -193,6 +205,21 @@ pub async fn resolve(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn older_permits_imply_the_new_commands() {
+        let permit = |perms: &[&str]| Level::Custom {
+            rank: 1,
+            perms: perms.iter().map(|p| p.to_string()).collect(),
+            whitelist: vec![],
+            limits: Default::default(),
+        };
+        assert!(permit(&["timeout"]).has("purge"));
+        assert!(permit(&["ban"]).has("quarantine"));
+        assert!(!permit(&["warn"]).has("quarantine"));
+        assert!(!permit(&["warn"]).has("purge"));
+        assert!(!permit(&[]).has("cases"));
+    }
+
     use super::*;
 
     fn custom(rank: i32, perms: &[&str]) -> Level {

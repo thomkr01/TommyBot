@@ -25,7 +25,7 @@ use crate::{
     app::{now_secs, App, GuildCfg},
     commands::timeout,
     events::send_log,
-    lockdown, verify,
+    lockdown, reply, verify,
 };
 
 fn now_ms() -> i64 {
@@ -153,8 +153,18 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             s.value = 0.0;
         }
     }
-    // shortcut: only the triggering message is purged, not the user's recent history.
     app.http.delete_message(m.channel_id, m.id).await.ok();
+    if cfg.misc.purge_last_100 {
+        reply::purge_user(app, m.channel_id, m.author.id).await.ok();
+    }
+    if cfg.misc.show_reason_on_auto {
+        reply::dm(
+            app,
+            m.author.id,
+            "You were timed out by automod: message spam",
+        )
+        .await;
+    }
     timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
     let text = format!(
         "<@{}> strike {} ({}s timeout{})",
@@ -429,6 +439,11 @@ async fn punish(
     why: &str,
 ) -> Result<()> {
     let uid = Id::new(user);
+    let punishing = matches!(action, Action::Kick | Action::Ban)
+        || matches!(action, Action::Timeout(ms) if ms > 0);
+    if punishing && app.cfg(gid.get()).await?.misc.show_reason_on_auto {
+        reply::dm(app, uid, &format!("Automod action: {why}")).await;
+    }
     match action {
         Action::Log => {}
         Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000).await?,
