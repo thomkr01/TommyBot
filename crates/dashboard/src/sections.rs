@@ -350,10 +350,14 @@ fn schema() -> Vec<Value> {
         fg("Moderation commands", "always_dm", "bool"),
         fg("Moderation commands", "delete_invocation", "bool"),
         fg("Moderation commands", "hide_staff_in_dms", "bool"),
-        dv(
-            fg("Moderation commands", "default_timeout_secs", "int"),
-            600,
-        ),
+        {
+            let mut v = dv(
+                fg("Moderation commands", "default_timeout_secs", "int"),
+                600,
+            );
+            v["help"] = json!("0 means 28 days");
+            v
+        },
         dv(fg("Moderation commands", "ban_purge_days", "int"), 0),
         dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true),
         fg("Auto moderation", "purge_last_100", "bool"),
@@ -399,9 +403,9 @@ fn schema() -> Vec<Value> {
         fg("General", "roles", "roles"),
     ];
     let appeals = vec![
-        f("enabled", "bool"),
-        f("channel", "channel"),
-        f("fields", "form"),
+        ti(fg("General", "enabled", "bool"), "Appeals System Status"),
+        ti(fg("General", "channel", "channel"), "Appeals channel"),
+        fg("Appeal Form", "fields", "form"),
     ];
     [
         ("logging", "Logging", log),
