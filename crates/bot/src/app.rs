@@ -81,11 +81,9 @@ pub struct App {
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
 }
 
-/// Active panic mode for one guild. shortcut: kept in memory, a restart ends panic mode early.
+/// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
 pub struct PanicRun {
-    pub ends: Instant,
     pub lock_mod_commands: bool,
-    pub unlock_when_ending: bool,
 }
 
 impl App {

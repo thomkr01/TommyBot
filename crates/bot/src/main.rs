@@ -43,6 +43,9 @@ async fn main() -> Result<()> {
         }
     });
 
+    if let Err(e) = panic::restore(&app).await {
+        tracing::warn!(?e, "restoring panic mode failed");
+    }
     tokio::spawn(scheduler::run(app.clone()));
     tokio::spawn(backup::auto_backup(app.clone()));
 

@@ -3,9 +3,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tommybot_core::jobs::{self, Job};
+use tommybot_logging::LogKind;
 use twilight_model::id::{marker::UserMarker, Id};
 
-use crate::{app::App, commands, lockdown};
+use crate::{app::App, commands, events::send_log, lockdown, panic};
 
 fn user(payload: &Value) -> Result<Id<UserMarker>> {
     Ok(Id::new(
@@ -28,6 +29,10 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 .context("job payload has no until_secs")?;
             commands::timeout_until(app, gid, user(&job.payload)?, until).await?;
         }
+        "panic_end" => {
+            panic::end(app, gid, job.payload["unlock"].as_bool().unwrap_or(false)).await?
+        }
+        "raid_end" => send_log(app, gid.get(), LogKind::JoinRaid, "Raid ended").await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())
@@ -40,8 +45,18 @@ pub async fn run(app: Arc<App>) {
         match jobs::claim_due(&app.pool, 50).await {
             Ok(due) => {
                 for job in due {
-                    if let Err(e) = dispatch(&app, &job).await {
-                        tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
+                    let done = match dispatch(&app, &job).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
+                            // Otherwise the lease expires and it runs again.
+                            job.attempts >= jobs::MAX_ATTEMPTS
+                        }
+                    };
+                    if done {
+                        if let Err(e) = jobs::finish(&app.pool, job.id).await {
+                            tracing::warn!(?e, id = job.id, "finishing job failed");
+                        }
                     }
                 }
             }
