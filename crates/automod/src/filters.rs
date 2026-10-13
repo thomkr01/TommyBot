@@ -11,7 +11,9 @@ pub fn is_zalgo(s: &str) -> bool {
 
 /// (uppercase, lowercase) letter counts, for the separate case weights.
 pub fn case_counts(s: &str) -> (usize, usize) {
-    s.chars().fold((0, 0), |(u, l), c| (u + c.is_uppercase() as usize, l + c.is_lowercase() as usize))
+    s.chars().fold((0, 0), |(u, l), c| {
+        (u + c.is_uppercase() as usize, l + c.is_lowercase() as usize)
+    })
 }
 
 /// Hosts of every http(s) URL in the text, lowercased, without port or `www.`.
@@ -19,8 +21,16 @@ pub fn hosts(s: &str) -> Vec<String> {
     s.split_whitespace()
         .filter_map(|w| {
             let rest = w.trim_matches(|c: char| "<>()[]\"'".contains(c));
-            let rest = rest.strip_prefix("https://").or_else(|| rest.strip_prefix("http://"))?;
-            let host = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?.split(':').next()?;
+            let rest = rest
+                .strip_prefix("https://")
+                .or_else(|| rest.strip_prefix("http://"))?;
+            let host = rest
+                .split(['/', '?', '#'])
+                .next()?
+                .rsplit('@')
+                .next()?
+                .split(':')
+                .next()?;
             Some(host.to_lowercase().trim_start_matches("www.").to_string())
         })
         .filter(|h| h.contains('.'))
@@ -33,16 +43,37 @@ fn on_domain(host: &str, domain: &str) -> bool {
 }
 
 pub fn any_on_domains(hosts: &[String], domains: &[String]) -> bool {
-    hosts.iter().any(|h| domains.iter().any(|d| on_domain(h, &d.to_lowercase())))
+    hosts
+        .iter()
+        .any(|h| domains.iter().any(|d| on_domain(h, &d.to_lowercase())))
 }
 
-pub const SHORTENERS: &[&str] = &["bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "cutt.ly", "rb.gy", "shorturl.at", "ow.ly"];
+pub const SHORTENERS: &[&str] = &[
+    "bit.ly",
+    "tinyurl.com",
+    "t.co",
+    "goo.gl",
+    "is.gd",
+    "cutt.ly",
+    "rb.gy",
+    "shorturl.at",
+    "ow.ly",
+];
 
 pub fn has_shortener(hosts: &[String]) -> bool {
-    hosts.iter().any(|h| SHORTENERS.iter().any(|d| on_domain(h, d)))
+    hosts
+        .iter()
+        .any(|h| SHORTENERS.iter().any(|d| on_domain(h, d)))
 }
 
-const OFFICIAL: &[&str] = &["discord.com", "discord.gg", "discordapp.com", "discord.media", "steampowered.com", "steamcommunity.com"];
+const OFFICIAL: &[&str] = &[
+    "discord.com",
+    "discord.gg",
+    "discordapp.com",
+    "discord.media",
+    "steampowered.com",
+    "steamcommunity.com",
+];
 
 /// Nitro/Steam scam links: a lure word in the text with a link that is not an official host,
 /// or a lookalike host such as `discorcl-gift.com`.
@@ -53,21 +84,33 @@ pub fn is_nitro_steam_scam(s: &str) -> bool {
     }
     let lower = s.to_lowercase();
     let lure = ["nitro", "steam"].iter().any(|w| lower.contains(w));
-    let brand_host = hosts.iter().any(|h| ["discord", "steam", "nitro"].iter().any(|b| h.contains(b)) && !OFFICIAL.iter().any(|d| on_domain(h, d)));
-    brand_host || (lure && hosts.iter().any(|h| !OFFICIAL.iter().any(|d| on_domain(h, d))))
+    let brand_host = hosts.iter().any(|h| {
+        ["discord", "steam", "nitro"].iter().any(|b| h.contains(b))
+            && !OFFICIAL.iter().any(|d| on_domain(h, d))
+    });
+    brand_host
+        || (lure
+            && hosts
+                .iter()
+                .any(|h| !OFFICIAL.iter().any(|d| on_domain(h, d))))
 }
 
 /// Number of blacklist hits. A `*` term is a wildcard matched per space-separated chunk; a plain term
 /// matches whole words only, so "ass" does not hit "class".
 pub fn word_hits(s: &str, words: &[String]) -> usize {
     let lower = s.to_lowercase();
-    let tokens: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
     words
         .iter()
         .filter(|w| {
             let w = w.to_lowercase();
             if w.contains('*') {
-                lower.split_whitespace().any(|t| crate::join::term_matches(&w, t))
+                lower
+                    .split_whitespace()
+                    .any(|t| crate::join::term_matches(&w, t))
             } else {
                 tokens.contains(&w.as_str())
             }
@@ -85,7 +128,9 @@ mod tests {
 
     #[test]
     fn zalgo() {
-        assert!(is_zalgo("h\u{300}\u{301}\u{302}e\u{303}\u{304}l\u{305}\u{306}lo"));
+        assert!(is_zalgo(
+            "h\u{300}\u{301}\u{302}e\u{303}\u{304}l\u{305}\u{306}lo"
+        ));
         assert!(!is_zalgo("héllo wörld"));
         assert!(!is_zalgo("e\u{301}"));
     }
@@ -100,15 +145,23 @@ mod tests {
         let h = hosts("see <https://www.Evil.com:8080/x?y> and http://a.b.co/p, not example");
         assert_eq!(h, v(&["evil.com", "a.b.co"]));
         assert!(any_on_domains(&h, &v(&["evil.com"])));
-        assert!(any_on_domains(&hosts("https://sub.evil.com"), &v(&["evil.com"])));
-        assert!(!any_on_domains(&hosts("https://notevil.com"), &v(&["evil.com"])));
+        assert!(any_on_domains(
+            &hosts("https://sub.evil.com"),
+            &v(&["evil.com"])
+        ));
+        assert!(!any_on_domains(
+            &hosts("https://notevil.com"),
+            &v(&["evil.com"])
+        ));
         assert!(has_shortener(&hosts("https://bit.ly/abc")));
         assert!(!has_shortener(&hosts("https://example.com")));
     }
 
     #[test]
     fn scam_links() {
-        assert!(is_nitro_steam_scam("free nitro https://discorcl-gift.com/x"));
+        assert!(is_nitro_steam_scam(
+            "free nitro https://discorcl-gift.com/x"
+        ));
         assert!(is_nitro_steam_scam("steam gift https://random.site/x"));
         assert!(is_nitro_steam_scam("https://steamcommunlty.com/login"));
         assert!(!is_nitro_steam_scam("free nitro for all"));
