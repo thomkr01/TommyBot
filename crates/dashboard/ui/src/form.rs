@@ -17,6 +17,13 @@ fn set_path(v: &mut Value, p: &str, x: Value) {
     *c = x;
 }
 
+/// (name, seconds) for the duration unit switcher.
+const UNITS: [(&str, f64); 4] = [("second", 1.0), ("minute", 60.0), ("hour", 3600.0), ("day", 86400.0)];
+
+fn best_unit(secs: f64) -> usize {
+    UNITS.iter().rposition(|(_, m)| secs >= *m && secs % *m == 0.0).unwrap_or(0)
+}
+
 fn strs(v: &Value) -> Vec<String> {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
 }
@@ -44,8 +51,27 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
     let default = StoredValue::new(f["default"].clone());
     let get = move || { let v = get_path(&val.get(), &p.get_value()); if v.is_null() { default.get_value() } else { v } };
     let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
+    let tail = path.rsplit('.').next().unwrap_or("").to_string();
+    let dur = kind == "int" && (tail.ends_with("_secs") || tail.ends_with("_ms"));
     let input = match kind.as_str() {
         "bool" => view! { <input type="checkbox" class="sw" prop:checked=move || get().as_bool().unwrap_or(false) on:change=move |e| set(json!(event_target_checked(&e))) /> }.into_any(),
+        "int" if dur => {
+            let per = if tail.ends_with("_ms") { 0.001 } else { 1.0 }; // seconds per stored unit
+            let secs = move || get().as_f64().unwrap_or(0.0) * per;
+            let chosen = RwSignal::new(None::<usize>);
+            let unit = move || chosen.get().unwrap_or_else(|| best_unit(secs()));
+            let set_n = move |n: f64| {
+                let v = (n.max(0.0) * UNITS[unit()].1 / per).round() as i64;
+                set(if v == 0 && default.get_value().is_null() { Value::Null } else { json!(v) });
+            };
+            view! { <div class="step"><button class="ghost" aria-label="less" on:click=move |_| set_n(secs() / UNITS[unit()].1 - 1.0)>"-"</button>
+                <input prop:value=move || format!("{}", secs() / UNITS[unit()].1) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<f64>() { set_n(x) } } />
+                <button class="ghost" aria-label="more" on:click=move |_| set_n(secs() / UNITS[unit()].1 + 1.0)>"+"</button>
+                <select aria-label="unit" on:change=move |e| chosen.set(UNITS.iter().position(|(u, _)| *u == event_target_value(&e)))>
+                    {UNITS.iter().map(|(u, _)| view! { <option value=*u selected=move || UNITS[unit()].0 == *u>{*u}</option> }).collect_view()}
+                </select></div>
+                <span class="chip">{move || { let s = secs(); let u = best_unit(s); let n = s / UNITS[u].1; format!("{n} {}{}", UNITS[u].0, if n == 1.0 { "" } else { "s" }) }}</span> }.into_any()
+        }
         "int" | "float" => {
             let float = kind == "float";
             let step = move |d: f64| {
@@ -61,7 +87,7 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
                     else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x)) } }
                     else if let Ok(x) = s.parse::<i64>() { set(json!(x)) }
                 } />
-                <button class="ghost" on:click=move |_| step(1.0)>"+"</button><span>{unit}</span></div> }.into_any()
+                <button class="ghost" on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div> }.into_any()
         }
         "list" => view! { <input prop:value=move || csv(&get()) on:change=move |e| set(from_csv(&event_target_value(&e))) /> }.into_any(),
         "choice" => {
@@ -110,7 +136,7 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
         _ => view! { <input prop:value=move || show(&get()) on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) } /> }.into_any(),
     };
     let help = f["help"].as_str().map(|h| view! { <span class="muted">{h.to_string()}</span> });
-    let label = path.rsplit('.').next().unwrap_or(&path).replace('_', " ");
+    let label = f["title"].as_str().map_or_else(|| tail.replace('_', " "), String::from);
     view! { <div class="row" class:tog=kind == "bool"><label>{label}</label>{input}{help}</div> }
 }
 
@@ -121,11 +147,12 @@ fn raw_editor(val: RwSignal<Value>, msg: RwSignal<String>) -> impl IntoView {
 
 /// Schema-driven form for the sections the backend describes; raw JSON stays available underneath.
 #[component]
-pub fn Section(guild: String, name: String, #[prop(default = "")] part: &'static str, enrolled: ReadSignal<bool>) -> impl IntoView {
+pub fn Section(guild: String, name: String, #[prop(into, default = String::new())] part: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let val = RwSignal::new(json!({}));
     let version = RwSignal::new(0i64);
     let dc = RwSignal::new(json!({}));
     let fields = RwSignal::new(Vec::<Value>::new());
+    let orig = RwSignal::new(json!({}));
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let (g, n) = (guild.clone(), name.clone());
     spawn_local(async move {
@@ -133,14 +160,15 @@ pub fn Section(guild: String, name: String, #[prop(default = "")] part: &'static
             Ok(v) => {
                 version.set(v["version"].as_i64().unwrap_or(0));
                 val.set(if v["config"][&n].is_object() { v["config"][&n].clone() } else { json!({}) });
+                orig.set(val.get_untracked());
             }
             Err(e) => msg.set(e),
         }
         // Missing schema/discord data degrades to the raw editor.
         if let Ok(s) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
             if let Some(sec) = s.as_array().and_then(|a| a.iter().find(|x| x["name"] == n.as_str())) {
-                // `part` splits one config section over two pages (automod: filters vs the rest).
-                let keep = |f: &Value| { let in_filters = f["path"].as_str().unwrap_or("").starts_with("filters."); part.is_empty() || in_filters == (part == "filters") };
+                // `part` picks one dashboard page of the section: "" all fields, "general" those without a page, else that page.
+                let keep = |f: &Value| match part.as_str() { "" => true, "general" => f["page"].is_null(), p => f["page"] == p };
                 fields.set(sec["fields"].as_array().into_iter().flatten().filter(|f| keep(f)).cloned().collect());
                 if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(d); }
             }
@@ -148,6 +176,7 @@ pub fn Section(guild: String, name: String, #[prop(default = "")] part: &'static
     });
     let save = move |_| {
         let (g, n, v, value) = (guild.clone(), name.clone(), version.get_untracked(), val.get_untracked());
+        orig.set(value.clone());
         run_save(async move { api("PUT", &format!("/api/guilds/{g}/config/{n}"), Some(json!({"expected_version": v, "value": value}))).await }, version, msg, need);
     };
     view! {
@@ -161,14 +190,19 @@ pub fn Section(guild: String, name: String, #[prop(default = "")] part: &'static
                         let g = f["group"].as_str().map_or_else(|| p.rsplit_once('.').map_or("General".to_string(), |(g, _)| g.replace(['.', '_'], " ")), String::from);
                         match groups.iter_mut().find(|(k, _)| *k == g) { Some((_, v)) => v.push(f), None => groups.push((g, vec![f])) }
                     }
-                    groups.into_iter().map(|(g, fs)| view! { <div class="card"><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}</div> }).collect_view()
+                    // A system that is switched off rings its cards red (the card holding the switch stays plain).
+                    let off = val.get()["enabled"] == json!(false);
+                    groups.into_iter().map(|(g, fs)| { let ring = off && !fs.iter().any(|f| f["path"] == "enabled"); view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}</div> } }).collect_view()
                 }}
             </div>
             <details><summary>"Advanced (raw JSON)"</summary>
                 {raw_editor(val, msg)}
             </details>
         </Show>
-        <div class="row"><button on:click=save>"Save"</button><span>{move || msg.get()}</span></div>
+        <Show when=move || val.get() != orig.get()>
+            <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| val.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
+        </Show>
+        <p class="info">{move || msg.get()}</p>
         <StepUp need enrolled />
     }
 }

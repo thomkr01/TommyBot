@@ -278,6 +278,7 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "antinuke" => serde_json::from_value::<AntinukeCfg>(v).map(drop),
         "automod" => serde_json::from_value::<AutomodCfg>(v).map(drop),
         "joingate" => serde_json::from_value::<tommybot_automod::join::GateCfg>(v).map(drop),
+        "verification" => serde_json::from_value::<tommybot_automod::join::VerifyCfg>(v).map(drop),
         "joinraid" => serde_json::from_value::<tommybot_automod::join::RaidCfg>(v).map(drop),
         "panic" => serde_json::from_value::<PanicCfg>(v).map(drop),
         "lockdown" => serde_json::from_value::<LockdownCfg>(v).map(drop),

@@ -9,7 +9,7 @@ fn s(v: &Value) -> String {
 
 #[component]
 pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    const STEPS: [&str; 9] = ["Auto Setup", "Logging", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue Key"];
+    const STEPS: [&str; 9] = ["Auto Setup", "Miscellaneous", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue Key"];
     let step = RwSignal::new(0usize);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
@@ -27,38 +27,67 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     };
     let g = guild.clone();
     view! {
+        <div class="wizbar"><button on:click=move |_| step.set(0)>"Start wizard"</button><a href="https://github.com/thomkr01/TommyBot" target="_blank" rel="noopener">"Support"</a></div>
         <div class="card">
             <div class="split">
-                <div><h2>"Setup process"</h2><p class="muted">"Follow the steps to set up the bot. You can jump to any step."</p></div>
-                <Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) color="var(--accent)" />
+                <div><h2>"Setup process"</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
+                <Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) color=Some("var(--primary)") />
             </div>
+            <h2>"Steps"</h2>
             <div class="steps">
                 {STEPS.iter().enumerate().map(|(i, t)| view! { <button class:on=move || step.get() == i on:click=move |_| step.set(i)><i>{i + 1}</i>{*t}</button> }).collect_view()}
             </div>
+            <div class="chips"><span class="chip blue">"You can choose a certain step if you want."</span><span class="chip orange">"The full setup could take around 3 minutes of your time."</span></div>
         </div>
         {move || match step.get() {
             0 => view! { <div class="card"><p class="muted">"Creates the quarantine role and the log channels."</p><button on:click=auto.clone()>"Run auto setup"</button><p class="info">{move || msg.get()}</p></div> }.into_any(),
-            1 => view! { <Section guild=g.clone() name="logging".into() enrolled /><Section guild=g.clone() name="lockdown".into() enrolled /> }.into_any(),
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
-            i => view! { <Section guild=g.clone() name=["", "", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() enrolled /> }.into_any(),
+            i => view! { <Section guild=g.clone() name=["", "misc", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() part=if i == 2 || i == 3 { "general" } else { "" } enrolled /> }.into_any(),
         }}
+        <p><Show when=move || step.get() < STEPS.len() - 1><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
         <StepUp need enrolled />
     }
 }
 
 /// Progress ring: `pct` filled, number in the middle.
 #[component]
-pub fn Ring(pct: Signal<usize>, color: &'static str) -> impl IntoView {
-    view! { <div class="ring" style=move || format!("--p:{};--c:{color}", pct.get())><b>{move || format!("{}%", pct.get())}</b></div> }
+pub fn Ring(pct: Signal<usize>, #[prop(default = None)] color: Option<&'static str>) -> impl IntoView {
+    // Without a fixed colour the ring is red under 50, orange under 80 and green above.
+    let c = move || color.unwrap_or(match pct.get() { 0..50 => "var(--bad)", 50..80 => "var(--warn)", _ => "var(--ok)" });
+    view! { <div class="ring" style=move || format!("--p:{};--c:{}", pct.get(), c())><b>{move || format!("{}%", pct.get())}</b></div> }
 }
 
-const SYSTEMS: [(&str, &str, &str); 5] = [
-    ("automod", "Auto Mod", "Heat-based spam, link and invite filtering with strikes."),
-    ("antinuke", "Anti Nuke", "Watches staff actions and guards the server against nukes."),
-    ("joingate", "Join Gate", "Instant filters for new members and bots joining."),
-    ("joinraid", "Join Raid", "Detects raids by join rate and reacts to them."),
-    ("panic", "Panic Mode", "Locks things down when several staff trip the anti-nuke at once."),
+/// (section, title, description, has a master switch, switch default when the key is missing).
+const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
+    ("automod", "Auto Mod", "Anti Spam, Anti Advertising, Anti Phishing and all the message filters.", true, false),
+    ("antinuke", "Anti Nuke", "The system that monitors your staff members and guards your server away from getting nuked.", true, true),
+    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true, true),
+    ("joinraid", "Join Raid", "The advanced system that monitors your server joins and reacts if a raid is targeting your server.", true, true),
+    ("verification", "Verification", "TommyBot's verification gate that your new members need to pass in order to get access to your server.", true, false),
 ];
+
+/// Master switch of a system: reads and writes its `enabled` key.
+#[component]
+fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl IntoView {
+    let (cfg, version, on) = (RwSignal::new(json!({})), RwSignal::new(0i64), RwSignal::new(default));
+    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let g = guild.clone();
+    spawn_local(async move {
+        if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
+            version.set(v["version"].as_i64().unwrap_or(0));
+            on.set(v["config"][section]["enabled"].as_bool().unwrap_or(default));
+            if v["config"][section].is_object() { cfg.set(v["config"][section].clone()); }
+        }
+    });
+    let change = move |e| {
+        let x = event_target_checked(&e);
+        cfg.update(|c| c["enabled"] = json!(x));
+        let (g, v, value) = (guild.clone(), version.get_untracked(), cfg.get_untracked());
+        on.set(x);
+        run_act(async move { api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await }, msg, need, move |r| version.set(r["version"].as_i64().unwrap_or(0)));
+    };
+    view! { <input type="checkbox" class="sw" aria-label="enable system" prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
+}
 
 #[component]
 pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
@@ -88,11 +117,11 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     <span class="stat"><span>"Your access"</span><b>{s(&x["level"])}</b></span> })}
                 {move || (!members.get().is_null()).then(|| view! { <span class="stat"><span>"Members"</span><b>{s(&members.get())}</b></span> })}
             </div>
-            <div><h2>"Security"</h2><Ring pct color="var(--warn)" /></div>
+            <div><h2>"Security"</h2><Ring pct /></div>
         </div></div>
         <h2 style="text-align:center">"Quick systems overview"</h2>
         <div class="cards">
-            {SYSTEMS.iter().map(|(k, t, d)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a></div></div> }).collect_view()}
+            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
         </div>
         <h2 style="margin-top:24px">"Security checks"</h2>
         <p class="err">{move || msg.get()}</p>
