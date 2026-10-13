@@ -63,6 +63,8 @@ impl GuildCfg {
 
 pub struct App {
     pub http: Client,
+    /// Own client and rate-limit bucket for backup restore and panic mode.
+    pub restore_http: Client,
     pub pool: PgPool,
     pub me: Id<UserMarker>,
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
@@ -86,9 +88,10 @@ pub struct PanicRun {
 }
 
 impl App {
-    pub fn new(http: Client, pool: PgPool, me: Id<UserMarker>) -> Self {
+    pub fn new(http: Client, restore_http: Client, pool: PgPool, me: Id<UserMarker>) -> Self {
         Self {
             http,
+            restore_http,
             pool,
             me,
             cfgs: Default::default(),

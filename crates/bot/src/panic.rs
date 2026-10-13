@@ -9,6 +9,7 @@ use twilight_model::id::{marker::GuildMarker, Id};
 
 use crate::{
     app::{App, PanicRun},
+    backup,
     events::{send_log, send_log_pinging},
     lockdown,
 };
@@ -34,8 +35,15 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             // Mod commands are gated by `panic_runs`, and the involved accounts were quarantined
             // by the verdicts that tripped panic mode.
             PanicStep::LockModCommands | PanicStep::QuarantineInvolved => {}
-            // shortcut: backup restore is not built yet, panic mode stops at the lock.
-            PanicStep::LoadLatestBackup | PanicStep::UnlockServer => {}
+            PanicStep::LoadLatestBackup => {
+                let text = match backup::restore_latest(app, gid).await {
+                    Ok(Some(n)) => format!("Panic mode: restored latest backup ({n} changes)"),
+                    Ok(None) => "Panic mode: no backup to restore".to_string(),
+                    Err(e) => format!("Panic mode: backup restore failed: {e}"),
+                };
+                send_log(app, gid.get(), LogKind::Panic, &text).await?;
+            }
+            PanicStep::UnlockServer => {}
         }
     }
     send_log(app, gid.get(), LogKind::Panic, "Panic mode: server locked").await
