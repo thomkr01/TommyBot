@@ -13,7 +13,7 @@ use twilight_model::{
     util::Timestamp,
 };
 
-use crate::{antinuke, app::App, lockdown, prefix::Parsed, targets};
+use crate::{antinuke, app::{now_secs, App}, lockdown, prefix::Parsed, targets};
 
 pub const PREFIX: &str = "w!";
 
@@ -85,6 +85,23 @@ async fn target_above_bot(
     ))
 }
 
+/// On a rate-limit breach the actor is quarantined and the reply says nothing was done.
+async fn rate_limited(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor_id: Id<UserMarker>,
+    actor: &permits::Level,
+    action: &str,
+) -> Result<Option<String>> {
+    if app.command_allowed(actor_id, actor, action) {
+        return Ok(None);
+    }
+    antinuke::quarantine_actor(app, gid, actor_id, "command rate limit exceeded").await?;
+    Ok(Some(format!(
+        "Command rate limit hit for `{action}`: nothing done, you have been quarantined"
+    )))
+}
+
 /// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text; Err only for
 /// infrastructure failures. `points` only matters for warns.
 #[allow(clippy::too_many_arguments)]
@@ -112,11 +129,8 @@ pub async fn apply(
     ) {
         return Ok(format!("Cannot {perm} <@{target}>: {d:?}"));
     }
-    if !app.command_allowed(actor_id, actor, perm) {
-        antinuke::quarantine_actor(app, gid, actor_id, "command rate limit exceeded").await?;
-        return Ok(format!(
-            "Command rate limit hit for `{perm}`: nothing done, you have been quarantined"
-        ));
+    if let Some(msg) = rate_limited(app, gid, actor_id, actor, perm).await? {
+        return Ok(msg);
     }
     let t = target.get();
     let (inverse, points) = match kind {
@@ -261,10 +275,7 @@ pub async fn timeout(
     u: Id<UserMarker>,
     secs: i64,
 ) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let until = Timestamp::from_secs(now + secs)?;
+    let until = Timestamp::from_secs(now_secs() + secs)?;
     http.update_guild_member(g, u)
         .communication_disabled_until(Some(until))
         .await?;
@@ -313,16 +324,10 @@ pub async fn revert_cmd(
     if !actor.has("revert") {
         return Ok("Cannot revert: no permit".into());
     }
-    if !app.command_allowed(actor_id, actor, "revert") {
-        antinuke::quarantine_actor(app, gid, actor_id, "command rate limit exceeded").await?;
-        return Ok(
-            "Command rate limit hit for `revert`: nothing done, you have been quarantined".into(),
-        );
+    if let Some(msg) = rate_limited(app, gid, actor_id, actor, "revert").await? {
+        return Ok(msg);
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let r = antinuke::revert_actor(app, gid, target, now - since_s).await?;
+    let r = antinuke::revert_actor(app, gid, target, now_secs() - since_s).await?;
     let reinvite: Vec<String> = r.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     Ok(format!(
         "Reverted {}/{} actions by <@{target}>. Re-invite: {}",

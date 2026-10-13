@@ -14,7 +14,7 @@ use twilight_model::{
     },
 };
 
-use crate::{app::App, events::send_log};
+use crate::{app::{now_secs, App}, events::send_log};
 
 fn watched(t: A) -> Option<Action> {
     Some(match t {
@@ -206,10 +206,7 @@ async fn quarantine_and_revert(
     why: &str,
 ) -> Result<()> {
     quarantine(app, gid, actor).await?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let sum = revert_actor(app, gid, actor, now - 3600).await?;
+    let sum = revert_actor(app, gid, actor, now_secs() - 3600).await?;
     let case = open_case(app, gid, actor, why).await?;
     let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     let text = format!(
