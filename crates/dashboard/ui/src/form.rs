@@ -174,8 +174,8 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
         // Missing schema/discord data degrades to the raw editor.
         if let Ok(s) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
             if let Some(sec) = s.as_array().and_then(|a| a.iter().find(|x| x["name"] == n.as_str())) {
-                // `part` picks one dashboard page of the section: "" all fields, "general" those without a page, else that page.
-                let keep = |f: &Value| match part.as_str() { "" => true, "general" => f["page"].is_null(), p => f["page"] == p };
+                // `part` picks the dashboard pages of the section: "" all fields, else a comma list where "general" means the fields without a page.
+                let keep = |f: &Value| part.is_empty() || part.split(',').any(|p| if p == "general" { f["page"].is_null() } else { f["page"] == p });
                 fields.set(sec["fields"].as_array().into_iter().flatten().filter(|f| keep(f)).cloned().collect());
                 if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(d); }
             }
