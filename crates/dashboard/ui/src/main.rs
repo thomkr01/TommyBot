@@ -10,13 +10,13 @@ use pages::{Rescue, Revert, Score, Wizard};
 
 /// Sidebar groups, mirroring Wick; only features TommyBot has. Untyped sections stay reachable under "Raw JSON".
 const NAV: &[(&str, &[(&str, &str)])] = &[
-    ("Auto Mod", &[("automod", "General")]),
+    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist")]),
     ("Anti Nuke", &[("antinuke", "General"), ("panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("whitelist", "Whitelist"), ("backups", "Backups"), ("filters", "Filters"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("verification", "Verification"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("appeals", "Appeals"), ("utility", "Utility")]),
+    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("verification", "Verification"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("appeals", "Appeals"), ("utility", "Utility")]),
 ];
-const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown")];
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown")];
 
 fn title(p: &str) -> String {
     let hit = NAV.iter().flat_map(|(g, i)| i.iter().map(move |(k, t)| (*k, *t, *g))).chain(TOP.iter().map(|(k, t)| (*k, *t, ""))).find(|(k, ..)| *k == p);
@@ -195,6 +195,8 @@ fn App() -> impl IntoView {
                                 "wizard" => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 "revert" => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
                                 "rescue" => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
+                                "filters" => view! { <Section guild=g.clone() name="automod".to_string() part="filters" enrolled /> }.into_any(),
+                                "automod" => view! { <Section guild=g.clone() name="automod".to_string() part="general" enrolled /> }.into_any(),
                                 _ => view! { <Section guild=g.clone() name=p.clone() enrolled /> }.into_any(),
                             };
                             view! { <Head guild=g.clone() page=title(p) />{page} }.into_any()

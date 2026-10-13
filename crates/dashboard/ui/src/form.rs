@@ -41,7 +41,8 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
     let path = f["path"].as_str().unwrap_or("").to_string();
     let kind = f["kind"].as_str().unwrap_or("text").to_string();
     let p = StoredValue::new(path.clone());
-    let get = move || get_path(&val.get(), &p.get_value());
+    let default = StoredValue::new(f["default"].clone());
+    let get = move || { let v = get_path(&val.get(), &p.get_value()); if v.is_null() { default.get_value() } else { v } };
     let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
     let input = match kind.as_str() {
         "bool" => view! { <input type="checkbox" class="sw" prop:checked=move || get().as_bool().unwrap_or(false) on:change=move |e| set(json!(event_target_checked(&e))) /> }.into_any(),
@@ -51,7 +52,7 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
                 let x = get().as_f64().unwrap_or(0.0) + d;
                 set(if float { json!(x) } else { json!(x as i64) })
             };
-            let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", "per_minute" => "/min", "per_hour" => "/hour", _ => "" };
+            let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "points", "per_minute" => "/min", "per_hour" => "/hour", _ => "" };
             view! { <div class="step"><button class="ghost" on:click=move |_| step(-1.0)>"-"</button>
                 <input prop:value=move || show(&get()) on:change=move |e| {
                     let s = event_target_value(&e);
@@ -65,8 +66,9 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
         "list" => view! { <input prop:value=move || csv(&get()) on:change=move |e| set(from_csv(&event_target_value(&e))) /> }.into_any(),
         "choice" => {
             let opts = f["options"].as_array().cloned().unwrap_or_default();
+            let none = f["none_label"].as_str().unwrap_or("off").to_string();
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
-                {opts.iter().map(|o| { let v = show(o); let l = if v.is_empty() { "off".to_string() } else { v.clone() };
+                {opts.iter().map(|o| { let v = show(o); let l = if v.is_empty() { none.clone() } else { v.clone() };
                     view! { <option value=v.clone() selected=move || show(&get()) == v>{l}</option> } }).collect_view()}
             </select> }.into_any()
         }
@@ -105,7 +107,7 @@ fn raw_editor(val: RwSignal<Value>, msg: RwSignal<String>) -> impl IntoView {
 
 /// Schema-driven form for the sections the backend describes; raw JSON stays available underneath.
 #[component]
-pub fn Section(guild: String, name: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+pub fn Section(guild: String, name: String, #[prop(default = "")] part: &'static str, enrolled: ReadSignal<bool>) -> impl IntoView {
     let val = RwSignal::new(json!({}));
     let version = RwSignal::new(0i64);
     let dc = RwSignal::new(json!({}));
@@ -123,7 +125,9 @@ pub fn Section(guild: String, name: String, enrolled: ReadSignal<bool>) -> impl 
         // Missing schema/discord data degrades to the raw editor.
         if let Ok(s) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
             if let Some(sec) = s.as_array().and_then(|a| a.iter().find(|x| x["name"] == n.as_str())) {
-                fields.set(sec["fields"].as_array().cloned().unwrap_or_default());
+                // `part` splits one config section over two pages (automod: filters vs the rest).
+                let keep = |f: &Value| { let in_filters = f["path"].as_str().unwrap_or("").starts_with("filters."); part.is_empty() || in_filters == (part == "filters") };
+                fields.set(sec["fields"].as_array().into_iter().flatten().filter(|f| keep(f)).cloned().collect());
                 if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(d); }
             }
         }
@@ -140,7 +144,7 @@ pub fn Section(guild: String, name: String, enrolled: ReadSignal<bool>) -> impl 
                     let mut groups: Vec<(String, Vec<Value>)> = vec![];
                     for f in fields.get() {
                         let p = f["path"].as_str().unwrap_or("");
-                        let g = p.rsplit_once('.').map_or("General".to_string(), |(g, _)| g.replace(['.', '_'], " "));
+                        let g = f["group"].as_str().map_or_else(|| p.rsplit_once('.').map_or("General".to_string(), |(g, _)| g.replace(['.', '_'], " ")), String::from);
                         match groups.iter_mut().find(|(k, _)| *k == g) { Some((_, v)) => v.push(f), None => groups.push((g, vec![f])) }
                     }
                     groups.into_iter().map(|(g, fs)| view! { <div class="card"><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}</div> }).collect_view()

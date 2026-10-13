@@ -31,6 +31,7 @@ pub const SECTIONS: &[&str] = &[
     "warn_points",
     "punish",
     "appeals",
+    "misc",
     "logging",
     "utility",
 ];
