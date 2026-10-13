@@ -153,7 +153,7 @@ pub async fn rollback(State(st): State<AppState>, s: Sess, Path((guild, v)): Pat
 }
 
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is.
-fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
+pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{AntinukeCfg, AutomodCfg, LockdownCfg};
     let v = v.clone();
     let r = match section {

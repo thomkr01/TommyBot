@@ -149,6 +149,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tommybot_antinuke::Action as NukeAction;
     use serde_json::json;
 
     #[test]
