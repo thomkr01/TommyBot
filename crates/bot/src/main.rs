@@ -12,6 +12,7 @@ mod prefix;
 mod scheduler;
 mod slash;
 mod targets;
+mod verify;
 mod welcome;
 
 use anyhow::Result;
@@ -33,6 +34,7 @@ async fn main() -> Result<()> {
         http,
         twilight_http::Client::new(cfg.discord_token.clone()),
         pool,
+        tommybot_automod::discord_api::Api::new(&cfg.discord_token),
         me,
     ));
     tokio::spawn({

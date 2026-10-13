@@ -95,7 +95,11 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
 }
 
 /// Strips the member's roles (saving them) so their permissions are gone.
-async fn quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
+pub(crate) async fn quarantine(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let member = app.http.guild_member(gid, user).await?.model().await?;
     let saved: Vec<i64> = member.roles.iter().map(|r| r.get() as i64).collect();
@@ -412,6 +416,7 @@ mod tests {
             twilight_http::Client::new(String::new()),
             twilight_http::Client::new(String::new()),
             pool,
+            tommybot_automod::discord_api::Api::new(""),
             Id::new(1),
         );
         let gid = Id::new(6_000_000_000 + std::process::id() as u64);
@@ -449,6 +454,7 @@ mod tests {
             twilight_http::Client::new(String::new()),
             twilight_http::Client::new(String::new()),
             pool,
+            tommybot_automod::discord_api::Api::new(""),
             Id::new(1),
         );
         let gid = Id::new(6_100_000_000 + std::process::id() as u64);
