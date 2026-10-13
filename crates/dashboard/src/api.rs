@@ -12,6 +12,24 @@ use serde_json::{json, Value};
 
 pub(crate) type Res = Result<Json<Value>, ApiError>;
 
+/// Permissions granted by the user's permit roles.
+pub(crate) async fn permit_perms(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+) -> Result<Vec<String>, ApiError> {
+    let roles: Vec<i64> = st
+        .discord
+        .member_roles(guild, &s.user_id.to_string())
+        .await?
+        .iter()
+        .filter_map(|r| r.parse().ok())
+        .collect();
+    Ok(sqlx::query_scalar::<_, Vec<String>>(
+        "select p.perms from permits p join permit_roles r on r.permit_id = p.id where p.guild_id = $1 and r.role_id = any($2)")
+        .bind(guild).bind(&roles).fetch_all(&st.db).await?.concat())
+}
+
 /// Re-resolved on every request, including writes (spec 3.1).
 pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Level, ApiError> {
     let flag = |table: &'static str| async move {
@@ -25,19 +43,11 @@ pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Leve
     };
     let discord_owner = st.discord.guild_owner(guild).await? == s.user_id.to_string();
     let (extra_owner, trusted_admin) = (flag("extra_owners").await?, flag("trusted_admins").await?);
-    let mut perms: Vec<String> = vec![];
-    if !(discord_owner || extra_owner || trusted_admin) {
-        let roles: Vec<i64> = st
-            .discord
-            .member_roles(guild, &s.user_id.to_string())
-            .await?
-            .iter()
-            .filter_map(|r| r.parse().ok())
-            .collect();
-        perms = sqlx::query_scalar::<_, Vec<String>>(
-            "select p.perms from permits p join permit_roles r on r.permit_id = p.id where p.guild_id = $1 and r.role_id = any($2)")
-            .bind(guild).bind(&roles).fetch_all(&st.db).await?.concat();
-    }
+    let perms = if discord_owner || extra_owner || trusted_admin {
+        vec![]
+    } else {
+        permit_perms(st, s, guild).await?
+    };
     Ok(access::level(&Facts {
         discord_owner,
         extra_owner,

@@ -58,6 +58,9 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         return Ok(());
     }
     let cfg = app.cfg(gid.get()).await?;
+    if !cfg.antinuke.enabled {
+        return Ok(());
+    }
     if e.action_type == A::MemberRoleUpdate {
         return hold(app, e, actor).await;
     }
@@ -266,19 +269,7 @@ async fn quarantine_and_revert(
         if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
     );
     send_log(app, gid.get(), LogKind::AntiNuke, &text).await?;
-    let cfg = app.cfg(gid.get()).await?.panic.clone();
-    if cfg.executors > 0 {
-        let tripped = {
-            let mut t = app.panic.lock().unwrap();
-            t.window = Duration::from_secs(cfg.window_secs);
-            t.executors = cfg.executors;
-            t.record(gid.get(), actor.get(), Instant::now())
-        };
-        if tripped {
-            crate::panic::start(app, gid, &cfg).await?;
-        }
-    }
-    Ok(())
+    crate::panic::note(app, gid, actor).await
 }
 
 /// A quiet gap this long starts a new nuke case instead of extending the last one.
@@ -360,6 +351,12 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
                     .execute(&app.pool)
                     .await?;
             }
+        }
+        Inverse::Ban { user } => {
+            app.http.create_ban(gid, Id::new(*user)).await?;
+        }
+        Inverse::Timeout { user, until } => {
+            crate::commands::timeout_until(app, gid, Id::new(*user), *until).await?;
         }
         // Discord cannot undo a kick, so this is reported for re-invite, not executed.
         Inverse::Reinvite { .. } => {}

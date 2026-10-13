@@ -1,5 +1,6 @@
 mod antinuke;
 mod app;
+mod appeals;
 mod automod;
 mod backup;
 mod commands;
@@ -52,6 +53,7 @@ async fn main() -> Result<()> {
         tracing::warn!(?e, "restoring panic mode failed");
     }
     tokio::spawn(scheduler::run(app.clone()));
+    tokio::spawn(events::flush_logs(app.clone()));
     tokio::spawn(backup::auto_backup(app.clone()));
 
     if let Err(e) = slash::register(&app).await {

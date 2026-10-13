@@ -6,7 +6,7 @@ use sqlx::types::Json;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tommybot_antinuke::{
-    map_overwrites, plan, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
+    describe, map_overwrites, plan, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
 };
 use twilight_http::Client;
 use twilight_model::{
@@ -170,29 +170,21 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: i64, confirm: bool) -> Re
     }
     let live = snapshot(&app.http, gid).await?;
     let p = plan(&image, &live, &keep, false);
-    let mut n = [0; 3];
-    for k in p
-        .roles
-        .iter()
-        .map(kind_of)
-        .chain(p.channels.iter().map(kind_of))
-    {
-        n[k] += 1;
+    let lines = describe(&p, &live);
+    if lines.is_empty() {
+        return Ok(format!("Backup #{id} already matches the server"));
     }
-    Ok(format!(
-        "Loading backup #{id} would create {}, update {} and delete {} roles/channels. \
-         Run again with confirm:true to apply.",
-        n[0], n[1], n[2]
-    ))
-}
-
-/// Index into the create/update/delete tally.
-fn kind_of<T>(c: &Change<T>) -> usize {
-    match c {
-        Change::Create(_) => 0,
-        Change::Update { .. } => 1,
-        Change::Delete(_) => 2,
+    let shown = lines.len().min(15);
+    let mut text = format!(
+        "Loading backup #{id} would change {} things:\n{}",
+        lines.len(),
+        lines[..shown].join("\n")
+    );
+    if lines.len() > shown {
+        text += &format!("\n...and {} more", lines.len() - shown);
     }
+    text += "\nRun again with confirm:true to apply.";
+    Ok(text)
 }
 
 /// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker) from

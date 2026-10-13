@@ -16,7 +16,7 @@ use twilight_model::{
 use crate::{
     antinuke,
     app::{now_secs, App},
-    backup,
+    appeals, backup,
     hierarchy::top_position,
     lockdown, modcmds,
     prefix::Parsed,
@@ -138,6 +138,9 @@ pub async fn apply_dm(
     }
     let t = target.get();
     let cfg = app.cfg(gid.get()).await?;
+    if matches!(kind, ModKind::Ban | ModKind::Timeout) {
+        appeals::dm_link(app, &cfg.appeals, gid, target).await; // before the ban: a banned user can't be DMed
+    }
     if dm || cfg.misc.always_dm {
         let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());
         reply::dm(app, target, &reply::dm_text(perm, reason, who)).await;

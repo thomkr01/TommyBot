@@ -17,7 +17,7 @@ use tommybot_automod::{
 };
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
-    sections::{AntinukeCfg, AutomodCfg, LockdownCfg, MiscCfg, PanicCfg, WhitelistCfg},
+    sections::{AntinukeCfg, AppealsCfg, AutomodCfg, LockdownCfg, MiscCfg, PanicCfg, WhitelistCfg},
 };
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
@@ -36,6 +36,7 @@ pub struct GuildCfg {
     pub lockdown: LockdownCfg,
     pub panic: PanicCfg,
     pub misc: MiscCfg,
+    pub appeals: AppealsCfg,
     pub whitelist: WhitelistCfg,
     pub verification: VerificationCfg,
 }
@@ -63,6 +64,7 @@ impl GuildCfg {
             lockdown: section(cfg, "lockdown"),
             panic: section(cfg, "panic"),
             misc: section(cfg, "misc"),
+            appeals: section(cfg, "appeals"),
             whitelist: section(cfg, "whitelist"),
             verification: section(cfg, "verification"),
         }

@@ -160,6 +160,15 @@ pub enum Inverse {
     Unquarantine {
         user: u64,
     },
+    /// Undoes an accepted ban appeal.
+    Ban {
+        user: u64,
+    },
+    /// Undoes an accepted timeout appeal; `until` is unix seconds.
+    Timeout {
+        user: u64,
+        until: i64,
+    },
     /// Discord can't undo kicks: reported for re-invite.
     Reinvite {
         user: u64,
@@ -200,6 +209,14 @@ pub fn plan_revert(log: &[LogEntry], actor: u64, since: i64) -> RevertPlan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn appeal_inverses_match_the_json_the_dashboard_stores() {
+        let ban: Inverse = serde_json::from_str(r#"{"op":"ban","user":7}"#).unwrap();
+        assert_eq!(ban, Inverse::Ban { user: 7 });
+        let t: Inverse = serde_json::from_str(r#"{"op":"timeout","user":7,"until":99}"#).unwrap();
+        assert_eq!(t, Inverse::Timeout { user: 7, until: 99 });
+    }
+
     use super::*;
 
     fn engine(pm: u32, ph: u32) -> AntiNuke {

@@ -17,7 +17,7 @@ use twilight_model::{
     gateway::event::Event,
     guild::audit_log::{AuditLogEntry, AuditLogEventType},
     id::{
-        marker::{ChannelMarker, UserMarker},
+        marker::{ChannelMarker, MessageMarker, UserMarker},
         Id,
     },
 };
@@ -26,7 +26,12 @@ use twilight_model::{
 const MAX_CHARS: usize = 2000;
 /// How long a moderator's message delete is kept to name the deleter of a gateway delete.
 const DELETER_WINDOW: Duration = Duration::from_secs(60);
-const MAX_DELETERS: usize = 1000;
+/// Caps the audit delete and removal lists.
+const MAX_RECENT: usize = 1000;
+/// A delete log waits this long so its audit entry, which can arrive after the delete, is seen.
+const HOLD: Duration = Duration::from_secs(10);
+/// A kick or ban audit entry suppresses the member leave for the same user within this window.
+const REMOVAL_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogMessage {
@@ -50,11 +55,23 @@ struct AuditDelete {
     channel: Id<ChannelMarker>,
 }
 
+/// A message delete waiting for its audit entry.
+struct HeldDelete {
+    at: Instant,
+    log: Id<ChannelMarker>,
+    id: Id<MessageMarker>,
+    channel: Id<ChannelMarker>,
+    cached: Option<CachedMessage>,
+}
+
 pub struct Logger {
-    /// The bot's own user id. Its kicks and bans are already logged as member leaves.
+    /// The bot's own user id. Its kicks and bans show only as member leaves.
     me: Id<UserMarker>,
     cache: MessageCache,
     deletes: VecDeque<AuditDelete>,
+    /// Users removed by a staff kick or ban, from the audit log.
+    removals: VecDeque<(Instant, Id<UserMarker>)>,
+    held: VecDeque<HeldDelete>,
 }
 
 impl Logger {
@@ -63,27 +80,77 @@ impl Logger {
             me,
             cache: MessageCache::default(),
             deletes: VecDeque::new(),
+            removals: VecDeque::new(),
+            held: VecDeque::new(),
         }
     }
 
     /// Returns the logs to send for one event. Call it for every event of a guild, even when
     /// logging is off, so the message cache can serve edits and deletes.
     pub fn handle(&mut self, cfg: &LogConfig, event: &Event, now: Instant) -> Vec<LogMessage> {
-        let Some(entry) = self.entry(event, now) else {
-            return Vec::new();
-        };
-        let ignored = entry
-            .channel
-            .is_some_and(|c| cfg.ignored_channels.contains(&c))
-            || entry.user.is_some_and(|u| cfg.ignored_users.contains(&u));
-        match cfg.target(entry.kind) {
-            Some(channel_id) if !ignored => vec![LogMessage {
-                channel_id,
-                kind: entry.kind,
-                content: clamp(entry.text),
-            }],
-            _ => Vec::new(),
+        let mut out = self.flush(now);
+        if let Event::MessageDelete(m) = event {
+            let Some(guild) = m.guild_id else {
+                return out;
+            };
+            let cached = self.cache.remove(guild, m.id);
+            let user = cached.as_ref().map(|c| c.author);
+            if let Some(log) = cfg.target(LogKind::Message) {
+                if !ignored(cfg, Some(m.channel_id), user) {
+                    self.held.push_back(HeldDelete {
+                        at: now,
+                        log,
+                        id: m.id,
+                        channel: m.channel_id,
+                        cached,
+                    });
+                }
+            }
+            return out;
         }
+        let Some(entry) = self.entry(event, now) else {
+            return out;
+        };
+        if let Some(channel_id) = cfg.target(entry.kind) {
+            if !ignored(cfg, entry.channel, entry.user) {
+                out.push(LogMessage {
+                    channel_id,
+                    kind: entry.kind,
+                    content: clamp(entry.text),
+                });
+            }
+        }
+        out
+    }
+
+    /// Returns the held delete logs that are due. Called from `handle`, and by the bot on a timer
+    /// so a quiet guild still gets its logs.
+    pub fn flush(&mut self, now: Instant) -> Vec<LogMessage> {
+        let mut out = Vec::new();
+        while self
+            .held
+            .front()
+            .is_some_and(|h| now.duration_since(h.at) >= HOLD)
+        {
+            let Some(h) = self.held.pop_front() else {
+                break;
+            };
+            let deleter = h
+                .cached
+                .as_ref()
+                .and_then(|c| self.deleter(c.author, h.channel, now));
+            out.push(LogMessage {
+                channel_id: h.log,
+                kind: LogKind::Message,
+                content: clamp(render::message_delete(
+                    h.id,
+                    h.channel,
+                    h.cached.as_ref(),
+                    deleter,
+                )),
+            });
+        }
+        out
     }
 
     fn entry(&mut self, event: &Event, now: Instant) -> Option<Entry> {
@@ -115,18 +182,6 @@ impl Logger {
                     text: render::message_edit(old.as_deref(), msg),
                 })
             }
-            Event::MessageDelete(m) => {
-                let cached = self.cache.remove(m.guild_id?, m.id);
-                let deleter = cached
-                    .as_ref()
-                    .and_then(|c| self.deleter(c.author, m.channel_id, now));
-                Some(Entry {
-                    kind: LogKind::Message,
-                    channel: Some(m.channel_id),
-                    user: cached.as_ref().map(|c| c.author),
-                    text: render::message_delete(m.id, m.channel_id, cached.as_ref(), deleter),
-                })
-            }
             Event::MessageDeleteBulk(m) => Some(Entry {
                 kind: LogKind::Message,
                 channel: Some(m.channel_id),
@@ -139,12 +194,17 @@ impl Logger {
                 user: Some(m.member.user.id),
                 text: render::member_add(&m.member.user),
             }),
-            Event::MemberRemove(m) => Some(Entry {
-                kind: LogKind::Member,
-                channel: None,
-                user: Some(m.user.id),
-                text: render::member_remove(&m.user),
-            }),
+            Event::MemberRemove(m) => {
+                if self.removed_by_audit(m.user.id, now) {
+                    return None;
+                }
+                Some(Entry {
+                    kind: LogKind::Member,
+                    channel: None,
+                    user: Some(m.user.id),
+                    text: render::member_remove(&m.user),
+                })
+            }
             Event::GuildAuditLogEntryCreate(e) => self.audit(&e.0, now),
             _ => None,
         }
@@ -152,12 +212,25 @@ impl Logger {
 
     fn audit(&mut self, e: &AuditLogEntry, now: Instant) -> Option<Entry> {
         match e.action_type {
-            // shortcut: staff-run kicks and bans still log twice (leave plus audit entry), since
-            // Discord sends no audit entry for a plain leave to merge with.
             AuditLogEventType::MemberKick | AuditLogEventType::MemberBanAdd
                 if e.user_id == Some(self.me) =>
             {
                 None
+            }
+            // shortcut: if Discord sends the member leave before this entry, a staff kick or ban logs twice. Needs a live check.
+            AuditLogEventType::MemberKick | AuditLogEventType::MemberBanAdd => {
+                if let Some(user) = e.target_id {
+                    while self
+                        .removals
+                        .front()
+                        .is_some_and(|(at, _)| now.duration_since(*at) >= REMOVAL_WINDOW)
+                        || self.removals.len() >= MAX_RECENT
+                    {
+                        self.removals.pop_front();
+                    }
+                    self.removals.push_back((now, user.cast()));
+                }
+                render::audit(e)
             }
             AuditLogEventType::MessageDelete => {
                 self.remember_delete(e, now);
@@ -177,7 +250,7 @@ impl Logger {
         ) else {
             return;
         };
-        while self.deletes.len() >= MAX_DELETERS
+        while self.deletes.len() >= MAX_RECENT
             || self
                 .deletes
                 .front()
@@ -191,6 +264,12 @@ impl Logger {
             target: target.cast(),
             channel,
         });
+    }
+
+    fn removed_by_audit(&self, user: Id<UserMarker>, now: Instant) -> bool {
+        self.removals
+            .iter()
+            .any(|(at, u)| *u == user && now.duration_since(*at) < REMOVAL_WINDOW)
     }
 
     fn deleter(
@@ -209,6 +288,16 @@ impl Logger {
             })
             .map(|d| d.executor)
     }
+}
+
+/// Whether a log for this channel or user is on an ignore list.
+fn ignored(
+    cfg: &LogConfig,
+    channel: Option<Id<ChannelMarker>>,
+    user: Option<Id<UserMarker>>,
+) -> bool {
+    channel.is_some_and(|c| cfg.ignored_channels.contains(&c))
+        || user.is_some_and(|u| cfg.ignored_users.contains(&u))
 }
 
 /// Keeps the first `MAX_CHARS` characters.
@@ -306,6 +395,58 @@ mod tests {
             logger.deleter(Id::new(20), Id::new(30), now + DELETER_WINDOW),
             None
         );
+    }
+
+    fn user(id: u64) -> twilight_model::user::User {
+        serde_json::from_value(serde_json::json!({
+            "id": id.to_string(), "username": "u", "discriminator": 0, "avatar": null, "bot": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn staff_kick_logs_once_as_audit_entry() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(5)),
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let mut logger = Logger::new(Id::new(1));
+        assert_eq!(logger.handle(&cfg, &audit_event(20, 10), now).len(), 1);
+        let leave = Event::MemberRemove(twilight_model::gateway::payload::incoming::MemberRemove {
+            guild_id: Id::new(9),
+            user: user(20),
+        });
+        assert!(logger.handle(&cfg, &leave, now).is_empty());
+    }
+
+    #[test]
+    fn delete_waits_for_late_audit_entry() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(5)),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut logger = Logger::new(Id::new(1));
+        logger.cache.insert(
+            Id::new(9),
+            Id::new(7),
+            CachedMessage::new(Id::new(20), "hi".into(), t0),
+            t0,
+        );
+        let delete =
+            Event::MessageDelete(twilight_model::gateway::payload::incoming::MessageDelete {
+                channel_id: Id::new(30),
+                guild_id: Some(Id::new(9)),
+                id: Id::new(7),
+            });
+        assert!(logger.handle(&cfg, &delete, t0).is_empty());
+        let late = t0 + Duration::from_secs(3);
+        assert!(logger.handle(&cfg, &audit_event(72, 10), late).is_empty());
+        let out = logger.flush(t0 + HOLD);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].content.contains("**Message deleted** by <@10>"));
+        assert!(logger.flush(t0 + HOLD).is_empty());
     }
 
     #[test]

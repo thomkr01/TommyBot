@@ -86,6 +86,38 @@ fn f(path: &str, kind: &str) -> Value {
     json!({"path": path, "label": path.replace(['.', '_'], " "), "kind": kind})
 }
 
+/// `f` placed in a named card instead of the one its path prefix would give.
+fn fg(group: &str, path: &str, kind: &str) -> Value {
+    let mut v = f(path, kind);
+    v["group"] = json!(group);
+    v
+}
+
+/// Shows `default` for a field the stored config leaves out (matches the Rust `Default`).
+fn dv(mut v: Value, default: impl Into<Value>) -> Value {
+    v["default"] = default.into();
+    v
+}
+
+const FILTERS: &[&str] = &[
+    "regular",
+    "similar",
+    "emojis",
+    "newlines",
+    "chars_upper",
+    "chars_lower",
+    "zalgo",
+    "suspicion",
+    "inactive_channel",
+    "invites",
+    "bad_sites",
+    "scam_links",
+    "nsfw_links",
+    "links",
+    "words.filter",
+];
+const FILTER_ACTIONS: [&str; 5] = ["delete", "warn", "timeout", "kick", "ban"];
+
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
 fn schema() -> Vec<Value> {
     let mut log = vec![f("fallback", "channel"), f("ignored_channels", "channels")];
@@ -112,6 +144,27 @@ fn schema() -> Vec<Value> {
             },
         )
     }));
+    for k in FILTERS {
+        let g = k.trim_end_matches(".filter").replace('_', " ");
+        let mut action = fg(&g, &format!("filters.{k}.action"), "choice");
+        action["options"] = json!(FILTER_ACTIONS.iter().chain(&[""]).collect::<Vec<_>>());
+        action["none_label"] = json!("strike system");
+        auto.extend([
+            dv(fg(&g, &format!("filters.{k}.enabled"), "bool"), true),
+            action,
+            fg(&g, &format!("filters.{k}.duration_secs"), "int"),
+        ]);
+    }
+    auto.extend([
+        fg("nsfw links", "filters.nsfw_crawl_shorteners", "bool"),
+        fg("words", "filters.words.strict", "list"),
+        fg("words", "filters.words.wildcard", "list"),
+        fg("words", "filters.words.premade_profane", "bool"),
+        fg("words", "filters.words.premade_vulgar", "bool"),
+        fg("words", "filters.words.premade_racist", "bool"),
+        fg("words", "filters.words.use_discord_automod", "bool"),
+        fg("links", "filters.blacklisted_domains", "list"),
+    ]);
     auto.extend([
         f("strike.cap", "int"),
         f("strike.strike_timeout_ms", "int"),
@@ -141,11 +194,48 @@ fn schema() -> Vec<Value> {
     ];
     let panic = vec![
         f("executors", "int"),
-        f("window_secs", "int"),
-        f("duration_secs", "int"),
+        dv(f("window_secs", "int"), 600),
+        dv(f("duration_secs", "int"), 600),
         f("lock_mod_commands", "bool"),
         f("unlock_when_ending", "bool"),
         f("warned_roles", "roles"),
+        f("heat_algorithm", "bool"),
+        f("whitelisted_categories", "channels"),
+    ];
+    let whitelist = vec![
+        f("users", "list"),
+        f("roles", "roles"),
+        f("channels", "channels"),
+        f("categories", "channels"),
+        f("webhooks", "list"),
+    ];
+    let misc = vec![
+        dv(fg("General", "prefix", "text"), "w!"),
+        dv(fg("General", "use_slash", "bool"), true),
+        fg("General", "compact_replies", "bool"),
+        fg("General", "delete_replies_secs", "int"),
+        fg("General", "enforce_quarantine_perms", "bool"),
+        fg("General", "ignore_no_permit", "bool"),
+        fg("Statics", "modlogs_channel", "channel"),
+        fg("Moderation commands", "confirm", "bool"),
+        fg("Moderation commands", "always_dm", "bool"),
+        fg("Moderation commands", "delete_invocation", "bool"),
+        fg("Moderation commands", "hide_staff_in_dms", "bool"),
+        dv(
+            fg("Moderation commands", "default_timeout_secs", "int"),
+            600,
+        ),
+        dv(fg("Moderation commands", "ban_purge_days", "int"), 0),
+        dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true),
+        fg("Auto moderation", "purge_last_100", "bool"),
+        dv(fg("Auto moderation", "staff_only_permitted", "bool"), true),
+        dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true),
+        dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
+    ];
+    let appeals = vec![
+        f("enabled", "bool"),
+        f("channel", "channel"),
+        f("fields", "form"),
     ];
     [
         ("logging", "Logging", log),
@@ -155,6 +245,9 @@ fn schema() -> Vec<Value> {
         ("joinraid", "Join raid", raid),
         ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
         ("panic", "Panic mode", panic),
+        ("appeals", "Appeals", appeals),
+        ("whitelist", "Whitelist", whitelist),
+        ("misc", "Miscellaneous", misc),
     ]
     .into_iter()
     .map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields}))
@@ -283,9 +376,16 @@ mod tests {
                     "int" => json!(5),
                     "float" => json!(1.5),
                     "text" => json!("x"),
-                    "list" => json!(["a"]),
-                    "choice" => fd["options"][0].clone(),
+                    "list" => json!(["1"]),
+                    "choice" => fd["options"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|o| o.as_str() != Some(""))
+                        .unwrap()
+                        .clone(),
                     "channel" | "role" => json!("1"),
+                    "form" => json!([{"label": "x"}]),
                     _ => json!(["1"]),
                 };
                 let mut cur = &mut obj;
