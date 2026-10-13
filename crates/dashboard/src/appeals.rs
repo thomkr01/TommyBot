@@ -228,20 +228,48 @@ async fn decide(
     let (user, kind): (i64, String) = sqlx::query_as("select user_id, kind from appeals where id = $1 and guild_id = $2 and status = 'open' for update")
         .bind(id).bind(guild).fetch_optional(&mut *tx).await?.ok_or(ApiError::NotFound)?;
     if b.accept {
-        let (method, path, body) = if kind == "ban" {
-            (Method::DELETE, format!("/guilds/{guild}/bans/{user}"), None)
+        // Lifting a punishment takes the permit for it, not just dashboard_edit (spec 2).
+        let perm = if kind == "ban" { "unban" } else { "timeout" };
+        if api::level_of(&st, &s, guild).await? < Level::Admin
+            && !api::permit_perms(&st, &s, guild)
+                .await?
+                .iter()
+                .any(|p| p == perm)
+        {
+            return Err(ApiError::Forbidden(
+                "accepting needs the unban or timeout permit",
+            ));
+        }
+        let inverse = if kind == "ban" {
+            lift(
+                &st,
+                Method::DELETE,
+                format!("/guilds/{guild}/bans/{user}"),
+                None,
+            )
+            .await?;
+            Some(json!({"op": "ban", "user": user}))
         } else {
-            (
+            let path = format!("/guilds/{guild}/members/{user}");
+            let until = match st.discord.call(Method::GET, &path, None).await {
+                Ok(m) => m["communication_disabled_until"]
+                    .as_str()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.timestamp()),
+                Err(e) if not_found(&e) => None,
+                Err(e) => return Err(e.into()),
+            };
+            lift(
+                &st,
                 Method::PATCH,
-                format!("/guilds/{guild}/members/{user}"),
+                path,
                 Some(json!({"communication_disabled_until": null})),
             )
+            .await?;
+            until.map(|until| json!({"op": "timeout", "user": user, "until": until}))
         };
-        match st.discord.call(method, &path, body).await {
-            Ok(_) => {}
-            Err(e) if not_found(&e) => {} // already lifted by hand
-            Err(e) => return Err(e.into()),
-        }
+        sqlx::query("insert into action_log (guild_id, actor_id, action, target_id, inverse) values ($1,$2,$3,$4,$5)")
+            .bind(guild).bind(s.user_id).bind(if kind == "ban" { "unban" } else { "untimeout" }).bind(user).bind(inverse).execute(&mut *tx).await?;
     }
     sqlx::query("update appeals set status = $2, decided_by = $3 where id = $1")
         .bind(id)
@@ -254,6 +282,20 @@ async fn decide(
     }
     tx.commit().await?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// Runs a Discord call that lifts a punishment; a 404 means it was already lifted by hand.
+async fn lift(
+    st: &AppState,
+    method: Method,
+    path: String,
+    body: Option<Value>,
+) -> Result<(), ApiError> {
+    match st.discord.call(method, &path, body).await {
+        Ok(_) => Ok(()),
+        Err(e) if not_found(&e) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn add_blacklist(

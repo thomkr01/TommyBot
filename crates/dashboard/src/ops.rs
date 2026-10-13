@@ -266,6 +266,14 @@ struct RevertBody {
 async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<()> {
     let (m, path, body) = match inv {
         Inverse::Unban { user } => (Method::DELETE, format!("/guilds/{guild}/bans/{user}"), None),
+        Inverse::Ban { user } => (Method::PUT, format!("/guilds/{guild}/bans/{user}"), None),
+        Inverse::Timeout { user, until } => (
+            Method::PATCH,
+            format!("/guilds/{guild}/members/{user}"),
+            Some(
+                json!({"communication_disabled_until": chrono::DateTime::from_timestamp(*until, 0).map(|t| t.to_rfc3339())}),
+            ),
+        ),
         Inverse::DeleteChannel { id } => (Method::DELETE, format!("/channels/{id}"), None),
         Inverse::DeleteRole { id } => (Method::DELETE, format!("/guilds/{guild}/roles/{id}"), None),
         Inverse::DeleteWebhook { id } => (Method::DELETE, format!("/webhooks/{id}"), None),
