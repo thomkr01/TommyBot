@@ -1,5 +1,5 @@
 //! Moderation commands beyond ban/kick/timeout/warn: unban, untimeout, unwarn, hackban,
-//! quarantine, purge, slowmode and case viewing/editing. One implementation, prefix and slash parsers.
+//! quarantine, purge, slowmode, verify, sanitize and case viewing/editing. One implementation, prefix and slash parsers.
 use anyhow::Result;
 use serde_json::{json, Value};
 use tommybot_antinuke::Inverse;
@@ -66,6 +66,12 @@ pub enum ModCmd {
         case: i32,
         reason: String,
     },
+    Verify {
+        user: u64,
+    },
+    Sanitize {
+        user: u64,
+    },
 }
 
 /// Numbers below this are case numbers / counts, not snowflakes.
@@ -86,6 +92,8 @@ impl ModCmd {
             Self::Purge { .. } => "purge",
             Self::Slowmode { .. } => "slowmode",
             Self::CasesView { .. } | Self::CasesEdit { .. } => "cases",
+            Self::Verify { .. } => "verify",
+            Self::Sanitize { .. } => "sanitize",
         }
     }
 
@@ -96,7 +104,8 @@ impl ModCmd {
             | Self::Hackban { user }
             | Self::Untimeout { user }
             | Self::Quarantine { user }
-            | Self::Unquarantine { user } => Some(user),
+            | Self::Unquarantine { user }
+            | Self::Sanitize { user } => Some(user),
             _ => None,
         }
     }
@@ -119,6 +128,8 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
         "unwarn" => ModCmd::Unwarn { case: case()? },
         "quarantine" => ModCmd::Quarantine { user: need_user()? },
         "unquarantine" => ModCmd::Unquarantine { user: need_user()? },
+        "verify" => ModCmd::Verify { user: need_user()? },
+        "sanitize" | "dehoist" => ModCmd::Sanitize { user: need_user()? },
         "purge" | "clear" => ModCmd::Purge {
             count: small
                 .filter(|n| (1..=PURGE_MAX as u64).contains(n))
@@ -303,6 +314,35 @@ pub async fn run(
                 let text = format!("Released <@{user}> from quarantine");
                 ("unquarantine", user, None, None, text)
             }
+            ModCmd::Verify { user } => {
+                let cfg = app.cfg(gid.get()).await?;
+                let roles = &cfg.verification.roles;
+                if roles.is_empty() {
+                    return Ok("Set the verification roles on the dashboard first".into());
+                }
+                crate::verify::grant(app, gid, Id::new(user), roles).await?;
+                ("verify", user, None, None, format!("Verified <@{user}>"))
+            }
+            ModCmd::Sanitize { user } => {
+                let m = app
+                    .http
+                    .guild_member(gid, Id::new(user))
+                    .await?
+                    .model()
+                    .await?;
+                let name = m.nick.or(m.user.global_name).unwrap_or(m.user.name);
+                let clean = sanitized(&name);
+                if clean == name {
+                    return Ok(format!("<@{user}> already has a clean name"));
+                }
+                app.http
+                    .update_guild_member(gid, Id::new(user))
+                    .nick(Some(&clean))
+                    .await?;
+                let note = format!("`{name}` -> `{clean}`");
+                let text = format!("Renamed <@{user}> to `{clean}`");
+                ("sanitize", user, None, Some(note), text)
+            }
             ModCmd::Purge { count, user } => {
                 let n = purge(app, channel, count, user).await?;
                 if n == 0 {
@@ -352,6 +392,22 @@ pub async fn run(
     )
     .await?;
     Ok(format!("Case #{case_no}: {reply}"))
+}
+
+/// Name without fancy unicode or leading hoist characters (`!`, `.`, digits...).
+fn sanitized(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .collect();
+    let s = ascii
+        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+        .trim_end();
+    if s.is_empty() {
+        "Moderated Nickname".into()
+    } else {
+        s.into()
+    }
 }
 
 /// (message id, author id, created unix secs), newest first.
@@ -439,6 +495,8 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
         "unwarn" => ModCmd::Unwarn { case: case(o)? },
         "quarantine" => ModCmd::Quarantine { user: u()? },
         "unquarantine" => ModCmd::Unquarantine { user: u()? },
+        "verify" => ModCmd::Verify { user: u()? },
+        "sanitize" => ModCmd::Sanitize { user: u()? },
         "purge" => ModCmd::Purge {
             count: int(o, "count")
                 .ok_or("missing count")?
@@ -508,6 +566,14 @@ pub fn definitions() -> Vec<Command> {
             .option(reason())
             .build(),
         chat("unquarantine", "Restore a quarantined member's roles")
+            .option(user("Member"))
+            .option(reason())
+            .build(),
+        chat("verify", "Manually verify a member")
+            .option(user("Member"))
+            .option(reason())
+            .build(),
+        chat("sanitize", "Clean up a member's hoisted or unreadable name")
             .option(user("Member"))
             .option(reason())
             .build(),
@@ -602,6 +668,18 @@ mod tests {
         let msgs = [(5, 1, now), (4, 2, now - 5), (3, 1, now - 10), (2, 1, old)];
         assert_eq!(purge_ids(&msgs, 2, None, now), vec![5, 4]);
         assert_eq!(purge_ids(&msgs, 10, Some(1), now), vec![5, 3]); // old one skipped
+    }
+
+    #[test]
+    fn sanitizes_names() {
+        assert_eq!(sanitized("!!!Bob"), "Bob");
+        assert_eq!(sanitized("  .1ｂｏｂ the Builder"), "the Builder");
+        assert_eq!(sanitized("Ann-Marie 2"), "Ann-Marie 2");
+        assert_eq!(sanitized("⚡⚡"), "Moderated Nickname");
+        assert_eq!(
+            pf("dehoist 5000000", None),
+            Ok(ModCmd::Sanitize { user: 5_000_000 })
+        );
     }
 
     #[test]

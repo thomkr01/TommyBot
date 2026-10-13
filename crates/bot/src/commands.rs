@@ -1,7 +1,7 @@
 //! Prefix mod commands: permit check -> action -> case (+ undo data). ban/kick/timeout/warn.
 use anyhow::Result;
 use serde_json::json;
-use tommybot_core::{cases, jobs, permits, warn};
+use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
 use twilight_http::Client;
 use twilight_model::{
     channel::message::AllowedMentions,
@@ -193,8 +193,8 @@ pub async fn apply_dm(
         reason,
         actor_id.get(),
     );
-    if kind == ModKind::Warn && cfg.misc.auto_warn_actions {
-        if let Some(extra) = apply_warn_thresholds(app, gid.get() as i64, t as i64, points).await? {
+    if kind == ModKind::Warn {
+        if let Some(extra) = apply_warn_actions(app, &cfg.misc, gid, target, points).await? {
             text += &format!("\n{extra}");
         }
     }
@@ -225,7 +225,7 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
             return say(app, msg, &text).await;
         }
         "unban" | "hackban" | "untimeout" | "unmute" | "unwarn" | "quarantine" | "unquarantine"
-        | "purge" | "clear" | "slowmode" | "cases" | "case" => {
+        | "purge" | "clear" | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "dehoist" => {
             return modcmds::run_prefix(app, msg, p).await
         }
         _ => return Ok(()),
@@ -277,35 +277,22 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
     Ok(())
 }
 
-async fn apply_warn_thresholds(
+/// Runs the misc config's custom warn action once a warn of `added` points crosses its threshold.
+pub(crate) async fn apply_warn_actions(
     app: &App,
-    gid: i64,
-    uid: i64,
+    misc: &MiscCfg,
+    g: Id<GuildMarker>,
+    u: Id<UserMarker>,
     added: i32,
 ) -> Result<Option<String>> {
-    let rows: Vec<(i32, String, Option<i64>)> = sqlx::query_as(
-        "SELECT points, action, duration_s FROM warn_thresholds WHERE guild_id = $1",
-    )
-    .bind(gid)
-    .fetch_all(&app.pool)
-    .await?;
-    let ts: Vec<warn::Threshold> = rows
-        .into_iter()
-        .filter_map(|(points, a, d)| {
-            let action = match a.as_str() {
-                "timeout" => warn::Action::Timeout { secs: d? },
-                "kick" => warn::Action::Kick,
-                "ban" => warn::Action::Ban,
-                _ => return None,
-            };
-            Some(warn::Threshold { points, action })
-        })
-        .collect();
+    if !misc.auto_warn_actions {
+        return Ok(None);
+    }
+    let (gid, uid) = (g.get() as i64, u.get() as i64);
     let after = cases::warn_points(&app.pool, gid, uid).await?;
-    let Some(t) = warn::crossed(&ts, after - added, after) else {
+    let Some(t) = warn::crossed(&misc.warn_actions, after - added, after) else {
         return Ok(None);
     };
-    let (g, u) = (Id::new(gid as u64), Id::<UserMarker>::new(uid as u64));
     match t.action {
         warn::Action::Ban => {
             app.http.create_ban(g, u).await?;

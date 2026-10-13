@@ -114,6 +114,22 @@ const fn flag(key: &'static str, label: &'static str, help: &'static str) -> Per
     }
 }
 
+/// Shown locked until the bot has the feature behind it (reports, mod notes, lock-updates channel).
+const fn planned(
+    key: &'static str,
+    label: &'static str,
+    help: &'static str,
+    flag: bool,
+) -> PermDef {
+    PermDef {
+        key,
+        label,
+        help,
+        flag,
+        locked: true,
+    }
+}
+
 /// Everything a permit can hold, in the order the editor shows it (Wick's five-section layout).
 pub const CATALOG: &[PermSection] = &[
     PermSection {
@@ -147,10 +163,11 @@ pub const CATALOG: &[PermSection] = &[
                 "Dashboard Edit",
                 "Change settings on this server's dashboard",
             ),
-            flag(
+            planned(
                 "reports",
                 "Report Immunity",
                 "Safe from being reported by server members",
+                true,
             ),
         ],
     },
@@ -172,13 +189,14 @@ pub const CATALOG: &[PermSection] = &[
             perm("purge", "Purge Command", ""),
             perm("verify", "Verify Command", "Manually verify members"),
             perm("sanitize", "Sanitize Command", "Sanitize/Dehoist"),
-            perm("reports", "Manage Reports", ""),
+            planned("reports", "Manage Reports", "", false),
             perm("backups", "Backups", "Take/Load/Delete backups"),
-            perm("notes_view", "View Notes", ""),
-            perm(
+            planned("notes_view", "View Notes", "", false),
+            planned(
                 "notes_manage",
                 "Manage Notes",
                 "View/edit/remove/sweep notes",
+                false,
             ),
             perm("appeals", "Review Appeals", ""),
             perm("revert", "Revert Center", "Undo anti-nuke actions"),
@@ -199,10 +217,11 @@ pub const CATALOG: &[PermSection] = &[
                 "Lock Server Joins",
                 "Kick/Ban new members joining",
             ),
-            perm(
+            planned(
                 "lock_updates",
                 "Make Lockdown Updates",
                 "Make updates in the lock-updates channel",
+                false,
             ),
         ],
     },
@@ -227,8 +246,15 @@ pub const CATALOG: &[PermSection] = &[
     },
 ];
 
-/// Keys older setups may already hold; saving them stays allowed.
-const LEGACY: &[&str] = &["lockdown", "antinuke"];
+/// Keys older setups may already hold (including the `planned` ones); saving them stays allowed.
+const LEGACY: &[&str] = &[
+    "lockdown",
+    "antinuke",
+    "reports",
+    "notes_view",
+    "notes_manage",
+    "lock_updates",
+];
 
 /// Whether `key` may be stored as a perm (`flag` false) or a whitelist flag (`flag` true).
 pub fn known(key: &str, flag: bool) -> bool {
@@ -375,7 +401,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for d in CATALOG.iter().flat_map(|s| s.items) {
             assert!(seen.insert((d.key, d.flag)), "duplicate {}", d.key);
-            assert_eq!(known(d.key, d.flag), !d.locked);
+            assert_eq!(known(d.key, d.flag), d.key != "owner");
         }
         assert!(known("antinuke", true) && !known("made_up", false) && !known("ban", true));
     }

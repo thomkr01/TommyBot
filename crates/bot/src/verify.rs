@@ -168,7 +168,7 @@ fn ephemeral(kind: InteractionResponseType, content: Option<&str>) -> Interactio
     }
 }
 
-async fn grant(
+pub(crate) async fn grant(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
