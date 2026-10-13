@@ -3,6 +3,7 @@ mod app;
 mod automod;
 mod commands;
 mod events;
+mod hierarchy;
 mod lockdown;
 mod panic;
 mod prefix;

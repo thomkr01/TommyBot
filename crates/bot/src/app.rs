@@ -76,6 +76,7 @@ pub struct App {
     pub nukes: Mutex<HashMap<u64, (NukeCase, Instant)>>,
     pub panic: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
+    pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
 }
 
 /// Active panic mode for one guild. shortcut: kept in memory, a restart ends panic mode early.
@@ -101,6 +102,7 @@ impl App {
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
             panic_runs: Default::default(),
+            guilds: Default::default(),
         }
     }
 
@@ -141,7 +143,7 @@ impl App {
 
     /// Owner, Extra Owner or Trusted Admin: untouchable by every bot system.
     pub async fn is_immune(&self, guild: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
-        let owner = self.http.guild(guild).await?.model().await?.owner_id;
+        let owner = self.guild_info(guild).await?.owner;
         Ok(self.level(guild, owner, user).await?.immune())
     }
 
@@ -152,7 +154,7 @@ impl App {
         user: Id<UserMarker>,
         flag: &str,
     ) -> Result<bool> {
-        let owner = self.http.guild(guild).await?.model().await?.owner_id;
+        let owner = self.guild_info(guild).await?.owner;
         Ok(self.level(guild, owner, user).await?.whitelisted(flag))
     }
 

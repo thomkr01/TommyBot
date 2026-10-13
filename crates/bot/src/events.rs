@@ -105,6 +105,11 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             automod::on_message(app, m).await?;
         }
+        Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
+        Event::RoleUpdate(r) => app.invalidate_guild(r.guild_id),
+        Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
+        Event::GuildUpdate(g) => app.invalidate_guild(g.id),
+        Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
         Event::InteractionCreate(i) => slash::handle(app, &i.0).await?,
         Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,

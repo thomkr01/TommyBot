@@ -217,7 +217,7 @@ async fn run(
         Ok(c) => c,
         Err(e) => return Ok(e),
     };
-    let owner = app.http.guild(gid).await?.model().await?.owner_id;
+    let owner = app.guild_info(gid).await?.owner;
     let actor = app.level(gid, owner, actor_id).await?;
     match cmd {
         Cmd::Mod {

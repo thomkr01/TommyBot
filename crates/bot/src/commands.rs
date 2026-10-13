@@ -5,7 +5,6 @@ use tommybot_core::{cases, permits, warn};
 use twilight_http::Client;
 use twilight_model::{
     gateway::payload::incoming::MessageCreate,
-    guild::Role,
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -16,6 +15,7 @@ use twilight_model::{
 use crate::{
     antinuke,
     app::{now_secs, App},
+    hierarchy::top_position,
     lockdown,
     prefix::Parsed,
     targets,
@@ -48,47 +48,16 @@ fn above_bot(target_top: Option<i64>, bot_top: i64, target_is_owner: bool) -> bo
     target_is_owner || target_top.is_some_and(|t| t >= bot_top)
 }
 
-/// Highest role position of a member; None when they are not in the server.
-async fn top_position(
-    app: &App,
-    gid: Id<GuildMarker>,
-    roles: &[Role],
-    user: Id<UserMarker>,
-) -> Option<i64> {
-    let m = app
-        .http
-        .guild_member(gid, user)
-        .await
-        .ok()?
-        .model()
-        .await
-        .ok()?;
-    Some(
-        roles
-            .iter()
-            .filter(|r| m.roles.contains(&r.id))
-            .map(|r| r.position)
-            .max()
-            .unwrap_or(0),
-    )
-}
-
-async fn target_above_bot(
-    app: &App,
-    gid: Id<GuildMarker>,
-    owner: Id<UserMarker>,
-    target: Id<UserMarker>,
-) -> Result<bool> {
-    if target == owner {
+async fn target_above_bot(app: &App, gid: Id<GuildMarker>, target: Id<UserMarker>) -> Result<bool> {
+    let info = app.guild_info(gid).await?;
+    if target == info.owner {
         return Ok(true);
     }
-    let roles = app.http.roles(gid).await?.models().await?;
-    let bot = top_position(app, gid, &roles, app.me).await.unwrap_or(0);
-    Ok(above_bot(
-        top_position(app, gid, &roles, target).await,
-        bot,
-        false,
-    ))
+    let top = match app.http.guild_member(gid, target).await {
+        Ok(m) => Some(top_position(&info.roles, &m.model().await?.roles)),
+        Err(_) => None, // not in the server
+    };
+    Ok(above_bot(top, info.bot_top, false))
 }
 
 /// Refuses while panic mode locks mod commands; on a rate-limit breach the actor is quarantined.
@@ -127,7 +96,7 @@ pub async fn apply(
 ) -> Result<String> {
     let perm = kind.name();
     let target_level = app.level(gid, owner, target).await?;
-    let above = kind != ModKind::Warn && target_above_bot(app, gid, owner, target).await?;
+    let above = kind != ModKind::Warn && target_above_bot(app, gid, target).await?;
     if let Err(d) = permits::check(
         actor,
         perm,
@@ -191,14 +160,14 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
         "warn" => ModKind::Warn,
         "timeout" | "mute" => ModKind::Timeout,
         "lock" | "unlock" => {
-            let owner = app.http.guild(gid).await?.model().await?.owner_id;
+            let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;
             let text = lockdown_cmd(app, gid, &actor, p.command == "unlock").await?;
             return say(app, msg, &text).await;
         }
         _ => return Ok(()),
     };
-    let owner = app.http.guild(gid).await?.model().await?.owner_id;
+    let owner = app.guild_info(gid).await?.owner;
     let mut targets: Vec<Id<UserMarker>> = p.targets.iter().map(|t| Id::new(*t)).collect();
     for n in &p.names {
         match targets::resolve(app, gid, n).await? {
