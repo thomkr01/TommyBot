@@ -62,21 +62,13 @@ pub async fn take_lock(db: &PgPool, guild: u64) -> Result<Option<Snapshot>> {
 }
 
 /// Queue a restart-safe timer, e.g. kind `lock_expiry`, `raid_end`, `panic_end`.
-pub async fn schedule(
-    db: &PgPool,
-    guild: u64,
-    kind: &str,
-    payload: serde_json::Value,
-    run_at: DateTime<Utc>,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO scheduled_jobs (guild_id, kind, payload, run_at) VALUES ($1,$2,$3,$4)",
-    )
-    .bind(guild as i64)
-    .bind(kind)
-    .bind(payload)
-    .bind(run_at)
-    .execute(db)
-    .await?;
+pub async fn schedule(db: &PgPool, guild: u64, kind: &str, payload: serde_json::Value, run_at: DateTime<Utc>) -> Result<()> {
+    sqlx::query("INSERT INTO scheduled_jobs (guild_id, kind, payload, run_at) VALUES ($1,$2,$3,$4)")
+        .bind(guild as i64)
+        .bind(kind)
+        .bind(payload)
+        .bind(run_at)
+        .execute(db)
+        .await?;
     Ok(())
 }

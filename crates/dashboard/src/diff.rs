@@ -25,11 +25,7 @@ fn walk(path: &str, a: Option<&Value>, b: Option<&Value>, out: &mut Vec<Change>)
                 walk(&format!("{path}/{k}"), x.get(k), y.get(k), out);
             }
         }
-        (x, y) if x != y => out.push(Change {
-            path: path.into(),
-            old: x.cloned(),
-            new: y.cloned(),
-        }),
+        (x, y) if x != y => out.push(Change { path: path.into(), old: x.cloned(), new: y.cloned() }),
         _ => {}
     }
 }
@@ -41,10 +37,7 @@ mod tests {
 
     #[test]
     fn nested_changes() {
-        let d = diff(
-            &json!({"a": {"x": 1, "y": 2}, "b": [1]}),
-            &json!({"a": {"x": 1, "y": 3, "z": 0}, "b": [1, 2]}),
-        );
+        let d = diff(&json!({"a": {"x": 1, "y": 2}, "b": [1]}), &json!({"a": {"x": 1, "y": 3, "z": 0}, "b": [1, 2]}));
         let paths: Vec<_> = d.iter().map(|c| c.path.as_str()).collect();
         assert_eq!(paths, ["/a/y", "/a/z", "/b"]);
     }

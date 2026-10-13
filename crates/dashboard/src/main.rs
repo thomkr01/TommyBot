@@ -43,23 +43,15 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (code, body) = match self {
-            ApiError::Unauthorized => {
-                (StatusCode::UNAUTHORIZED, json!({"error": "login required"}))
-            }
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, json!({"error": "login required"})),
             ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, json!({"error": m})),
             ApiError::StepUp => (StatusCode::FORBIDDEN, json!({"error": "step_up_required"})),
             ApiError::NotFound => (StatusCode::NOT_FOUND, json!({"error": "not found"})),
-            ApiError::Conflict(v) => (
-                StatusCode::CONFLICT,
-                json!({"error": "config changed, reload", "current_version": v}),
-            ),
+            ApiError::Conflict(v) => (StatusCode::CONFLICT, json!({"error": "config changed, reload", "current_version": v})),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, json!({"error": m})),
             ApiError::Internal(e) => {
                 tracing::error!("{e:#}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": "internal error"}),
-                )
+                (StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "internal error"}))
             }
         };
         (code, Json(body)).into_response()
@@ -80,25 +72,15 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .route(&format!("{g}/config/{{section}}"), put(api::put_section))
         .route(&format!("{g}/permits"), put(api::put_permits))
         .route(&format!("{g}/history"), get(api::history))
-        .route(
-            &format!("{g}/history/{{from}}/{{to}}"),
-            get(api::diff_versions),
-        )
-        .route(
-            &format!("{g}/history/{{version}}/rollback"),
-            post(api::rollback),
-        )
-        .fallback_service(
-            ServeDir::new(dist).fallback(ServeFile::new(format!("{dist}/index.html"))),
-        )
+        .route(&format!("{g}/history/{{from}}/{{to}}"), get(api::diff_versions))
+        .route(&format!("{g}/history/{{version}}/rollback"), post(api::rollback))
+        .fallback_service(ServeDir::new(dist).fallback(ServeFile::new(format!("{dist}/index.html"))))
         .with_state(st)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     let env = |k: &str| std::env::var(k).map_err(|_| anyhow::anyhow!("{k} not set"));
     let base = env("DASHBOARD_URL")?;
     let db = tommybot_core::db::connect(&env("DATABASE_URL")?).await?;
@@ -113,14 +95,8 @@ async fn main() -> anyhow::Result<()> {
             redirect_uri: format!("{}/auth/callback", base.trim_end_matches('/')),
         },
     };
-    let app = router(
-        st,
-        &std::env::var("DASHBOARD_DIST").unwrap_or_else(|_| "crates/dashboard/ui/dist".into()),
-    );
-    let listener = tokio::net::TcpListener::bind(
-        std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
-    )
-    .await?;
+    let app = router(st, &std::env::var("DASHBOARD_DIST").unwrap_or_else(|_| "crates/dashboard/ui/dist".into()));
+    let listener = tokio::net::TcpListener::bind(std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into())).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -59,22 +59,13 @@ pub fn strike(s: &mut StrikeState, cfg: &StrikeCfg, now: i64) -> StrikeAction {
     s.last_strike_ms = now;
     let capped = s.strikes >= cfg.cap;
     let timeout_ms = if capped {
-        s.last_cap_duration_ms = if s.last_cap_duration_ms > 0 {
-            s.last_cap_duration_ms * 2
-        } else {
-            cfg.cap_timeout_ms
-        };
+        s.last_cap_duration_ms = if s.last_cap_duration_ms > 0 { s.last_cap_duration_ms * 2 } else { cfg.cap_timeout_ms };
         s.cap_end_ms = now + s.last_cap_duration_ms;
         s.last_cap_duration_ms
     } else {
         cfg.strike_timeout_ms
     };
-    StrikeAction {
-        strike: s.strikes,
-        timeout_ms,
-        purge: capped,
-        reset_heat: cfg.reset_heat_on_timeout,
-    }
+    StrikeAction { strike: s.strikes, timeout_ms, purge: capped, reset_heat: cfg.reset_heat_on_timeout }
 }
 
 #[cfg(test)]
@@ -93,10 +84,7 @@ mod tests {
             seq.push((a.timeout_ms / M, a.purge));
             now += a.timeout_ms + 5 * M; // reoffend shortly after the timeout ends
         }
-        assert_eq!(
-            seq,
-            [(1, false), (1, false), (11, true), (22, true), (44, true)]
-        );
+        assert_eq!(seq, [(1, false), (1, false), (11, true), (22, true), (44, true)]);
     }
 
     #[test]

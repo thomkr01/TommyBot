@@ -14,25 +14,9 @@ pub enum Level {
 pub const SENSITIVE: &[&str] = &["antinuke", "whitelist"];
 
 pub const SECTIONS: &[&str] = &[
-    "wizard",
-    "whitelist",
-    "antinuke",
-    "panic",
-    "backups",
-    "automod",
-    "filters",
-    "discord_automod",
-    "condition_automod",
-    "joingate",
-    "joinraid",
-    "verification",
-    "lockdown",
-    "moderation",
-    "warn_points",
-    "punish",
-    "appeals",
-    "logging",
-    "utility",
+    "wizard", "whitelist", "antinuke", "panic", "backups", "automod", "filters",
+    "discord_automod", "condition_automod", "joingate", "joinraid", "verification", "lockdown",
+    "moderation", "warn_points", "punish", "appeals", "logging", "utility",
 ];
 
 pub struct Facts<'a> {
@@ -64,26 +48,11 @@ mod tests {
     #[test]
     fn levels() {
         let perms = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let l = |o, e, t, p: &[&str]| {
-            level(&Facts {
-                discord_owner: o,
-                extra_owner: e,
-                trusted_admin: t,
-                permit_perms: &perms(p),
-            })
-        };
+        let l = |o, e, t, p: &[&str]| level(&Facts { discord_owner: o, extra_owner: e, trusted_admin: t, permit_perms: &perms(p) });
         assert_eq!(l(true, false, false, &[]), Level::Owner);
         assert_eq!(l(false, true, false, &[]), Level::Owner);
         assert_eq!(l(false, false, true, &[]), Level::Admin);
-        assert_eq!(
-            l(
-                false,
-                false,
-                false,
-                &["ban", "dashboard_view", "dashboard_edit"]
-            ),
-            Level::Editor
-        );
+        assert_eq!(l(false, false, false, &["ban", "dashboard_view", "dashboard_edit"]), Level::Editor);
         assert_eq!(l(false, false, false, &["dashboard_view"]), Level::Viewer);
         assert_eq!(l(false, false, false, &["ban"]), Level::None);
     }
