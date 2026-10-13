@@ -19,6 +19,7 @@ use crate::{
     hierarchy::top_position,
     lockdown,
     prefix::Parsed,
+    reply,
     slash::BackupCmd,
     targets,
 };
@@ -87,12 +88,32 @@ pub async fn apply(
     app: &App,
     gid: Id<GuildMarker>,
     owner: Id<UserMarker>,
+    actor: (Id<UserMarker>, &permits::Level),
+    kind: ModKind,
+    target: Id<UserMarker>,
+    reason: Option<&str>,
+    duration_s: Option<i64>,
+    points: i32,
+) -> Result<String> {
+    apply_dm(
+        app, gid, owner, actor, kind, target, reason, duration_s, points, false,
+    )
+    .await
+}
+
+/// [`apply`] with the `?dm` flag: the target is told before the action.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_dm(
+    app: &App,
+    gid: Id<GuildMarker>,
+    owner: Id<UserMarker>,
     (actor_id, actor): (Id<UserMarker>, &permits::Level),
     kind: ModKind,
     target: Id<UserMarker>,
     reason: Option<&str>,
     duration_s: Option<i64>,
     points: i32,
+    dm: bool,
 ) -> Result<String> {
     let perm = kind.name();
     let target_level = app.level(gid, owner, target).await?;
@@ -112,6 +133,10 @@ pub async fn apply(
     }
     let t = target.get();
     let cfg = app.cfg(gid.get()).await?;
+    if dm || cfg.misc.always_dm {
+        let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());
+        reply::dm(app, target, &reply::dm_text(perm, reason, who)).await;
+    }
     let (inverse, points) = match kind {
         ModKind::Ban => {
             app.http
@@ -154,7 +179,12 @@ pub async fn apply(
         },
     )
     .await?;
-    let mut text = format!("Case #{case_no}: {perm} <@{t}>");
+    let mut text = reply::case_text(
+        cfg.misc.compact_replies,
+        (case_no.into(), perm, t),
+        reason,
+        actor_id.get(),
+    );
     if kind == ModKind::Warn && cfg.misc.auto_warn_actions {
         if let Some(extra) = apply_warn_thresholds(app, gid.get() as i64, t as i64, points).await? {
             text += &format!("\n{extra}");
@@ -188,6 +218,11 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
     {
         return Ok(());
     }
+    if cfg.misc.delete_invocation
+        && app.level(gid, owner, msg.author.id).await? != permits::Level::None
+    {
+        app.http.delete_message(msg.channel_id, msg.id).await.ok();
+    }
     let mut targets: Vec<Id<UserMarker>> = p.targets.iter().map(|t| Id::new(*t)).collect();
     for n in &p.names {
         match targets::resolve(app, gid, n).await? {
@@ -198,7 +233,7 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
     for t in targets {
         // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
         let actor = app.level(gid, owner, msg.author.id).await?;
-        let text = match apply(
+        let text = match apply_dm(
             app,
             gid,
             owner,
@@ -208,6 +243,7 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
             p.reason.as_deref(),
             p.duration_s,
             cfg.misc.warn_base_points,
+            p.dm,
         )
         .await
         {
@@ -321,10 +357,18 @@ pub async fn timeout_until(
 }
 
 async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()> {
-    app.http
+    let sent = app
+        .http
         .create_message(msg.channel_id)
         .content(text)
+        .await?
+        .model()
         .await?;
+    if let Some(gid) = msg.guild_id {
+        if let Some(secs) = app.cfg(gid.get()).await?.misc.delete_replies_secs {
+            reply::delete_later(app, gid, msg.channel_id, sent.id, secs).await?;
+        }
+    }
     Ok(())
 }
 

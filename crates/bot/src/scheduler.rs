@@ -32,6 +32,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "panic_end" => {
             panic::end(app, gid, job.payload["unlock"].as_bool().unwrap_or(false)).await?
         }
+        "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "raid_end" => send_log(app, gid.get(), LogKind::JoinRaid, "Raid ended").await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }

@@ -1,7 +1,7 @@
 //! Slash commands and user context menus. No default_member_permissions: staff need no Discord
 //! permissions (spec 2.6), the bot checks permits instead.
 use anyhow::Result;
-use tommybot_core::duration;
+use tommybot_core::{duration, permits};
 use twilight_model::{
     application::{
         command::{Command, CommandType},
@@ -283,6 +283,11 @@ async fn run(
     };
     let owner = app.guild_info(gid).await?.owner;
     let actor = app.level(gid, owner, actor_id).await?;
+    if !app.cfg(gid.get()).await?.misc.use_slash
+        && !matches!(actor, permits::Level::Owner | permits::Level::ExtraOwner)
+    {
+        return Ok("Slash commands are disabled on this server".into());
+    }
     match cmd {
         Cmd::Mod {
             kind,
