@@ -8,3 +8,7 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tommybot-core.workspace = true
