@@ -1,6 +1,7 @@
 mod antinuke;
 mod app;
 mod automod;
+mod backup;
 mod commands;
 mod events;
 mod lockdown;
@@ -24,7 +25,12 @@ async fn main() -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
     let http = twilight_http::Client::new(cfg.discord_token.clone());
     let me = http.current_user().await?.model().await?.id;
-    let app = Arc::new(app::App::new(http, pool, me));
+    let app = Arc::new(app::App::new(
+        http,
+        twilight_http::Client::new(cfg.discord_token.clone()),
+        pool,
+        me,
+    ));
     tokio::spawn({
         let app = app.clone();
         async move {
@@ -34,6 +40,8 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    tokio::spawn(backup::auto_backup(app.clone()));
 
     if let Err(e) = slash::register(&app).await {
         tracing::warn!(?e, "slash command registration failed");

@@ -4,7 +4,9 @@
 //! audit-log events in and executes the returned verdicts / inverse ops. Ids are raw `u64`
 //! snowflakes and times are passed in, to avoid depending on core or a clock.
 
+mod backup;
 mod incident;
+pub use backup::*;
 pub use incident::*;
 
 use serde::{Deserialize, Serialize};
