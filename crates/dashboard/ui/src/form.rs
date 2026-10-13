@@ -119,6 +119,35 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 </div> }).collect_view()}
             </div> }.into_any()
         }
+        "customs" => {
+            let opts = f["options"].as_array().cloned().unwrap_or_default();
+            view! { <div class="pick">
+                {move || (0..get().as_array().map_or(0, Vec::len)).map(|i| {
+                    let boxes = opts.iter().map(|o| {
+                        let k = show(o);
+                        let label = k.replace('_', " ");
+                        let k2 = k.clone();
+                        view! { <label><input type="checkbox" prop:checked=move || strs(&get()[i]["events"]).contains(&k) on:change=move |e| {
+                            let mut cur = get();
+                            let mut ev = strs(&cur[i]["events"]);
+                            ev.retain(|x| *x != k2);
+                            if event_target_checked(&e) { ev.push(k2.clone()); }
+                            cur[i]["events"] = json!(ev);
+                            set(cur);
+                        } /> {label}</label> }
+                    }).collect_view();
+                    view! { <div class="row">
+                        <select aria-label="channel" on:change=move |e| { let mut cur = get(); cur[i]["channel"] = json!(event_target_value(&e)); set(cur) }>
+                            <option value="" selected=move || get()[i]["channel"].is_null()>"choose a channel"</option>
+                            {move || items(&dc.get(), "channels").into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || get()[i]["channel"].as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
+                        </select>
+                        <div class="pick">{boxes}</div>
+                        <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
+                    </div> }
+                }).collect_view()}
+                <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); } if let Some(a) = cur.as_array_mut() { a.push(json!({"events": [], "channel": null})); } set(cur) }>"Add a new logging type"</button>
+            </div> }.into_any()
+        }
         "channel" | "role" => {
             let key = if kind == "channel" { "channels" } else { "roles" };
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
