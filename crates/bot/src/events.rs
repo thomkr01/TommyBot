@@ -68,6 +68,22 @@ pub async fn send_log_pinging(
     send(app, ch, &format!("{pings}{text}"), &mentions).await
 }
 
+/// Sends held delete logs once their wait is over. `handle` only flushes when an event arrives,
+/// so a quiet guild would otherwise never log its deletes.
+pub async fn flush_logs(app: Arc<App>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        tick.tick().await;
+        let due = app.logger.lock().unwrap().flush(Instant::now());
+        for m in due {
+            if let Err(e) = send(&app, m.channel_id, &m.content, &AllowedMentions::default()).await
+            {
+                tracing::warn!(?e, channel = %m.channel_id, "log send failed");
+            }
+        }
+    }
+}
+
 pub async fn handle(app: Arc<App>, ev: Event) {
     if let Err(e) = run(&app, &ev).await {
         tracing::warn!(?e, kind = ?ev.kind(), "event handler failed");
