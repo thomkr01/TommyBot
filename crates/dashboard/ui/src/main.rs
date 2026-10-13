@@ -6,20 +6,22 @@ mod common;
 mod form;
 mod pages;
 mod permits;
+mod recovery;
 use appeals::{AppealBlacklist, AppealForm, AppealList};
 use common::*;
 use form::Section;
 use permits::Permits;
 use pages::{Rescue, Revert, Score, Wizard};
+use recovery::{Backups, Panic};
 
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
-const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
-    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist"), ("panic", "Panic Mode")]),
-    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("panic", "Panic Mode")]),
+    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
+    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
+    ("Raw JSON", &[("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
 const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
@@ -38,6 +40,8 @@ fn title(p: &str) -> String {
         _ if p.starts_with("appeal") => "Appeals".into(),
         "antinuke" | "antinuke_filters" => format!("Anti Nuke {}", if p == "antinuke" { "General" } else { "Filters" }),
         "automod" => "Auto Mod General".into(),
+        "automod_panic" => "Auto Mod Panic Mode".into(),
+        "antinuke_panic" => "Anti Nuke Panic Mode".into(),
         "filters" => "Auto Mod Filters".into(),
         _ => NAV.iter().flat_map(|(_, i)| i.iter()).chain(TOP).find(|(k, _)| *k == p).map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()),
     }
@@ -186,6 +190,9 @@ fn App() -> impl IntoView {
                                 ("overview", _) => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 ("revert", _) => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
+                                ("backups", _) => view! { <Backups guild=g.clone() enrolled /> }.into_any(),
+                                ("automod_panic", _) => view! { <Panic guild=g.clone() part="heat,general" enrolled /> }.into_any(),
+                                ("antinuke_panic", _) => view! { <Panic guild=g.clone() part="nuke,general" enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                                 ("appeal_list", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealList guild=g.clone() /> }.into_any(),
                                 ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealBlacklist guild=g.clone() /> }.into_any(),

@@ -100,16 +100,23 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
         }
         "form" => {
             let upd = move |i: usize, k: &'static str, x: Value| { let mut cur = get(); cur[i][k] = x; set(cur) };
+            let count = move || get().as_array().map_or(0, Vec::len);
             view! { <div class="pick">
-                {move || (0..get().as_array().map_or(0, Vec::len)).map(|i| view! { <div class="row">
+                <div class="row">
+                    <Show when=move || count() < 6>
+                        <button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"label": "New question", "long": false, "required": true})); set(json!(cur)) }>"Add new field"</button>
+                    </Show>
+                    <button class="danger" on:click=move |_| set(json!([]))>"Delete all fields"</button>
+                </div>
+                {move || (0..count()).map(|i| view! { <div class="row">
                     <input prop:value=move || get()[i]["label"].as_str().unwrap_or("").to_string() on:change=move |e| upd(i, "label", json!(event_target_value(&e))) />
+                    <Show when=move || get()[i]["required"].as_bool().unwrap_or(true)><b class="err">"*"</b></Show>
+                    <span class="chip blue">{move || if get()[i]["long"].as_bool().unwrap_or(false) { "Textarea" } else { "Text" }}</span>
+                    <Show when=move || get()[i]["label"] == "Appeal Message"><span class="chip">"default"</span></Show>
                     <label><input type="checkbox" prop:checked=move || get()[i]["long"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "long", json!(event_target_checked(&e))) /> "long"</label>
                     <label><input type="checkbox" prop:checked=move || get()[i]["required"].as_bool().unwrap_or(true) on:change=move |e| upd(i, "required", json!(event_target_checked(&e))) /> "required"</label>
                     <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
                 </div> }).collect_view()}
-                <Show when=move || get().as_array().map_or(0, Vec::len) < 6>
-                    <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); } if let Some(a) = cur.as_array_mut() { a.push(json!({"label": "New question", "long": false, "required": true})); } set(cur) }>"Add field"</button>
-                </Show>
             </div> }.into_any()
         }
         "channel" | "role" => {
@@ -167,8 +174,8 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
         // Missing schema/discord data degrades to the raw editor.
         if let Ok(s) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
             if let Some(sec) = s.as_array().and_then(|a| a.iter().find(|x| x["name"] == n.as_str())) {
-                // `part` picks one dashboard page of the section: "" all fields, "general" those without a page, else that page.
-                let keep = |f: &Value| match part.as_str() { "" => true, "general" => f["page"].is_null(), p => f["page"] == p };
+                // `part` picks the dashboard pages of the section: "" all fields, else a comma list where "general" means the fields without a page.
+                let keep = |f: &Value| part.is_empty() || part.split(',').any(|p| if p == "general" { f["page"].is_null() } else { f["page"] == p });
                 fields.set(sec["fields"].as_array().into_iter().flatten().filter(|f| keep(f)).cloned().collect());
                 if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(d); }
             }
