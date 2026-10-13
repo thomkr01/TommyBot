@@ -4,9 +4,11 @@ mod automod;
 mod backup;
 mod commands;
 mod events;
+mod hierarchy;
 mod lockdown;
 mod panic;
 mod prefix;
+mod scheduler;
 mod slash;
 mod targets;
 
@@ -41,6 +43,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    tokio::spawn(scheduler::run(app.clone()));
     tokio::spawn(backup::auto_backup(app.clone()));
 
     if let Err(e) = slash::register(&app).await {
