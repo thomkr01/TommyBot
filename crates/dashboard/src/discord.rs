@@ -36,37 +36,81 @@ impl Discord {
 
     pub async fn exchange(&self, code: &str) -> Result<String> {
         #[derive(Deserialize)]
-        struct T { access_token: String }
-        let t: T = self.http.post(format!("{API}/oauth2/token"))
-            .form(&[("client_id", &self.client_id[..]), ("client_secret", &self.client_secret), ("grant_type", "authorization_code"),
-                    ("code", code), ("redirect_uri", &self.redirect_uri)])
-            .send().await?.error_for_status()?.json().await?;
+        struct T {
+            access_token: String,
+        }
+        let t: T = self
+            .http
+            .post(format!("{API}/oauth2/token"))
+            .form(&[
+                ("client_id", &self.client_id[..]),
+                ("client_secret", &self.client_secret),
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", &self.redirect_uri),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         Ok(t.access_token)
     }
 
     pub async fn me(&self, token: &str) -> Result<User> {
-        Ok(self.http.get(format!("{API}/users/@me")).bearer_auth(token).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(format!("{API}/users/@me"))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     pub async fn user_guilds(&self, token: &str) -> Result<Vec<Guild>> {
-        Ok(self.http.get(format!("{API}/users/@me/guilds")).bearer_auth(token).send().await?.error_for_status()?.json().await?)
+        Ok(self
+            .http
+            .get(format!("{API}/users/@me/guilds"))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     fn bot(&self, path: String) -> reqwest::RequestBuilder {
-        self.http.get(format!("{API}{path}")).header("Authorization", format!("Bot {}", self.bot_token))
+        self.http
+            .get(format!("{API}{path}"))
+            .header("Authorization", format!("Bot {}", self.bot_token))
     }
 
     pub async fn guild_owner(&self, guild: i64) -> Result<String> {
         #[derive(Deserialize)]
-        struct G { owner_id: String }
-        let g: G = self.bot(format!("/guilds/{guild}")).send().await?.error_for_status()?.json().await?;
+        struct G {
+            owner_id: String,
+        }
+        let g: G = self
+            .bot(format!("/guilds/{guild}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         Ok(g.owner_id)
     }
 
     pub async fn member_roles(&self, guild: i64, user: &str) -> Result<Vec<String>> {
         #[derive(Deserialize)]
-        struct M { roles: Vec<String> }
-        let r = self.bot(format!("/guilds/{guild}/members/{user}")).send().await?;
+        struct M {
+            roles: Vec<String>,
+        }
+        let r = self
+            .bot(format!("/guilds/{guild}/members/{user}"))
+            .send()
+            .await?;
         if r.status() == 404 {
             return Ok(vec![]);
         }
@@ -74,17 +118,24 @@ impl Discord {
     }
 
     pub async fn post_message(&self, channel: &str, content: &str) -> Result<()> {
-        self.http.post(format!("{API}/channels/{channel}/messages"))
+        self.http
+            .post(format!("{API}/channels/{channel}/messages"))
             .header("Authorization", format!("Bot {}", self.bot_token))
             .json(&serde_json::json!({"content": content, "allowed_mentions": {"parse": []}}))
-            .send().await?.error_for_status()?;
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 }
 
 fn urlencode(s: &str) -> String {
-    s.bytes().map(|b| match b {
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-        _ => format!("%{b:02X}"),
-    }).collect()
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }

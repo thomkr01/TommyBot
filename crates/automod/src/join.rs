@@ -81,7 +81,13 @@ pub fn term_matches(term: &str, name: &str) -> bool {
 
 fn has_invite(name: &str) -> bool {
     let n = name.to_lowercase();
-    ["discord.gg/", "discord.com/invite/", "discordapp.com/invite/"].iter().any(|p| n.contains(p))
+    [
+        "discord.gg/",
+        "discord.com/invite/",
+        "discordapp.com/invite/",
+    ]
+    .iter()
+    .any(|p| n.contains(p))
 }
 
 /// Suspicious = default avatar, young account or username-filter match (configurable OR).
@@ -105,13 +111,33 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
         }
     };
     check(cfg.no_avatar, Filter::NoAvatar, !j.has_avatar);
-    check(cfg.min_age.map(|m| m.1), Filter::AccountAge, cfg.min_age.is_some_and(|(min, _)| age < min.max(5_000)));
-    check(cfg.unauthorized_bot, Filter::UnauthorizedBot, j.is_bot && !j.added_by_authorized);
-    check(cfg.unverified_bot, Filter::UnverifiedBot, j.is_bot && !j.bot_verified);
+    check(
+        cfg.min_age.map(|m| m.1),
+        Filter::AccountAge,
+        cfg.min_age.is_some_and(|(min, _)| age < min.max(5_000)),
+    );
+    check(
+        cfg.unauthorized_bot,
+        Filter::UnauthorizedBot,
+        j.is_bot && !j.added_by_authorized,
+    );
+    check(
+        cfg.unverified_bot,
+        Filter::UnverifiedBot,
+        j.is_bot && !j.bot_verified,
+    );
     check(cfg.invite_in_name, Filter::InviteInName, has_invite(j.name));
     let min = cfg.min_age.map_or(0, |m| m.0);
-    check(cfg.suspicious, Filter::Suspicious, is_suspicious(j, cfg, min, now));
-    check(cfg.username_filter, Filter::UsernameFilter, cfg.username_terms.iter().any(|t| term_matches(t, j.name)));
+    check(
+        cfg.suspicious,
+        Filter::Suspicious,
+        is_suspicious(j, cfg, min, now),
+    );
+    check(
+        cfg.username_filter,
+        Filter::UsernameFilter,
+        cfg.username_terms.iter().any(|t| term_matches(t, j.name)),
+    );
     // Age timeouts only last for the remaining period.
     for h in &mut hits {
         if let (Filter::AccountAge, Action::Timeout(_)) = *h {
@@ -208,18 +234,40 @@ impl RaidDetector {
         now < self.active_until
     }
 
-    pub fn on_join(&mut self, j: &Joiner, suspicious: bool, cfg: &RaidCfg, now: i64) -> RaidOutcome {
+    pub fn on_join(
+        &mut self,
+        j: &Joiner,
+        suspicious: bool,
+        cfg: &RaidCfg,
+        now: i64,
+    ) -> RaidOutcome {
         self.joins.retain(|r| now - r.at <= cfg.span_ms);
-        self.joins.push(JoinRec { id: j.id, at: now, name: j.name.to_lowercase(), has_avatar: j.has_avatar, suspicious });
-        let counted = self.joins.iter().filter(|r| r.suspicious || !cfg.suspicious_only).count();
+        self.joins.push(JoinRec {
+            id: j.id,
+            at: now,
+            name: j.name.to_lowercase(),
+            has_avatar: j.has_avatar,
+            suspicious,
+        });
+        let counted = self
+            .joins
+            .iter()
+            .filter(|r| r.suspicious || !cfg.suspicious_only)
+            .count();
         let was_active = self.active(now);
         if !was_active && counted >= cfg.count {
             self.active_until = now + cfg.active_ms;
-            return RaidOutcome { triggered: true, flagged: self.flagged(cfg, now) };
+            return RaidOutcome {
+                triggered: true,
+                flagged: self.flagged(cfg, now),
+            };
         }
         if was_active {
             let me = self.flagged(cfg, now).contains(&j.id);
-            return RaidOutcome { triggered: false, flagged: if me { vec![j.id] } else { vec![] } };
+            return RaidOutcome {
+                triggered: false,
+                flagged: if me { vec![j.id] } else { vec![] },
+            };
         }
         RaidOutcome::default()
     }
@@ -231,7 +279,9 @@ impl RaidDetector {
             .iter()
             .filter(|r| {
                 string_flag(&r.name, &cfg.string_patterns)
-                    || cfg.flag_younger_than_ms.is_some_and(|y| now - account_created_ms(r.id) < y)
+                    || cfg
+                        .flag_younger_than_ms
+                        .is_some_and(|y| now - account_created_ms(r.id) < y)
                     || (cfg.flag_no_avatar && !r.has_avatar)
                     || farm.as_ref().is_some_and(|f| f.contains(&r.id))
             })
@@ -244,7 +294,9 @@ impl RaidDetector {
         let bucket_by = |size: i64| {
             let mut m: HashMap<i64, Vec<u64>> = HashMap::new();
             for r in &self.joins {
-                m.entry(account_created_ms(r.id) / size).or_default().push(r.id);
+                m.entry(account_created_ms(r.id) / size)
+                    .or_default()
+                    .push(r.id);
             }
             m
         };
@@ -252,7 +304,11 @@ impl RaidDetector {
         if buckets.values().any(|v| v.len() * 2 > self.joins.len()) {
             buckets = bucket_by(HOUR_MS);
         }
-        buckets.into_values().filter(|v| v.len() >= min).flatten().collect()
+        buckets
+            .into_values()
+            .filter(|v| v.len() >= min)
+            .flatten()
+            .collect()
     }
 }
 
@@ -312,13 +368,22 @@ pub struct VerifyCfg {
 
 impl Default for VerifyCfg {
     fn default() -> Self {
-        Self { mode: VerifyMode::Captcha, target: VerifyTarget::Everyone, time_limit_ms: 120_000, on_fail: FailAction::Nothing }
+        Self {
+            mode: VerifyMode::Captcha,
+            target: VerifyTarget::Everyone,
+            time_limit_ms: 120_000,
+            on_fail: FailAction::Nothing,
+        }
     }
 }
 
 /// Button mode is upgraded to captcha while a raid is active.
 pub fn effective_mode(cfg: &VerifyCfg, raid_active: bool) -> VerifyMode {
-    if raid_active && cfg.mode == VerifyMode::Button { VerifyMode::Captcha } else { cfg.mode }
+    if raid_active && cfg.mode == VerifyMode::Button {
+        VerifyMode::Captcha
+    } else {
+        cfg.mode
+    }
 }
 
 /// Members who already hold a main role count as verified.
@@ -338,7 +403,12 @@ mod tests {
     }
 
     fn joiner(id: u64, name: &str, has_avatar: bool) -> Joiner<'_> {
-        Joiner { id, name, has_avatar, ..Default::default() }
+        Joiner {
+            id,
+            name,
+            has_avatar,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -365,24 +435,48 @@ mod tests {
         };
         let j = joiner(id_aged(DAY_MS / 2, 0), "clean", true);
         let hits = gate(&j, &cfg, NOW);
-        assert_eq!(hits, vec![(Filter::AccountAge, Action::Timeout(DAY_MS / 2))]);
+        assert_eq!(
+            hits,
+            vec![(Filter::AccountAge, Action::Timeout(DAY_MS / 2))]
+        );
         let j = joiner(id_aged(DAY_MS / 2, 0), "nitro giveaway", false);
         assert_eq!(harshest(&gate(&j, &cfg, NOW)), Some(Action::Ban));
     }
 
     #[test]
     fn require_all_needs_every_filter() {
-        let mut cfg = GateCfg { no_avatar: Some(Action::Kick), min_age: Some((DAY_MS, Action::Kick)), require_all: true, ..Default::default() };
+        let mut cfg = GateCfg {
+            no_avatar: Some(Action::Kick),
+            min_age: Some((DAY_MS, Action::Kick)),
+            require_all: true,
+            ..Default::default()
+        };
         assert!(gate(&joiner(id_aged(10 * DAY_MS, 0), "a", false), &cfg, NOW).is_empty());
-        assert_eq!(gate(&joiner(id_aged(1000, 0), "a", false), &cfg, NOW).len(), 2);
+        assert_eq!(
+            gate(&joiner(id_aged(1000, 0), "a", false), &cfg, NOW).len(),
+            2
+        );
         cfg.require_all = false;
-        assert_eq!(gate(&joiner(id_aged(10 * DAY_MS, 0), "a", false), &cfg, NOW).len(), 1);
+        assert_eq!(
+            gate(&joiner(id_aged(10 * DAY_MS, 0), "a", false), &cfg, NOW).len(),
+            1
+        );
     }
 
     #[test]
     fn bots_and_invite_names() {
-        let cfg = GateCfg { unauthorized_bot: Some(Action::Kick), invite_in_name: Some(Action::Ban), ..Default::default() };
-        let bot = Joiner { id: id_aged(DAY_MS, 0), name: "bot", is_bot: true, has_avatar: true, ..Default::default() };
+        let cfg = GateCfg {
+            unauthorized_bot: Some(Action::Kick),
+            invite_in_name: Some(Action::Ban),
+            ..Default::default()
+        };
+        let bot = Joiner {
+            id: id_aged(DAY_MS, 0),
+            name: "bot",
+            is_bot: true,
+            has_avatar: true,
+            ..Default::default()
+        };
         assert_eq!(harshest(&gate(&bot, &cfg, NOW)), Some(Action::Kick));
         let j = joiner(id_aged(DAY_MS, 0), "join discord.gg/abc", true);
         assert_eq!(harshest(&gate(&j, &cfg, NOW)), Some(Action::Ban));
@@ -390,7 +484,9 @@ mod tests {
 
     #[test]
     fn pattern_operators() {
-        let pats: Vec<String> = ["=bob", "$_bot", "'raid", "!safe"].map(String::from).to_vec();
+        let pats: Vec<String> = ["=bob", "$_bot", "'raid", "!safe"]
+            .map(String::from)
+            .to_vec();
         assert!(string_flag("bob", &pats));
         assert!(!string_flag("bobby", &pats));
         assert!(string_flag("user_bot", &pats));
@@ -399,14 +495,25 @@ mod tests {
     }
 
     fn raid_cfg() -> RaidCfg {
-        RaidCfg { count: 3, span_ms: 60_000, active_ms: 600_000, ..Default::default() }
+        RaidCfg {
+            count: 3,
+            span_ms: 60_000,
+            active_ms: 600_000,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn static_trigger_flags_whole_window() {
-        let cfg = RaidCfg { flag_no_avatar: true, ..raid_cfg() };
+        let cfg = RaidCfg {
+            flag_no_avatar: true,
+            ..raid_cfg()
+        };
         let mut d = RaidDetector::default();
-        assert_eq!(d.on_join(&joiner(1, "a", false), false, &cfg, NOW), RaidOutcome::default());
+        assert_eq!(
+            d.on_join(&joiner(1, "a", false), false, &cfg, NOW),
+            RaidOutcome::default()
+        );
         d.on_join(&joiner(2, "b", true), false, &cfg, NOW + 1000);
         let out = d.on_join(&joiner(3, "c", false), false, &cfg, NOW + 2000);
         assert!(out.triggered);
@@ -420,22 +527,38 @@ mod tests {
 
     #[test]
     fn suspicious_only_counting() {
-        let cfg = RaidCfg { suspicious_only: true, ..raid_cfg() };
+        let cfg = RaidCfg {
+            suspicious_only: true,
+            ..raid_cfg()
+        };
         let mut d = RaidDetector::default();
         for i in 0..5 {
-            assert!(!d.on_join(&joiner(i, "a", true), false, &cfg, NOW + i as i64).triggered);
+            assert!(
+                !d.on_join(&joiner(i, "a", true), false, &cfg, NOW + i as i64)
+                    .triggered
+            );
         }
         d.on_join(&joiner(10, "a", true), true, &cfg, NOW + 10);
         d.on_join(&joiner(11, "a", true), true, &cfg, NOW + 11);
-        assert!(d.on_join(&joiner(12, "a", true), true, &cfg, NOW + 12).triggered);
+        assert!(
+            d.on_join(&joiner(12, "a", true), true, &cfg, NOW + 12)
+                .triggered
+        );
     }
 
     #[test]
     fn id_flag_catches_bot_farm_and_narrows_buckets() {
-        let cfg = RaidCfg { id_flag_min: Some(3), ..raid_cfg() };
+        let cfg = RaidCfg {
+            id_flag_min: Some(3),
+            ..raid_cfg()
+        };
         let mut d = RaidDetector::default();
         // three accounts made within an hour on one old day, one unrelated account
-        let farm = [id_aged(50 * DAY_MS, 1), id_aged(50 * DAY_MS - 60_000, 2), id_aged(50 * DAY_MS - 120_000, 3)];
+        let farm = [
+            id_aged(50 * DAY_MS, 1),
+            id_aged(50 * DAY_MS - 60_000, 2),
+            id_aged(50 * DAY_MS - 120_000, 3),
+        ];
         let other = id_aged(200 * DAY_MS, 4);
         for (i, id) in farm.iter().chain([&other]).enumerate() {
             let out = d.on_join(&joiner(*id, "x", true), false, &cfg, NOW + i as i64);
@@ -453,7 +576,10 @@ mod tests {
 
     #[test]
     fn verification_helpers() {
-        let mut cfg = VerifyCfg { mode: VerifyMode::Button, ..Default::default() };
+        let mut cfg = VerifyCfg {
+            mode: VerifyMode::Button,
+            ..Default::default()
+        };
         assert_eq!(effective_mode(&cfg, true), VerifyMode::Captcha);
         assert_eq!(effective_mode(&cfg, false), VerifyMode::Button);
         cfg.mode = VerifyMode::Web;
