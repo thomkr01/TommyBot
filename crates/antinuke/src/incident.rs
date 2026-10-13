@@ -2,7 +2,7 @@
 
 use crate::Inverse;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Six base36 chars (like `7rh9t7`) from caller-supplied entropy (e.g. now-nanos ^ guild id).
@@ -67,10 +67,7 @@ impl PanicTracker {
         let q = self.hits.entry(guild).or_default();
         q.retain(|(t, _)| now.duration_since(*t) < self.window);
         q.push_back((now, executor));
-        let mut who: Vec<u64> = q.iter().map(|(_, u)| *u).collect();
-        who.sort_unstable();
-        who.dedup();
-        let tripped = who.len() >= self.executors;
+        let tripped = q.iter().map(|(_, u)| u).collect::<HashSet<_>>().len() >= self.executors;
         if tripped {
             self.hits.remove(&guild);
         }
