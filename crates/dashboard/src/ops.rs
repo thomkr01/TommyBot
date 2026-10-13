@@ -1,4 +1,4 @@
-use crate::{access::Level, api::{log_change, require}, auth::{self, Sess}, ApiError, AppState};
+use crate::{access::Level, api::{log_change, require, Res}, auth::{self, Sess}, ApiError, AppState};
 use axum::{extract::{Path, Query, State}, routing::{get, post}, Json, Router};
 use reqwest::Method;
 use serde::Deserialize;
@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 use tommybot_antinuke::Inverse;
 
 type ActionRow = (i64, i64, String, Option<i64>, Option<Value>, bool, chrono::DateTime<chrono::Utc>);
-type Res = Result<Json<Value>, ApiError>;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -19,8 +18,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/guilds/{guild}/rescue/regenerate", post(rescue_regenerate))
         .route("/api/rescue/claim", post(rescue_claim))
 }
-
-// ---- security score ----
 
 const DANGEROUS: u64 = 0x8 | 0x20 | 0x1000_0000 | 0x10 | 0x4 | 0x2 | 0x2000_0000;
 
@@ -109,8 +106,6 @@ async fn fix(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>, Json(b
     Ok(Json(json!({"ok": true})))
 }
 
-// ---- revert center ----
-
 #[derive(Deserialize)]
 struct ActionsQ {
     actor: Option<i64>,
@@ -178,14 +173,8 @@ async fn revert(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>, Jso
     Ok(Json(json!({"done": done, "failed": failed, "skipped": skipped, "reinvite": reinvite})))
 }
 
-// ---- rescue key ----
-
 fn hash(key: &str) -> String {
     Sha256::digest(key.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn ct_eq(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn rescue_status(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -210,15 +199,9 @@ struct Claim {
 }
 
 async fn claim_key(db: &sqlx::PgPool, guild: i64, user: i64, key: &str) -> Result<(), ApiError> {
-    let stored: Option<String> = sqlx::query_scalar("select key_hash from rescue_key where guild_id = $1").bind(guild).fetch_optional(db).await?;
-    let h = hash(key);
-    // Equal-length dummy compare when no key exists keeps timing uniform.
-    if !ct_eq(stored.as_deref().unwrap_or(&"0".repeat(64)), &h) || stored.is_none() {
-        return Err(ApiError::Forbidden("invalid rescue key"));
-    }
     let mut tx = db.begin().await?;
     // The delete is the single-use gate: a concurrent claim sees zero rows.
-    if sqlx::query("delete from rescue_key where guild_id = $1 and key_hash = $2").bind(guild).bind(&h).execute(&mut *tx).await?.rows_affected() == 0 {
+    if sqlx::query("delete from rescue_key where guild_id = $1 and key_hash = $2").bind(guild).bind(hash(key)).execute(&mut *tx).await?.rows_affected() == 0 {
         return Err(ApiError::Forbidden("invalid rescue key"));
     }
     sqlx::query("insert into extra_owners (guild_id, user_id) values ($1, $2) on conflict do nothing").bind(guild).bind(user).execute(&mut *tx).await?;
@@ -256,7 +239,6 @@ mod tests {
     #[test]
     fn strips_only_dangerous_bits() {
         assert_eq!((0x8 | 0x400u64) & !DANGEROUS, 0x400);
-        assert!(ct_eq(&hash("a"), &hash("a")) && !ct_eq(&hash("a"), &hash("b")));
     }
 
     #[tokio::test]
