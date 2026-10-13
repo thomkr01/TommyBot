@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
+use tommybot_automod::discord_api::Api;
 use tommybot_automod::{
     heat::{HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
@@ -70,6 +71,7 @@ pub struct App {
     /// Own client and rate-limit bucket for backup restore and panic mode.
     pub restore_http: Client,
     pub pool: PgPool,
+    pub api: Api,
     pub me: Id<UserMarker>,
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
     pub logger: Mutex<Logger>,
@@ -91,11 +93,18 @@ pub struct PanicRun {
 }
 
 impl App {
-    pub fn new(http: Client, restore_http: Client, pool: PgPool, me: Id<UserMarker>) -> Self {
+    pub fn new(
+        http: Client,
+        restore_http: Client,
+        pool: PgPool,
+        api: Api,
+        me: Id<UserMarker>,
+    ) -> Self {
         Self {
             http,
             restore_http,
             pool,
+            api,
             me,
             cfgs: Default::default(),
             logger: Mutex::new(Logger::new(me)),
@@ -197,6 +206,7 @@ impl App {
             let n = l.recv().await?;
             if let Ok(g) = n.payload().parse::<u64>() {
                 self.cfgs.write().unwrap().remove(&g);
+                tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
             }
         }
     }

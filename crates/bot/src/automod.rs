@@ -56,13 +56,11 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let f = &cfg.automod.filters;
     let hosts = filters::hosts(content);
     let (upper_chars, lower_chars) = filters::case_counts(content);
-    let words: Vec<String> = f
-        .words
-        .strict
-        .iter()
-        .cloned()
-        .chain(f.words.wildcard.iter().map(|w| format!("*{w}*")))
-        .collect();
+    let words = if f.words.use_discord_automod {
+        vec![]
+    } else {
+        blacklist_words(f)
+    };
     let facts = MsgFacts {
         content,
         // shortcut: custom emoji only, unicode emoji are not counted.
@@ -184,6 +182,22 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     Ok(())
 }
 
+/// Strict words as written, wildcard words wrapped in `*`, plus the toggled premade lists.
+/// Discord's native keyword rules use the same syntax.
+pub fn blacklist_words(f: &FiltersCfg) -> Vec<String> {
+    let w = &f.words;
+    w.strict
+        .iter()
+        .cloned()
+        .chain(w.wildcard.iter().map(|x| format!("*{x}*")))
+        .chain(filters::premade_words(
+            w.premade_profane,
+            w.premade_vulgar,
+            w.premade_racist,
+        ))
+        .collect()
+}
+
 /// Heat weights with every disabled filter zeroed.
 fn enabled_weights(h: &HeatCfg, f: &FiltersCfg) -> HeatCfg {
     let mut h = h.clone();
@@ -282,6 +296,24 @@ async fn filter_action(
         &format!("<@{uid}>: {action:?} (filter)"),
     )
     .await
+}
+
+/// Keeps the native Discord AutoMod keyword rule in step with the saved word lists.
+/// Only runs while the guild opted in; turning it off is done from the rule list (`Api::set_rule_enabled`).
+pub async fn sync_discord_rule(app: std::sync::Arc<App>, guild: u64) {
+    let run = async {
+        let cfg = app.cfg(guild).await?;
+        let f = &cfg.automod.filters;
+        if f.words.use_discord_automod {
+            app.api
+                .sync_keyword_rule(guild, &blacklist_words(f))
+                .await?;
+        }
+        anyhow::Ok(())
+    };
+    if let Err(e) = run.await {
+        tracing::warn!(?e, guild, "syncing the Discord AutoMod rule failed");
+    }
 }
 
 /// Deletes webhooks made in the last 10 minutes unless their owner is immune.

@@ -406,6 +406,7 @@ mod tests {
             twilight_http::Client::new(String::new()),
             twilight_http::Client::new(String::new()),
             pool,
+            tommybot_automod::discord_api::Api::new(""),
             Id::new(1),
         );
         let gid = Id::new(6_000_000_000 + std::process::id() as u64);
@@ -443,6 +444,7 @@ mod tests {
             twilight_http::Client::new(String::new()),
             twilight_http::Client::new(String::new()),
             pool,
+            tommybot_automod::discord_api::Api::new(""),
             Id::new(1),
         );
         let gid = Id::new(6_100_000_000 + std::process::id() as u64);
