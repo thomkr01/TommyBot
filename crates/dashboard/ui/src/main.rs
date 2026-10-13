@@ -163,6 +163,11 @@ fn App() -> impl IntoView {
 }
 
 fn main() {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        if let Some(body) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.body()) {
+            let _ = body.insert_adjacent_text("beforeend", &format!("Dashboard crashed: {info}"));
+        }
+    }));
     leptos::mount::mount_to_body(App);
 }
