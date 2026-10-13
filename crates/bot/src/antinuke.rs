@@ -11,7 +11,7 @@ use tommybot_logging::LogKind;
 use twilight_model::{
     guild::audit_log::{AuditLogEntry, AuditLogEventType as A},
     id::{
-        marker::{GuildMarker, UserMarker},
+        marker::{GuildMarker, RoleMarker, UserMarker},
         Id,
     },
 };
@@ -109,6 +109,20 @@ async fn quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Re
     app.http
         .update_guild_member(gid, user)
         .roles(&roles)
+        .await?;
+    record_quarantine(app, gid, user).await
+}
+
+/// Logs the bot's quarantine so the revert center can undo it. Written after the role change
+/// succeeded, so a failed quarantine never leaves an unquarantine to run.
+async fn record_quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
+    sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+        .bind(gid.get() as i64)
+        .bind(app.me.get() as i64)
+        .bind("quarantine")
+        .bind(user.get() as i64)
+        .bind(json!(Inverse::Unquarantine { user: user.get() }))
+        .execute(&app.pool)
         .await?;
     Ok(())
 }
@@ -291,8 +305,36 @@ async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()
         Inverse::DeleteWebhook { id } => {
             app.http.delete_webhook(Id::new(*id)).await?;
         }
-        // shortcut: no code records these two yet, and Reinvite is reported instead.
-        Inverse::RestoreRoles { .. } | Inverse::Unquarantine { .. } | Inverse::Reinvite { .. } => {}
+        Inverse::RestoreRoles { user, roles } => {
+            let roles: Vec<Id<RoleMarker>> = roles.iter().map(|r| Id::new(*r)).collect();
+            app.http
+                .update_guild_member(gid, Id::new(*user))
+                .roles(&roles)
+                .await?;
+        }
+        Inverse::Unquarantine { user } => {
+            let saved: Option<(Vec<i64>,)> = sqlx::query_as(
+                "SELECT saved_roles FROM quarantines WHERE guild_id=$1 AND user_id=$2",
+            )
+            .bind(gid.get() as i64)
+            .bind(*user as i64)
+            .fetch_optional(&app.pool)
+            .await?;
+            if let Some((saved,)) = saved {
+                let roles: Vec<Id<RoleMarker>> = saved.iter().map(|r| Id::new(*r as u64)).collect();
+                app.http
+                    .update_guild_member(gid, Id::new(*user))
+                    .roles(&roles)
+                    .await?;
+                sqlx::query("DELETE FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+                    .bind(gid.get() as i64)
+                    .bind(*user as i64)
+                    .execute(&app.pool)
+                    .await?;
+            }
+        }
+        // Discord cannot undo a kick, so this is reported for re-invite, not executed.
+        Inverse::Reinvite { .. } => {}
     }
     Ok(())
 }
@@ -355,6 +397,35 @@ mod tests {
         assert_eq!(data["quarantined"], serde_json::json!([10, 11]));
         assert_eq!(data["reverted"].as_array().unwrap().len(), 2);
         sqlx::query("DELETE FROM nuke_incidents WHERE guild_id=$1")
+            .bind(gid.get() as i64)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn quarantine_record_inverse_roundtrips() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(twilight_http::Client::new(String::new()), pool, Id::new(1));
+        let gid = Id::new(6_100_000_000 + std::process::id() as u64);
+        record_quarantine(&app, gid, Id::new(42)).await.unwrap();
+        let (actor, inv): (i64, serde_json::Value) = sqlx::query_as(
+            "SELECT actor_id, inverse FROM action_log WHERE guild_id=$1 AND action='quarantine'",
+        )
+        .bind(gid.get() as i64)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!(actor, 1);
+        assert_eq!(
+            serde_json::from_value::<Inverse>(inv).unwrap(),
+            Inverse::Unquarantine { user: 42 }
+        );
+        sqlx::query("DELETE FROM action_log WHERE guild_id=$1")
             .bind(gid.get() as i64)
             .execute(&app.pool)
             .await
