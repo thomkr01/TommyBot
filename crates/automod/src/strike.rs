@@ -2,7 +2,10 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StrikeCfg {
+    /// "Use the auto timeouts": off records strikes but times nobody out.
+    pub enabled: bool,
     /// Strike number that counts as the cap.
     pub cap: u32,
     pub strike_timeout_ms: i64,
@@ -12,21 +15,23 @@ pub struct StrikeCfg {
     /// Strikes below the cap are forgotten after this long without a trigger.
     pub strike_expiry_ms: i64,
     pub reset_heat_on_timeout: bool,
-    /// Lock the server when a member reaches this strike number.
-    #[serde(default)]
-    pub lock_at_strikes: Option<u32>,
+    /// Grow each cap timeout after the first by `multiplier_pct`.
+    pub multiply: bool,
+    pub multiplier_pct: u32,
 }
 
 impl Default for StrikeCfg {
     fn default() -> Self {
         Self {
+            enabled: true,
             cap: 3,
             strike_timeout_ms: 60_000,
             cap_timeout_ms: 11 * 60_000,
             reoffend_window_ms: 60 * 60_000,
             strike_expiry_ms: 60 * 60_000,
             reset_heat_on_timeout: true,
-            lock_at_strikes: None,
+            multiply: true,
+            multiplier_pct: 200,
         }
     }
 }
@@ -63,8 +68,8 @@ pub fn strike(s: &mut StrikeState, cfg: &StrikeCfg, now: i64) -> StrikeAction {
     s.last_strike_ms = now;
     let capped = s.strikes >= cfg.cap;
     let timeout_ms = if capped {
-        s.last_cap_duration_ms = if s.last_cap_duration_ms > 0 {
-            s.last_cap_duration_ms * 2
+        s.last_cap_duration_ms = if s.last_cap_duration_ms > 0 && cfg.multiply {
+            s.last_cap_duration_ms * i64::from(cfg.multiplier_pct) / 100
         } else {
             cfg.cap_timeout_ms
         };
@@ -101,6 +106,13 @@ mod tests {
             seq,
             [(1, false), (1, false), (11, true), (22, true), (44, true)]
         );
+        let flat = StrikeCfg {
+            multiply: false,
+            ..Default::default()
+        };
+        let mut s = StrikeState::default();
+        let caps: Vec<_> = (0..4).map(|i| strike(&mut s, &flat, i).timeout_ms / M).collect();
+        assert_eq!(caps, [1, 1, 11, 11]);
     }
 
     #[test]

@@ -1,9 +1,14 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
 //! shortcut: web mode needs the web crate, DM and simple-captcha modes fall back to the image captcha.
 use anyhow::Result;
-use captcha::{filters::Noise, Captcha};
+use captcha::{
+    filters::{Dots, Noise, Wave},
+    Captcha,
+};
 use serde::Deserialize;
-use tommybot_automod::join::{effective_mode, must_verify, FailAction, VerifyCfg, VerifyMode};
+use tommybot_automod::join::{
+    effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
+};
 use tommybot_core::jobs;
 use twilight_model::{
     application::interaction::{modal::ModalInteractionComponent, Interaction, InteractionData},
@@ -107,10 +112,15 @@ pub async fn on_join(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, susp
         return;
     };
     let v = &cfg.verification;
-    if !v.enabled
-        || !must_verify(&v.verify, suspicious, false)
-        || v.verify.on_fail == FailAction::Nothing
-    {
+    if !v.enabled || !must_verify(&v.verify, suspicious, false) {
+        return;
+    }
+    if v.verify.quarantine_on_join {
+        if let Err(e) = crate::antinuke::quarantine(app, gid, user).await {
+            tracing::warn!(?e, "quarantining an unverified joiner failed");
+        }
+    }
+    if v.verify.on_fail == FailAction::Nothing {
         return;
     }
     let at = now_secs() + v.verify.time_limit_ms / 1000;
@@ -168,24 +178,48 @@ fn ephemeral(kind: InteractionResponseType, content: Option<&str>) -> Interactio
     }
 }
 
-async fn grant(
-    app: &App,
-    gid: Id<GuildMarker>,
-    user: Id<UserMarker>,
-    roles: &[Id<RoleMarker>],
-) -> Result<()> {
-    for r in roles {
-        app.http.add_guild_member_role(gid, user, *r).await?;
+/// Hands out the verification roles; a member quarantined on join leaves quarantine.
+async fn grant(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, v: &VerificationCfg) -> Result<()> {
+    if v.verify.replace_roles || v.verify.quarantine_on_join {
+        app.http.update_guild_member(gid, user).roles(&v.roles).await?;
+    } else {
+        for r in &v.roles {
+            app.http.add_guild_member_role(gid, user, *r).await?;
+        }
+    }
+    if v.verify.quarantine_on_join {
+        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2")
+            .bind(gid.get() as i64)
+            .bind(user.get() as i64)
+            .execute(&app.pool)
+            .await?;
     }
     Ok(())
 }
 
-/// A 5-character code and its PNG. Sync so the non-Send generator never crosses an await.
-fn new_captcha() -> (String, Vec<u8>) {
-    let mut c = Captcha::new();
-    c.add_chars(5).apply_filter(Noise::new(0.3)).view(220, 100);
-    (c.chars_as_string(), c.as_png().unwrap_or_default())
+/// The code and its PNG. Sync so the non-Send generator never crosses an await.
+fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
+    let mut cap = Captcha::new();
+    let hex = c.font_color.trim_start_matches('#');
+    if let (6, Ok(rgb)) = (hex.len(), u32::from_str_radix(hex, 16)) {
+        cap.set_color([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+    }
+    // The library draws on a fixed 400x300 canvas; these bounds keep the crop inside it.
+    cap.add_chars(c.length.clamp(3, 7));
+    if c.trace {
+        cap.apply_filter(Wave::new(2.0, 8.0));
+    }
+    if c.mixed {
+        cap.apply_filter(Noise::new(0.3));
+    }
+    if c.spread {
+        cap.apply_filter(Dots::new(12).min_radius(2).max_radius(4));
+    }
+    cap.view(c.width.clamp(150, 300), c.height.clamp(60, 200));
+    (cap.chars_as_string(), cap.as_png().unwrap_or_default())
 }
+
+const NOTES: &str = "Type the characters you see.\n-# Letters are not case sensitive. Ignore the dots and lines, they are only there to stop bots. Press Verify again for a new image.";
 
 /// The text a member typed, wherever the modal nests the input.
 fn typed_text(c: &ModalInteractionComponent) -> Option<String> {
@@ -223,7 +257,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 ..Default::default()
             };
             let now = now_secs() * 1000;
-            let min_age = cfg.joingate.min_age.map_or(0, |a| a.0);
+            let min_age = cfg.joingate.min_age_ms();
             let suspicious =
                 tommybot_automod::join::is_suspicious(&joiner, &cfg.joingate, min_age, now);
             let raid = app
@@ -237,13 +271,13 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                     client.create_response(i.id, &i.token, &reply(t)).await?;
                 }
                 Step::Grant => {
-                    grant(app, gid, user, &cfg.verification.roles).await?;
+                    grant(app, gid, user, &cfg.verification).await?;
                     client
                         .create_response(i.id, &i.token, &reply("Verified, welcome!"))
                         .await?;
                 }
                 Step::Captcha => {
-                    let (code, png) = new_captcha();
+                    let (code, png) = new_captcha(&cfg.verification.verify.captcha);
                     app.captchas
                         .lock()
                         .unwrap()
@@ -260,7 +294,11 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                         .await?;
                     client
                         .update_response(&i.token)
-                        .content(Some("Type the characters you see."))
+                        .content(Some(if cfg.verification.verify.show_notes {
+                            NOTES
+                        } else {
+                            "Type the characters you see."
+                        }))
                         .attachments(&[Attachment::from_bytes("captcha.png".into(), png, 1)])
                         .components(Some(&[row(button("Enter code", ENTER))]))
                         .await?;
@@ -308,7 +346,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 .remove(&(gid.get(), user.get()));
             let text = if expected.is_some_and(|e| e.eq_ignore_ascii_case(typed.trim())) {
                 let cfg = app.cfg(gid.get()).await?;
-                grant(app, gid, user, &cfg.verification.roles).await?;
+                grant(app, gid, user, &cfg.verification).await?;
                 "Verified, welcome!"
             } else {
                 "Wrong code. Press Verify to get a new one."
@@ -363,10 +401,16 @@ mod tests {
     }
 
     #[test]
-    fn captcha_png_matches_five_char_code() {
-        let (code, png) = new_captcha();
-        assert_eq!(code.chars().count(), 5);
+    fn captcha_follows_its_settings_within_bounds() {
+        let (code, png) = new_captcha(&CaptchaCfg::default());
+        assert_eq!(code.chars().count(), 6);
         assert_eq!(&png[1..4], b"PNG");
+        for (length, width, height) in [(1, 1, 1), (99, 9999, 9999), (7, 150, 60)] {
+            for _ in 0..20 {
+                let c = CaptchaCfg { length, width, height, font_color: "#ff0000".into(), ..Default::default() };
+                assert!(!new_captcha(&c).1.is_empty());
+            }
+        }
     }
 
     #[test]

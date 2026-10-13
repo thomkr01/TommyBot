@@ -5,7 +5,7 @@ use tommybot_antinuke::{webhooks_to_delete, Webhook};
 use tommybot_automod::{
     discord_api::BotAction,
     filters,
-    heat::{heat, Breakdown, HeatCfg, MsgFacts},
+    heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
     join::{gate, harshest, is_suspicious, Action, Joiner},
     lockdown::JoinLock,
     store,
@@ -14,11 +14,13 @@ use tommybot_automod::{
 use tommybot_core::{
     cases::{self, NewCase},
     jobs,
-    sections::{FilterAction, FilterCfg, FiltersCfg},
+    sections::{AutomodCfg, FilterAction, FilterCfg, FiltersCfg, WhitelistList},
 };
 use tommybot_logging::LogKind;
 use twilight_model::{
-    gateway::payload::incoming::{AutoModerationActionExecution, MemberAdd, MessageCreate},
+    gateway::payload::incoming::{
+        AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
+    },
     guild::auto_moderation::AutoModerationActionType,
     id::{marker::GuildMarker, Id},
 };
@@ -39,23 +41,27 @@ fn now_ms() -> i64 {
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
-    if !cfg.automod.enabled {
+    let am = &cfg.automod;
+    if !am.enabled || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
     }
     let wl = &cfg.whitelist;
-    if wl.channels.contains(&m.channel_id)
-        || wl.users.contains(&m.author.id)
-        || m.webhook_id
-            .is_some_and(|w| wl.webhooks.iter().any(|x| x.get() == w.get()))
-        || m.member
-            .as_ref()
-            .is_some_and(|mem| mem.roles.iter().any(|r| wl.roles.contains(r)))
-    {
+    let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
+        let any_categories = [&wl.spam, &wl.invites, &wl.mentions, &wl.everyone]
+        .iter()
+        .any(|l| !l.categories.is_empty());
+    let category = if any_categories {
+        app.guild_info(gid).await?.parents.get(&m.channel_id).copied()
+    } else {
+        None
+    };
+    let listed = |l: &WhitelistList| l.covers(m.author.id, roles, m.channel_id, category, m.webhook_id);
+    if listed(&wl.spam) {
         return Ok(());
     }
     let now = now_ms();
     let content = m.content.as_str();
-    let f = &cfg.automod.filters;
+    let f = &am.filters;
     let hosts = filters::hosts(content);
     let (upper_chars, lower_chars) = filters::case_counts(content);
     let words = if f.words.use_discord_automod {
@@ -63,6 +69,11 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     } else {
         blacklist_words(f)
     };
+    let images = m
+        .attachments
+        .iter()
+        .filter(|a| a.content_type.as_deref().is_some_and(|t| t.starts_with("image/")))
+        .count();
     let facts = MsgFacts {
         content,
         // shortcut: custom emoji only, unicode emoji are not counted.
@@ -70,9 +81,18 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         user_mentions: m.mentions.len(),
         everyone_mentions: usize::from(m.mention_everyone),
         role_mentions: m.mention_roles.len(),
-        attachments: m.attachments.len(),
+        images,
+        files: m.attachments.len() - images,
         embeds: m.embeds.len(),
+        links: hosts.len(),
         stickers: m.sticker_items.len(),
+        channel_inactive: app
+            .channels
+            .lock()
+            .unwrap()
+            .entry(m.channel_id.get())
+            .or_default()
+            .on_message(now, f.inactive_messages),
         invite_link: f.invites.enabled
             && ["discord.gg/", "discord.com/invite/"]
                 .iter()
@@ -90,21 +110,38 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         upper_chars,
         lower_chars,
         from_webhook: m.webhook_id.is_some(),
+        whitelist: Whitelist {
+            spam: false,
+            mention_spam: listed(&wl.mentions),
+            advertising: listed(&wl.invites),
+            everyone: listed(&wl.everyone),
+        },
         ..Default::default()
     };
-    let mention_lock = cfg.automod.mention_lock.is_some_and(|(limit, span)| {
-        let n = facts.user_mentions + facts.everyone_mentions + facts.role_mentions;
-        n > 0
-            && app
-                .mentions
-                .lock()
-                .unwrap()
-                .entry(gid.get())
-                .or_default()
-                .on_mentions(n, now, limit, span)
-    });
+    let pings = facts.user_mentions + facts.everyone_mentions + facts.role_mentions;
+    let lock = &am.auto_lockdown;
+    let mention_lock = lock.enabled
+        && lock.mentions
+        && pings > 0
+        && app
+            .mentions
+            .lock()
+            .unwrap()
+            .entry(gid.get())
+            .or_default()
+            .on_mentions(pings, now, lock.mention_count, lock.mention_window_ms);
+    let over_hour_cap = am.anti_spam
+        && f.mentions.enabled
+        && pings > 0
+        && app
+            .pings
+            .lock()
+            .unwrap()
+            .entry((gid.get(), m.author.id.get()))
+            .or_default()
+            .on_mentions(pings, now, f.mention_hour_cap + 1, 3_600_000);
     let key = (gid.get(), m.author.id.get());
-    let heat_cfg = enabled_weights(&cfg.automod.heat, f);
+    let heat_cfg = enabled_weights(am);
     let (triggered, breakdown) = {
         let mut map = app.heat.lock().unwrap();
         // shortcut: heat state is dropped wholesale past 100k users, move to a TTL cache when that bites.
@@ -112,7 +149,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             map.clear();
         }
         let (state, hist) = map.entry(key).or_default();
-        let b = heat(&facts, hist, &heat_cfg);
+        let mut b = heat(&facts, hist, &heat_cfg);
+        if over_hour_cap {
+            b.parts.push(("mentions", heat_cfg.max));
+        }
         hist.remember(content);
         (state.apply(&b, now, &heat_cfg), b)
     };
@@ -140,13 +180,13 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         return delete_new_webhooks(app, gid).await;
     }
     crate::panic::note(app, gid, m.author.id, true).await?;
-    if let Some(fc) = tripped_filter(&breakdown, &facts, f) {
+    if let Some(fc) = tripped_filter(&breakdown, f) {
         if let Some(action) = fc.action {
             return filter_action(app, &cfg, gid, m, action, fc.duration_secs).await;
         }
     }
     let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
-    let act = strike(&mut st, &cfg.automod.strike, now);
+    let act = strike(&mut st, &am.strike, now);
     store::save_strikes(&app.pool, gid.get(), m.author.id.get(), &st).await?;
     if act.reset_heat {
         if let Some((s, _)) = app.heat.lock().unwrap().get_mut(&key) {
@@ -157,15 +197,17 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if cfg.misc.purge_last_100 {
         reply::purge_user(app, m.channel_id, m.author.id).await.ok();
     }
-    if cfg.misc.show_reason_on_auto {
-        reply::dm(
-            app,
-            m.author.id,
-            "You were timed out by automod: message spam",
-        )
-        .await;
+    if am.strike.enabled {
+        if cfg.misc.show_reason_on_auto {
+            reply::dm(
+                app,
+                m.author.id,
+                "You were timed out by automod: message spam",
+            )
+            .await;
+        }
+        timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
     }
-    timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
     let text = format!(
         "<@{}> strike {} ({}s timeout{})",
         m.author.id,
@@ -174,11 +216,8 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         if act.purge { ", cap" } else { "" }
     );
     send_log(app, gid.get(), LogKind::AutoMod, &text).await?;
-    if cfg
-        .automod
-        .strike
-        .lock_at_strikes
-        .is_some_and(|n| act.strike >= n)
+    if lock.enabled
+        && lock.strikes.is_some_and(|n| act.strike >= n)
         && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?
     {
         send_log(
@@ -211,19 +250,30 @@ pub fn blacklist_words(f: &FiltersCfg) -> Vec<String> {
         .collect()
 }
 
-/// Heat weights with every disabled filter zeroed.
-fn enabled_weights(h: &HeatCfg, f: &FiltersCfg) -> HeatCfg {
-    let mut h = h.clone();
+/// Heat weights with every disabled filter zeroed; anti spam off leaves only the link and word filters.
+fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
+    let (f, mut h) = (&am.filters, am.heat.clone());
+    let spam = am.anti_spam;
+    let (pings, attach) = (spam && f.mentions.enabled, spam && f.attachments.enabled);
     for (on, w) in [
-        (f.regular.enabled, &mut h.base),
-        (f.similar.enabled, &mut h.similarity),
-        (f.emojis.enabled, &mut h.per_emoji),
-        (f.newlines.enabled, &mut h.per_newline),
-        (f.chars_upper.enabled, &mut h.per_upper),
-        (f.chars_lower.enabled, &mut h.per_lower),
-        (f.zalgo.enabled, &mut h.zalgo),
-        (f.suspicion.enabled, &mut h.suspicious_account),
-        (f.inactive_channel.enabled, &mut h.inactive_channel),
+        (spam && f.regular.enabled, &mut h.base),
+        (spam && f.similar.enabled, &mut h.similarity),
+        (spam && f.emojis.enabled, &mut h.per_emoji),
+        (spam && f.newlines.enabled, &mut h.per_newline),
+        (spam && f.chars_upper.enabled, &mut h.per_upper),
+        (spam && f.chars_lower.enabled, &mut h.per_lower),
+        (spam && f.chars_lower.enabled, &mut h.per_char),
+        (spam && f.zalgo.enabled, &mut h.zalgo),
+        (spam && f.suspicion.enabled, &mut h.suspicious_account),
+        (spam && f.inactive_channel.enabled, &mut h.inactive_channel),
+        (pings && f.mention_users.enabled, &mut h.per_mention),
+        (pings && f.mention_roles.enabled, &mut h.per_role_mention),
+        (pings && f.mention_everyone.enabled, &mut h.per_everyone),
+        (attach && f.embeds.enabled, &mut h.per_embed),
+        (attach && f.images.enabled, &mut h.per_image),
+        (attach && f.files.enabled, &mut h.per_file),
+        (attach && f.attach_links.enabled, &mut h.per_link),
+        (attach && f.stickers.enabled, &mut h.per_sticker),
     ] {
         if !on {
             *w = 0.0;
@@ -232,17 +282,8 @@ fn enabled_weights(h: &HeatCfg, f: &FiltersCfg) -> HeatCfg {
     h
 }
 
-/// The filter that pushed the message over: the link filter behind an instant trip, else the biggest contributor.
-fn tripped_filter<'a>(b: &Breakdown, m: &MsgFacts, f: &'a FiltersCfg) -> Option<&'a FilterCfg> {
-    if b.instant_max {
-        return Some(if m.invite_link {
-            &f.invites
-        } else if m.malicious_link {
-            &f.scam_links
-        } else {
-            &f.links
-        });
-    }
+/// The filter behind the biggest heat contribution.
+fn tripped_filter<'a>(b: &Breakdown, f: &'a FiltersCfg) -> Option<&'a FilterCfg> {
     let (name, _) = b.parts.iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
     Some(match *name {
         "message" => &f.regular,
@@ -250,11 +291,17 @@ fn tripped_filter<'a>(b: &Breakdown, m: &MsgFacts, f: &'a FiltersCfg) -> Option<
         "emojis" => &f.emojis,
         "newlines" => &f.newlines,
         "uppercase" => &f.chars_upper,
-        "lowercase" => &f.chars_lower,
+        "lowercase" | "characters" => &f.chars_lower,
         "zalgo" => &f.zalgo,
         "suspicious_account" => &f.suspicion,
         "inactive_channel" => &f.inactive_channel,
         "blacklisted_words" => &f.words.filter,
+        "invites" => &f.invites,
+        "malicious" => &f.scam_links,
+        "nsfw" => &f.nsfw_links,
+        "links_blacklist" => &f.links,
+        "mentions" | "role_mentions" | "everyone" => &f.mentions,
+        "images" | "files" | "embeds" | "links" | "stickers" => &f.attachments,
         _ => return None,
     })
 }
@@ -354,7 +401,7 @@ async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         &hooks,
         now_secs() - 600,
         |o| immune[&o],
-        |id| cfg.whitelist.webhooks.iter().any(|w| w.get() == id),
+        |id| cfg.whitelist.spam.webhooks.iter().any(|w| w.get() == id),
     );
     for id in &doomed {
         app.http.delete_webhook(Id::new(*id)).await.ok();
@@ -372,7 +419,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             JoinLock::Kick => Action::Kick,
             JoinLock::Ban => Action::Ban,
         };
-        return punish(app, gid, user.id.get(), action, "join lock").await;
+        return punish(app, &cfg, gid, user.id.get(), action, "join lock").await;
     }
     // shortcut: names are not run through decancer, and bot adders/verification are not looked up
     // (bots count as authorized so the unauthorized-bot filter never fires).
@@ -384,19 +431,12 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         bot_verified: false,
         added_by_authorized: true,
     };
-    let suspicious = is_suspicious(
-        &j,
-        &cfg.joingate,
-        cfg.joingate.min_age.map_or(0, |a| a.0),
-        now,
-    );
+    let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     verify::on_join(app, gid, user.id, suspicious).await;
     if let Some(action) = harshest(&gate(&j, &cfg.joingate, now)) {
-        punish(app, gid, j.id, action, "join gate").await?;
+        punish(app, &cfg, gid, j.id, action, "join gate").await?;
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
-        let min_age = cfg.joingate.min_age.map_or(0, |a| a.0);
-        let suspicious = is_suspicious(&j, &cfg.joingate, min_age, now);
         let out = app
             .raids
             .lock()
@@ -427,11 +467,12 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             )
             .await?;
         }
-        if let Some(kind) = out.triggered.then(|| raid.lock.clone()).flatten() {
+        let auto_lock = cfg.automod.auto_lockdown.enabled;
+        if let Some(kind) = (out.triggered && auto_lock).then(|| raid.lock.clone()).flatten() {
             lockdown::lock(app, gid, kind).await?;
         }
         for id in out.flagged {
-            punish(app, gid, id, raid.action, "join raid").await?;
+            punish(app, &cfg, gid, id, raid.action, "join raid").await?;
         }
     }
     Ok(())
@@ -485,8 +526,8 @@ async fn native_action(
             .await?;
         }
         BotAction::Timeout => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
-        BotAction::Kick => punish(app, gid, uid.get(), Action::Kick, WHY).await?,
-        BotAction::Ban => punish(app, gid, uid.get(), Action::Ban, WHY).await?,
+        BotAction::Kick => punish(app, cfg, gid, uid.get(), Action::Kick, WHY).await?,
+        BotAction::Ban => punish(app, cfg, gid, uid.get(), Action::Ban, WHY).await?,
         BotAction::Lock => {
             lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?;
         }
@@ -494,21 +535,56 @@ async fn native_action(
     Ok(())
 }
 
+/// Re-runs the username filter when a member renames, if the gate asks for it.
+pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
+    let cfg = app.cfg(m.guild_id.get()).await?;
+    let g = &cfg.joingate;
+    let Some(action) = g.username_filter.filter(|_| g.enabled && g.username_post_join) else {
+        return Ok(());
+    };
+    // A timeout fires another member update; without this a matching name would loop.
+    let timed_out = m
+        .communication_disabled_until
+        .is_some_and(|t| t.as_secs() > now_secs());
+    let names = [Some(m.user.name.as_str()), m.nick.as_deref()];
+    if timed_out || !names.into_iter().flatten().any(|n| g.name_matches(n)) {
+        return Ok(());
+    }
+    punish(app, &cfg, m.guild_id, m.user.id.get(), action, "username filter").await
+}
+
 async fn punish(
     app: &App,
+    cfg: &GuildCfg,
     gid: Id<GuildMarker>,
     user: u64,
     action: Action,
     why: &str,
 ) -> Result<()> {
     let uid = Id::new(user);
-    let punishing = matches!(action, Action::Kick | Action::Ban)
-        || matches!(action, Action::Timeout(ms) if ms > 0);
-    if punishing && app.cfg(gid.get()).await?.misc.show_reason_on_auto {
+    let punishing = !matches!(action, Action::Log | Action::Timeout(..=-1));
+    if punishing && (cfg.misc.show_reason_on_auto || cfg.joingate.dm_punished) {
         reply::dm(app, uid, &format!("Automod action: {why}")).await;
     }
     match action {
         Action::Log => {}
+        Action::Warn => {
+            cases::create(
+                &app.pool,
+                NewCase {
+                    guild_id: gid.get() as i64,
+                    kind: "warn",
+                    user_id: user as i64,
+                    mod_id: app.me.get() as i64,
+                    reason: Some(why),
+                    points: cfg.misc.warn_base_points,
+                    duration_s: None,
+                    inverse: None,
+                },
+            )
+            .await?;
+        }
+        Action::Timeout(0) => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
         Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000).await?,
         Action::Timeout(_) => return Ok(()),
         Action::Kick => {
@@ -533,34 +609,29 @@ mod tests {
 
     #[test]
     fn disabled_filters_lose_their_weight() {
-        let mut f = FiltersCfg::default();
-        f.zalgo.enabled = false;
-        f.regular.enabled = false;
-        let h = enabled_weights(&HeatCfg::default(), &f);
-        assert_eq!((h.zalgo, h.base), (0.0, 0.0));
+        let mut am = AutomodCfg::default();
+        am.filters.zalgo.enabled = false;
+        am.filters.regular.enabled = false;
+        am.filters.mentions.enabled = false;
+        let h = enabled_weights(&am);
+        assert_eq!((h.zalgo, h.base, h.per_everyone), (0.0, 0.0, 0.0));
         assert_eq!(h.per_emoji, HeatCfg::default().per_emoji);
+        am.anti_spam = false;
+        let h = enabled_weights(&am);
+        assert_eq!((h.per_emoji, h.invite), (0.0, HeatCfg::default().invite));
     }
 
     #[test]
-    fn biggest_part_picks_the_filter_and_links_win_on_instant() {
+    fn biggest_part_picks_the_filter() {
         let mut f = FiltersCfg::default();
         f.zalgo.action = Some(FilterAction::Ban);
-        let b = Breakdown {
-            parts: vec![("message", 18.0), ("zalgo", 40.0)],
-            instant_max: false,
-        };
-        let got = tripped_filter(&b, &MsgFacts::default(), &f).unwrap();
-        assert_eq!(got.action, Some(FilterAction::Ban));
         f.invites.action = Some(FilterAction::Kick);
-        let facts = MsgFacts {
-            invite_link: true,
-            ..Default::default()
+        let pick = |parts| {
+            tripped_filter(&Breakdown { parts }, &f)
+                .unwrap()
+                .action
         };
-        let b = Breakdown {
-            parts: vec![],
-            instant_max: true,
-        };
-        let got = tripped_filter(&b, &facts, &f).unwrap();
-        assert_eq!(got.action, Some(FilterAction::Kick));
+        assert_eq!(pick(vec![("message", 18.0), ("zalgo", 40.0)]), Some(FilterAction::Ban));
+        assert_eq!(pick(vec![("message", 18.0), ("invites", 100.0)]), Some(FilterAction::Kick));
     }
 }

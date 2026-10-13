@@ -4,12 +4,18 @@ use anyhow::Result;
 use serde_json::json;
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{
-    hold_violation, plan_revert, Action, Inverse, LogEntry, NukeCase, Verdict,
+    gained_dangerous, has_dangerous, hold_violation, plan_revert, Action, Inverse, LogEntry,
+    NukeCase, Verdict,
 };
+use tommybot_automod::heat::{Breakdown, HeatCfg};
 use tommybot_core::cases::{self, NewCase};
 use tommybot_logging::LogKind;
 use twilight_model::{
-    guild::audit_log::{AuditLogEntry, AuditLogEventType as A},
+    guild::{
+        audit_log::{AuditLogChange, AuditLogEntry, AuditLogEventType as A},
+        Permissions,
+    },
+    http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
     id::{
         marker::{GuildMarker, RoleMarker, UserMarker},
         Id,
@@ -17,7 +23,7 @@ use twilight_model::{
 };
 
 use crate::{
-    app::{now_secs, App},
+    app::{now_secs, App, GuildCfg},
     backup,
     events::send_log,
 };
@@ -74,15 +80,25 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if !cfg.antinuke.enabled {
         return Ok(());
     }
-    if e.action_type == A::MemberRoleUpdate {
-        return hold(app, e, actor).await;
+    if matches!(
+        e.action_type,
+        A::MemberRoleUpdate
+            | A::RoleUpdate
+            | A::ChannelOverwriteCreate
+            | A::ChannelOverwriteUpdate
+            | A::GuildUpdate
+    ) {
+        if e.action_type == A::MemberRoleUpdate {
+            hold(app, e, actor).await?;
+        }
+        return guard_perms(app, &cfg, e, actor).await;
     }
     let Some(action) = watched(e.action_type) else {
         return Ok(());
     };
-    if !cfg.antinuke.limits.contains_key(&action) {
+    let Some((_, heat)) = cfg.antinuke.limit(action) else {
         return Ok(());
-    }
+    };
     let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?;
     let inv = inverse(action, e.target_id.map(|t| t.get()));
     if !exempt {
@@ -94,10 +110,13 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             .bind(inv.as_ref().map(|i| json!(i)))
             .execute(&app.pool)
             .await?;
+        if heat > 0 && cfg.panic.heat_algorithm && add_heat(app, gid, actor, heat) {
+            crate::panic::note(app, gid, actor, true).await?;
+        }
     }
     let verdict = {
         let mut an = app.antinuke.lock().unwrap();
-        an.limits = cfg.antinuke.limits.clone();
+        an.limits = cfg.antinuke.watched();
         an.on_action(gid.get(), actor.get(), action, exempt, Instant::now())
     };
     if let Verdict::Quarantine(c) = verdict {
@@ -108,6 +127,114 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         quarantine_and_revert(app, gid, actor, &why).await?;
     }
     Ok(())
+}
+
+/// Adds a staff action's heat %; true when the member just reached 100.
+fn add_heat(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, heat: u32) -> bool {
+    // shortcut: staff heat cools 1% per second, Wick's rate is unknown.
+    let cfg = HeatCfg {
+        decay_per_sec: 0.01,
+        ..Default::default()
+    };
+    let b = Breakdown {
+        parts: vec![("nuke", f64::from(heat))],
+    };
+    let mut map = app.nuke_heat.lock().unwrap();
+    let s = map.entry((gid.get(), actor.get())).or_default();
+    let hot = s.apply(&b, now_secs() * 1000, &cfg);
+    if hot {
+        s.value = 0.0;
+    }
+    hot
+}
+
+/// Strict mode, public role and channel permission guards, and the vanity guard.
+/// Undoes the change where the bot can, then quarantines the actor.
+async fn guard_perms(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+    let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
+        return Ok(());
+    };
+    let an = &cfg.antinuke;
+    let public = |id: u64| id == gid.get() || cfg.lockdown.main_roles.iter().any(|r| r.get() == id);
+    let gained = |old: Option<Permissions>, new: Option<Permissions>| {
+        let bits = |p: Option<Permissions>| p.map_or(0, |p| p.bits());
+        gained_dangerous(bits(old), bits(new)).then(|| old.unwrap_or(Permissions::empty()))
+    };
+    let why = match e.action_type {
+        A::RoleUpdate if an.strict_mode || (an.monitor_public_roles && public(target.get())) => {
+            let Some(old) = e.changes.iter().find_map(|c| match c {
+                AuditLogChange::Permissions { old, new } => gained(*old, *new),
+                _ => None,
+            }) else {
+                return Ok(());
+            };
+            if app.whitelisted(gid, actor, "antinuke").await? {
+                return Ok(());
+            }
+            app.http.update_role(gid, target.cast()).permissions(old).await?;
+            "gave a role dangerous permissions"
+        }
+        A::MemberRoleUpdate if an.strict_member_roles => {
+            let info = app.guild_info(gid).await?;
+            let added: Vec<Id<RoleMarker>> = e
+                .changes
+                .iter()
+                .filter_map(|c| match c {
+                    AuditLogChange::RoleAdded { new, .. } => Some(new),
+                    _ => None,
+                })
+                .flatten()
+                .map(|r| r.id)
+                .filter(|r| info.role_perms.get(r).is_some_and(|p| has_dangerous(*p)))
+                .collect();
+            if added.is_empty() || app.whitelisted(gid, actor, "antinuke").await? {
+                return Ok(());
+            }
+            for r in added {
+                app.http.remove_guild_member_role(gid, target.cast(), r).await?;
+            }
+            "gave a member a role with dangerous permissions"
+        }
+        A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate if an.monitor_channel_perms => {
+            let Some(role) = e.options.as_ref().and_then(|o| o.id).filter(|id| public(id.get())) else {
+                return Ok(());
+            };
+            let Some(old) = e.changes.iter().find_map(|c| match c {
+                AuditLogChange::Allow { old, new } => gained(*old, *new),
+                _ => None,
+            }) else {
+                return Ok(());
+            };
+            if app.whitelisted(gid, actor, "antinuke").await? {
+                return Ok(());
+            }
+            let channel = target.cast();
+            if e.action_type == A::ChannelOverwriteCreate {
+                app.http.delete_channel_permission(channel).role(role.cast()).await?;
+            } else {
+                let o = PermissionOverwrite {
+                    id: role.cast(),
+                    kind: PermissionOverwriteType::Role,
+                    allow: Some(old),
+                    deny: None,
+                };
+                app.http.update_channel_permission(channel, &o).await?;
+            }
+            "gave @everyone or a main role dangerous channel permissions"
+        }
+        A::GuildUpdate if an.vanity_guard => {
+            let changed = e
+                .changes
+                .iter()
+                .any(|c| matches!(c, AuditLogChange::VanityUrlCode { .. }));
+            if !changed || app.whitelisted(gid, actor, "antinuke").await? {
+                return Ok(());
+            }
+            "changed the vanity URL (bots cannot set it back, do it by hand)"
+        }
+        _ => return Ok(()),
+    };
+    quarantine_and_revert(app, gid, actor, why).await
 }
 
 /// Strips the member's roles (saving them) so their permissions are gone.
@@ -269,19 +396,26 @@ async fn quarantine_and_revert(
     actor: Id<UserMarker>,
     why: &str,
 ) -> Result<()> {
-    quarantine(app, gid, actor).await?;
+    let auto = app.cfg(gid.get()).await?.antinuke.auto_quarantine;
+    if auto {
+        quarantine(app, gid, actor).await?;
+    }
     let sum = revert_actor(app, gid, actor, now_secs() - 3600).await?;
     let case = open_case(app, gid, actor, why).await?;
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
     let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     let text = format!(
-        "**Anti-nuke** case #{case} (nuke `{nuke}`): <@{actor}> quarantined, {why}. Reverted {}/{} actions, recreated {} deleted. Kicked, re-invite: {}",
+        "**Anti-nuke** case #{case} (nuke `{nuke}`): <@{actor}> {}, {why}. Reverted {}/{} actions, recreated {} deleted. Kicked, re-invite: {}",
+        if auto { "quarantined" } else { "not quarantined (auto quarantine is off)" },
         sum.ops - sum.failed,
         sum.ops,
         sum.recreated,
         if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
     );
     send_log(app, gid.get(), LogKind::AntiNuke, &text).await?;
+    if !auto {
+        return Ok(());
+    }
     crate::panic::note(app, gid, actor, false).await
 }
 
@@ -392,11 +526,12 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     if saved.is_none() {
         return Ok(());
     }
-    let whitelisted = app.whitelisted(gid, actor, "quarantine").await?;
+    let cfg = app.cfg(gid.get()).await?;
+    let whitelisted = cfg.antinuke.quarantine_whitelist.contains(&actor)
+        || app.whitelisted(gid, actor, "quarantine").await?;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
         return Ok(());
     }
-    let cfg = app.cfg(gid.get()).await?;
     let roles: Vec<_> = cfg.antinuke.quarantine_role.into_iter().collect();
     app.http
         .update_guild_member(gid, target)

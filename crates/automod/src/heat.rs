@@ -15,10 +15,15 @@ pub struct HeatCfg {
     pub free_chars: usize,
     pub per_newline: f64,
     pub per_emoji: f64,
+    /// Per @user, @role and @everyone/@here mention.
     pub per_mention: f64,
-    pub per_mass_mention: f64,
-    pub per_attachment: f64,
+    pub per_role_mention: f64,
+    pub per_everyone: f64,
+    pub per_image: f64,
+    /// Attachments that are not images.
+    pub per_file: f64,
     pub per_embed: f64,
+    pub per_link: f64,
     pub per_sticker: f64,
     pub inactive_channel: f64,
     pub per_blacklisted_word: f64,
@@ -32,6 +37,11 @@ pub struct HeatCfg {
     /// Per uppercase / lowercase letter, on top of `per_char`.
     pub per_upper: f64,
     pub per_lower: f64,
+    /// Link filters; at the default 100 one hit reaches max heat.
+    pub invite: f64,
+    pub malicious: f64,
+    pub nsfw: f64,
+    pub blacklisted_link: f64,
 }
 
 impl Default for HeatCfg {
@@ -45,10 +55,13 @@ impl Default for HeatCfg {
             per_newline: 2.0,
             per_emoji: 3.0,
             per_mention: 15.0,
-            per_mass_mention: 60.0,
-            per_attachment: 10.0,
-            per_embed: 8.0,
-            per_sticker: 8.0,
+            per_role_mention: 20.0,
+            per_everyone: 100.0,
+            per_image: 20.0,
+            per_file: 15.0,
+            per_embed: 15.0,
+            per_link: 10.0,
+            per_sticker: 15.0,
             inactive_channel: 10.0,
             per_blacklisted_word: 40.0,
             suspicious_account: 10.0,
@@ -58,17 +71,23 @@ impl Default for HeatCfg {
             zalgo: 40.0,
             per_upper: 0.0,
             per_lower: 0.0,
+            invite: 100.0,
+            malicious: 100.0,
+            nsfw: 100.0,
+            blacklisted_link: 100.0,
         }
     }
 }
 
-/// Which filters the author is whitelisted from.
+/// Which filters the author is whitelisted from (the whitelist tabs).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Whitelist {
     pub spam: bool,
+    /// @user and @role mentions.
     pub mention_spam: bool,
     pub advertising: bool,
-    pub public_role_mention: bool,
+    /// @everyone and @here.
+    pub everyone: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,8 +98,11 @@ pub struct MsgFacts<'a> {
     /// @everyone / @here
     pub everyone_mentions: usize,
     pub role_mentions: usize,
-    pub attachments: usize,
+    pub images: usize,
+    /// Attachments that are not images.
+    pub files: usize,
     pub embeds: usize,
+    pub links: usize,
     pub stickers: usize,
     pub channel_inactive: bool,
     pub blacklisted_words: usize,
@@ -125,8 +147,6 @@ impl UserHistory {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Breakdown {
     pub parts: Vec<(&'static str, f64)>,
-    /// Advert / NSFW / malicious / blacklisted link: punish immediately.
-    pub instant_max: bool,
 }
 
 impl Breakdown {
@@ -164,13 +184,12 @@ pub fn similarity(a: &str, b: &str) -> f64 {
 
 pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     let w = m.whitelist;
-    let mut b = Breakdown {
-        instant_max: (m.invite_link && !w.advertising)
-            || m.nsfw_link
-            || m.malicious_link
-            || m.blacklisted_link,
-        ..Default::default()
-    };
+    let mut b = Breakdown::default();
+    let hit = |on: bool, v: f64| if on { v } else { 0.0 };
+    b.add("invites", hit(m.invite_link && !w.advertising, cfg.invite));
+    b.add("malicious", hit(m.malicious_link, cfg.malicious));
+    b.add("nsfw", hit(m.nsfw_link, cfg.nsfw));
+    b.add("links_blacklist", hit(m.blacklisted_link, cfg.blacklisted_link));
     b.add("message", cfg.base);
     if !w.spam {
         let sim = hist.best_similarity(m.content);
@@ -191,8 +210,10 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
             cfg.per_newline * m.content.matches('\n').count() as f64,
         );
         b.add("emojis", cfg.per_emoji * m.emojis as f64);
-        b.add("attachments", cfg.per_attachment * m.attachments as f64);
+        b.add("images", cfg.per_image * m.images as f64);
+        b.add("files", cfg.per_file * m.files as f64);
         b.add("embeds", cfg.per_embed * m.embeds as f64);
+        b.add("links", cfg.per_link * m.links as f64);
         b.add("stickers", cfg.per_sticker * m.stickers as f64);
         if m.channel_inactive {
             b.add("inactive_channel", cfg.inactive_channel);
@@ -200,15 +221,10 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     }
     if !w.mention_spam {
         b.add("mentions", cfg.per_mention * m.user_mentions as f64);
+        b.add("role_mentions", cfg.per_role_mention * m.role_mentions as f64);
     }
-    let mass = m.everyone_mentions
-        + if w.public_role_mention {
-            0
-        } else {
-            m.role_mentions
-        };
-    if !w.mention_spam {
-        b.add("mass_mentions", cfg.per_mass_mention * mass as f64);
+    if !w.everyone {
+        b.add("everyone", cfg.per_everyone * m.everyone_mentions as f64);
     }
     b.add(
         "blacklisted_words",
@@ -223,6 +239,29 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
         }
     }
     b
+}
+
+/// Quiet-channel detector for the inactive channel filter.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelActivity {
+    last_ms: i64,
+    burst_left: u32,
+}
+
+impl ChannelActivity {
+    /// shortcut: a fixed hour of silence makes a channel inactive; make it a setting if servers ask.
+    pub const QUIET_MS: i64 = 3_600_000;
+
+    /// True for the first `burst` messages after the channel was quiet.
+    pub fn on_message(&mut self, now: i64, burst: u32) -> bool {
+        if self.last_ms > 0 && now - self.last_ms >= Self::QUIET_MS {
+            self.burst_left = burst;
+        }
+        self.last_ms = now;
+        let inactive = self.burst_left > 0;
+        self.burst_left = self.burst_left.saturating_sub(1);
+        inactive
+    }
 }
 
 /// A user's running heat. Decay is applied lazily when read.
@@ -240,11 +279,7 @@ impl HeatState {
 
     /// Apply a message's breakdown; returns true when the automod should trigger.
     pub fn apply(&mut self, b: &Breakdown, now: i64, cfg: &HeatCfg) -> bool {
-        self.value = if b.instant_max {
-            cfg.max
-        } else {
-            self.decayed(now, cfg) + b.total()
-        };
+        self.value = self.decayed(now, cfg) + b.total();
         self.at_ms = now;
         self.value >= cfg.max
     }
@@ -259,6 +294,17 @@ mod tests {
             content,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn quiet_channel_flags_the_next_burst() {
+        let mut c = ChannelActivity::default();
+        assert!(!c.on_message(1, 2));
+        let later = 1 + ChannelActivity::QUIET_MS;
+        assert_eq!(
+            [later, later + 1, later + 2].map(|t| c.on_message(t, 2)),
+            [true, true, false]
+        );
     }
 
     #[test]
@@ -299,14 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn invite_is_instant_max_unless_whitelisted() {
+    fn invite_trips_at_once_unless_whitelisted() {
         let cfg = HeatCfg::default();
         let mut m = msg("discord.gg/x");
         m.invite_link = true;
         let mut s = HeatState::default();
         assert!(s.apply(&heat(&m, &UserHistory::default(), &cfg), 0, &cfg));
         m.whitelist.advertising = true;
-        assert!(!heat(&m, &UserHistory::default(), &cfg).instant_max);
+        assert_eq!(heat(&m, &UserHistory::default(), &cfg).total(), cfg.base);
     }
 
     #[test]
@@ -316,9 +362,9 @@ mod tests {
         m.everyone_mentions = 1;
         m.role_mentions = 1;
         let full = heat(&m, &UserHistory::default(), &cfg).total();
-        m.whitelist.public_role_mention = true;
-        assert!(heat(&m, &UserHistory::default(), &cfg).total() < full);
         m.whitelist.mention_spam = true;
+        assert!(heat(&m, &UserHistory::default(), &cfg).total() < full);
+        m.whitelist.everyone = true;
         assert_eq!(heat(&m, &UserHistory::default(), &cfg).total(), cfg.base);
     }
 
