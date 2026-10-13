@@ -15,9 +15,11 @@ use twilight_model::{
 use crate::{
     antinuke,
     app::{now_secs, App},
+    backup,
     hierarchy::top_position,
     lockdown,
     prefix::Parsed,
+    slash::BackupCmd,
     targets,
 };
 
@@ -348,6 +350,40 @@ pub async fn lockdown_cmd(
     .into())
 }
 
+/// `/backup create|list|load|delete`. `load` previews unless `confirm` is set.
+pub async fn backup_cmd(
+    app: &App,
+    gid: Id<GuildMarker>,
+    (actor_id, actor): (Id<UserMarker>, &permits::Level),
+    cmd: BackupCmd,
+) -> Result<String> {
+    if !actor.has("backups") {
+        return Ok("Cannot manage backups: no permit".into());
+    }
+    if let Some(msg) = gated(app, gid, actor_id, actor, "backups").await? {
+        return Ok(msg);
+    }
+    Ok(match cmd {
+        BackupCmd::Create => format!("Saved backup #{}", backup::save(app, gid).await?),
+        BackupCmd::List => {
+            let rows = backup::list(app, gid).await?;
+            if rows.is_empty() {
+                "No backups yet".into()
+            } else {
+                rows.iter()
+                    .map(|(id, at, r, c)| format!("`#{id}` <t:{at}:R>: {r} roles, {c} channels"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        BackupCmd::Load { id, confirm } => backup::load(app, gid, id, confirm).await?,
+        BackupCmd::Delete { id } => match backup::delete(app, gid, id).await? {
+            true => format!("Deleted backup #{id}"),
+            false => format!("No backup #{id}"),
+        },
+    })
+}
+
 /// `/revert`: undo what `target` did in the last `since_s` seconds.
 pub async fn revert_cmd(
     app: &App,
@@ -365,9 +401,10 @@ pub async fn revert_cmd(
     let r = antinuke::revert_actor(app, gid, target, now_secs() - since_s).await?;
     let reinvite: Vec<String> = r.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     Ok(format!(
-        "Reverted {}/{} actions by <@{target}>. Re-invite: {}",
+        "Reverted {}/{} actions by <@{target}> and recreated {} deleted. Re-invite: {}",
         r.ops - r.failed,
         r.ops,
+        r.recreated,
         if reinvite.is_empty() {
             "none".into()
         } else {
