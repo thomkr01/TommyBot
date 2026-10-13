@@ -38,12 +38,24 @@ mod tests {
     #[test]
     fn harshest_crossed_wins() {
         let ts = [
-            Threshold { points: 3, action: Action::Timeout { secs: 600 } },
-            Threshold { points: 6, action: Action::Kick },
-            Threshold { points: 9, action: Action::Ban },
+            Threshold {
+                points: 3,
+                action: Action::Timeout { secs: 600 },
+            },
+            Threshold {
+                points: 6,
+                action: Action::Kick,
+            },
+            Threshold {
+                points: 9,
+                action: Action::Ban,
+            },
         ];
         assert_eq!(crossed(&ts, 0, 2), None);
-        assert_eq!(crossed(&ts, 0, 3).unwrap().action, Action::Timeout { secs: 600 });
+        assert_eq!(
+            crossed(&ts, 0, 3).unwrap().action,
+            Action::Timeout { secs: 600 }
+        );
         assert_eq!(crossed(&ts, 2, 7).unwrap().action, Action::Kick);
         assert_eq!(crossed(&ts, 7, 7), None);
     }

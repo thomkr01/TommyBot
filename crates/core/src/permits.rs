@@ -88,47 +88,18 @@ impl RateLimiter {
     /// Records the use and returns `false` when it exceeds the limit (caller quarantines the actor).
     pub fn allow(&mut self, actor: UserId, action: &str, limit: Limit, now: Instant) -> bool {
         let q = self.hits.entry((actor, action.to_owned())).or_default();
-        while q.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(3600)) {
+        while q
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(3600))
+        {
             q.pop_front();
         }
         q.push_back(now);
-        let last_min = q.iter().filter(|t| now.duration_since(**t) < Duration::from_secs(60)).count();
+        let last_min = q
+            .iter()
+            .filter(|t| now.duration_since(**t) < Duration::from_secs(60))
+            .count();
         last_min as u32 <= limit.per_min && q.len() as u32 <= limit.per_hour
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn custom(rank: i32, perms: &[&str]) -> Level {
-        Level::Custom { rank, perms: perms.iter().map(|s| s.to_string()).collect() }
-    }
-
-    #[test]
-    fn permit_checks() {
-        let mod_ = custom(1, &["ban"]);
-        assert_eq!(check(&Level::None, "ban", 1, &Level::None, 2, false), Err(Denied::NoPermit));
-        assert_eq!(check(&mod_, "kick", 1, &Level::None, 2, false), Err(Denied::NoPermit));
-        assert_eq!(check(&mod_, "ban", 1, &Level::None, 2, false), Ok(()));
-        assert_eq!(check(&mod_, "ban", 1, &Level::TrustedAdmin, 2, false), Err(Denied::TargetProtected));
-        assert_eq!(check(&mod_, "ban", 1, &custom(1, &[]), 2, false), Err(Denied::TargetProtected));
-        assert_eq!(check(&custom(2, &["ban"]), "ban", 1, &custom(1, &[]), 2, false), Ok(()));
-        assert_eq!(check(&mod_, "ban", 1, &Level::None, 2, true), Err(Denied::TargetAboveBot));
-        assert_eq!(check(&Level::Owner, "ban", 1, &Level::None, 1, false), Err(Denied::SelfTarget));
-    }
-
-    #[test]
-    fn rate_limit_windows() {
-        let mut rl = RateLimiter::default();
-        let lim = Limit { per_min: 2, per_hour: 3 };
-        let t0 = Instant::now();
-        assert!(rl.allow(1, "ban", lim, t0));
-        assert!(rl.allow(1, "ban", lim, t0));
-        assert!(!rl.allow(1, "ban", lim, t0)); // 3rd within the minute
-        assert!(rl.allow(2, "ban", lim, t0)); // other actor unaffected
-        let later = t0 + Duration::from_secs(61);
-        assert!(!rl.allow(1, "ban", lim, later)); // 4th in the hour breaches per_hour
     }
 }
 
@@ -143,13 +114,23 @@ pub async fn resolve(
     if user_id == owner_id {
         return Ok(Level::Owner);
     }
-    let (eo,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM extra_owners WHERE guild_id=$1 AND user_id=$2)")
-        .bind(guild_id).bind(user_id).fetch_one(pool).await?;
+    let (eo,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM extra_owners WHERE guild_id=$1 AND user_id=$2)",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
     if eo {
         return Ok(Level::ExtraOwner);
     }
-    let (ta,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM trusted_admins WHERE guild_id=$1 AND user_id=$2)")
-        .bind(guild_id).bind(user_id).fetch_one(pool).await?;
+    let (ta,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM trusted_admins WHERE guild_id=$1 AND user_id=$2)",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
     if ta {
         return Ok(Level::TrustedAdmin);
     }
@@ -158,6 +139,71 @@ pub async fn resolve(
         "SELECT p.rank, p.perms FROM permits p JOIN permit_roles r ON r.permit_id = p.id
          WHERE p.guild_id = $1 AND r.role_id = ANY($2) ORDER BY p.rank DESC LIMIT 1",
     )
-    .bind(guild_id).bind(roles).fetch_optional(pool).await?;
+    .bind(guild_id)
+    .bind(roles)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map_or(Level::None, |(rank, perms)| Level::Custom { rank, perms }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn custom(rank: i32, perms: &[&str]) -> Level {
+        Level::Custom {
+            rank,
+            perms: perms.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn permit_checks() {
+        let mod_ = custom(1, &["ban"]);
+        assert_eq!(
+            check(&Level::None, "ban", 1, &Level::None, 2, false),
+            Err(Denied::NoPermit)
+        );
+        assert_eq!(
+            check(&mod_, "kick", 1, &Level::None, 2, false),
+            Err(Denied::NoPermit)
+        );
+        assert_eq!(check(&mod_, "ban", 1, &Level::None, 2, false), Ok(()));
+        assert_eq!(
+            check(&mod_, "ban", 1, &Level::TrustedAdmin, 2, false),
+            Err(Denied::TargetProtected)
+        );
+        assert_eq!(
+            check(&mod_, "ban", 1, &custom(1, &[]), 2, false),
+            Err(Denied::TargetProtected)
+        );
+        assert_eq!(
+            check(&custom(2, &["ban"]), "ban", 1, &custom(1, &[]), 2, false),
+            Ok(())
+        );
+        assert_eq!(
+            check(&mod_, "ban", 1, &Level::None, 2, true),
+            Err(Denied::TargetAboveBot)
+        );
+        assert_eq!(
+            check(&Level::Owner, "ban", 1, &Level::None, 1, false),
+            Err(Denied::SelfTarget)
+        );
+    }
+
+    #[test]
+    fn rate_limit_windows() {
+        let mut rl = RateLimiter::default();
+        let lim = Limit {
+            per_min: 2,
+            per_hour: 3,
+        };
+        let t0 = Instant::now();
+        assert!(rl.allow(1, "ban", lim, t0));
+        assert!(rl.allow(1, "ban", lim, t0));
+        assert!(!rl.allow(1, "ban", lim, t0)); // 3rd within the minute
+        assert!(rl.allow(2, "ban", lim, t0)); // other actor unaffected
+        let later = t0 + Duration::from_secs(61);
+        assert!(!rl.allow(1, "ban", lim, later)); // 4th in the hour breaches per_hour
+    }
 }

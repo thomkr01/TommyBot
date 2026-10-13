@@ -21,7 +21,10 @@ pub struct NewCase<'a> {
 pub async fn create(pool: &PgPool, c: NewCase<'_>) -> Result<i32> {
     let mut tx = pool.begin().await?;
     // Serialize case numbering per guild.
-    sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(c.guild_id).execute(&mut *tx).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(c.guild_id)
+        .execute(&mut *tx)
+        .await?;
     let (case_no,): (i32,) = sqlx::query_as(
         "INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id, reason, points, duration_s, expires_at)
          VALUES ($1, (SELECT COALESCE(MAX(case_no), 0) + 1 FROM cases WHERE guild_id = $1),
@@ -69,10 +72,12 @@ pub async fn warn_points(pool: &PgPool, guild_id: GuildId, user_id: UserId) -> R
 
 /// Warns reset after a threshold punishment is applied (spec 4.9).
 pub async fn reset_warns(pool: &PgPool, guild_id: GuildId, user_id: UserId) -> Result<()> {
-    sqlx::query("UPDATE cases SET active = false WHERE guild_id = $1 AND user_id = $2 AND kind = 'warn'")
-        .bind(guild_id)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE cases SET active = false WHERE guild_id = $1 AND user_id = $2 AND kind = 'warn'",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }

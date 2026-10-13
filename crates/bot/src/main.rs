@@ -22,12 +22,20 @@ async fn main() -> Result<()> {
     let http = twilight_http::Client::new(cfg.discord_token.clone());
     let mut shard = Shard::new(ShardId::ONE, cfg.discord_token, intents);
 
-    while let Some(event) = shard.next_event(twilight_gateway::EventTypeFlags::all()).await {
+    while let Some(event) = shard
+        .next_event(twilight_gateway::EventTypeFlags::all())
+        .await
+    {
         match event {
             Ok(Event::MessageCreate(msg)) if !msg.author.bot => {
-                let Some(text) = msg.content.strip_prefix(commands::PREFIX) else { continue };
+                let Some(text) = msg.content.strip_prefix(commands::PREFIX) else {
+                    continue;
+                };
                 if let Some(parsed) = prefix::parse(text) {
-                    let ctx = commands::Ctx { http: &http, pool: &pool };
+                    let ctx = commands::Ctx {
+                        http: &http,
+                        pool: &pool,
+                    };
                     if let Err(e) = commands::run(&ctx, &msg, parsed).await {
                         tracing::warn!(?e, "command failed");
                     }

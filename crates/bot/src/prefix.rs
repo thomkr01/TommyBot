@@ -11,21 +11,31 @@ pub struct Parsed {
 /// `s` is the message text with the prefix already stripped. Targets are mentions or raw ids.
 pub fn parse(s: &str) -> Option<Parsed> {
     let mut it = s.split_whitespace().peekable();
-    let mut p = Parsed { command: it.next()?.to_lowercase(), ..Default::default() };
+    let mut p = Parsed {
+        command: it.next()?.to_lowercase(),
+        ..Default::default()
+    };
     while let Some(tok) = it.next() {
         match tok {
             "?r" => {
-                let rest: Vec<&str> = it.by_ref().take_while(|t| *t != "?dm").collect();
-                if !rest.is_empty() {
-                    p.reason = Some(rest.join(" "));
+                let mut words = vec![];
+                while let Some(t) = it.next_if(|t| *t != "?dm") {
+                    words.push(t);
                 }
-                // take_while consumed the `?dm` flag if it ended the reason
-                p.dm |= s.trim_end().ends_with("?dm");
+                if !words.is_empty() {
+                    p.reason = Some(words.join(" "));
+                }
             }
             "?dm" => p.dm = true,
             _ => {
-                let id = tok.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>().ok();
-                if let (Some(id), true) = (id, tok.starts_with("<@") || tok.chars().all(|c| c.is_ascii_digit())) {
+                let id = tok
+                    .trim_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<u64>()
+                    .ok();
+                if let (Some(id), true) = (
+                    id,
+                    tok.starts_with("<@") || tok.chars().all(|c| c.is_ascii_digit()),
+                ) {
                     p.targets.push(id);
                 } else if let Some(d) = tommybot_core::duration::parse(tok) {
                     p.duration_s = Some(d);
