@@ -378,7 +378,12 @@ mod tests {
             return;
         };
         let pool = tommybot_core::db::connect(&url).await.unwrap();
-        let app = App::new(twilight_http::Client::new(String::new()), pool, Id::new(1));
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            Id::new(1),
+        );
         let gid = Id::new(6_000_000_000 + std::process::id() as u64);
         let first = record_nuke(&app, gid, Id::new(10), &[Inverse::DeleteChannel { id: 5 }])
             .await
@@ -410,7 +415,12 @@ mod tests {
             return;
         };
         let pool = tommybot_core::db::connect(&url).await.unwrap();
-        let app = App::new(twilight_http::Client::new(String::new()), pool, Id::new(1));
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            Id::new(1),
+        );
         let gid = Id::new(6_100_000_000 + std::process::id() as u64);
         record_quarantine(&app, gid, Id::new(42)).await.unwrap();
         let (actor, inv): (i64, serde_json::Value) = sqlx::query_as(
