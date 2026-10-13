@@ -103,9 +103,8 @@ pub async fn setup(app: &App, gid: Id<GuildMarker>) -> Result<String> {
 
 /// Gives a fresh joiner until the time limit to verify; see [`deadline`].
 pub async fn on_join(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, suspicious: bool) {
-    let cfg = match app.cfg(gid.get()).await {
-        Ok(c) => c,
-        Err(_) => return,
+    let Ok(cfg) = app.cfg(gid.get()).await else {
+        return;
     };
     let v = &cfg.verification;
     if !v.enabled
@@ -200,9 +199,10 @@ fn typed_text(c: &ModalInteractionComponent) -> Option<String> {
 
 /// Handles the verify button, the "enter code" button and the code modal. Returns false for other interactions.
 pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
-    let (Some(gid), Some(user)) = (i.guild_id, i.author_id()) else {
+    let (Some(gid), Some(u)) = (i.guild_id, i.author()) else {
         return Ok(false);
     };
+    let user = u.id;
     let client = app.http.interaction(Id::new(app.me.get()));
     let reply = |text: &'static str| {
         ephemeral(
@@ -216,7 +216,6 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             let member = i.member.as_ref();
             let has_role =
                 member.is_some_and(|m| m.roles.iter().any(|r| cfg.verification.roles.contains(r)));
-            let u = i.author().expect("author_id implies author");
             let joiner = tommybot_automod::join::Joiner {
                 id: u.id.get(),
                 name: &u.name,
