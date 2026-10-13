@@ -157,6 +157,81 @@ pub fn plan(
     p
 }
 
+/// Parses the kind a dashboard button or job payload names; `channel` is only used by "channel".
+pub fn kind_from(name: &str, channel: Option<u64>) -> Option<LockKind> {
+    Some(match name {
+        "server" => LockKind::Server,
+        "blind" => LockKind::Blind,
+        "role" => LockKind::Role,
+        "all" => LockKind::All,
+        "kick" => LockKind::Join(JoinLock::Kick),
+        "ban" => LockKind::Join(JoinLock::Ban),
+        "channel" => LockKind::Channel(channel?),
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Problem {
+    pub id: String,
+    pub text: String,
+    /// Applying this op resolves the problem.
+    pub fix: Option<Op>,
+}
+
+/// Compatibility check (spec F49): what would make a server lock leak or fail.
+pub fn tshoot(
+    guild_id: u64,
+    main_roles: &[u64],
+    roles: &[RoleInfo],
+    bot_position: i32,
+) -> Vec<Problem> {
+    let main: Vec<u64> = if main_roles.is_empty() {
+        vec![guild_id]
+    } else {
+        main_roles.to_vec()
+    };
+    let mut out = vec![];
+    for r in roles
+        .iter()
+        .filter(|r| main.contains(&r.id) && r.id != guild_id)
+    {
+        if r.position >= bot_position {
+            out.push(Problem {
+                id: format!("main_above_bot_{}", r.id),
+                text: format!(
+                    "Main role <@&{}> is not below the bot, so it cannot be locked.",
+                    r.id
+                ),
+                fix: None,
+            });
+        }
+    }
+    for r in roles.iter().filter(|r| !main.contains(&r.id) && !r.managed) {
+        if r.perms & (1 << 3) != 0 {
+            out.push(Problem {
+                id: format!("admin_{}", r.id),
+                text: format!(
+                    "Role <@&{}> has Administrator and ignores every lock.",
+                    r.id
+                ),
+                fix: None,
+            });
+        } else if r.perms & SEND_MESSAGES != 0 {
+            let fixable = r.position < bot_position;
+            out.push(Problem {
+                id: format!("bypass_{}", r.id),
+                text: format!("Role <@&{}> grants Send Messages, so members with it can still talk during a lock.", r.id),
+                fix: fixable.then_some(Op::SetRolePerms {
+                    role: r.id,
+                    perms: r.perms & !SEND_MESSAGES,
+                }),
+            });
+        }
+    }
+    out
+}
+
 /// Ops that put every saved perm back exactly; join lock / invites are lifted by the caller via the flags.
 pub fn unlock_ops(s: &Snapshot) -> Vec<Op> {
     s.role_perms
@@ -297,6 +372,29 @@ mod tests {
         );
         let p = plan(&LockKind::Channel(77), G, &[10, 11], &[], 5);
         assert_eq!(p.ops.len(), 2);
+    }
+
+    #[test]
+    fn tshoot_flags_bypass_roles_and_unlockable_main_roles() {
+        let p = tshoot(G, &[10], &roles(), 5);
+        let ids: Vec<&str> = p.iter().map(|p| p.id.as_str()).collect();
+        // @everyone grants Send but is not a main role here, so it bypasses; role 12 is admin
+        assert_eq!(ids, vec!["bypass_1", "admin_12"]);
+        assert_eq!(
+            p[0].fix,
+            Some(Op::SetRolePerms {
+                role: 1,
+                perms: VIEW_CHANNEL
+            })
+        );
+        assert!(tshoot(G, &[12], &roles(), 5)[0]
+            .id
+            .starts_with("main_above_bot"));
+        assert_eq!(kind_from("channel", None), None);
+        assert_eq!(
+            kind_from("kick", None),
+            Some(LockKind::Join(JoinLock::Kick))
+        );
     }
 
     #[test]

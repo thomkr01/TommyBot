@@ -24,7 +24,7 @@ use twilight_model::{
 use crate::{
     app::{now_secs, App, GuildCfg},
     commands::timeout,
-    events::send_log,
+    events::{send_log, send_log_pinging},
     lockdown, reply, verify,
 };
 
@@ -413,11 +413,17 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
                 (now / 1000) + raid.active_ms / 1000,
             )
             .await?;
-            send_log(
+            let warned: Vec<_> = raid
+                .warned_roles
+                .iter()
+                .filter_map(|r| r.parse().ok().map(Id::new))
+                .collect();
+            send_log_pinging(
                 app,
                 gid.get(),
                 LogKind::JoinRaid,
                 &format!("Raid detected, {} accounts flagged", out.flagged.len()),
+                &warned,
             )
             .await?;
         }

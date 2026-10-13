@@ -4,7 +4,9 @@ use serde_json::{json, Value};
 mod appeals;
 mod common;
 mod form;
+mod lockdown;
 mod pages;
+use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealBlacklist, AppealForm, AppealList};
 use common::*;
 use form::Section;
@@ -13,12 +15,13 @@ use pages::{Rescue, Revert, Score, Wizard};
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
 const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
-    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist"), ("panic", "Panic Mode")]),
+    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("panic", "Panic Mode")]),
     ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
+    ("Raw JSON", &[("backups", "Backups"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
+const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
 const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
 /// (sub page, title, description) for the Filters index.
@@ -34,6 +37,8 @@ const FILTER_PAGES: &[(&str, &str, &str)] = &[
 fn title(p: &str) -> String {
     match p {
         _ if p.starts_with("appeal") => "Appeals".into(),
+        _ if p.starts_with("lockdown") => "Lockdown".into(),
+        "discord_automod" => "Discord AutoMod".into(),
         "antinuke" | "antinuke_filters" => format!("Anti Nuke {}", if p == "antinuke" { "General" } else { "Filters" }),
         "automod" => "Auto Mod General".into(),
         "filters" => "Auto Mod Filters".into(),
@@ -197,7 +202,7 @@ fn App() -> impl IntoView {
                         Some(g) => {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
-                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}</a> } };
+                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}</a> } };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -233,6 +238,9 @@ fn App() -> impl IntoView {
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 ("revert", _) => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
+                                ("lockdown", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownManage guild=g.clone() /> }.into_any(),
+                                ("lockdown_settings", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownSettings guild=g.clone() enrolled /> }.into_any(),
+                                ("discord_automod", _) => view! { <DiscordRules guild=g.clone() /> }.into_any(),
                                 ("appeal_list", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealList guild=g.clone() /> }.into_any(),
                                 ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealBlacklist guild=g.clone() /> }.into_any(),
                                 ("appeals", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() />{sec("appeals", "")} }.into_any(),

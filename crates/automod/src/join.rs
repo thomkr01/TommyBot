@@ -223,6 +223,9 @@ pub struct RaidCfg {
     /// Also lock the server (join lock) when a raid is detected.
     #[serde(default)]
     pub lock: Option<crate::lockdown::LockKind>,
+    /// Roles pinged in the raid log when a raid starts.
+    #[serde(default)]
+    pub warned_roles: Vec<String>,
 }
 
 fn default_raid_action() -> Action {
@@ -243,6 +246,7 @@ impl Default for RaidCfg {
             id_flag_min: None,
             action: Action::Kick,
             lock: None,
+            warned_roles: vec![],
         }
     }
 }

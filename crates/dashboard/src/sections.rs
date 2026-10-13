@@ -310,6 +310,11 @@ fn schema() -> Vec<Value> {
         fg("General", "require_all", "bool"),
         fg("Username", "username_terms", "list"),
     ]);
+    let choice = |g: &str, path: &str, opts: &[&str]| {
+        let mut v = fg(g, path, "choice");
+        v["options"] = json!(opts);
+        v
+    };
     let raid = vec![
         dv(fg("General", "enabled", "bool"), true),
         f("count", "int"),
@@ -320,6 +325,12 @@ fn schema() -> Vec<Value> {
         f("flag_younger_than_ms", "int"),
         f("flag_no_avatar", "bool"),
         f("id_flag_min", "int"),
+        dv(
+            choice("Response", "action", &["Log", "Kick", "Ban"]),
+            "Kick",
+        ),
+        choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+        fg("Response", "warned_roles", "roles"),
     ];
     let panic = vec![
         f("executors", "int"),
@@ -361,11 +372,6 @@ fn schema() -> Vec<Value> {
         dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true),
         dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
     ];
-    let choice = |g: &str, path: &str, opts: &[&str]| {
-        let mut v = fg(g, path, "choice");
-        v["options"] = json!(opts);
-        v
-    };
     let verification = vec![
         fg("General", "enabled", "bool"),
         dv(

@@ -119,6 +119,134 @@ impl Api {
     }
 }
 
+/// What the dashboard's rule editor sends; `rule_body` turns it into Discord's shape.
+/// shortcut: only Discord's native actions (block, alert, timeout); report/warn/kick/ban/lock as bot actions are not wired.
+#[derive(Debug, Default, Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct RuleSpec {
+    pub name: String,
+    pub enabled: bool,
+    /// "keyword", "spam", "preset" or "mention".
+    pub trigger: String,
+    pub keywords: Vec<String>,
+    pub allow: Vec<String>,
+    /// 1 profanity, 2 sexual content, 3 slurs.
+    pub presets: Vec<u8>,
+    pub mention_limit: u32,
+    pub block_message: bool,
+    pub custom_message: String,
+    pub alert_channel: String,
+    pub timeout_s: u32,
+    pub exempt_roles: Vec<String>,
+    pub exempt_channels: Vec<String>,
+}
+
+impl RuleSpec {
+    /// Reads a rule back from Discord's JSON so the editor can show and re-save it.
+    pub fn from_discord(v: &Value) -> Self {
+        let strs = |x: &Value| -> Vec<String> {
+            x.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let meta = &v["trigger_metadata"];
+        let mut r = Self {
+            name: v["name"].as_str().unwrap_or_default().into(),
+            enabled: v["enabled"].as_bool().unwrap_or(false),
+            trigger: match v["trigger_type"].as_u64() {
+                Some(1) => "keyword",
+                Some(3) => "spam",
+                Some(4) => "preset",
+                Some(5) => "mention",
+                _ => "other",
+            }
+            .into(),
+            keywords: strs(&meta["keyword_filter"]),
+            allow: strs(&meta["allow_list"]),
+            presets: meta["presets"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|n| n.as_u64().map(|n| n as u8))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            mention_limit: meta["mention_total_limit"].as_u64().unwrap_or(0) as u32,
+            exempt_roles: strs(&v["exempt_roles"]),
+            exempt_channels: strs(&v["exempt_channels"]),
+            ..Default::default()
+        };
+        for a in v["actions"].as_array().into_iter().flatten() {
+            let m = &a["metadata"];
+            match a["type"].as_u64() {
+                Some(1) => {
+                    r.block_message = true;
+                    r.custom_message = m["custom_message"].as_str().unwrap_or_default().into();
+                }
+                Some(2) => r.alert_channel = m["channel_id"].as_str().unwrap_or_default().into(),
+                Some(3) => r.timeout_s = m["duration_seconds"].as_u64().unwrap_or(0) as u32,
+                _ => {}
+            }
+        }
+        r
+    }
+}
+
+/// Discord limits: custom block message 150 chars, timeout 4 weeks, mention limit 50 (min 1).
+pub fn rule_body(r: &RuleSpec) -> Result<Value> {
+    let (trigger_type, meta) = match r.trigger.as_str() {
+        "keyword" => (
+            1,
+            json!({ "keyword_filter": r.keywords.iter().filter(|w| !w.is_empty() && w.chars().count() <= MAX_KEYWORD_LEN).take(MAX_KEYWORDS).collect::<Vec<_>>(),
+                    "allow_list": r.allow.iter().take(100).collect::<Vec<_>>() }),
+        ),
+        "spam" => (3, json!({})),
+        "preset" => (
+            4,
+            json!({ "presets": r.presets, "allow_list": r.allow.iter().take(1000).collect::<Vec<_>>() }),
+        ),
+        "mention" => (
+            5,
+            json!({ "mention_total_limit": r.mention_limit.clamp(1, 50) }),
+        ),
+        other => bail!("unknown trigger {other:?}"),
+    };
+    if r.name.trim().is_empty() {
+        bail!("rule needs a name");
+    }
+    let mut actions = vec![];
+    if r.block_message {
+        let msg: String = r.custom_message.chars().take(150).collect();
+        actions.push(json!({ "type": 1, "metadata": { "custom_message": msg } }));
+    }
+    if !r.alert_channel.is_empty() {
+        actions.push(json!({ "type": 2, "metadata": { "channel_id": r.alert_channel } }));
+    }
+    // Discord rejects timeouts on the spam and preset triggers.
+    if r.timeout_s > 0 && matches!(trigger_type, 1 | 5) {
+        actions.push(
+            json!({ "type": 3, "metadata": { "duration_seconds": r.timeout_s.min(2_419_200) } }),
+        );
+    }
+    if actions.is_empty() {
+        bail!("rule needs at least one action");
+    }
+    Ok(json!({
+        "name": r.name,
+        "event_type": 1,
+        "trigger_type": trigger_type,
+        "trigger_metadata": meta,
+        "actions": actions,
+        "enabled": r.enabled,
+        "exempt_roles": r.exempt_roles.iter().take(20).collect::<Vec<_>>(),
+        "exempt_channels": r.exempt_channels.iter().take(50).collect::<Vec<_>>(),
+    }))
+}
+
 /// `until` is `(now_ms, until_ms)`.
 fn invites_body(until: Option<(i64, i64)>) -> Value {
     let until = until.map(|(now, until)| {
@@ -153,6 +281,35 @@ mod tests {
         let v = invites_body(Some((0, 10 * MAX_INVITE_PAUSE_MS)));
         assert_eq!(v["invites_disabled_until"], "1970-01-02T00:00:00+00:00");
         assert!(invites_body(None)["invites_disabled_until"].is_null());
+    }
+
+    #[test]
+    fn rule_body_builds_each_trigger_and_rejects_empty_rules() {
+        let mut r = RuleSpec {
+            name: "n".into(),
+            trigger: "mention".into(),
+            mention_limit: 99,
+            timeout_s: 60,
+            block_message: true,
+            ..Default::default()
+        };
+        let v = rule_body(&r).unwrap();
+        assert_eq!(v["trigger_metadata"]["mention_total_limit"], 50);
+        assert_eq!(v["actions"].as_array().unwrap().len(), 2);
+        let back = RuleSpec::from_discord(&v);
+        assert_eq!(
+            (back.trigger.as_str(), back.mention_limit, back.timeout_s),
+            ("mention", 50, 60)
+        );
+        r.trigger = "spam".into();
+        assert_eq!(
+            rule_body(&r).unwrap()["actions"].as_array().unwrap().len(),
+            1
+        );
+        r.block_message = false;
+        assert!(rule_body(&r).is_err());
+        r.trigger = "nope".into();
+        assert!(rule_body(&r).is_err());
     }
 
     #[test]
