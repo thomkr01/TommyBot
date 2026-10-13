@@ -66,6 +66,44 @@ pub struct Plan {
     pub id_map: HashMap<u64, u64>,
 }
 
+/// One line per change for the diff preview: `+` create, `~` update, `-` delete. Deletes are
+/// named from the live server.
+pub fn describe(plan: &Plan, live: &Image) -> Vec<String> {
+    fn line<T>(
+        c: &Change<T>,
+        what: &str,
+        name: impl Fn(&T) -> &str,
+        live_name: impl Fn(u64) -> String,
+    ) -> String {
+        match c {
+            Change::Create(x) => format!("+ {what} {}", name(x)),
+            Change::Update { to, .. } => format!("~ {what} {}", name(to)),
+            Change::Delete(id) => format!("- {what} {}", live_name(*id)),
+        }
+    }
+    let role = |id: u64| {
+        live.roles
+            .iter()
+            .find(|r| r.id == id)
+            .map_or(id.to_string(), |r| r.name.clone())
+    };
+    let chan = |id: u64| {
+        live.channels
+            .iter()
+            .find(|c| c.id == id)
+            .map_or(id.to_string(), |c| c.name.clone())
+    };
+    let roles = plan
+        .roles
+        .iter()
+        .map(|c| line(c, "role", |r| &r.name, role));
+    let chans = plan
+        .channels
+        .iter()
+        .map(|c| line(c, "channel", |c| &c.name, chan));
+    roles.chain(chans).collect()
+}
+
 /// Rewrites overwrite targets from image ids to live ids; unmapped targets are dropped.
 pub fn map_overwrites(ows: &[OverwriteImg], id_map: &HashMap<u64, u64>) -> Vec<OverwriteImg> {
     ows.iter()
@@ -323,5 +361,21 @@ mod tests {
         let (image, live) = (img(vec![want], vec![]), img(vec![locked], vec![]));
         assert!(is_empty(&plan(&image, &live, &HashSet::new(), true)));
         assert_eq!(plan(&image, &live, &HashSet::new(), false).roles.len(), 1);
+    }
+
+    #[test]
+    fn describe_names_each_change() {
+        let image = img(vec![role(10, "Mod")], vec![chan(20, "general", 0, None)]);
+        let live = img(vec![role(99, "evil")], vec![chan(98, "spam", 0, None)]);
+        let p = plan(&image, &live, &HashSet::new(), false);
+        assert_eq!(
+            describe(&p, &live),
+            [
+                "+ role Mod",
+                "- role evil",
+                "+ channel general",
+                "- channel spam"
+            ]
+        );
     }
 }

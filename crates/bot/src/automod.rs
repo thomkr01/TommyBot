@@ -99,6 +99,9 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         app.http.delete_message(m.channel_id, m.id).await.ok();
         return delete_new_webhooks(app, gid).await;
     }
+    if cfg.panic.heat_algorithm {
+        crate::panic::note(app, gid, m.author.id).await?;
+    }
     let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
     let act = strike(&mut st, &cfg.automod.strike, now);
     store::save_strikes(&app.pool, gid.get(), m.author.id.get(), &st).await?;
