@@ -3,19 +3,25 @@
 pub struct Parsed {
     pub command: String,
     pub targets: Vec<u64>,
+    /// Usernames or nicknames to look up, in order.
+    pub names: Vec<String>,
     pub duration_s: Option<i64>,
     pub reason: Option<String>,
     pub dm: bool,
 }
 
-/// `s` is the message text with the prefix already stripped. Targets are mentions or raw ids.
+/// `s` is the message text with the prefix already stripped. Targets are mentions, raw ids, or names (words before the first `?flag`; with commas,
+/// each comma-separated chunk is one name so multi-word names work).
 pub fn parse(s: &str) -> Option<Parsed> {
     let mut it = s.split_whitespace().peekable();
     let mut p = Parsed {
         command: it.next()?.to_lowercase(),
         ..Default::default()
     };
+    let mut name_words: Vec<&str> = vec![];
+    let mut flagged = false;
     while let Some(tok) = it.next() {
+        flagged |= tok.starts_with('?');
         match tok {
             "?r" => {
                 let mut words = vec![];
@@ -39,10 +45,23 @@ pub fn parse(s: &str) -> Option<Parsed> {
                     p.targets.push(id);
                 } else if let Some(d) = tommybot_core::duration::parse(tok) {
                     p.duration_s = Some(d);
+                } else if !flagged {
+                    name_words.push(tok);
                 }
             }
         }
     }
+    let joined = name_words.join(" ");
+    p.names = if joined.contains(',') {
+        joined
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .collect()
+    } else {
+        name_words.into_iter().map(String::from).collect()
+    };
     Some(p)
 }
 
@@ -58,6 +77,16 @@ mod tests {
         assert_eq!(p.duration_s, Some(432_000));
         assert_eq!(p.reason.as_deref(), Some("spamming links"));
         assert!(p.dm);
+    }
+
+    #[test]
+    fn names_and_commas() {
+        let p = parse("ban alice bob 5d ?r x").unwrap();
+        assert_eq!(p.names, vec!["alice", "bob"]);
+        let p = parse("kick john smith, <@5>, bob ?r why ok").unwrap();
+        assert_eq!(p.names, vec!["john smith", "bob"]);
+        assert_eq!(p.targets, vec![5]);
+        assert!(parse("ban ?r not a name").unwrap().names.is_empty());
     }
 
     #[test]

@@ -5,10 +5,13 @@ use tommybot_logging::LogKind;
 use twilight_gateway::Event;
 use twilight_model::{
     channel::message::AllowedMentions,
-    id::{marker::ChannelMarker, Id},
+    id::{
+        marker::{ChannelMarker, RoleMarker},
+        Id,
+    },
 };
 
-use crate::{antinuke, app::App, automod, commands, prefix};
+use crate::{antinuke, app::App, automod, commands, prefix, slash};
 
 fn guild_of(ev: &Event) -> Option<u64> {
     let g = match ev {
@@ -25,23 +28,50 @@ fn guild_of(ev: &Event) -> Option<u64> {
 }
 
 /// Logged text is user-controlled, so it is sent with mentions disabled.
-async fn send(app: &App, channel: Id<ChannelMarker>, text: &str) -> Result<()> {
+async fn send(
+    app: &App,
+    channel: Id<ChannelMarker>,
+    text: &str,
+    mentions: &AllowedMentions,
+) -> Result<()> {
     app.http
         .create_message(channel)
         .content(text)
-        .allowed_mentions(Some(&AllowedMentions::default()))
+        .allowed_mentions(Some(mentions))
         .await?;
     Ok(())
 }
 
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, text: &str) -> Result<()> {
     match app.cfg(guild).await?.logging.target(kind) {
-        Some(ch) => send(app, ch, text).await,
+        Some(ch) => send(app, ch, text, &AllowedMentions::default()).await,
         None => Ok(()),
     }
 }
 
+/// Like [`send_log`] but pings the given roles (panic mode warns staff roles).
+pub async fn send_log_pinging(
+    app: &App,
+    guild: u64,
+    kind: LogKind,
+    text: &str,
+    roles: &[Id<RoleMarker>],
+) -> Result<()> {
+    let Some(ch) = app.cfg(guild).await?.logging.target(kind) else {
+        return Ok(());
+    };
+    let pings: String = roles.iter().map(|r| format!("<@&{r}> ")).collect();
+    let mentions = AllowedMentions {
+        roles: roles.to_vec(),
+        ..Default::default()
+    };
+    send(app, ch, &format!("{pings}{text}"), &mentions).await
+}
+
 pub async fn handle(app: Arc<App>, ev: Event) {
+    if let Err(e) = crate::panic::end_due(&app).await {
+        tracing::warn!(?e, "ending panic mode failed");
+    }
     if let Err(e) = run(&app, &ev).await {
         tracing::warn!(?e, kind = ?ev.kind(), "event handler failed");
     }
@@ -56,24 +86,27 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             .unwrap()
             .handle(&cfg.logging, ev, Instant::now());
         for m in msgs {
-            if let Err(e) = send(app, m.channel_id, &m.content).await {
+            if let Err(e) = send(app, m.channel_id, &m.content, &AllowedMentions::default()).await {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
             }
         }
     }
     match ev {
-        Event::MessageCreate(m) if !m.author.bot => {
-            if let Some(parsed) = m
-                .content
-                .strip_prefix(commands::PREFIX)
-                .and_then(prefix::parse)
-            {
-                commands::run(app, m, parsed).await?;
-            } else {
-                automod::on_message(app, m).await?;
+        // Webhook posts count as bots but still carry heat, so they reach automod (never commands).
+        Event::MessageCreate(m) if !m.author.bot || m.webhook_id.is_some() => {
+            if !m.author.bot {
+                if let Some(parsed) = m
+                    .content
+                    .strip_prefix(commands::PREFIX)
+                    .and_then(prefix::parse)
+                {
+                    commands::run(app, m, parsed).await?;
+                }
             }
+            automod::on_message(app, m).await?;
         }
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
+        Event::InteractionCreate(i) => slash::handle(app, &i.0).await?,
         Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,
         _ => {}
     }

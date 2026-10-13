@@ -11,3 +11,6 @@ tommybot-antinuke = { path = "../antinuke" }
 tommybot-automod = { path = "../automod" }
 serde.workspace = true
 twilight-model.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
