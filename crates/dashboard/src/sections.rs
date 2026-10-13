@@ -94,8 +94,8 @@ fn fg(group: &str, path: &str, kind: &str) -> Value {
 }
 
 /// Shows `default` for a field the stored config leaves out (matches the Rust `Default`).
-fn dv(mut v: Value, default: Value) -> Value {
-    v["default"] = default;
+fn dv(mut v: Value, default: impl Into<Value>) -> Value {
+    v["default"] = default.into();
     v
 }
 
@@ -150,7 +150,7 @@ fn schema() -> Vec<Value> {
         action["options"] = json!(FILTER_ACTIONS.iter().chain(&[""]).collect::<Vec<_>>());
         action["none_label"] = json!("strike system");
         auto.extend([
-            dv(fg(&g, &format!("filters.{k}.enabled"), "bool"), json!(true)),
+            dv(fg(&g, &format!("filters.{k}.enabled"), "bool"), true),
             action,
             fg(&g, &format!("filters.{k}.duration_secs"), "int"),
         ]);
@@ -194,8 +194,8 @@ fn schema() -> Vec<Value> {
     ];
     let panic = vec![
         f("executors", "int"),
-        dv(f("window_secs", "int"), json!(600)),
-        dv(f("duration_secs", "int"), json!(600)),
+        dv(f("window_secs", "int"), 600),
+        dv(f("duration_secs", "int"), 600),
         f("lock_mod_commands", "bool"),
         f("unlock_when_ending", "bool"),
         f("warned_roles", "roles"),
@@ -210,8 +210,8 @@ fn schema() -> Vec<Value> {
         f("webhooks", "list"),
     ];
     let misc = vec![
-        dv(fg("General", "prefix", "text"), json!("w!")),
-        dv(fg("General", "use_slash", "bool"), json!(true)),
+        dv(fg("General", "prefix", "text"), "w!"),
+        dv(fg("General", "use_slash", "bool"), true),
         fg("General", "compact_replies", "bool"),
         fg("General", "delete_replies_secs", "int"),
         fg("General", "enforce_quarantine_perms", "bool"),
@@ -223,23 +223,14 @@ fn schema() -> Vec<Value> {
         fg("Moderation commands", "hide_staff_in_dms", "bool"),
         dv(
             fg("Moderation commands", "default_timeout_secs", "int"),
-            json!(600),
+            600,
         ),
-        dv(fg("Moderation commands", "ban_purge_days", "int"), json!(0)),
-        dv(
-            fg("Auto moderation", "show_reason_on_auto", "bool"),
-            json!(true),
-        ),
+        dv(fg("Moderation commands", "ban_purge_days", "int"), 0),
+        dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true),
         fg("Auto moderation", "purge_last_100", "bool"),
-        dv(
-            fg("Auto moderation", "staff_only_permitted", "bool"),
-            json!(true),
-        ),
-        dv(
-            fg("Auto warn actions", "auto_warn_actions", "bool"),
-            json!(true),
-        ),
-        dv(fg("Auto warn actions", "warn_base_points", "int"), json!(1)),
+        dv(fg("Auto moderation", "staff_only_permitted", "bool"), true),
+        dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true),
+        dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
     ];
     [
         ("logging", "Logging", log),
