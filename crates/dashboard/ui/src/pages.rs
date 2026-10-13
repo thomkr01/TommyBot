@@ -9,7 +9,7 @@ fn s(v: &Value) -> String {
 
 #[component]
 pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    const STEPS: [&str; 5] = ["Auto setup", "Logging channel", "Main roles", "Permits", "Done"];
+    const STEPS: [&str; 9] = ["Auto Setup", "Logging", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue Key"];
     let step = RwSignal::new(0usize);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
@@ -38,10 +38,9 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         </div>
         {move || match step.get() {
             0 => view! { <div class="card"><p class="muted">"Creates the quarantine role and the log channels."</p><button on:click=auto.clone()>"Run auto setup"</button><p class="info">{move || msg.get()}</p></div> }.into_any(),
-            1 => view! { <Section guild=g.clone() name="logging".into() enrolled /> }.into_any(),
-            2 => view! { <Section guild=g.clone() name="lockdown".into() enrolled /> }.into_any(),
-            3 => view! { <div class="card"><a href=format!("#/{g}/permits")>"Review permits"</a></div> }.into_any(),
-            _ => view! { <div class="card"><a href=format!("#/{g}/overview")>"Check the security score"</a></div> }.into_any(),
+            1 => view! { <Section guild=g.clone() name="logging".into() enrolled /><Section guild=g.clone() name="lockdown".into() enrolled /> }.into_any(),
+            8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
+            i => view! { <Section guild=g.clone() name=["", "", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() enrolled /> }.into_any(),
         }}
         <StepUp need enrolled />
     }
@@ -66,6 +65,9 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
+    let members = RwSignal::new(Value::Null);
+    let g = guild.clone();
+    spawn_local(async move { if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { members.set(d["members"].clone()) } });
     let g = guild.clone();
     let load = move || { let g = g.clone(); spawn_local(async move {
         match api("GET", &format!("/api/guilds/{g}/score"), None).await {
@@ -84,6 +86,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     <span class="stat"><span>"Server name"</span><b>{s(&x["name"])}</b></span>
                     <span class="stat"><span>"Server ID"</span><b>{s(&x["id"])}</b></span>
                     <span class="stat"><span>"Your access"</span><b>{s(&x["level"])}</b></span> })}
+                {move || (!members.get().is_null()).then(|| view! { <span class="stat"><span>"Members"</span><b>{s(&members.get())}</b></span> })}
             </div>
             <div><h2>"Security"</h2><Ring pct color="var(--warn)" /></div>
         </div></div>

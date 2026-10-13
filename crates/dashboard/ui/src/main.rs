@@ -134,19 +134,22 @@ fn App() -> impl IntoView {
     let (guilds, set_guilds) = signal(Vec::<Value>::new());
     provide_context(guilds);
     let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
+    let load_guilds = move || async move {
+        match api("GET", "/api/guilds", None).await {
+            Ok(g) => {
+                let list = g.as_array().cloned().unwrap_or_default();
+                set_guilds_note.set(if list.is_empty() { "No servers: the bot must be in the server, and you must be its owner, an extra owner, a trusted admin or hold a permit with dashboard_view.".into() } else { String::new() });
+                set_guilds.set(list);
+            }
+            Err(e) => set_guilds_note.set(format!("Could not load servers: {e}")),
+        }
+    };
     spawn_local(async move {
         if let Ok(v) = api("GET", "/api/me", None).await {
             CSRF.with(|c| *c.borrow_mut() = v["csrf"].as_str().unwrap_or("").to_string());
             set_enrolled.set(v["totp_enrolled"].as_bool().unwrap_or(false));
             set_me.set(Some(v));
-            match api("GET", "/api/guilds", None).await {
-                Ok(g) => {
-                    let list = g.as_array().cloned().unwrap_or_default();
-                    set_guilds_note.set(if list.is_empty() { "No servers: the bot must be in the server, and you must be its owner, an extra owner, a trusted admin or hold a permit with dashboard_view.".into() } else { String::new() });
-                    set_guilds.set(list);
-                }
-                Err(e) => set_guilds_note.set(format!("Could not load servers: {e}")),
-            }
+            load_guilds().await;
         }
     });
     view! {
@@ -176,7 +179,7 @@ fn App() -> impl IntoView {
                 <main>
                     {move || match route.get().as_slice() {
                         [] => view! {
-                            <div class="head"><h1>"Servers"</h1></div>
+                            <div class="head"><h1>"Servers"</h1><button class="ghost" on:click=move |_| { set_guilds_note.set("Loading servers...".into()); spawn_local(load_guilds()) }>"Refresh servers"</button></div>
                             <p class="muted">{move || guilds_note.get()}</p>
                             <div class="cards">{guilds.get().iter().map(|g| view! { <div class="card"><a class="gcard" href=format!("#/{}/overview", g["id"].as_str().unwrap_or(""))>{match g["icon"].as_str() {
                                 Some(i) => view! { <img src=format!("https://cdn.discordapp.com/icons/{}/{i}.png?size=64", g["id"].as_str().unwrap_or("")) /> }.into_any(),
