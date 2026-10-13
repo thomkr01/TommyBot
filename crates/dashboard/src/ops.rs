@@ -168,9 +168,7 @@ async fn roles_of(st: &AppState, guild: i64) -> Result<Vec<Role>, ApiError> {
 
 async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
-    let (_, config) = crate::store::current(&st.db, guild)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let (_, config) = crate::store::current(&st.db, guild).await?;
     let roles = roles_of(&st, guild).await?;
     let me = st.discord.call(Method::GET, "/users/@me", None).await?;
     let mine = st
@@ -216,7 +214,8 @@ async fn fix(
             Some(json!({"permissions": perms})),
         )
         .await?;
-    if let Some((_, c)) = crate::store::current(&st.db, guild).await? {
+    {
+        let (_, c) = crate::store::current(&st.db, guild).await?;
         log_change(
             &st,
             &c,
@@ -322,7 +321,8 @@ async fn revert(
             .await?;
         done += 1;
     }
-    if let Some((_, c)) = crate::store::current(&st.db, guild).await? {
+    {
+        let (_, c) = crate::store::current(&st.db, guild).await?;
         log_change(
             &st,
             &c,

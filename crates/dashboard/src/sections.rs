@@ -203,9 +203,7 @@ async fn auto_setup(
     Json(b): Json<Setup>,
 ) -> Res {
     api::require(&st, &s, guild, Level::Admin, true).await?;
-    let (cur, mut config) = store::current(&st.db, guild)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let (cur, mut config) = store::current(&st.db, guild).await?;
     if cur != b.expected_version {
         return Err(ApiError::Conflict(cur)); // before any Discord side effect
     }

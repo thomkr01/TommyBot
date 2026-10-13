@@ -121,12 +121,20 @@ fn App() -> impl IntoView {
     let (me, set_me) = signal(None::<Value>);
     let (enrolled, set_enrolled) = signal(false);
     let (guilds, set_guilds) = signal(Vec::<Value>::new());
+    let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
     spawn_local(async move {
         if let Ok(v) = api("GET", "/api/me", None).await {
             CSRF.with(|c| *c.borrow_mut() = v["csrf"].as_str().unwrap_or("").to_string());
             set_enrolled.set(v["totp_enrolled"].as_bool().unwrap_or(false));
             set_me.set(Some(v));
-            if let Ok(g) = api("GET", "/api/guilds", None).await { set_guilds.set(g.as_array().cloned().unwrap_or_default()); }
+            match api("GET", "/api/guilds", None).await {
+                Ok(g) => {
+                    let list = g.as_array().cloned().unwrap_or_default();
+                    set_guilds_note.set(if list.is_empty() { "No servers: the bot must be in the server, and you must be its owner, an extra owner, a trusted admin or hold a permit with dashboard_view.".into() } else { String::new() });
+                    set_guilds.set(list);
+                }
+                Err(e) => set_guilds_note.set(format!("Could not load servers: {e}")),
+            }
         }
     });
     view! {
@@ -145,6 +153,7 @@ fn App() -> impl IntoView {
                     {move || match route.get().as_slice() {
                         [] => view! {
                             <h1>"Servers"</h1>
+                            <p class="muted">{move || guilds_note.get()}</p>
                             {guilds.get().iter().map(|g| view! { <div class="card"><a href=format!("#/{}/overview", g["id"].as_str().unwrap_or(""))>{g["name"].as_str().unwrap_or("").to_string()}</a> <span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></div> }).collect_view()}
                         }.into_any(),
                         [g, p, ..] if p == "permits" => view! { <Permits guild=g.clone() enrolled /> }.into_any(),

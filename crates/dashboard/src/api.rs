@@ -65,12 +65,13 @@ pub(crate) async fn require(
 
 pub async fn guilds(State(st): State<AppState>, s: Sess) -> Res {
     let mut out = vec![];
+    let bot_in = st.discord.bot_guild_ids().await?;
     for g in st.discord.user_guilds(&s.access_token).await? {
         let Ok(id) = g.id.parse::<i64>() else {
             continue;
         };
-        if store::current(&st.db, id).await?.is_none() {
-            continue; // bot isn't set up there
+        if !bot_in.contains(&g.id) {
+            continue;
         }
         let level = level_of(&st, &s, id).await?;
         if level > Level::None {
@@ -82,9 +83,7 @@ pub async fn guilds(State(st): State<AppState>, s: Sess) -> Res {
 
 pub async fn get_config(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     let level = require(&st, &s, guild, Level::Viewer, false).await?;
-    let (version, mut config) = store::current(&st.db, guild)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let (version, mut config) = store::current(&st.db, guild).await?;
     config["permits"] = store::read_permits(&mut *st.db.acquire().await?, guild).await?;
     Ok(Json(
         json!({"version": version, "config": config, "level": level, "sensitive": access::SENSITIVE}),
@@ -137,9 +136,7 @@ pub async fn put_section(
         sensitive,
     )
     .await?;
-    let (_, mut config) = store::current(&st.db, guild)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let (_, mut config) = store::current(&st.db, guild).await?;
     config[&section] = b.value;
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
@@ -173,9 +170,7 @@ pub async fn put_permits(
         ));
     }
     store::write_permits(&mut tx, guild, &b.value).await?;
-    let (_, mut config) = store::current(&st.db, guild)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let (_, mut config) = store::current(&st.db, guild).await?;
     config["permits"] = store::read_permits(&mut tx, guild).await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;

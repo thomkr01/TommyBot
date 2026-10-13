@@ -99,7 +99,11 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(ops::routes())
         // Hash routing means the server never needs an index.html fallback; one would also hide
         // missing assets by answering a stale hashed .js/.wasm request with HTML.
-        .fallback_service(ServeDir::new(dist))
+        .fallback_service(ServeDir::new(dist).not_found_service(
+            axum::routing::any(|| async {
+                (StatusCode::NOT_FOUND, "Not found. If this is the dashboard root, the web UI was not built into the image: rebuild with docker compose up -d --build.")
+            }),
+        ))
         .layer(SetResponseHeaderLayer::if_not_present(
             CACHE_CONTROL,
             HeaderValue::from_static("no-cache"),
