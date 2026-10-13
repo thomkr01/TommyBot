@@ -189,7 +189,10 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     b.add("invites", hit(m.invite_link && !w.advertising, cfg.invite));
     b.add("malicious", hit(m.malicious_link, cfg.malicious));
     b.add("nsfw", hit(m.nsfw_link, cfg.nsfw));
-    b.add("links_blacklist", hit(m.blacklisted_link, cfg.blacklisted_link));
+    b.add(
+        "links_blacklist",
+        hit(m.blacklisted_link, cfg.blacklisted_link),
+    );
     b.add("message", cfg.base);
     if !w.spam {
         let sim = hist.best_similarity(m.content);
@@ -221,7 +224,10 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     }
     if !w.mention_spam {
         b.add("mentions", cfg.per_mention * m.user_mentions as f64);
-        b.add("role_mentions", cfg.per_role_mention * m.role_mentions as f64);
+        b.add(
+            "role_mentions",
+            cfg.per_role_mention * m.role_mentions as f64,
+        );
     }
     if !w.everyone {
         b.add("everyone", cfg.per_everyone * m.everyone_mentions as f64);

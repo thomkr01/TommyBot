@@ -178,9 +178,7 @@ fn has_invite(name: &str) -> bool {
 
 /// Suspicious = default avatar, young account or username-filter match (configurable OR).
 pub fn is_suspicious(j: &Joiner, cfg: &GateCfg, min_age_ms: i64, now: i64) -> bool {
-    !j.has_avatar
-        || now - account_created_ms(j.id) < min_age_ms
-        || cfg.name_matches(j.name)
+    !j.has_avatar || now - account_created_ms(j.id) < min_age_ms || cfg.name_matches(j.name)
 }
 
 /// Filters that matched, with the action each wants.
@@ -594,13 +592,24 @@ mod tests {
     fn actions_from_the_dashboard_select_and_strict_names() {
         let a: Vec<Action> =
             serde_json::from_str(r#"["Warn", "Timeout", {"Timeout": 5}, "Ban"]"#).unwrap();
-        assert_eq!(a, [Action::Warn, Action::Timeout(0), Action::Timeout(5), Action::Ban]);
+        assert_eq!(
+            a,
+            [
+                Action::Warn,
+                Action::Timeout(0),
+                Action::Timeout(5),
+                Action::Ban
+            ]
+        );
         let cfg = GateCfg {
             username_filter: Some(Action::Kick),
             username_strict: vec!["Admin".into()],
             ..Default::default()
         };
-        assert_eq!(gate(&joiner(id_aged(9 * DAY_MS, 0), "admin", true), &cfg, NOW).len(), 1);
+        assert_eq!(
+            gate(&joiner(id_aged(9 * DAY_MS, 0), "admin", true), &cfg, NOW).len(),
+            1
+        );
         assert!(gate(&joiner(id_aged(9 * DAY_MS, 0), "admins", true), &cfg, NOW).is_empty());
     }
 

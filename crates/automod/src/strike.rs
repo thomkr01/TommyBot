@@ -111,7 +111,9 @@ mod tests {
             ..Default::default()
         };
         let mut s = StrikeState::default();
-        let caps: Vec<_> = (0..4).map(|i| strike(&mut s, &flat, i).timeout_ms / M).collect();
+        let caps: Vec<_> = (0..4)
+            .map(|i| strike(&mut s, &flat, i).timeout_ms / M)
+            .collect();
         assert_eq!(caps, [1, 1, 11, 11]);
     }
 

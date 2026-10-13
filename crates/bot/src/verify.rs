@@ -179,9 +179,17 @@ fn ephemeral(kind: InteractionResponseType, content: Option<&str>) -> Interactio
 }
 
 /// Hands out the verification roles; a member quarantined on join leaves quarantine.
-async fn grant(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, v: &VerificationCfg) -> Result<()> {
+async fn grant(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    v: &VerificationCfg,
+) -> Result<()> {
     if v.verify.replace_roles || v.verify.quarantine_on_join {
-        app.http.update_guild_member(gid, user).roles(&v.roles).await?;
+        app.http
+            .update_guild_member(gid, user)
+            .roles(&v.roles)
+            .await?;
     } else {
         for r in &v.roles {
             app.http.add_guild_member_role(gid, user, *r).await?;
@@ -407,7 +415,13 @@ mod tests {
         assert_eq!(&png[1..4], b"PNG");
         for (length, width, height) in [(1, 1, 1), (99, 9999, 9999), (7, 150, 60)] {
             for _ in 0..20 {
-                let c = CaptchaCfg { length, width, height, font_color: "#ff0000".into(), ..Default::default() };
+                let c = CaptchaCfg {
+                    length,
+                    width,
+                    height,
+                    font_color: "#ff0000".into(),
+                    ..Default::default()
+                };
                 assert!(!new_captcha(&c).1.is_empty());
             }
         }

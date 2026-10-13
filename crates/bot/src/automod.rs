@@ -47,15 +47,20 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     }
     let wl = &cfg.whitelist;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
-        let any_categories = [&wl.spam, &wl.invites, &wl.mentions, &wl.everyone]
+    let any_categories = [&wl.spam, &wl.invites, &wl.mentions, &wl.everyone]
         .iter()
         .any(|l| !l.categories.is_empty());
     let category = if any_categories {
-        app.guild_info(gid).await?.parents.get(&m.channel_id).copied()
+        app.guild_info(gid)
+            .await?
+            .parents
+            .get(&m.channel_id)
+            .copied()
     } else {
         None
     };
-    let listed = |l: &WhitelistList| l.covers(m.author.id, roles, m.channel_id, category, m.webhook_id);
+    let listed =
+        |l: &WhitelistList| l.covers(m.author.id, roles, m.channel_id, category, m.webhook_id);
     if listed(&wl.spam) {
         return Ok(());
     }
@@ -72,7 +77,11 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let images = m
         .attachments
         .iter()
-        .filter(|a| a.content_type.as_deref().is_some_and(|t| t.starts_with("image/")))
+        .filter(|a| {
+            a.content_type
+                .as_deref()
+                .is_some_and(|t| t.starts_with("image/"))
+        })
         .count();
     let facts = MsgFacts {
         content,
@@ -468,7 +477,10 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             .await?;
         }
         let auto_lock = cfg.automod.auto_lockdown.enabled;
-        if let Some(kind) = (out.triggered && auto_lock).then(|| raid.lock.clone()).flatten() {
+        if let Some(kind) = (out.triggered && auto_lock)
+            .then(|| raid.lock.clone())
+            .flatten()
+        {
             lockdown::lock(app, gid, kind).await?;
         }
         for id in out.flagged {
@@ -539,7 +551,10 @@ async fn native_action(
 pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     let cfg = app.cfg(m.guild_id.get()).await?;
     let g = &cfg.joingate;
-    let Some(action) = g.username_filter.filter(|_| g.enabled && g.username_post_join) else {
+    let Some(action) = g
+        .username_filter
+        .filter(|_| g.enabled && g.username_post_join)
+    else {
         return Ok(());
     };
     // A timeout fires another member update; without this a matching name would loop.
@@ -550,7 +565,15 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     if timed_out || !names.into_iter().flatten().any(|n| g.name_matches(n)) {
         return Ok(());
     }
-    punish(app, &cfg, m.guild_id, m.user.id.get(), action, "username filter").await
+    punish(
+        app,
+        &cfg,
+        m.guild_id,
+        m.user.id.get(),
+        action,
+        "username filter",
+    )
+    .await
 }
 
 async fn punish(
@@ -626,12 +649,14 @@ mod tests {
         let mut f = FiltersCfg::default();
         f.zalgo.action = Some(FilterAction::Ban);
         f.invites.action = Some(FilterAction::Kick);
-        let pick = |parts| {
-            tripped_filter(&Breakdown { parts }, &f)
-                .unwrap()
-                .action
-        };
-        assert_eq!(pick(vec![("message", 18.0), ("zalgo", 40.0)]), Some(FilterAction::Ban));
-        assert_eq!(pick(vec![("message", 18.0), ("invites", 100.0)]), Some(FilterAction::Kick));
+        let pick = |parts| tripped_filter(&Breakdown { parts }, &f).unwrap().action;
+        assert_eq!(
+            pick(vec![("message", 18.0), ("zalgo", 40.0)]),
+            Some(FilterAction::Ban)
+        );
+        assert_eq!(
+            pick(vec![("message", 18.0), ("invites", 100.0)]),
+            Some(FilterAction::Kick)
+        );
     }
 }

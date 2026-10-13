@@ -12,6 +12,8 @@ use axum::{
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tommybot_antinuke::Action as NukeAction;
+use tommybot_automod::{heat::HeatCfg, strike::StrikeCfg};
 use tommybot_logging::LogEvent;
 
 pub fn routes() -> Router<AppState> {
@@ -41,26 +43,6 @@ const LOG_KINDS: &[&str] = &[
     "join_raid",
     "panic",
     "mod_command",
-];
-const NUKE: &[&str] = &[
-    "ChannelCreate",
-    "ChannelDelete",
-    "RoleCreate",
-    "RoleDelete",
-    "Ban",
-    "Kick",
-    "WebhookCreate",
-    "WebhookDelete",
-    "Prune",
-    "BotAdd",
-];
-const GATE: &[&str] = &[
-    "no_avatar",
-    "unauthorized_bot",
-    "unverified_bot",
-    "invite_in_name",
-    "suspicious",
-    "username_filter",
 ];
 
 fn f(path: &str, kind: &str) -> Value {
@@ -92,19 +74,39 @@ fn ti(mut v: Value, title: &str) -> Value {
     v
 }
 
-fn pretty(key: &str) -> String {
-    let mut out = String::new();
-    for (i, c) in key.chars().enumerate() {
-        match c {
-            '_' => out.push(' '),
-            c if c.is_uppercase() && i > 0 => out.extend([' ', c.to_ascii_lowercase()]),
-            c => out.push(c),
-        }
-    }
-    let mut cs = out.chars();
-    cs.next()
-        .map(|c| c.to_uppercase().chain(cs).collect())
-        .unwrap_or_default()
+/// Help text under the field.
+fn hp(mut v: Value, help: &str) -> Value {
+    v["help"] = json!(help);
+    v
+}
+
+/// A field stored in another section, shown on this section's page (saved with it).
+fn sx(section: &str, mut v: Value) -> Value {
+    v["section"] = json!(section);
+    v
+}
+
+/// A choice field with its options; "" is the unset option.
+fn choice(group: &str, path: &str, opts: &[&str]) -> Value {
+    let mut v = fg(group, path, "choice");
+    v["options"] = json!(opts);
+    v
+}
+
+/// A heat weight with its default and the "N messages before a timeout" helper.
+fn heat_field(group: &str, w: &str, page: &str, noun: &str) -> Value {
+    let heat = serde_json::to_value(HeatCfg::default()).unwrap_or_default();
+    let mut v = pg(
+        dv(fg(group, &format!("heat.{w}"), "float"), heat[w].clone()),
+        page,
+    );
+    v["helper"] = json!({
+        "noun": noun,
+        "max": heat["max"],
+        "decay": heat["decay_per_sec"],
+        "strike_ms": StrikeCfg::default().strike_timeout_ms,
+    });
+    v
 }
 
 /// (filter key, dashboard page, card title).
@@ -124,21 +126,77 @@ const FILTERS: &[(&str, &str, &str)] = &[
     ("nsfw_links", "nsfw", "NSFW links"),
     ("words.filter", "words", "Word blacklist"),
     ("links", "links", "Link blacklist"),
+    ("mentions", "spam_mentions", "General"),
+    ("attachments", "spam_attach", "General"),
 ];
-/// Heat weights shown on the card of the filter they feed.
-const HEAT_FOR: &[(&str, &str)] = &[
-    ("regular", "base"),
-    ("similar", "similarity"),
-    ("similar", "similarity_floor"),
-    ("emojis", "per_emoji"),
-    ("newlines", "per_newline"),
-    ("chars_lower", "per_char"),
-    ("chars_lower", "free_chars"),
-    ("suspicion", "suspicious_account"),
-    ("inactive_channel", "inactive_channel"),
-    ("words.filter", "per_blacklisted_word"),
+/// Heat weights shown on the card of the filter they feed, with the helper's noun.
+const HEAT_FOR: &[(&str, &str, &str)] = &[
+    ("regular", "base", "messages"),
+    ("similar", "similarity", "similar messages"),
+    ("emojis", "per_emoji", "emojis"),
+    ("newlines", "per_newline", "new lines"),
+    ("chars_upper", "per_upper", "uppercase characters"),
+    ("chars_lower", "per_lower", "lowercase characters"),
+    ("chars_lower", "per_char", "characters past the free ones"),
+    ("zalgo", "zalgo", "zalgo messages"),
+    ("suspicion", "suspicious_account", "messages"),
+    ("inactive_channel", "inactive_channel", "messages"),
+    ("invites", "invite", "invites"),
+    ("scam_links", "malicious", "scam links"),
+    ("nsfw_links", "nsfw", "NSFW links"),
+    ("words.filter", "per_blacklisted_word", "blacklisted words"),
+    ("links", "blacklisted_link", "blacklisted links"),
 ];
-const FILTER_ACTIONS: [&str; 5] = ["delete", "warn", "timeout", "kick", "ban"];
+/// Mention and attachment kinds: (filter key, page, card title, heat weight, helper noun).
+/// Their action lives on the tab's General card.
+const SUBS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "mention_users",
+        "spam_mentions",
+        "@user mentions",
+        "per_mention",
+        "mentions",
+    ),
+    (
+        "mention_roles",
+        "spam_mentions",
+        "@role mentions",
+        "per_role_mention",
+        "role mentions",
+    ),
+    (
+        "mention_everyone",
+        "spam_mentions",
+        "@everyone mentions",
+        "per_everyone",
+        "@everyone mentions",
+    ),
+    ("embeds", "spam_attach", "Embeds", "per_embed", "embeds"),
+    ("images", "spam_attach", "Images", "per_image", "images"),
+    ("files", "spam_attach", "Files", "per_file", "files"),
+    ("attach_links", "spam_attach", "Links", "per_link", "links"),
+    (
+        "stickers",
+        "spam_attach",
+        "Stickers",
+        "per_sticker",
+        "stickers",
+    ),
+];
+/// "" leaves the decision to the strike system.
+const FILTER_ACTIONS: &[&str] = &["delete", "warn", "timeout", "kick", "ban", ""];
+/// Anti-nuke filter cards: (action, card title).
+const NUKE_CARDS: &[(&str, &str)] = &[
+    ("Kick", "Kicks"),
+    ("Ban", "Bans"),
+    ("RoleCreate", "Role creations"),
+    ("RoleDelete", "Role deletions"),
+    ("ChannelCreate", "Channel creations"),
+    ("ChannelDelete", "Channel deletions"),
+    ("WebhookCreate", "Webhook creations"),
+    ("WebhookDelete", "Webhook deletions"),
+];
+const GATE_ACTIONS: &[&str] = &["", "Log", "Warn", "Timeout", "Kick", "Ban"];
 
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
 fn schema() -> Vec<Value> {
@@ -191,68 +249,131 @@ fn schema() -> Vec<Value> {
         .collect::<Vec<_>>());
     log.push(pg(custom, "discord_customize"));
     let mut nuke = vec![
-        dv(fg("Status", "enabled", "bool"), true),
-        fg("Auto quarantine", "quarantine_role", "role"),
+        ti(dv(fg("Status", "enabled", "bool"), true), "Use the antinuke module"),
+        ti(fg("Status", "prune", "bool"), "Detect and react to member prunes"),
+        ti(fg("Status", "vanity_guard", "bool"), "Have TommyBot guard your server's vanity url"),
+        ti(dv(fg("Auto quarantine", "auto_quarantine", "bool"), true), "Use the auto quarantine module"),
+        ti(fg("Auto quarantine", "quarantine_role", "role"), "Quarantine role"),
+        ti(fg("Auto quarantine", "strict_mode", "bool"), "Strict mode: punish unauthorized admins giving dangerous perms to any role in the server"),
+        ti(fg("Auto quarantine", "strict_member_roles", "bool"), "Strict member role addition: punish unauthorized admins giving dangerous perms to other members"),
+        ti(fg("Auto quarantine", "monitor_public_roles", "bool"), "Monitor public roles: protect @everyone and main roles from getting dangerous permissions"),
+        ti(fg("Auto quarantine", "monitor_channel_perms", "bool"), "Monitor channel permissions: protect @everyone and main roles from getting dangerous CHANNEL permissions"),
+        hp(
+            ti(fg("Auto quarantine", "quarantine_whitelist", "list"), "Quarantine whitelist"),
+            "User IDs that may change the roles of quarantined members.",
+        ),
     ];
-    for a in NUKE {
-        let g = pretty(a);
+    for (a, title) in NUKE_CARDS {
+        let (m, h, heat) = NukeAction::ALL
+            .into_iter()
+            .find(|x| format!("{x:?}") == *a)
+            .and_then(NukeAction::default_limit)
+            .unwrap_or_default();
+        let card = *title;
+        let at = |k: &str, kind: &str, title: &str| {
+            ti(
+                pg(fg(card, &format!("limits.{a}.{k}"), kind), "limits"),
+                title,
+            )
+        };
+        let mut first = dv(at("enabled", "bool", "Monitor this action"), true);
+        if *a == "Kick" {
+            first = hp(first, "We absolutely recommend not giving your staff members native Discord Ban/Kick permissions, force them to use the bot's kick and ban commands that are supervised by the antinuke.");
+        }
+        if *a == "WebhookCreate" {
+            first = hp(
+                first,
+                "Tracking webhooks created by people is very important.",
+            );
+        }
         nuke.extend([
-            pg(
-                ti(
-                    fg(&g, &format!("limits.{a}.per_minute"), "int"),
-                    "Minute limit",
-                ),
-                "limits",
-            ),
-            pg(
-                ti(fg(&g, &format!("limits.{a}.per_hour"), "int"), "Hour limit"),
-                "limits",
+            first,
+            dv(at("per_minute", "int", "Minute limit"), m),
+            dv(at("per_hour", "int", "Hour limit"), h),
+            hp(
+                dv(at("heat", "int", "Heat per action"), heat),
+                "Only counts when Panic Mode and its heat option are on.",
             ),
         ]);
     }
     let mut auto = vec![
-        fg("Status", "enabled", "bool"),
-        ti(
-            fg("Auto timeouts", "strike.strike_timeout_ms", "int"),
-            "Regular strike duration",
+        ti(fg("Status", "enabled", "bool"), "Use the automod module"),
+        ti(dv(fg("Status", "anti_spam", "bool"), true), "Use the anti spam"),
+        ti(dv(fg("Status", "monitor_webhooks", "bool"), true), "Monitor unwhitelisted webhooks"),
+        // Display only: the heat system is the one mode, the stored value is ignored.
+        ti(dv(choice("Status", "mode", &["Heat System"]), "Heat System"), "AutoMod mode"),
+        ti(dv(fg("Auto timeouts", "strike.enabled", "bool"), true), "Use the auto timeouts"),
+        ti(dv(fg("Auto timeouts", "strike.strike_timeout_ms", "int"), 60_000), "Regular strike duration"),
+        ti(dv(fg("Auto timeouts", "strike.cap_timeout_ms", "int"), 660_000), "CAP strike duration"),
+        ti(dv(fg("Auto timeouts", "strike.cap", "int"), 3), "Strikes before the CAP strike"),
+        ti(dv(fg("Auto timeouts", "strike.reoffend_window_ms", "int"), 3_600_000), "Reoffend window"),
+        ti(dv(fg("Auto timeouts", "strike.strike_expiry_ms", "int"), 3_600_000), "Strike expiry"),
+        ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), true), "Multiply timeouts"),
+        ti(dv(fg("Auto timeouts", "strike.multiplier_pct", "int"), 200), "Multiplier percentage"),
+        ti(dv(fg("Heat settings", "heat.max", "float"), 100.0), "Max heat"),
+        ti(dv(fg("Heat settings", "heat.decay_per_sec", "float"), 0.1), "Heat degradation (every second)"),
+        dv(fg("Heat settings", "heat.webhook_multiplier", "float"), 1.5),
+        hp(
+            ti(dv(fg("Heat settings", "strike.reset_heat_on_timeout", "bool"), true), "Set current heat to 0 after punishment"),
+            "The filter that generated the most heat is picked as the reason, and its action is used.",
         ),
-        ti(
-            fg("Auto timeouts", "strike.cap_timeout_ms", "int"),
-            "CAP strike duration",
+        ti(fg("Auto lockdown", "auto_lockdown.enabled", "bool"), "Use the auto lockdown module"),
+        ti(dv(fg("Mentions lockdown", "auto_lockdown.mentions", "bool"), true), "Use the mentions auto lockdown trigger"),
+        ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_count", "int"), 50), "Trigger count (mentions)"),
+        ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_window_ms", "int"), 3_000), "Trigger count history"),
+        hp(
+            ti(fg("Strikes lockdown", "auto_lockdown.strikes", "int"), "Lock at this strike number"),
+            "Empty: off.",
         ),
-        ti(
-            fg("Auto timeouts", "strike.cap", "int"),
-            "Strikes before the CAP strike",
-        ),
-        ti(
-            fg("Auto timeouts", "strike.reoffend_window_ms", "int"),
-            "Reoffend window",
-        ),
-        ti(
-            fg("Auto timeouts", "strike.strike_expiry_ms", "int"),
-            "Strike expiry",
-        ),
-        fg("Heat settings", "heat.max", "float"),
-        ti(
-            fg("Heat settings", "heat.decay_per_sec", "float"),
-            "Heat degradation (every second)",
-        ),
-        fg("Heat settings", "heat.webhook_multiplier", "float"),
-        ti(
-            fg("Heat settings", "strike.reset_heat_on_timeout", "bool"),
-            "Set current heat to 0 after punishment",
+        sx(
+            "joinraid",
+            ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
         ),
     ];
     for (k, page, title) in FILTERS {
         let mut action = pg(
             ti(
-                fg(title, &format!("filters.{k}.action"), "choice"),
+                choice(title, &format!("filters.{k}.action"), FILTER_ACTIONS),
                 "Trigger action",
             ),
             page,
         );
-        action["options"] = json!(FILTER_ACTIONS.iter().chain(&[""]).collect::<Vec<_>>());
         action["none_label"] = json!("strike system");
+        let use_it = if *k == "mentions" {
+            "Consider mentions found in messages"
+        } else if *k == "attachments" {
+            "Consider attachments found in messages"
+        } else {
+            "Use this filter"
+        };
+        auto.extend([
+            pg(
+                dv(
+                    ti(fg(title, &format!("filters.{k}.enabled"), "bool"), use_it),
+                    true,
+                ),
+                page,
+            ),
+            action,
+            hp(
+                pg(
+                    ti(
+                        fg(title, &format!("filters.{k}.duration_secs"), "int"),
+                        "Action duration",
+                    ),
+                    page,
+                ),
+                "Empty uses the default timeout from Miscellaneous.",
+            ),
+        ]);
+        auto.extend(
+            HEAT_FOR
+                .iter()
+                .filter(|(f, ..)| f == k)
+                .map(|(_, h, noun)| ti(heat_field(title, h, page, noun), "Heat added")),
+        );
+    }
+    for (k, page, title, w, noun) in SUBS {
         auto.extend([
             pg(
                 dv(
@@ -264,100 +385,183 @@ fn schema() -> Vec<Value> {
                 ),
                 page,
             ),
-            action,
-            pg(
-                ti(
-                    fg(title, &format!("filters.{k}.duration_secs"), "int"),
-                    "Action duration",
-                ),
-                page,
-            ),
+            ti(heat_field(title, w, page, noun), "Heat added"),
         ]);
-        auto.extend(HEAT_FOR.iter().filter(|(f, _)| f == k).map(|(_, h)| {
-            pg(
-                fg(
-                    title,
-                    &format!("heat.{h}"),
-                    if h.starts_with("free") {
-                        "int"
-                    } else {
-                        "float"
-                    },
-                ),
-                page,
-            )
-        }));
     }
     auto.extend([
-        pg(fg("Mentions", "heat.per_mention", "float"), "spam_mentions"),
         pg(
-            fg("Mentions", "heat.per_mass_mention", "float"),
+            dv(
+                ti(
+                    fg("Similar message", "heat.similarity_floor", "float"),
+                    "Similarity ratio",
+                ),
+                0.8,
+            ),
+            "spam_text",
+        ),
+        pg(
+            dv(
+                ti(
+                    fg("Characters (lowercase)", "heat.free_chars", "int"),
+                    "Free characters",
+                ),
+                200,
+            ),
+            "spam_text",
+        ),
+        pg(
+            dv(
+                ti(
+                    fg("Inactive channel", "filters.inactive_messages", "int"),
+                    "Inactive messages",
+                ),
+                10,
+            ),
+            "spam_text",
+        ),
+        pg(
+            dv(
+                ti(
+                    fg("General", "filters.mention_hour_cap", "int"),
+                    "Hour cap (pings)",
+                ),
+                20,
+            ),
             "spam_mentions",
-        ),
-        pg(
-            fg("Attachments", "heat.per_attachment", "float"),
-            "spam_attach",
-        ),
-        pg(fg("Attachments", "heat.per_embed", "float"), "spam_attach"),
-        pg(
-            fg("Attachments", "heat.per_sticker", "float"),
-            "spam_attach",
         ),
         pg(
             fg("NSFW links", "filters.nsfw_crawl_shorteners", "bool"),
             "nsfw",
         ),
         pg(
-            fg("Word blacklist", "filters.words.strict", "list"),
-            "words",
-        ),
-        pg(
-            fg("Word blacklist", "filters.words.wildcard", "list"),
-            "words",
-        ),
-        pg(
-            fg("Word blacklist", "filters.words.premade_profane", "bool"),
-            "words",
-        ),
-        pg(
-            fg("Word blacklist", "filters.words.premade_vulgar", "bool"),
-            "words",
-        ),
-        pg(
-            fg("Word blacklist", "filters.words.premade_racist", "bool"),
-            "words",
-        ),
-        pg(
-            fg(
-                "Word blacklist",
-                "filters.words.use_discord_automod",
-                "bool",
+            ti(
+                fg("Word blacklist", "filters.words.strict", "list"),
+                "Strict words",
             ),
             "words",
         ),
         pg(
-            fg("Link blacklist", "filters.blacklisted_domains", "list"),
+            ti(
+                fg("Word blacklist", "filters.words.wildcard", "list"),
+                "Wildcard words",
+            ),
+            "words",
+        ),
+        pg(
+            ti(
+                fg("Word blacklist", "filters.words.premade_profane", "bool"),
+                "Use premade list of profane words",
+            ),
+            "words",
+        ),
+        pg(
+            ti(
+                fg("Word blacklist", "filters.words.premade_vulgar", "bool"),
+                "Use premade list of vulgar words",
+            ),
+            "words",
+        ),
+        pg(
+            ti(
+                fg("Word blacklist", "filters.words.premade_racist", "bool"),
+                "Use premade list of racist words",
+            ),
+            "words",
+        ),
+        pg(
+            ti(
+                fg(
+                    "Word blacklist",
+                    "filters.words.use_discord_automod",
+                    "bool",
+                ),
+                "Use Discord's AutoMod keyword blacklist instead",
+            ),
+            "words",
+        ),
+        pg(
+            ti(
+                fg("Link blacklist", "filters.blacklisted_domains", "list"),
+                "Links",
+            ),
             "links",
         ),
     ]);
-    let mut gate: Vec<Value> = GATE
-        .iter()
-        .map(|k| {
-            let mut v = fg(&pretty(k), k, "choice");
-            v["options"] = json!(["Log", "Kick", "Ban"]); // Timeout(ms) is a tuple variant: raw editor
-            ti(v, "Trigger action")
-        })
-        .collect();
+    // (key, card, toggle text); the action select turns a filter off with "off".
+    let mut gate = vec![
+        ti(
+            dv(fg("General", "enabled", "bool"), true),
+            "Use the joingate module",
+        ),
+        ti(
+            fg("General", "dm_punished", "bool"),
+            "DM members when punished",
+        ),
+        ti(
+            fg("General", "require_all", "bool"),
+            "Act only when every enabled filter matches",
+        ),
+    ];
+    for (k, card, help) in [
+        (
+            "unauthorized_bot",
+            "Bot additions",
+            "Target bots added by unauthorized members",
+        ),
+        (
+            "unverified_bot",
+            "Unverified bot additions",
+            "Target Discord unverified bots added by anyone",
+        ),
+        (
+            "no_avatar",
+            "No avatar",
+            "Target accounts that have no profile pictures",
+        ),
+        (
+            "suspicious",
+            "Suspicious account",
+            "Target accounts TommyBot deems suspicious",
+        ),
+        (
+            "invite_in_name",
+            "Advertising name",
+            "Target accounts with invite links in usernames",
+        ),
+        (
+            "account_age",
+            "Account age",
+            "Target accounts younger than the minimum account age",
+        ),
+        (
+            "username_filter",
+            "Username",
+            "Target accounts whose username matches your list",
+        ),
+    ] {
+        gate.push(hp(
+            ti(choice(card, k, GATE_ACTIONS), "Trigger action"),
+            help,
+        ));
+    }
     gate.extend([
-        dv(fg("General", "enabled", "bool"), true),
-        fg("General", "require_all", "bool"),
-        fg("Username", "username_terms", "list"),
+        ti(
+            dv(fg("Account age", "min_age_days", "int"), 7),
+            "Minimum account age",
+        ),
+        ti(
+            fg("Username", "username_post_join", "bool"),
+            "Enable this filter POST join too",
+        ),
+        hp(
+            ti(fg("Username", "username_strict", "list"), "Strict words"),
+            "Exact match, case insensitive.",
+        ),
+        hp(
+            ti(fg("Username", "username_terms", "list"), "Wildcard words"),
+            "Contains; * matches anything. Names are sanitized before matching.",
+        ),
     ]);
-    let choice = |g: &str, path: &str, opts: &[&str]| {
-        let mut v = fg(g, path, "choice");
-        v["options"] = json!(opts);
-        v
-    };
     let raid = vec![
         dv(fg("General", "enabled", "bool"), true),
         f("count", "int"),
@@ -369,7 +573,11 @@ fn schema() -> Vec<Value> {
         f("flag_no_avatar", "bool"),
         f("id_flag_min", "int"),
         dv(
-            choice("Response", "action", &["Log", "Kick", "Ban"]),
+            choice(
+                "Response",
+                "action",
+                &["Log", "Warn", "Timeout", "Kick", "Ban"],
+            ),
             "Kick",
         ),
         choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
@@ -396,13 +604,24 @@ fn schema() -> Vec<Value> {
         fg("Response", "warned_roles", "roles"),
         fg("Response", "whitelisted_categories", "channels"),
     ];
-    let whitelist = vec![
-        f("users", "list"),
-        f("roles", "roles"),
-        f("channels", "channels"),
-        f("categories", "channels"),
-        f("webhooks", "list"),
-    ];
+    let mut whitelist = vec![];
+    for (tab, prefix) in [
+        ("", ""),
+        ("invites", "invites."),
+        ("mentions", "mentions."),
+        ("everyone", "everyone."),
+    ] {
+        for (key, card, kind) in [
+            ("users", "Members", "list"),
+            ("roles", "Roles", "roles"),
+            ("channels", "Channels", "channels"),
+            ("categories", "Categories", "channels"),
+            ("webhooks", "Webhooks", "list"),
+        ] {
+            let v = ti(fg(card, &format!("{prefix}{key}"), kind), card);
+            whitelist.push(if tab.is_empty() { v } else { pg(v, tab) });
+        }
+    }
     let misc = vec![
         dv(fg("General", "prefix", "text"), "w!"),
         dv(fg("General", "use_slash", "bool"), true),
@@ -410,19 +629,48 @@ fn schema() -> Vec<Value> {
         fg("General", "delete_replies_secs", "int"),
         fg("General", "enforce_quarantine_perms", "bool"),
         fg("General", "ignore_no_permit", "bool"),
-        fg("Statics", "modlogs_channel", "channel"),
+        sx(
+            "logging",
+            hp(
+                ti(fg("Statics", "fallback", "channel"), "Logs channel"),
+                "All logs that have no channel of their own go here.",
+            ),
+        ),
+        sx(
+            "logging",
+            hp(
+                ti(
+                    fg("Statics", "routes.mod_command", "channel"),
+                    "Modlogs channel",
+                ),
+                "Moderation actions done by staff with the bot go here as cases.",
+            ),
+        ),
+        sx(
+            "antinuke",
+            hp(
+                ti(fg("Statics", "quarantine_role", "role"), "Quarantine role"),
+                "Quarantined members are moved to this role.",
+            ),
+        ),
+        sx(
+            "lockdown",
+            hp(
+                ti(fg("Statics", "main_roles", "roles"), "Main roles"),
+                "The roles your members have; lockdown and verification use them.",
+            ),
+        ),
         fg("Moderation commands", "confirm", "bool"),
         fg("Moderation commands", "always_dm", "bool"),
         fg("Moderation commands", "delete_invocation", "bool"),
         fg("Moderation commands", "hide_staff_in_dms", "bool"),
-        {
-            let mut v = dv(
+        hp(
+            dv(
                 fg("Moderation commands", "default_timeout_secs", "int"),
                 600,
-            );
-            v["help"] = json!("0 means 28 days");
-            v
-        },
+            ),
+            "0 means 28 days",
+        ),
         dv(fg("Moderation commands", "ban_purge_days", "int"), 0),
         dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true),
         fg("Auto moderation", "purge_last_100", "bool"),
@@ -431,26 +679,59 @@ fn schema() -> Vec<Value> {
         dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
     ];
     let verification = vec![
-        fg("General", "enabled", "bool"),
+        ti(
+            fg("General", "enabled", "bool"),
+            "Use the verification module",
+        ),
+        hp(
+            ti(
+                fg("General", "quarantine_on_join", "bool"),
+                "Quarantine user on join (not recommended)",
+            ),
+            "Legacy: every joiner sits in quarantine until they verify.",
+        ),
+        hp(
+            ti(
+                dv(fg("General", "replace_roles", "bool"), true),
+                "Set autoroles instead of adding them",
+            ),
+            "On a pass the member's roles are replaced by the verification roles.",
+        ),
         dv(
-            choice("General", "target", &["Everyone", "SuspiciousOnly"]),
+            ti(
+                choice("General", "target", &["Everyone", "SuspiciousOnly"]),
+                "Verification targets",
+            ),
             "Everyone",
         ),
-        dv(
-            choice(
-                "General",
-                "on_fail",
-                &["Nothing", "Kick", "Ban", "Quarantine"],
+        hp(
+            dv(
+                ti(
+                    choice(
+                        "General",
+                        "on_fail",
+                        &["Nothing", "Kick", "Ban", "Quarantine"],
+                    ),
+                    "Fail action",
+                ),
+                "Nothing",
             ),
-            "Nothing",
+            "Kick, Ban and Quarantine run when the verification duration ends after the join.",
         ),
         dv(
-            choice(
-                "General",
-                "mode",
-                &["Button", "Captcha", "SimpleCaptcha", "Dm", "Web"],
+            ti(
+                choice(
+                    "General",
+                    "mode",
+                    &["Button", "Captcha", "SimpleCaptcha", "Dm", "Web"],
+                ),
+                "Verification mode",
             ),
             "Captcha",
+        ),
+        ti(
+            dv(fg("General", "show_notes", "bool"), true),
+            "Display helpful notes alongside the captcha",
         ),
         dv(
             ti(
@@ -459,8 +740,36 @@ fn schema() -> Vec<Value> {
             ),
             120_000,
         ),
-        fg("General", "channel", "channel"),
-        fg("General", "roles", "roles"),
+        ti(fg("General", "channel", "channel"), "Verification channel"),
+        ti(fg("General", "roles", "roles"), "Verification roles"),
+        ti(
+            dv(fg("Captcha", "captcha.height", "int"), 100),
+            "Captcha height",
+        ),
+        ti(
+            dv(fg("Captcha", "captcha.width", "int"), 300),
+            "Captcha width",
+        ),
+        ti(
+            dv(fg("Captcha", "captcha.font_color", "color"), "#000000"),
+            "Font color",
+        ),
+        ti(
+            dv(fg("Captcha", "captcha.length", "int"), 6),
+            "Captcha answer length",
+        ),
+        ti(
+            dv(fg("Captcha", "captcha.trace", "bool"), true),
+            "Show a colored trace that follows the captcha characters",
+        ),
+        ti(
+            dv(fg("Captcha", "captcha.mixed", "bool"), true),
+            "Add mixed noise over the captcha characters",
+        ),
+        ti(
+            dv(fg("Captcha", "captcha.spread", "bool"), true),
+            "Show small spread-around dots to trick scripts",
+        ),
     ];
     let appeals = vec![
         ti(fg("General", "enabled", "bool"), "Appeals System Status"),
@@ -619,14 +928,14 @@ mod tests {
 
     #[test]
     fn every_schema_path_deserializes() {
+        let mut objs: std::collections::BTreeMap<String, Value> = Default::default();
         for sec in schema() {
-            let mut obj = json!({});
             for fd in sec["fields"].as_array().unwrap() {
                 let sample = match fd["kind"].as_str().unwrap() {
                     "bool" => json!(true),
                     "int" => json!(5),
                     "float" => json!(1.5),
-                    "text" => json!("x"),
+                    "text" | "color" => json!("x"),
                     "list" => json!(["1"]),
                     "choice" => fd["options"]
                         .as_array()
@@ -640,16 +949,18 @@ mod tests {
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
                     _ => json!(["1"]),
                 };
-                let mut cur = &mut obj;
+                let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
+                let mut cur = objs.entry(name.to_string()).or_insert_with(|| json!({}));
                 let parts: Vec<_> = fd["path"].as_str().unwrap().split('.').collect();
                 for p in &parts[..parts.len() - 1] {
                     cur = &mut cur[*p];
                 }
                 cur[parts[parts.len() - 1]] = sample;
             }
-            let name = sec["name"].as_str().unwrap();
-            api::validate(name, &obj)
-                .unwrap_or_else(|_| panic!("{name} schema does not deserialize"));
+        }
+        for (name, obj) in objs {
+            api::validate(&name, &obj)
+                .unwrap_or_else(|e| panic!("{name} schema does not deserialize: {e:?}"));
         }
     }
 }

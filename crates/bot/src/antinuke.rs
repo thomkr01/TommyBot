@@ -150,7 +150,12 @@ fn add_heat(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, heat: u32) -
 
 /// Strict mode, public role and channel permission guards, and the vanity guard.
 /// Undoes the change where the bot can, then quarantines the actor.
-async fn guard_perms(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+async fn guard_perms(
+    app: &App,
+    cfg: &GuildCfg,
+    e: &AuditLogEntry,
+    actor: Id<UserMarker>,
+) -> Result<()> {
     let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
         return Ok(());
     };
@@ -171,7 +176,10 @@ async fn guard_perms(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<Use
             if app.whitelisted(gid, actor, "antinuke").await? {
                 return Ok(());
             }
-            app.http.update_role(gid, target.cast()).permissions(old).await?;
+            app.http
+                .update_role(gid, target.cast())
+                .permissions(old)
+                .await?;
             "gave a role dangerous permissions"
         }
         A::MemberRoleUpdate if an.strict_member_roles => {
@@ -191,12 +199,19 @@ async fn guard_perms(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<Use
                 return Ok(());
             }
             for r in added {
-                app.http.remove_guild_member_role(gid, target.cast(), r).await?;
+                app.http
+                    .remove_guild_member_role(gid, target.cast(), r)
+                    .await?;
             }
             "gave a member a role with dangerous permissions"
         }
         A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate if an.monitor_channel_perms => {
-            let Some(role) = e.options.as_ref().and_then(|o| o.id).filter(|id| public(id.get())) else {
+            let Some(role) = e
+                .options
+                .as_ref()
+                .and_then(|o| o.id)
+                .filter(|id| public(id.get()))
+            else {
                 return Ok(());
             };
             let Some(old) = e.changes.iter().find_map(|c| match c {
@@ -210,7 +225,10 @@ async fn guard_perms(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<Use
             }
             let channel = target.cast();
             if e.action_type == A::ChannelOverwriteCreate {
-                app.http.delete_channel_permission(channel).role(role.cast()).await?;
+                app.http
+                    .delete_channel_permission(channel)
+                    .role(role.cast())
+                    .await?;
             } else {
                 let o = PermissionOverwrite {
                     id: role.cast(),

@@ -553,7 +553,10 @@ mod tests {
         let ban = c.limit(NukeAction::Ban).unwrap();
         assert_eq!((ban.0.per_minute, ban.0.per_hour, ban.1), (2, 15, 20));
         assert!(c.limit(NukeAction::RoleCreate).is_none());
-        assert!(c.limit(NukeAction::Prune).is_none(), "prunes need the toggle");
+        assert!(
+            c.limit(NukeAction::Prune).is_none(),
+            "prunes need the toggle"
+        );
         assert_eq!(c.watched().len(), 8);
     }
 }
