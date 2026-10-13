@@ -15,7 +15,7 @@ use twilight_model::{
 use crate::{
     antinuke,
     app::{now_secs, App},
-    backup,
+    appeals, backup,
     hierarchy::top_position,
     lockdown,
     prefix::Parsed,
@@ -112,6 +112,9 @@ pub async fn apply(
     }
     let t = target.get();
     let cfg = app.cfg(gid.get()).await?;
+    if matches!(kind, ModKind::Ban | ModKind::Timeout) {
+        appeals::dm_link(app, &cfg.appeals, gid, target).await; // before the ban: a banned user can't be DMed
+    }
     let (inverse, points) = match kind {
         ModKind::Ban => {
             app.http

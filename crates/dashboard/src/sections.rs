@@ -232,6 +232,11 @@ fn schema() -> Vec<Value> {
         dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true),
         dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
     ];
+    let appeals = vec![
+        f("enabled", "bool"),
+        f("channel", "channel"),
+        f("fields", "form"),
+    ];
     [
         ("logging", "Logging", log),
         ("antinuke", "Anti-nuke", nuke),
@@ -240,6 +245,7 @@ fn schema() -> Vec<Value> {
         ("joinraid", "Join raid", raid),
         ("lockdown", "Lockdown", vec![f("main_roles", "roles")]),
         ("panic", "Panic mode", panic),
+        ("appeals", "Appeals", appeals),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
     ]
@@ -379,6 +385,7 @@ mod tests {
                         .unwrap()
                         .clone(),
                     "channel" | "role" => json!("1"),
+                    "form" => json!([{"label": "x"}]),
                     _ => json!(["1"]),
                 };
                 let mut cur = &mut obj;

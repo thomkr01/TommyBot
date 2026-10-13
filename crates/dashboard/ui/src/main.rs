@@ -1,9 +1,11 @@
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
+mod appeals;
 mod common;
 mod form;
 mod pages;
+use appeals::{AppealBlacklist, AppealForm, AppealList};
 use common::*;
 use form::Section;
 use pages::{Rescue, Revert, Score, Wizard};
@@ -13,8 +15,9 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist")]),
     ("Anti Nuke", &[("antinuke", "General"), ("panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid")]),
+    ("Appeals", &[("appeals", "Settings"), ("appeal_list", "List"), ("appeal_blacklist", "Blacklist")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("verification", "Verification"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("appeals", "Appeals"), ("utility", "Utility")]),
+    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("verification", "Verification"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown")];
 
@@ -158,6 +161,7 @@ fn App() -> impl IntoView {
                 <nav>
                     {move || match route.get().first() {
                         None => view! { <a href="#/">"Servers"</a> }.into_any(),
+                        Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
@@ -186,6 +190,7 @@ fn App() -> impl IntoView {
                                 None => view! { <i>{g["name"].as_str().unwrap_or("?").chars().next().unwrap_or('?').to_string()}</i> }.into_any() }}
                                 <b>{g["name"].as_str().unwrap_or("").to_string()}</b><span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></a></div> }).collect_view()}</div>
                         }.into_any(),
+                        [a, g] if a == "appeal" => view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview") /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, ..] => {
                             let page = match p.as_str() {
@@ -194,6 +199,8 @@ fn App() -> impl IntoView {
                                 "overview" => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                                 "wizard" => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 "revert" => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
+                                "appeal_list" => view! { <AppealList guild=g.clone() /> }.into_any(),
+                                "appeal_blacklist" => view! { <AppealBlacklist guild=g.clone() /> }.into_any(),
                                 "rescue" => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                                 "filters" => view! { <Section guild=g.clone() name="automod".to_string() part="filters" enrolled /> }.into_any(),
                                 "automod" => view! { <Section guild=g.clone() name="automod".to_string() part="general" enrolled /> }.into_any(),

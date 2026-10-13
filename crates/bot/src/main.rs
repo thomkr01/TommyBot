@@ -1,5 +1,6 @@
 mod antinuke;
 mod app;
+mod appeals;
 mod automod;
 mod backup;
 mod commands;
