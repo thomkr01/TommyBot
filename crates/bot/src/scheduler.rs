@@ -6,7 +6,7 @@ use tommybot_core::jobs::{self, Job};
 use tommybot_logging::LogKind;
 use twilight_model::id::{marker::UserMarker, Id};
 
-use crate::{app::App, commands, events::send_log, lockdown, panic};
+use crate::{app::App, commands, events::send_log, lockdown, panic, verify};
 
 fn user(payload: &Value) -> Result<Id<UserMarker>> {
     Ok(Id::new(
@@ -33,6 +33,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             panic::end(app, gid, job.payload["unlock"].as_bool().unwrap_or(false)).await?
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
+        "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "raid_end" => send_log(app, gid.get(), LogKind::JoinRaid, "Raid ended").await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }

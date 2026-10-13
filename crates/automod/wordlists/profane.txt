@@ -1,0 +1,13 @@
+# One word per line. Matched as whole words.
+damn
+hell
+crap
+bastard
+bitch
+asshole
+dick
+piss
+shit
+fuck
+bullshit
+motherfucker
