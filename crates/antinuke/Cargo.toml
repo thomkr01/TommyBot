@@ -1,10 +1,10 @@
 [package]
 name = "tommybot-antinuke"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
 
 [dev-dependencies]
-serde_json = "1"
+serde_json.workspace = true
