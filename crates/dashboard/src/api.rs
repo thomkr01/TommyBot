@@ -73,6 +73,18 @@ pub(crate) async fn require(
     Ok(l)
 }
 
+/// The toggles of the permit editor, so the page never carries its own copy of the permission list.
+pub async fn permit_catalog(_: Sess) -> Json<Value> {
+    Json(json!(tommybot_core::permits::CATALOG
+        .iter()
+        .map(
+            |s| json!({"id": s.id, "title": s.title, "items": s.items.iter().map(|d| json!({
+            "key": d.key, "label": d.label, "help": d.help, "flag": d.flag, "locked": d.locked,
+        })).collect::<Vec<_>>()})
+        )
+        .collect::<Vec<_>>()))
+}
+
 pub async fn guilds(State(st): State<AppState>, s: Sess) -> Res {
     let mut out = vec![];
     let bot_in = st.discord.bot_guild_ids().await?;
