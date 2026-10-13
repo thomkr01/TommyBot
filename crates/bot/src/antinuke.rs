@@ -143,17 +143,21 @@ async fn open_case(
     .await
 }
 
-async fn quarantine_and_revert(
+/// Result of undoing an actor's logged actions.
+pub(crate) struct RevertSummary {
+    pub ops: usize,
+    pub failed: usize,
+    pub reinvite: Vec<u64>,
+}
+
+/// Undoes the actor's unreverted logged actions since `since_secs` (unix seconds) and marks them reverted.
+pub(crate) async fn revert_actor(
     app: &App,
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
-    why: &str,
-) -> Result<()> {
-    quarantine(app, gid, actor).await?;
-    let since = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64
-        - 3600;
+    since_secs: i64,
+) -> Result<RevertSummary> {
+    let since = since_secs;
     let rows: Vec<(serde_json::Value, i64)> = sqlx::query_as(
         "SELECT inverse, EXTRACT(EPOCH FROM created_at)::BIGINT FROM action_log
          WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)",
@@ -188,12 +192,30 @@ async fn quarantine_and_revert(
         .bind(since)
         .execute(&app.pool)
         .await?;
+    Ok(RevertSummary {
+        ops: plan.ops.len(),
+        failed,
+        reinvite: plan.reinvite,
+    })
+}
+
+async fn quarantine_and_revert(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+) -> Result<()> {
+    quarantine(app, gid, actor).await?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let sum = revert_actor(app, gid, actor, now - 3600).await?;
     let case = open_case(app, gid, actor, why).await?;
-    let reinvite: Vec<String> = plan.reinvite.iter().map(|u| format!("<@{u}>")).collect();
+    let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     let text = format!(
         "**Anti-nuke** case #{case}: <@{actor}> quarantined, {why}. Reverted {}/{} actions. Kicked, re-invite: {}",
-        plan.ops.len() - failed,
-        plan.ops.len(),
+        sum.ops - sum.failed,
+        sum.ops,
         if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
     );
     send_log(app, gid.get(), LogKind::AntiNuke, &text).await

@@ -5,6 +5,8 @@ mod commands;
 mod events;
 mod lockdown;
 mod prefix;
+mod slash;
+mod targets;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -31,6 +33,10 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    if let Err(e) = slash::register(&app).await {
+        tracing::warn!(?e, "slash command registration failed");
+    }
 
     let intents = Intents::GUILDS
         | Intents::GUILD_MEMBERS

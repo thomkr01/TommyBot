@@ -8,7 +8,7 @@ use twilight_model::{
     id::{marker::ChannelMarker, Id},
 };
 
-use crate::{antinuke, app::App, automod, commands, prefix};
+use crate::{antinuke, app::App, automod, commands, prefix, slash};
 
 fn guild_of(ev: &Event) -> Option<u64> {
     let g = match ev {
@@ -74,6 +74,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
         }
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
+        Event::InteractionCreate(i) => slash::handle(app, &i.0).await?,
         Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,
         _ => {}
     }
