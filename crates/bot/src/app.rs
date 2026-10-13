@@ -10,7 +10,7 @@ use tommybot_antinuke::{Action as NukeAction, AntiNuke, Limit};
 use tommybot_automod::{
     heat::{HeatCfg, HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
-    lockdown::{JoinLock, MentionWatch},
+    lockdown::MentionWatch,
     strike::StrikeCfg,
 };
 use tommybot_core::permits::{self, Level};
@@ -91,8 +91,6 @@ pub struct App {
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
-    /// Active join locks. shortcut: lost on restart, persist via the lock snapshot when needed.
-    pub join_locks: Mutex<HashMap<u64, JoinLock>>,
 }
 
 impl App {
@@ -107,7 +105,6 @@ impl App {
             heat: Default::default(),
             raids: Default::default(),
             mentions: Default::default(),
-            join_locks: Default::default(),
         }
     }
 

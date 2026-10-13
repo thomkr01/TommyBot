@@ -163,6 +163,13 @@ pub struct RaidCfg {
     pub flag_no_avatar: bool,
     /// Minimum accounts in one creation-time bucket to call it a bot farm; None disables.
     pub id_flag_min: Option<usize>,
+    /// What happens to flagged raiders.
+    #[serde(default = "default_raid_action")]
+    pub action: Action,
+}
+
+fn default_raid_action() -> Action {
+    Action::Kick
 }
 
 impl Default for RaidCfg {
@@ -176,6 +183,7 @@ impl Default for RaidCfg {
             flag_younger_than_ms: None,
             flag_no_avatar: false,
             id_flag_min: None,
+            action: Action::Kick,
         }
     }
 }
@@ -449,6 +457,15 @@ mod tests {
             }
         }
         panic!("raid never triggered");
+    }
+
+    #[test]
+    fn raid_action_defaults_to_kick() {
+        let mut v = serde_json::to_value(RaidCfg::default()).unwrap();
+        v.as_object_mut().unwrap().remove("action");
+        assert_eq!(serde_json::from_value::<RaidCfg>(v.clone()).unwrap().action, Action::Kick);
+        v["action"] = serde_json::json!("Ban");
+        assert_eq!(serde_json::from_value::<RaidCfg>(v).unwrap().action, Action::Ban);
     }
 
     #[test]
