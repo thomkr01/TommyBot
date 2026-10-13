@@ -95,7 +95,6 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         from_webhook: m.webhook_id.is_some(),
         ..Default::default()
     };
-    // Profanity and link whitelists from the author's permit; looked up only when a filter hit.
     if facts.blacklisted_words > 0 && app.whitelisted(gid, m.author.id, "words").await? {
         facts.blacklisted_words = 0;
     }
@@ -466,7 +465,6 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
     Ok(())
 }
 
-/// Custom warn actions for an automod warn, logged since there is no command reply.
 async fn warn_actions(
     app: &App,
     cfg: &GuildCfg,

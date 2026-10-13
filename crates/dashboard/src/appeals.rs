@@ -209,7 +209,6 @@ async fn list(
         json!({"id": id, "user_id": user_id, "username": username, "kind": kind, "answers": answers, "status": status, "at": at})).collect::<Vec<_>>())))
 }
 
-/// Trusted admins and owners, or dashboard viewers whose permit has Review Appeals.
 async fn reviewer(st: &AppState, s: &Sess, guild: i64) -> Result<(), ApiError> {
     let l = api::require(st, s, guild, Level::Viewer, false).await?;
     if l >= Level::Admin || has_perm(st, s, guild, "appeals").await? {
@@ -283,9 +282,8 @@ async fn accept(
     kind: &str,
     tx: &mut sqlx::PgConnection,
 ) -> Result<(), ApiError> {
-    // Lifting a punishment takes the permit for it, not just Review Appeals (spec 2).
-    let perm = if kind == "ban" { "ban" } else { "timeout" };
-    if api::level_of(st, s, guild).await? < Level::Admin && !has_perm(st, s, guild, perm).await? {
+    // Lifting a punishment takes its permit ("ban" or "timeout"), not just Review Appeals (spec 2).
+    if api::level_of(st, s, guild).await? < Level::Admin && !has_perm(st, s, guild, kind).await? {
         return Err(ApiError::Forbidden(
             "accepting needs the ban or timeout permit",
         ));

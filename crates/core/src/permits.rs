@@ -246,15 +246,8 @@ pub const CATALOG: &[PermSection] = &[
     },
 ];
 
-/// Keys older setups may already hold (including the `planned` ones); saving them stays allowed.
-const LEGACY: &[&str] = &[
-    "lockdown",
-    "antinuke",
-    "reports",
-    "notes_view",
-    "notes_manage",
-    "lock_updates",
-];
+/// Keys older setups may already hold; saving them stays allowed.
+const LEGACY: &[&str] = &["lockdown", "antinuke"];
 
 /// Whether `key` may be stored as a perm (`flag` false) or a whitelist flag (`flag` true).
 pub fn known(key: &str, flag: bool) -> bool {
@@ -262,7 +255,7 @@ pub fn known(key: &str, flag: bool) -> bool {
         || CATALOG
             .iter()
             .flat_map(|s| s.items)
-            .any(|d| d.key == key && d.flag == flag && !d.locked)
+            .any(|d| d.key == key && d.flag == flag && d.key != "owner")
 }
 
 /// `target_above_bot`: target's top role is not below the bot's top role (Discord hierarchy).

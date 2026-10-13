@@ -277,7 +277,6 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
     Ok(())
 }
 
-/// Runs the misc config's custom warn action once a warn of `added` points crosses its threshold.
 pub(crate) async fn apply_warn_actions(
     app: &App,
     misc: &MiscCfg,

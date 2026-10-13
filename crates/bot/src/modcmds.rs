@@ -394,7 +394,6 @@ pub async fn run(
     Ok(format!("Case #{case_no}: {reply}"))
 }
 
-/// Name without fancy unicode or leading hoist characters (`!`, `.`, digits...).
 fn sanitized(name: &str) -> String {
     let ascii: String = name
         .chars()
