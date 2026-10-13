@@ -79,11 +79,12 @@ async fn lock(
     require(&st, &s, guild, Level::Editor, false).await?;
     let channel = b.channel.as_deref().and_then(|c| c.parse().ok());
     kind_from(&b.kind, channel).ok_or_else(|| ApiError::BadRequest("unknown lock kind".into()))?;
+    let duration = b.duration_s.filter(|d| *d > 0);
     jobs::enqueue(
         &st.db,
         guild,
         "lock",
-        json!({"kind": b.kind, "channel": b.channel, "duration_s": b.duration_s}),
+        json!({"kind": b.kind, "channel": b.channel, "duration_s": duration}),
         now(),
     )
     .await?;
