@@ -1,0 +1,2 @@
+# One word per line. Matched as whole words.
+# Deliberately empty: add the terms your community wants blocked (a maintained public list such as LDNOOBW works).

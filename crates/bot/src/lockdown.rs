@@ -1,6 +1,7 @@
 //! Runs automod lockdown plans against Discord and restores them from the stored snapshot.
 use anyhow::Result;
 use tommybot_automod::{
+    discord_api::MAX_INVITE_PAUSE_MS,
     lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot},
     store,
 };
@@ -10,7 +11,7 @@ use twilight_model::{
     id::{marker::GuildMarker, Id},
 };
 
-use crate::app::App;
+use crate::app::{now_secs, App};
 
 async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
     match op {
@@ -37,8 +38,12 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
         }
         // No-op: the saved snapshot records the join lock and `join_lock` reads it from there.
         Op::EnableJoinLock(_) => {}
-        // shortcut: no twilight call for the INVITES_DISABLED feature, kick-lock still kicks joiners.
-        Op::PauseInvites => {}
+        Op::PauseInvites => {
+            let now = now_secs() * 1000;
+            app.api
+                .pause_invites(gid.get(), Some((now, now + MAX_INVITE_PAUSE_MS)))
+                .await?;
+        }
     }
     Ok(())
 }
@@ -115,6 +120,9 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     };
     for op in unlock_ops(&snap) {
         exec(app, gid, &op).await?;
+    }
+    if snap.invites_paused {
+        app.api.pause_invites(gid.get(), None).await?;
     }
     for (channel, role) in &snap.channel_denies {
         app.http
