@@ -10,24 +10,46 @@ use common::*;
 use form::Section;
 use pages::{Rescue, Revert, Score, Wizard};
 
-/// Sidebar groups, mirroring Wick; only features TommyBot has. Untyped sections stay reachable under "Raw JSON".
+/// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
-    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist")]),
-    ("Anti Nuke", &[("antinuke", "General"), ("panic", "Panic Mode")]),
-    ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid")]),
-    ("Appeals", &[("appeals", "Settings"), ("appeal_list", "List"), ("appeal_blacklist", "Blacklist")]),
+    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("whitelist", "Whitelist"), ("panic", "Panic Mode")]),
+    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("panic", "Panic Mode")]),
+    ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("verification", "Verification"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
+    ("Raw JSON", &[("backups", "Backups"), ("discord_automod", "Discord Automod"), ("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
-const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("lockdown", "Lockdown")];
+const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
+const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
+/// (sub page, title, description) for the Filters index.
+const FILTER_PAGES: &[(&str, &str, &str)] = &[
+    ("spam_text", "Anti Spam", "Target message, mention, attachment spam and a lot more."),
+    ("invites", "Invite Links", "Target Discord Server invites sent by advertisers."),
+    ("malicious", "Malicious Links", "Target phishing/malicious/scam websites sent in your server."),
+    ("nsfw", "NSFW Links", "Target NSFW websites posted in SFW channels."),
+    ("words", "Word Blacklist", "Target premade profanity words or add your own."),
+    ("links", "Link Blacklist", "Target websites found in messages that you manage."),
+];
 
 fn title(p: &str) -> String {
-    let hit = NAV.iter().flat_map(|(g, i)| i.iter().map(move |(k, t)| (*k, *t, *g))).chain(TOP.iter().map(|(k, t)| (*k, *t, ""))).find(|(k, ..)| *k == p);
-    match hit {
-        Some((_, t, g)) if matches!(g, "Auto Mod" | "Anti Nuke") => format!("{g} {t}"),
-        Some((_, t, _)) => t.to_string(),
-        None => p.replace('_', " "),
+    match p {
+        _ if p.starts_with("appeal") => "Appeals".into(),
+        "antinuke" | "antinuke_filters" => format!("Anti Nuke {}", if p == "antinuke" { "General" } else { "Filters" }),
+        "automod" => "Auto Mod General".into(),
+        "filters" => "Auto Mod Filters".into(),
+        _ => NAV.iter().flat_map(|(_, i)| i.iter()).chain(TOP).find(|(k, _)| *k == p).map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()),
     }
+}
+
+#[component]
+fn Tabs(guild: String, items: &'static [(&'static str, &'static str)], active: String) -> impl IntoView {
+    view! { <div class="tabs">{items.iter().map(|(p, t)| view! { <a class:on=*p == active href=format!("#/{guild}/{p}")>{*t}</a> }).collect_view()}</div> }
+}
+
+fn toggle_theme() {
+    let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) else { return };
+    let next = if root.get_attribute("data-theme").as_deref() == Some("light") { "dark" } else { "light" };
+    let _ = root.set_attribute("data-theme", next);
 }
 
 fn hash() -> Vec<String> {
@@ -136,6 +158,7 @@ fn App() -> impl IntoView {
     let (enrolled, set_enrolled) = signal(false);
     let (guilds, set_guilds) = signal(Vec::<Value>::new());
     provide_context(guilds);
+    let (nav_open, set_nav_open) = signal(false);
     let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
     let load_guilds = move || async move {
         match api("GET", "/api/guilds", None).await {
@@ -157,15 +180,24 @@ fn App() -> impl IntoView {
     });
     view! {
         <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a href="/auth/login"><button>"Log in with Discord"</button></a></main> }>
+            <header>
+                <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>"☰"</button>
+                <a class="logo" href="#/">"TommyBot"</a><span class="sp"></span>
+                <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>"Theme"</button>
+                <details>
+                    <summary>{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
+                    <div><a href="#/">"Servers"</a><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
+                </details>
+            </header>
             <div class="shell">
-                <nav>
+                <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
                         None => view! { <a href="#/">"Servers"</a> }.into_any(),
                         Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
-                            let link = |p: &str, t: &str| { let on = page == p; view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}</a> } };
+                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}</a> } };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -173,7 +205,7 @@ fn App() -> impl IntoView {
                                 None => view! { <i>{name.chars().next().unwrap_or('?').to_string()}</i> }.into_any(),
                             };
                             view! {
-                                <a class="srv" href="#/" title="Switch server">{icon}{name}</a>
+                                <a class="srv" href="#/" title="Switch server">{icon}{name}<button class="refresh" on:click=move |e| { e.prevent_default(); e.stop_propagation(); spawn_local(load_guilds()) }>"refresh server"</button></a>
                                 {TOP.iter().map(|(p, t)| link(p, t)).collect_view()}
                                 {NAV.iter().map(|(grp, items)| view! { <details open=*grp != "Raw JSON"><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
                             }.into_any()
@@ -192,19 +224,27 @@ fn App() -> impl IntoView {
                         }.into_any(),
                         [a, g] if a == "appeal" => view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview") /><Score guild=g.clone() enrolled /> }.into_any(),
-                        [g, p, ..] => {
-                            let page = match p.as_str() {
-                                "permits" => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
-                                "history" => view! { <History guild=g.clone() enrolled /> }.into_any(),
-                                "overview" => view! { <Score guild=g.clone() enrolled /> }.into_any(),
-                                "wizard" => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
-                                "revert" => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
-                                "appeal_list" => view! { <AppealList guild=g.clone() /> }.into_any(),
-                                "appeal_blacklist" => view! { <AppealBlacklist guild=g.clone() /> }.into_any(),
-                                "rescue" => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
-                                "filters" => view! { <Section guild=g.clone() name="automod".to_string() part="filters" enrolled /> }.into_any(),
-                                "automod" => view! { <Section guild=g.clone() name="automod".to_string() part="general" enrolled /> }.into_any(),
-                                _ => view! { <Section guild=g.clone() name=p.clone() enrolled /> }.into_any(),
+                        [g, p, rest @ ..] => {
+                            let sec = |name: &str, part: &str| view! { <Section guild=g.clone() name=name.to_string() part=part.to_string() enrolled /> }.into_any();
+                            let page = match (p.as_str(), rest.first()) {
+                                ("permits", _) => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
+                                ("history", _) => view! { <History guild=g.clone() enrolled /> }.into_any(),
+                                ("overview", _) => view! { <Score guild=g.clone() enrolled /> }.into_any(),
+                                ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
+                                ("revert", _) => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
+                                ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
+                                ("appeal_list", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealList guild=g.clone() /> }.into_any(),
+                                ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealBlacklist guild=g.clone() /> }.into_any(),
+                                ("appeals", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() />{sec("appeals", "")} }.into_any(),
+                                ("filters", None) => view! { <div class="stack">{FILTER_PAGES.iter().map(|(sub, t, d)| view! { <a class="card link" href=format!("#/{g}/filters/{sub}")><span class="ico"></span><span><h3>{*t}</h3><span class="muted">{*d}</span></span><span class="sp"></span>"›"</a> }).collect_view()}</div> }.into_any(),
+                                ("filters", Some(sub)) => {
+                                    let tabs = sub.starts_with("spam_").then(|| view! { <Tabs guild=g.clone() items=SPAM_TABS active=format!("filters/{sub}") /> });
+                                    view! { <p><a href=format!("#/{g}/filters")><button class="ghost">"Go back"</button></a></p>{tabs}{sec("automod", sub)} }.into_any()
+                                }
+                                ("automod", _) => sec("automod", "general"),
+                                ("antinuke", _) => sec("antinuke", "general"),
+                                ("antinuke_filters", _) => sec("antinuke", "limits"),
+                                _ => sec(p, ""),
                             };
                             view! { <Head guild=g.clone() page=title(p) />{page} }.into_any()
                         }
