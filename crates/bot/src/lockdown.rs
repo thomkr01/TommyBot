@@ -78,7 +78,8 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
             managed: r.managed,
         })
         .collect();
-    let plan = plan(&kind, gid.get(), &cfg.main_roles, &info, bot_position);
+    let main_roles: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
+    let plan = plan(&kind, gid.get(), &main_roles, &info, bot_position);
     // Saved first so a failure halfway can still be unlocked exactly.
     store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
     for op in &plan.ops {

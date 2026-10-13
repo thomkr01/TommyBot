@@ -21,20 +21,29 @@ use twilight_model::id::{
     Id,
 };
 
-#[derive(Default)]
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
 pub struct AntinukeCfg {
     pub limits: HashMap<NukeAction, Limit>,
     /// Quarantined members are moved to this role (none: all roles removed).
     pub quarantine_role: Option<Id<RoleMarker>>,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
 pub struct AutomodCfg {
     pub enabled: bool,
     pub heat: HeatCfg,
     pub strike: StrikeCfg,
     /// (mentions, window ms): that many mentions in the window locks the server.
     pub mention_lock: Option<(usize, i64)>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+pub struct LockdownCfg {
+    /// Roles that lose Send Messages in a server lock; empty means @everyone.
+    pub main_roles: Vec<Id<RoleMarker>>,
 }
 
 #[derive(Default)]
@@ -44,8 +53,7 @@ pub struct GuildCfg {
     pub automod: AutomodCfg,
     pub joingate: GateCfg,
     pub joinraid: Option<RaidCfg>,
-    /// Roles that lose Send Messages in a server lock; empty means @everyone.
-    pub main_roles: Vec<u64>,
+    pub lockdown: LockdownCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -62,47 +70,13 @@ fn section<T: DeserializeOwned + Default>(cfg: &Value, name: &str) -> T {
 
 impl GuildCfg {
     fn parse(cfg: &Value) -> Self {
-        #[derive(serde::Deserialize, Default)]
-        #[serde(default)]
-        struct Anti {
-            limits: HashMap<NukeAction, Limit>,
-            quarantine_role: Option<Id<RoleMarker>>,
-        }
-        #[derive(serde::Deserialize, Default)]
-        #[serde(default)]
-        struct Auto {
-            enabled: bool,
-            heat: Option<HeatCfg>,
-            strike: Option<StrikeCfg>,
-            mention_lock: Option<(usize, i64)>,
-        }
-        #[derive(serde::Deserialize, Default)]
-        #[serde(default)]
-        struct Lock {
-            main_roles: Vec<Id<RoleMarker>>,
-        }
-        let (anti, auto, lock): (Anti, Auto, Lock) = (
-            section(cfg, "antinuke"),
-            section(cfg, "automod"),
-            section(cfg, "lockdown"),
-        );
         Self {
             logging: section(cfg, "logging"),
-            antinuke: AntinukeCfg {
-                limits: anti.limits,
-                quarantine_role: anti.quarantine_role,
-            },
-            automod: AutomodCfg {
-                enabled: auto.enabled,
-                heat: auto.heat.unwrap_or_default(),
-                strike: auto.strike.unwrap_or_default(),
-                mention_lock: auto.mention_lock,
-            },
+            antinuke: section(cfg, "antinuke"),
+            automod: section(cfg, "automod"),
             joingate: section(cfg, "joingate"),
-            joinraid: cfg
-                .get("joinraid")
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            main_roles: lock.main_roles.iter().map(|r| r.get()).collect(),
+            joinraid: section(cfg, "joinraid"),
+            lockdown: section(cfg, "lockdown"),
         }
     }
 }
@@ -164,6 +138,12 @@ impl App {
         .await
     }
 
+    /// Owner, Extra Owner or Trusted Admin: untouchable by every bot system.
+    pub async fn is_immune(&self, guild: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
+        let owner = self.http.guild(guild).await?.model().await?.owner_id;
+        Ok(self.level(guild, owner, user).await?.immune())
+    }
+
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {
         if let Some(c) = self.cfgs.read().unwrap().get(&guild) {
             return Ok(c.clone());
@@ -210,7 +190,7 @@ mod tests {
         assert_eq!(c.antinuke.quarantine_role, Some(Id::new(7)));
         assert!(c.automod.enabled && c.automod.mention_lock == Some((5, 10_000)));
         assert_eq!(c.logging.fallback, Some(Id::new(42)));
-        assert_eq!(c.main_roles, vec![9]);
+        assert_eq!(c.lockdown.main_roles, vec![Id::new(9)]);
         assert!(!GuildCfg::parse(&json!({})).automod.enabled);
     }
 }

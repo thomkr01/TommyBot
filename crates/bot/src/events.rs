@@ -3,7 +3,10 @@ use anyhow::Result;
 use std::{sync::Arc, time::Instant};
 use tommybot_logging::LogKind;
 use twilight_gateway::Event;
-use twilight_model::channel::message::AllowedMentions;
+use twilight_model::{
+    channel::message::AllowedMentions,
+    id::{marker::ChannelMarker, Id},
+};
 
 use crate::{antinuke, app::App, automod, commands, prefix};
 
@@ -22,15 +25,20 @@ fn guild_of(ev: &Event) -> Option<u64> {
 }
 
 /// Logged text is user-controlled, so it is sent with mentions disabled.
-pub async fn send_log(app: &App, guild: u64, kind: LogKind, text: &str) -> Result<()> {
-    if let Some(ch) = app.cfg(guild).await?.logging.target(kind) {
-        app.http
-            .create_message(ch)
-            .content(text)
-            .allowed_mentions(Some(&AllowedMentions::default()))
-            .await?;
-    }
+async fn send(app: &App, channel: Id<ChannelMarker>, text: &str) -> Result<()> {
+    app.http
+        .create_message(channel)
+        .content(text)
+        .allowed_mentions(Some(&AllowedMentions::default()))
+        .await?;
     Ok(())
+}
+
+pub async fn send_log(app: &App, guild: u64, kind: LogKind, text: &str) -> Result<()> {
+    match app.cfg(guild).await?.logging.target(kind) {
+        Some(ch) => send(app, ch, text).await,
+        None => Ok(()),
+    }
 }
 
 pub async fn handle(app: Arc<App>, ev: Event) {
@@ -48,13 +56,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             .unwrap()
             .handle(&cfg.logging, ev, Instant::now());
         for m in msgs {
-            let sent = app
-                .http
-                .create_message(m.channel_id)
-                .content(&m.content)
-                .allowed_mentions(Some(&AllowedMentions::default()))
-                .await;
-            if let Err(e) = sent {
+            if let Err(e) = send(app, m.channel_id, &m.content).await {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
             }
         }

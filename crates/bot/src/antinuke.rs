@@ -8,7 +8,10 @@ use tommybot_core::cases::{self, NewCase};
 use tommybot_logging::LogKind;
 use twilight_model::{
     guild::audit_log::{AuditLogEntry, AuditLogEventType as A},
-    id::{marker::UserMarker, Id},
+    id::{
+        marker::{GuildMarker, UserMarker},
+        Id,
+    },
 };
 
 use crate::{app::App, events::send_log};
@@ -55,12 +58,11 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     let Some(action) = watched(e.action_type) else {
         return Ok(());
     };
-    if cfg.antinuke.limits.is_empty() {
+    if !cfg.antinuke.limits.contains_key(&action) {
         return Ok(());
     }
     // shortcut: only Owner/EO/TA are exempt, permit-level anti-nuke whitelists are not read yet.
-    let owner = app.http.guild(gid).await?.model().await?.owner_id;
-    let exempt = app.level(gid, owner, actor).await?.immune();
+    let exempt = app.is_immune(gid, actor).await?;
     let inv = inverse(action, e.target_id.map(|t| t.get()));
     if !exempt {
         sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
@@ -88,11 +90,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
 }
 
 /// Strips the member's roles (saving them) so their permissions are gone.
-async fn quarantine(
-    app: &App,
-    gid: Id<twilight_model::id::marker::GuildMarker>,
-    user: Id<UserMarker>,
-) -> Result<()> {
+async fn quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let member = app.http.guild_member(gid, user).await?.model().await?;
     let saved: Vec<i64> = member.roles.iter().map(|r| r.get() as i64).collect();
@@ -113,7 +111,7 @@ async fn quarantine(
 
 async fn quarantine_and_revert(
     app: &App,
-    gid: Id<twilight_model::id::marker::GuildMarker>,
+    gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     why: &str,
 ) -> Result<()> {
@@ -180,11 +178,7 @@ async fn quarantine_and_revert(
     send_log(app, gid.get(), LogKind::AntiNuke, &text).await
 }
 
-async fn run_inverse(
-    app: &App,
-    gid: Id<twilight_model::id::marker::GuildMarker>,
-    op: &Inverse,
-) -> Result<()> {
+async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
     match op {
         Inverse::Unban { user } => {
             app.http.delete_ban(gid, Id::new(*user)).await?;
@@ -220,8 +214,7 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         return Ok(());
     }
     // shortcut: quarantine-whitelisted permits are not read, only Owner/EO/TA may touch the held member.
-    let owner = app.http.guild(gid).await?.model().await?.owner_id;
-    let whitelisted = app.level(gid, owner, actor).await?.immune();
+    let whitelisted = app.is_immune(gid, actor).await?;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
         return Ok(());
     }

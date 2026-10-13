@@ -59,6 +59,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let key = (gid.get(), m.author.id.get());
     let triggered = {
         let mut map = app.heat.lock().unwrap();
+        // shortcut: heat state is dropped wholesale past 100k users, move to a TTL cache when that bites.
+        if map.len() > 100_000 {
+            map.clear();
+        }
         let (state, hist) = map.entry(key).or_default();
         let b = heat(&facts, hist, &cfg.automod.heat);
         hist.remember(content);
@@ -67,8 +71,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !triggered && !mention_lock {
         return Ok(());
     }
-    let owner = app.http.guild(gid).await?.model().await?.owner_id;
-    if app.level(gid, owner, m.author.id).await?.immune() {
+    if app.is_immune(gid, m.author.id).await? {
         return Ok(());
     }
     if mention_lock && lockdown::lock(app, gid, LockKind::Server).await? {
