@@ -35,17 +35,23 @@ pub fn from_csv(s: &str) -> Value {
 #[component]
 pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (code, set_code) = signal(String::new());
-    let (info, set_info) = signal(String::new());
+    let (err, set_err) = signal(String::new());
+    let (qr, set_qr) = signal(String::new());
+    let (secret, set_secret) = signal(String::new());
     let enroll = move |_| spawn_local(async move {
         match api("POST", "/api/totp/enroll", None).await {
-            Ok(v) => set_info.set(format!("Add this key to your authenticator app, then enter a code: {} ({})", v["secret"], v["uri"])),
-            Err(e) => set_info.set(e),
+            Ok(v) => {
+                let svg = qrcode::QrCode::new(v["uri"].as_str().unwrap_or("")).map(|q| q.render::<qrcode::render::svg::Color>().min_dimensions(200, 200).build());
+                set_qr.set(svg.unwrap_or_default());
+                set_secret.set(v["secret"].as_str().unwrap_or("").to_string());
+            }
+            Err(e) => set_err.set(e),
         }
     });
     let verify = move |_| spawn_local(async move {
         match api("POST", "/api/totp/verify", Some(json!({"code": code.get_untracked()}))).await {
-            Ok(_) => { need.set(false); set_info.set(String::new()); }
-            Err(e) => set_info.set(e),
+            Ok(_) => { need.set(false); set_err.set(String::new()); set_qr.set(String::new()); }
+            Err(e) => set_err.set(e),
         }
     });
     view! {
@@ -54,14 +60,26 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
                 <b>"Confirm it's you"</b>
                 <p class="muted">"This change needs your authenticator code. After verifying, save again."</p>
                 <Show when=move || !enrolled.get()><button class="ghost" on:click=enroll>"Set up authenticator"</button></Show>
+                <Show when=move || !qr.get().is_empty()>
+                    <p class="info">"Scan this QR code with your authenticator app, then enter a code below."</p>
+                    <div class="qr" inner_html=move || qr.get()></div>
+                    <p class="muted">"Can't scan? Enter this key manually: " <code>{move || secret.get()}</code></p>
+                </Show>
                 <div class="row">
                     <input placeholder="123456" prop:value=code on:input=move |e| set_code.set(event_target_value(&e)) />
                     <button on:click=verify>"Verify"</button>
                 </div>
-                <p class="err">{move || info.get()}</p>
+                <p class="err">{move || err.get()}</p>
             </div>
         </Show>
     }
+}
+
+/// Page header: the page name over the server name.
+#[component]
+pub fn Head(guild: String, page: String) -> impl IntoView {
+    let guilds = expect_context::<ReadSignal<Vec<Value>>>();
+    view! { <div class="head"><small>{page}</small><h1>{move || guilds.get().iter().find(|g| g["id"] == guild.as_str()).and_then(|g| g["name"].as_str().map(String::from)).unwrap_or_else(|| guild.clone())}</h1></div> }
 }
 
 /// Runs a request, routing `step_up_required` to the prompt and other errors to `msg`.

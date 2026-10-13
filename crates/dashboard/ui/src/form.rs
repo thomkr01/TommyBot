@@ -25,6 +25,11 @@ fn show(v: &Value) -> String {
     match v { Value::Null => String::new(), Value::String(s) => s.clone(), o => o.to_string() }
 }
 
+/// Display name for a channel/role id (falls back to the id).
+pub fn name_of(dc: &Value, key: &str, id: &str) -> String {
+    items(dc, key).into_iter().find(|(i, _)| i == id).map_or_else(|| id.to_string(), |(_, l)| l)
+}
+
 /// (id, label) pairs from `/discord` for `key` ("channels" or "roles").
 fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
     let pre = if key == "channels" { "#" } else { "@" };
@@ -39,16 +44,23 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
     let get = move || get_path(&val.get(), &p.get_value());
     let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
     let input = match kind.as_str() {
-        "bool" => view! { <input type="checkbox" prop:checked=move || get().as_bool().unwrap_or(false) on:change=move |e| set(json!(event_target_checked(&e))) /> }.into_any(),
+        "bool" => view! { <input type="checkbox" class="sw" prop:checked=move || get().as_bool().unwrap_or(false) on:change=move |e| set(json!(event_target_checked(&e))) /> }.into_any(),
         "int" | "float" => {
             let float = kind == "float";
-            view! { <input prop:value=move || show(&get()) on:change=move |e| {
-                let s = event_target_value(&e);
-                let s = s.trim();
-                if s.is_empty() { set(Value::Null) }
-                else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x)) } }
-                else if let Ok(x) = s.parse::<i64>() { set(json!(x)) }
-            } /> }.into_any()
+            let step = move |d: f64| {
+                let x = get().as_f64().unwrap_or(0.0) + d;
+                set(if float { json!(x) } else { json!(x as i64) })
+            };
+            let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", "per_minute" => "/min", "per_hour" => "/hour", _ => "" };
+            view! { <div class="step"><button class="ghost" on:click=move |_| step(-1.0)>"-"</button>
+                <input prop:value=move || show(&get()) on:change=move |e| {
+                    let s = event_target_value(&e);
+                    let s = s.trim();
+                    if s.is_empty() { set(Value::Null) }
+                    else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x)) } }
+                    else if let Ok(x) = s.parse::<i64>() { set(json!(x)) }
+                } />
+                <button class="ghost" on:click=move |_| step(1.0)>"+"</button><span>{unit}</span></div> }.into_any()
         }
         "list" => view! { <input prop:value=move || csv(&get()) on:change=move |e| set(from_csv(&event_target_value(&e))) /> }.into_any(),
         "choice" => {
@@ -82,7 +94,8 @@ fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
         _ => view! { <input prop:value=move || show(&get()) on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) } /> }.into_any(),
     };
     let help = f["help"].as_str().map(|h| view! { <span class="muted">{h.to_string()}</span> });
-    view! { <div class="row"><label>{f["label"].as_str().unwrap_or(&path).to_string()}</label>{input}{help}</div> }
+    let label = path.rsplit('.').next().unwrap_or(&path).replace('_', " ");
+    view! { <div class="row" class:tog=kind == "bool"><label>{label}</label>{input}{help}</div> }
 }
 
 fn raw_editor(val: RwSignal<Value>, msg: RwSignal<String>) -> impl IntoView {
@@ -121,10 +134,17 @@ pub fn Section(guild: String, name: String, enrolled: ReadSignal<bool>) -> impl 
     };
     view! {
         <Show when=move || !fields.get().is_empty() fallback=move || raw_editor(val, msg)>
-            <div class="card">
-                <For each=move || fields.get() key=|f| f["path"].as_str().unwrap_or("").to_string() let:f>
-                    <Field f val dc />
-                </For>
+            <div class="cards">
+                {move || {
+                    // One card per path prefix ("limits.ban" -> "limits ban"); unprefixed fields go under "General".
+                    let mut groups: Vec<(String, Vec<Value>)> = vec![];
+                    for f in fields.get() {
+                        let p = f["path"].as_str().unwrap_or("");
+                        let g = p.rsplit_once('.').map_or("General".to_string(), |(g, _)| g.replace(['.', '_'], " "));
+                        match groups.iter_mut().find(|(k, _)| *k == g) { Some((_, v)) => v.push(f), None => groups.push((g, vec![f])) }
+                    }
+                    groups.into_iter().map(|(g, fs)| view! { <div class="card"><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}</div> }).collect_view()
+                }}
             </div>
             <details><summary>"Advanced (raw JSON)"</summary>
                 {raw_editor(val, msg)}

@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::form::Section;
+use crate::form::{name_of, Section};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
@@ -13,21 +13,31 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let step = RwSignal::new(0usize);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
+    let g2 = guild.clone();
     let auto = move |_| {
-        let g = g.clone();
+        let (g, g2) = (g.clone(), g2.clone());
         run_act(async move {
             let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
             api("POST", &format!("/api/guilds/{g}/wizard/auto-setup"), Some(json!({"expected_version": c["version"]}))).await
-        }, msg, need, move |v| msg.set(format!("Created: {}", v["created"])));
+        }, msg, need, move |v| { let (g, c) = (g2.clone(), v["created"].clone()); spawn_local(async move {
+            let dc = api("GET", &format!("/api/guilds/{g}/discord"), None).await.unwrap_or(Value::Null);
+            let n = |k: &str, key: &str| name_of(&dc, key, c[k].as_str().unwrap_or(""));
+            msg.set(format!("Created: quarantine role {}, log channel {}, mod log channel {}", n("quarantine_role", "roles"), n("logs", "channels"), n("modlogs", "channels")));
+        }) });
     };
     let g = guild.clone();
     view! {
-        <h1>"Setup wizard"</h1>
-        <div class="row">
-            {STEPS.iter().enumerate().map(|(i, t)| view! { <button class:ghost=move || step.get() != i on:click=move |_| step.set(i)>{format!("{}. {t}", i + 1)}</button> }).collect_view()}
+        <div class="card">
+            <div class="split">
+                <div><h2>"Setup process"</h2><p class="muted">"Follow the steps to set up the bot. You can jump to any step."</p></div>
+                <Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) color="var(--accent)" />
+            </div>
+            <div class="steps">
+                {STEPS.iter().enumerate().map(|(i, t)| view! { <button class:on=move || step.get() == i on:click=move |_| step.set(i)><i>{i + 1}</i>{*t}</button> }).collect_view()}
+            </div>
         </div>
         {move || match step.get() {
-            0 => view! { <div class="card"><p class="muted">"Creates the quarantine role and the log channels."</p><button on:click=auto.clone()>"Run auto setup"</button><p>{move || msg.get()}</p></div> }.into_any(),
+            0 => view! { <div class="card"><p class="muted">"Creates the quarantine role and the log channels."</p><button on:click=auto.clone()>"Run auto setup"</button><p class="info">{move || msg.get()}</p></div> }.into_any(),
             1 => view! { <Section guild=g.clone() name="logging".into() enrolled /> }.into_any(),
             2 => view! { <Section guild=g.clone() name="lockdown".into() enrolled /> }.into_any(),
             3 => view! { <div class="card"><a href=format!("#/{g}/permits")>"Review permits"</a></div> }.into_any(),
@@ -37,10 +47,25 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     }
 }
 
+/// Progress ring: `pct` filled, number in the middle.
+#[component]
+pub fn Ring(pct: Signal<usize>, color: &'static str) -> impl IntoView {
+    view! { <div class="ring" style=move || format!("--p:{};--c:{color}", pct.get())><b>{move || format!("{}%", pct.get())}</b></div> }
+}
+
+const SYSTEMS: [(&str, &str, &str); 5] = [
+    ("automod", "Auto Mod", "Heat-based spam, link and invite filtering with strikes."),
+    ("antinuke", "Anti Nuke", "Watches staff actions and guards the server against nukes."),
+    ("joingate", "Join Gate", "Instant filters for new members and bots joining."),
+    ("joinraid", "Join Raid", "Detects raids by join rate and reacts to them."),
+    ("panic", "Panic Mode", "Locks things down when several staff trip the anti-nuke at once."),
+];
+
 #[component]
 pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let guilds = expect_context::<ReadSignal<Vec<Value>>>();
     let g = guild.clone();
     let load = move || { let g = g.clone(); spawn_local(async move {
         match api("GET", &format!("/api/guilds/{g}/score"), None).await {
@@ -49,8 +74,24 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         }
     }) };
     load();
+    let pct = Signal::derive(move || { let r = rows.get(); if r.is_empty() { 0 } else { r.iter().filter(|x| x["severity"] == "ok").count() * 100 / r.len() } });
+    let (id, g2) = (guild.clone(), guild.clone());
     view! {
-        <h1>"Security score"</h1>
+        <div class="card"><div class="split">
+            <div>
+                <h2>"Details"</h2>
+                {move || guilds.get().into_iter().find(|x| x["id"] == id.as_str()).map(|x| view! {
+                    <span class="stat"><span>"Server name"</span><b>{s(&x["name"])}</b></span>
+                    <span class="stat"><span>"Server ID"</span><b>{s(&x["id"])}</b></span>
+                    <span class="stat"><span>"Your access"</span><b>{s(&x["level"])}</b></span> })}
+            </div>
+            <div><h2>"Security"</h2><Ring pct color="var(--warn)" /></div>
+        </div></div>
+        <h2 style="text-align:center">"Quick systems overview"</h2>
+        <div class="cards">
+            {SYSTEMS.iter().map(|(k, t, d)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a></div></div> }).collect_view()}
+        </div>
+        <h2 style="margin-top:24px">"Security checks"</h2>
         <p class="err">{move || msg.get()}</p>
         <For each=move || rows.get() key=|r| s(&r["id"]) let:r>
             {
@@ -94,7 +135,6 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         });
     };
     view! {
-        <h1>"Revert center"</h1>
         <div class="row">
             <input placeholder="Actor user ID" prop:value=actor on:input=move |e| actor.set(event_target_value(&e)) />
             <input placeholder="Hours" prop:value=hours on:input=move |e| hours.set(event_target_value(&e)) />
@@ -140,7 +180,6 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         run_act(async move { api("POST", "/api/rescue/claim", Some(json!({"guild_id": g, "key": k.trim()}))).await }, msg, need, move |_| msg.set("Claimed.".into()));
     };
     view! {
-        <h1>"Rescue key"</h1>
         <div class="card">
             <p class="muted">{move || if has_key.get() { "A rescue key exists. Regenerating invalidates the old one." } else { "No rescue key yet." }}</p>
             <button on:click=regen>"Regenerate key (owner)"</button>
