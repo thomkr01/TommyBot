@@ -17,7 +17,9 @@ use twilight_model::{
         Id,
     },
 };
-use twilight_util::builder::command::{CommandBuilder, IntegerBuilder, StringBuilder, UserBuilder};
+use twilight_util::builder::command::{
+    BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
+};
 
 use crate::{
     app::App,
@@ -41,6 +43,15 @@ pub enum Cmd {
         target: Id<UserMarker>,
         since_s: i64,
     },
+    Backup(BackupCmd),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BackupCmd {
+    Create,
+    List,
+    Load { id: i64, confirm: bool },
+    Delete { id: i64 },
 }
 
 fn user(o: &[CommandDataOption], name: &str) -> Option<Id<UserMarker>> {
@@ -70,6 +81,32 @@ fn int(o: &[CommandDataOption], name: &str) -> Option<i64> {
         })
 }
 
+fn flag(o: &[CommandDataOption], name: &str) -> bool {
+    o.iter()
+        .any(|o| o.name == name && o.value == CommandOptionValue::Boolean(true))
+}
+
+fn backup(o: &[CommandDataOption]) -> Result<Cmd, String> {
+    let Some(CommandDataOption {
+        name,
+        value: CommandOptionValue::SubCommand(sub),
+    }) = o.first()
+    else {
+        return Err("Pick a subcommand".into());
+    };
+    let id = || int(sub, "id").ok_or("missing id");
+    Ok(Cmd::Backup(match name.as_str() {
+        "create" => BackupCmd::Create,
+        "list" => BackupCmd::List,
+        "load" => BackupCmd::Load {
+            id: id()?,
+            confirm: flag(sub, "confirm"),
+        },
+        "delete" => BackupCmd::Delete { id: id()? },
+        _ => return Err("Unknown subcommand".into()),
+    }))
+}
+
 /// Optional duration option: absent is fine, unparseable is an error.
 fn dur(o: &[CommandDataOption], name: &str) -> Result<Option<i64>, String> {
     string(o, name)
@@ -97,6 +134,7 @@ pub fn parse(
             })
         }
         "unlock" => return Ok(Cmd::Unlock),
+        "backup" => return backup(o),
         "revert" => {
             return Ok(Cmd::Revert {
                 target: user(o, "actor").ok_or("missing actor")?,
@@ -165,6 +203,23 @@ pub fn definitions() -> Vec<Command> {
             chat("revert", "Undo a member's recent logged actions")
                 .option(UserBuilder::new("actor", "Whose actions to undo").required(true))
                 .option(StringBuilder::new("since", "How far back, e.g. 2h").required(true)),
+        ),
+        guild_only(
+            chat("backup", "Server backups")
+                .option(SubCommandBuilder::new("create", "Take a backup now"))
+                .option(SubCommandBuilder::new("list", "List saved backups"))
+                .option(
+                    SubCommandBuilder::new("load", "Restore the server to a backup")
+                        .option(IntegerBuilder::new("id", "Backup id").required(true))
+                        .option(BooleanBuilder::new(
+                            "confirm",
+                            "Apply it (otherwise preview)",
+                        )),
+                )
+                .option(
+                    SubCommandBuilder::new("delete", "Delete a backup")
+                        .option(IntegerBuilder::new("id", "Backup id").required(true)),
+                ),
         ),
         guild_only(menu("Ban")),
         guild_only(menu("Kick")),
@@ -256,6 +311,7 @@ async fn run(
         Cmd::Revert { target, since_s } => {
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }
+        Cmd::Backup(b) => commands::backup_cmd(app, gid, (actor_id, &actor), b).await,
     }
 }
 
@@ -332,5 +388,45 @@ mod tests {
             .map(|c| matches!(c, Cmd::Mod { points: 3, .. })),
             Ok(true)
         );
+    }
+
+    #[test]
+    fn parses_backup_subcommands() {
+        let sub = |name: &str, args: Vec<CommandDataOption>| {
+            [opt(name, CommandOptionValue::SubCommand(args))]
+        };
+        assert_eq!(
+            parse("backup", &sub("create", vec![]), None),
+            Ok(Cmd::Backup(BackupCmd::Create))
+        );
+        assert_eq!(
+            parse(
+                "backup",
+                &sub(
+                    "load",
+                    vec![
+                        opt("id", CommandOptionValue::Integer(4)),
+                        opt("confirm", CommandOptionValue::Boolean(true))
+                    ]
+                ),
+                None
+            ),
+            Ok(Cmd::Backup(BackupCmd::Load {
+                id: 4,
+                confirm: true
+            }))
+        );
+        assert_eq!(
+            parse(
+                "backup",
+                &sub("load", vec![opt("id", CommandOptionValue::Integer(4))]),
+                None
+            ),
+            Ok(Cmd::Backup(BackupCmd::Load {
+                id: 4,
+                confirm: false
+            }))
+        );
+        assert!(parse("backup", &sub("delete", vec![]), None).is_err()); // id required
     }
 }

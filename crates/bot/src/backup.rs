@@ -5,7 +5,9 @@ use anyhow::Result;
 use sqlx::types::Json;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use tommybot_antinuke::{map_overwrites, plan, Change, ChannelImg, Image, OverwriteImg, RoleImg};
+use tommybot_antinuke::{
+    map_overwrites, plan, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
+};
 use twilight_http::Client;
 use twilight_model::{
     channel::{
@@ -70,13 +72,14 @@ pub async fn snapshot(http: &Client, gid: Id<GuildMarker>) -> Result<Image> {
     })
 }
 
-pub async fn save(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+pub async fn save(app: &App, gid: Id<GuildMarker>) -> Result<i64> {
     let image = snapshot(&app.http, gid).await?;
-    sqlx::query("INSERT INTO backups (guild_id, image) VALUES ($1, $2)")
-        .bind(gid.get() as i64)
-        .bind(Json(&image))
-        .execute(&app.pool)
-        .await?;
+    let (id,): (i64,) =
+        sqlx::query_as("INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id")
+            .bind(gid.get() as i64)
+            .bind(Json(&image))
+            .fetch_one(&app.pool)
+            .await?;
     sqlx::query(
         "DELETE FROM backups WHERE guild_id = $1 AND id NOT IN \
          (SELECT id FROM backups WHERE guild_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2)",
@@ -85,7 +88,7 @@ pub async fn save(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     .bind(KEEP)
     .execute(&app.pool)
     .await?;
-    Ok(())
+    Ok(id)
 }
 
 pub async fn latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<Image>> {
@@ -98,12 +101,8 @@ pub async fn latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<Image>> {
     Ok(row.map(|(Json(i),)| i))
 }
 
-/// Panic-mode restore: sync to the latest image, never deleting the quarantine role, log channels
-/// or the lock channel, and keeping the server lock. `None` means there is no backup yet.
-pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<usize>> {
-    let Some(image) = latest(app, gid).await? else {
-        return Ok(None);
-    };
+/// Live ids a restore must never delete: the quarantine role and the log channels.
+async fn keep_set(app: &App, gid: Id<GuildMarker>) -> Result<HashSet<u64>> {
     let cfg = app.cfg(gid.get()).await?;
     let mut keep: HashSet<u64> = cfg
         .antinuke
@@ -118,7 +117,106 @@ pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<us
             .chain(cfg.logging.routes.values())
             .map(|c| c.get()),
     );
+    Ok(keep)
+}
+
+/// Panic-mode restore: sync to the latest image and keep the server lock. `None` means there is
+/// no backup yet.
+pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<usize>> {
+    let Some(image) = latest(app, gid).await? else {
+        return Ok(None);
+    };
+    let keep = keep_set(app, gid).await?;
     Ok(Some(restore(app, gid, &image, &keep, true).await?))
+}
+
+/// Backups as `(id, created_at unix secs, roles, channels)`, newest first.
+pub async fn list(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(i64, i64, i32, i32)>> {
+    Ok(sqlx::query_as(
+        "SELECT id, EXTRACT(EPOCH FROM created_at)::BIGINT, jsonb_array_length(image->'roles')::INT, \
+         jsonb_array_length(image->'channels')::INT FROM backups \
+         WHERE guild_id = $1 ORDER BY created_at DESC, id DESC",
+    )
+    .bind(gid.get() as i64)
+    .fetch_all(&app.pool)
+    .await?)
+}
+
+pub async fn delete(app: &App, gid: Id<GuildMarker>, id: i64) -> Result<bool> {
+    let r = sqlx::query("DELETE FROM backups WHERE guild_id = $1 AND id = $2")
+        .bind(gid.get() as i64)
+        .bind(id)
+        .execute(&app.pool)
+        .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// `/backup load`: without `confirm` only describes what would change; with it, syncs the server
+/// to backup `id`.
+pub async fn load(app: &App, gid: Id<GuildMarker>, id: i64, confirm: bool) -> Result<String> {
+    let row: Option<(Json<Image>,)> =
+        sqlx::query_as("SELECT image FROM backups WHERE guild_id = $1 AND id = $2")
+            .bind(gid.get() as i64)
+            .bind(id)
+            .fetch_optional(&app.pool)
+            .await?;
+    let Some((Json(image),)) = row else {
+        return Ok(format!("No backup #{id}"));
+    };
+    let keep = keep_set(app, gid).await?;
+    if confirm {
+        let n = restore(app, gid, &image, &keep, false).await?;
+        return Ok(format!("Restored backup #{id} ({n} changes)"));
+    }
+    let live = snapshot(&app.http, gid).await?;
+    let p = plan(&image, &live, &keep, false);
+    let mut n = [0; 3];
+    for k in p
+        .roles
+        .iter()
+        .map(kind_of)
+        .chain(p.channels.iter().map(kind_of))
+    {
+        n[k] += 1;
+    }
+    Ok(format!(
+        "Loading backup #{id} would create {}, update {} and delete {} roles/channels. \
+         Run again with confirm:true to apply.",
+        n[0], n[1], n[2]
+    ))
+}
+
+/// Index into the create/update/delete tally.
+fn kind_of<T>(c: &Change<T>) -> usize {
+    match c {
+        Change::Create(_) => 0,
+        Change::Update { .. } => 1,
+        Change::Delete(_) => 2,
+    }
+}
+
+/// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker) from
+/// the latest image, plus children re-parented to a recreated category. Nothing else is touched.
+pub async fn recreate(app: &App, gid: Id<GuildMarker>, ids: &HashSet<u64>) -> Result<usize> {
+    let Some(image) = latest(app, gid).await? else {
+        return Ok(0);
+    };
+    let live = snapshot(&app.restore_http, gid).await?;
+    let keep: HashSet<u64> = live
+        .roles
+        .iter()
+        .map(|r| r.id)
+        .chain(live.channels.iter().map(|c| c.id))
+        .collect();
+    let mut p = plan(&image, &live, &keep, true);
+    p.roles
+        .retain(|c| matches!(c, Change::Create(r) if ids.contains(&r.id)));
+    p.channels.retain(|c| match c {
+        Change::Create(c) => ids.contains(&c.id),
+        Change::Update { to, .. } => to.parent.is_some_and(|p| ids.contains(&p)),
+        Change::Delete(_) => false,
+    });
+    Ok(execute(app, gid, &image, p, true).await)
 }
 
 fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
@@ -156,7 +254,19 @@ pub async fn restore(
             .filter(|c| c.name == "server-locked")
             .map(|c| c.id),
     );
-    let mut p = plan(image, &live, &keep, respect_lock);
+    let p = plan(image, &live, &keep, respect_lock);
+    Ok(execute(app, gid, image, p, respect_lock).await)
+}
+
+/// Applies a plan. A failed step is logged and skipped, so one missing permission can't abort it.
+async fn execute(
+    app: &App,
+    gid: Id<GuildMarker>,
+    image: &Image,
+    mut p: Plan,
+    respect_lock: bool,
+) -> usize {
+    let http = &app.restore_http;
     let mut done = 0;
     let mut id_map = std::mem::take(&mut p.id_map);
 
@@ -257,7 +367,7 @@ pub async fn restore(
             tracing::warn!(?e, "restoring role positions failed");
         }
     }
-    Ok(done)
+    done
 }
 
 fn count(r: Result<()>, done: &mut usize, what: &str) {

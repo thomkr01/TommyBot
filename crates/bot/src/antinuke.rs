@@ -18,6 +18,7 @@ use twilight_model::{
 
 use crate::{
     app::{now_secs, App},
+    backup,
     events::send_log,
 };
 
@@ -168,6 +169,8 @@ pub(crate) struct RevertSummary {
     pub done: Vec<Inverse>,
     pub failed: usize,
     pub reinvite: Vec<u64>,
+    /// Deleted channels and roles recreated from the latest backup.
+    pub recreated: usize,
 }
 
 /// Undoes the actor's unreverted logged actions since `since_secs` (unix seconds) and marks them reverted.
@@ -206,6 +209,25 @@ pub(crate) async fn revert_actor(
             failed += 1;
         }
     }
+    // Deleted channels and roles have no logged inverse; they come back from the latest backup.
+    let gone: Vec<(i64,)> = sqlx::query_as(
+        "SELECT target_id FROM action_log WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted
+         AND action IN ('ChannelDelete','RoleDelete') AND target_id IS NOT NULL AND created_at >= to_timestamp($3)",
+    )
+    .bind(gid.get() as i64)
+    .bind(actor.get() as i64)
+    .bind(since)
+    .fetch_all(&app.pool)
+    .await?;
+    let gone: std::collections::HashSet<u64> = gone.into_iter().map(|(id,)| id as u64).collect();
+    let recreated = if gone.is_empty() {
+        0
+    } else {
+        backup::recreate(app, gid, &gone).await.unwrap_or_else(|e| {
+            tracing::warn!(?e, "recreating deleted objects failed");
+            0
+        })
+    };
     sqlx::query("UPDATE action_log SET reverted = true WHERE guild_id=$1 AND actor_id=$2 AND created_at >= to_timestamp($3)")
         .bind(gid.get() as i64)
         .bind(actor.get() as i64)
@@ -217,6 +239,7 @@ pub(crate) async fn revert_actor(
         done: plan.ops,
         failed,
         reinvite: plan.reinvite,
+        recreated,
     })
 }
 
@@ -232,9 +255,10 @@ async fn quarantine_and_revert(
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
     let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     let text = format!(
-        "**Anti-nuke** case #{case} (nuke `{nuke}`): <@{actor}> quarantined, {why}. Reverted {}/{} actions. Kicked, re-invite: {}",
+        "**Anti-nuke** case #{case} (nuke `{nuke}`): <@{actor}> quarantined, {why}. Reverted {}/{} actions, recreated {} deleted. Kicked, re-invite: {}",
         sum.ops - sum.failed,
         sum.ops,
+        sum.recreated,
         if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
     );
     send_log(app, gid.get(), LogKind::AntiNuke, &text).await?;
