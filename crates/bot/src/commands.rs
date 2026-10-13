@@ -4,6 +4,7 @@ use serde_json::json;
 use tommybot_core::{cases, jobs, permits, warn};
 use twilight_http::Client;
 use twilight_model::{
+    channel::message::AllowedMentions,
     gateway::payload::incoming::MessageCreate,
     id::{
         marker::{GuildMarker, UserMarker},
@@ -364,11 +365,12 @@ pub async fn timeout_until(
     Ok(())
 }
 
-async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()> {
+pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()> {
     let sent = app
         .http
         .create_message(msg.channel_id)
         .content(text)
+        .allowed_mentions(Some(&AllowedMentions::default()))
         .await?
         .model()
         .await?;

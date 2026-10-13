@@ -12,7 +12,6 @@ use twilight_model::{
             InteractionContextType,
         },
     },
-    channel::message::AllowedMentions,
     gateway::payload::incoming::MessageCreate,
     id::{
         marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
@@ -26,7 +25,7 @@ use twilight_util::builder::command::{
 use crate::{
     antinuke,
     app::{now_secs, App},
-    commands::{gated, target_above_bot},
+    commands::{self, gated, target_above_bot},
     prefix::Parsed,
     slash::{int, string, user},
     targets,
@@ -168,7 +167,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     if let (Some(n), true) = (name, p.targets.iter().all(|t| *t < SMALL)) {
         match targets::resolve(app, gid, n).await? {
             Ok(id) => resolved = Some(id.get()),
-            Err(e) => return say(app, msg.channel_id, &e).await,
+            Err(e) => return commands::say(app, msg, &e).await,
         }
     }
     let text = match from_prefix(&p, resolved) {
@@ -193,16 +192,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             })
         }
     };
-    say(app, msg.channel_id, &text).await
-}
-
-async fn say(app: &App, channel: Id<ChannelMarker>, text: &str) -> Result<()> {
-    app.http
-        .create_message(channel)
-        .content(text)
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .await?;
-    Ok(())
+    commands::say(app, msg, &text).await
 }
 
 /// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text.
