@@ -33,7 +33,9 @@ pub enum Cmd {
         duration_s: Option<i64>,
         points: i32,
     },
-    Lock,
+    Lock {
+        duration_s: Option<i64>,
+    },
     Unlock,
     Revert {
         target: Id<UserMarker>,
@@ -89,7 +91,11 @@ pub fn parse(
         "kick" | "Kick" => ModKind::Kick,
         "timeout" | "Timeout" => ModKind::Timeout,
         "warn" => ModKind::Warn,
-        "lock" => return Ok(Cmd::Lock),
+        "lock" => {
+            return Ok(Cmd::Lock {
+                duration_s: dur(o, "duration")?,
+            })
+        }
         "unlock" => return Ok(Cmd::Unlock),
         "revert" => {
             return Ok(Cmd::Revert {
@@ -150,7 +156,10 @@ pub fn definitions() -> Vec<Command> {
                 .option(reason())
                 .option(IntegerBuilder::new("points", "Warn points (default 1)").min_value(1)),
         ),
-        guild_only(chat("lock", "Lock the server")),
+        guild_only(
+            chat("lock", "Lock the server")
+                .option(StringBuilder::new("duration", "Unlock after, e.g. 30m")),
+        ),
         guild_only(chat("unlock", "Unlock the server")),
         guild_only(
             chat("revert", "Undo a member's recent logged actions")
@@ -240,9 +249,10 @@ async fn run(
             )
             .await
         }
-        Cmd::Lock | Cmd::Unlock => {
-            commands::lockdown_cmd(app, gid, &actor, cmd == Cmd::Unlock).await
+        Cmd::Lock { duration_s } => {
+            commands::lockdown_cmd(app, gid, &actor, false, duration_s).await
         }
+        Cmd::Unlock => commands::lockdown_cmd(app, gid, &actor, true, None).await,
         Cmd::Revert { target, since_s } => {
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }

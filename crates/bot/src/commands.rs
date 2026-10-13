@@ -1,7 +1,7 @@
 //! Prefix mod commands: permit check -> action -> case (+ undo data). ban/kick/timeout/warn.
 use anyhow::Result;
 use serde_json::json;
-use tommybot_core::{cases, permits, warn};
+use tommybot_core::{cases, jobs, permits, warn};
 use twilight_http::Client;
 use twilight_model::{
     gateway::payload::incoming::MessageCreate,
@@ -145,6 +145,10 @@ pub async fn apply(
     let (inverse, points) = match kind {
         ModKind::Ban => {
             app.http.create_ban(gid, target).await?;
+            if let Some(d) = duration_s {
+                let job = json!({"user":t});
+                jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d).await?;
+            }
             (Some(json!({"op":"unban","user":t})), 0)
         }
         ModKind::Kick => {
@@ -152,7 +156,7 @@ pub async fn apply(
             (None, 0)
         }
         ModKind::Timeout => {
-            timeout(&app.http, gid, target, duration_s.unwrap_or(600)).await?;
+            timeout_until(app, gid, target, now_secs() + duration_s.unwrap_or(600)).await?;
             (Some(json!({"op":"untimeout","user":t})), 0)
         }
         ModKind::Warn => (None, points),
@@ -193,7 +197,7 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
         "lock" | "unlock" => {
             let owner = app.http.guild(gid).await?.model().await?.owner_id;
             let actor = app.level(gid, owner, msg.author.id).await?;
-            let text = lockdown_cmd(app, gid, &actor, p.command == "unlock").await?;
+            let text = lockdown_cmd(app, gid, &actor, p.command == "unlock", p.duration_s).await?;
             return say(app, msg, &text).await;
         }
         _ => return Ok(()),
@@ -278,16 +282,56 @@ async fn apply_warn_thresholds(
     )))
 }
 
+/// Discord rejects timeouts longer than 28 days.
+const MAX_TIMEOUT_S: i64 = 28 * 86_400;
+
+/// Seconds to apply now, and whether a renewal must follow.
+fn timeout_chunk(remaining: i64) -> (i64, bool) {
+    (remaining.min(MAX_TIMEOUT_S), remaining > MAX_TIMEOUT_S)
+}
+
+/// Single capped timeout for callers that cannot renew (warn thresholds, automod).
 pub async fn timeout(
     http: &Client,
     g: Id<GuildMarker>,
     u: Id<UserMarker>,
     secs: i64,
 ) -> Result<()> {
-    let until = Timestamp::from_secs(now_secs() + secs)?;
+    let until = Timestamp::from_secs(now_secs() + timeout_chunk(secs).0)?;
     http.update_guild_member(g, u)
         .communication_disabled_until(Some(until))
         .await?;
+    Ok(())
+}
+
+/// Applies the next 28-day chunk of a timeout ending at `until` and queues a renewal when more remains.
+pub async fn timeout_until(
+    app: &App,
+    g: Id<GuildMarker>,
+    u: Id<UserMarker>,
+    until: i64,
+) -> Result<()> {
+    let now = now_secs();
+    let (chunk, more) = timeout_chunk(until - now);
+    if chunk <= 0 {
+        return Ok(());
+    }
+    app.http
+        .update_guild_member(g, u)
+        .communication_disabled_until(Some(Timestamp::from_secs(now + chunk)?))
+        .await?;
+    if more {
+        // Renewed a day early so scheduler lag cannot open a gap.
+        let job = json!({"user":u.get(),"until_secs":until});
+        jobs::enqueue(
+            &app.pool,
+            g.get() as i64,
+            "timeout_renew",
+            job,
+            now + chunk - 86_400,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -305,6 +349,7 @@ pub async fn lockdown_cmd(
     gid: Id<GuildMarker>,
     actor: &permits::Level,
     unlock: bool,
+    duration_s: Option<i64>,
 ) -> Result<String> {
     if !actor.has("lockdown") {
         return Ok("Cannot lock: no permit".into());
@@ -314,6 +359,18 @@ pub async fn lockdown_cmd(
         return Ok("Server unlocked".into());
     }
     let done = lockdown::lock(app, gid, tommybot_automod::lockdown::LockKind::Server).await?;
+    if done {
+        if let Some(d) = duration_s {
+            jobs::enqueue(
+                &app.pool,
+                gid.get() as i64,
+                "unlock",
+                json!({}),
+                now_secs() + d,
+            )
+            .await?;
+        }
+    }
     Ok(if done {
         "Server locked"
     } else {
@@ -352,7 +409,14 @@ pub async fn revert_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::above_bot;
+    use super::{above_bot, timeout_chunk, MAX_TIMEOUT_S};
+
+    #[test]
+    fn timeout_chunking() {
+        assert_eq!(timeout_chunk(600), (600, false));
+        assert_eq!(timeout_chunk(MAX_TIMEOUT_S), (MAX_TIMEOUT_S, false));
+        assert_eq!(timeout_chunk(MAX_TIMEOUT_S + 1), (MAX_TIMEOUT_S, true));
+    }
 
     #[test]
     fn hierarchy() {

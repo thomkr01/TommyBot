@@ -6,6 +6,7 @@ mod events;
 mod lockdown;
 mod panic;
 mod prefix;
+mod scheduler;
 mod slash;
 mod targets;
 
@@ -34,6 +35,8 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    tokio::spawn(scheduler::run(app.clone()));
 
     if let Err(e) = slash::register(&app).await {
         tracing::warn!(?e, "slash command registration failed");
