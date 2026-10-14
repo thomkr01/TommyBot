@@ -247,7 +247,6 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     let text = match from_prefix(&p, resolved) {
         Err(e) => e,
         Ok(cmd) => {
-            let actor = level;
             if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
                 let action = Action::Ext {
                     cmd,
@@ -257,12 +256,11 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
                 return commands::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action))
                     .await;
             }
-            let actor = (msg.author.id, &actor);
             run(
                 app,
                 gid,
                 owner,
-                actor,
+                (msg.author.id, &level),
                 msg.channel_id,
                 cmd,
                 p.reason.as_deref(),
