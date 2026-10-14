@@ -429,6 +429,7 @@ fn schema() -> Vec<Value> {
         dv(fg("Auto moderation", "staff_only_permitted", "bool"), true),
         dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true),
         dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
+        fg("Auto warn actions", "warn_actions", "warn_actions"),
     ];
     let verification = vec![
         fg("General", "enabled", "bool"),
@@ -638,6 +639,7 @@ mod tests {
                     "channel" | "role" => json!("1"),
                     "form" => json!([{"label": "x"}]),
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
+                    "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
                     _ => json!(["1"]),
                 };
                 let mut cur = &mut obj;

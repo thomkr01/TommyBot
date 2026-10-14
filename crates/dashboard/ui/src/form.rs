@@ -119,6 +119,27 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 </div> }).collect_view()}
             </div> }.into_any()
         }
+        "warn_actions" => {
+            let upd = move |i: usize, k: &'static str, x: Value| { let mut cur = get(); cur[i][k] = x; set(cur) };
+            let count = move || get().as_array().map_or(0, Vec::len);
+            view! { <div class="pick">
+                <div class="row">
+                    <button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"points": 10, "action": "timeout", "secs": 3600})); set(json!(cur)) }>"Add new action"</button>
+                    <button class="danger" on:click=move |_| set(json!([]))>"Delete all actions"</button>
+                </div>
+                <Show when=move || count() == 0><span class="muted">"No Custom Actions"</span></Show>
+                {move || (0..count()).map(|i| view! { <div class="row">
+                    <input aria-label="points" prop:value=move || show(&get()[i]["points"]) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<i64>() { upd(i, "points", json!(x)) } } /><span>"points"</span>
+                    <select aria-label="action" on:change=move |e| upd(i, "action", json!(event_target_value(&e)))>
+                        {["timeout", "kick", "ban"].map(|a| view! { <option value=a selected=move || get()[i]["action"] == a>{a}</option> }).collect_view()}
+                    </select>
+                    <Show when=move || get()[i]["action"] == "timeout">
+                        <input aria-label="seconds" prop:value=move || show(&get()[i]["secs"]) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<i64>() { upd(i, "secs", json!(x)) } } /><span>"seconds"</span>
+                    </Show>
+                    <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
+                </div> }).collect_view()}
+            </div> }.into_any()
+        }
         "customs" => {
             let opts = f["options"].as_array().cloned().unwrap_or_default();
             view! { <div class="pick">

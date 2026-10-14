@@ -192,7 +192,7 @@ async fn list(
     Path(guild): Path<i64>,
     Query(f): Query<Filter>,
 ) -> Res {
-    api::require(&st, &s, guild, Level::Viewer, false).await?;
+    reviewer(&st, &s, guild).await?;
     let q = f.q.unwrap_or_default();
     let rows: Vec<Row> = sqlx::query_as(
         "select id, user_id::text, username, kind, answers, status, created_at from appeals
@@ -209,6 +209,22 @@ async fn list(
         json!({"id": id, "user_id": user_id, "username": username, "kind": kind, "answers": answers, "status": status, "at": at})).collect::<Vec<_>>())))
 }
 
+async fn reviewer(st: &AppState, s: &Sess, guild: i64) -> Result<(), ApiError> {
+    let l = api::require(st, s, guild, Level::Viewer, false).await?;
+    if l >= Level::Admin || has_perm(st, s, guild, "appeals").await? {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("needs the Review Appeals permit"))
+    }
+}
+
+async fn has_perm(st: &AppState, s: &Sess, guild: i64, perm: &str) -> Result<bool, ApiError> {
+    Ok(api::permit_perms(st, s, guild)
+        .await?
+        .iter()
+        .any(|p| p == perm))
+}
+
 #[derive(Deserialize)]
 struct Decide {
     accept: bool,
@@ -223,7 +239,7 @@ async fn decide(
     Path((guild, id)): Path<(i64, i64)>,
     Json(b): Json<Decide>,
 ) -> Res {
-    api::require(&st, &s, guild, Level::Editor, false).await?;
+    reviewer(&st, &s, guild).await?;
     let mut tx = st.db.begin().await?;
     let (user, kind): (i64, String) = sqlx::query_as("select user_id, kind from appeals where id = $1 and guild_id = $2 and status = 'open' for update")
         .bind(id).bind(guild).fetch_optional(&mut *tx).await?.ok_or(ApiError::NotFound)?;
@@ -257,7 +273,7 @@ async fn lift(
     }
 }
 
-/// Lifts the ban or timeout and logs it with its undo. Needs the permit for that punishment, not just dashboard_edit.
+/// Lifts the ban or timeout and logs it with its undo.
 async fn accept(
     st: &AppState,
     s: &Sess,
@@ -266,16 +282,10 @@ async fn accept(
     kind: &str,
     tx: &mut sqlx::PgConnection,
 ) -> Result<(), ApiError> {
-    // Lifting a punishment takes the permit for it, not just dashboard_edit (spec 2).
-    let perm = if kind == "ban" { "unban" } else { "timeout" };
-    if api::level_of(st, s, guild).await? < Level::Admin
-        && !api::permit_perms(st, s, guild)
-            .await?
-            .iter()
-            .any(|p| p == perm)
-    {
+    // Lifting a punishment takes its permit ("ban" or "timeout"), not just Review Appeals (spec 2).
+    if api::level_of(st, s, guild).await? < Level::Admin && !has_perm(st, s, guild, kind).await? {
         return Err(ApiError::Forbidden(
-            "accepting needs the unban or timeout permit",
+            "accepting needs the ban or timeout permit",
         ));
     }
     let inverse = if kind == "ban" {
