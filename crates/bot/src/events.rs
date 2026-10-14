@@ -119,9 +119,13 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
+        Event::ChannelCreate(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
+        Event::ChannelUpdate(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
+        Event::ChannelDelete(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
         Event::GuildUpdate(g) => app.invalidate_guild(g.id),
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),
+        Event::MemberUpdate(m) => automod::on_member_update(app, m).await?,
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await? {

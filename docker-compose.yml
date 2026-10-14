@@ -26,6 +26,7 @@ services:
         condition: service_healthy
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
+      SUPPORT_URL: ${SUPPORT_URL:-}
       DATABASE_URL: postgres://tommybot:${POSTGRES_PASSWORD}@postgres:5432/tommybot
       RUST_LOG: ${RUST_LOG:-info}
       # Links in the welcome message.
@@ -48,6 +49,7 @@ services:
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?set DISCORD_CLIENT_ID in .env}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:?set DISCORD_CLIENT_SECRET in .env}
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
+      SUPPORT_URL: ${SUPPORT_URL:-}
       RUST_LOG: ${RUST_LOG:-info}
 
 volumes:

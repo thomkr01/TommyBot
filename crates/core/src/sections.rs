@@ -13,9 +13,26 @@ use twilight_model::id::{
 pub struct AntinukeCfg {
     /// Master switch for the dashboard overview; on unless a saved config turns it off.
     pub enabled: bool,
-    pub limits: HashMap<NukeAction, Limit>,
+    /// Per action; actions left out use [`NukeAction::default_limit`].
+    pub limits: HashMap<NukeAction, LimitCfg>,
     /// Quarantined members are moved to this role (none: all roles removed).
     pub quarantine_role: Option<Id<RoleMarker>>,
+    /// Watch member prunes.
+    pub prune: bool,
+    /// Quarantine whoever changes the vanity URL (bots cannot set it back).
+    pub vanity_guard: bool,
+    /// Off: a reached limit is only logged and reverted.
+    pub auto_quarantine: bool,
+    /// Punish giving dangerous permissions to any role.
+    pub strict_mode: bool,
+    /// Punish giving members a role with dangerous permissions.
+    pub strict_member_roles: bool,
+    /// Keep dangerous permissions off @everyone and the main roles.
+    pub monitor_public_roles: bool,
+    /// Keep dangerous channel overwrites off @everyone and the main roles.
+    pub monitor_channel_perms: bool,
+    /// May change a quarantined member's roles.
+    pub quarantine_whitelist: Vec<Id<UserMarker>>,
 }
 
 impl Default for AntinukeCfg {
@@ -24,19 +41,115 @@ impl Default for AntinukeCfg {
             enabled: true,
             limits: HashMap::new(),
             quarantine_role: None,
+            prune: false,
+            vanity_guard: false,
+            auto_quarantine: true,
+            strict_mode: false,
+            strict_member_roles: false,
+            monitor_public_roles: false,
+            monitor_channel_perms: false,
+            quarantine_whitelist: vec![],
         }
     }
 }
 
-#[derive(Default, Deserialize)]
+/// One anti-nuke filter card; unset numbers take the action's defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
+pub struct LimitCfg {
+    pub enabled: bool,
+    pub per_minute: Option<u32>,
+    pub per_hour: Option<u32>,
+    /// Heat % per action towards panic mode's heat algorithm.
+    pub heat: Option<u32>,
+}
+
+impl Default for LimitCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            per_minute: None,
+            per_hour: None,
+            heat: None,
+        }
+    }
+}
+
+impl AntinukeCfg {
+    /// The watched limit and heat % of `a`, None when it is not watched.
+    pub fn limit(&self, a: NukeAction) -> Option<(Limit, u32)> {
+        if a == NukeAction::Prune && !self.prune {
+            return None;
+        }
+        let c = self.limits.get(&a).copied().unwrap_or_default();
+        let d = a.default_limit();
+        let limit = Limit {
+            per_minute: c.per_minute.or(d.map(|d| d.0))?,
+            per_hour: c.per_hour.or(d.map(|d| d.1))?,
+        };
+        let heat = c.heat.or(d.map(|d| d.2)).unwrap_or(0);
+        c.enabled.then_some((limit, heat))
+    }
+
+    pub fn watched(&self) -> HashMap<NukeAction, Limit> {
+        NukeAction::ALL
+            .into_iter()
+            .filter_map(|a| self.limit(a).map(|(l, _)| (a, l)))
+            .collect()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(default)]
 pub struct AutomodCfg {
     pub enabled: bool,
+    /// Off: only the link and word filters run.
+    pub anti_spam: bool,
+    /// Off: messages from webhooks are left alone.
+    pub monitor_webhooks: bool,
     pub heat: HeatCfg,
     pub strike: StrikeCfg,
-    /// (mentions, window ms): that many mentions in the window locks the server.
-    pub mention_lock: Option<(usize, i64)>,
+    pub auto_lockdown: AutoLockdownCfg,
     pub filters: FiltersCfg,
+}
+
+impl Default for AutomodCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            anti_spam: true,
+            monitor_webhooks: true,
+            heat: HeatCfg::default(),
+            strike: StrikeCfg::default(),
+            auto_lockdown: AutoLockdownCfg::default(),
+            filters: FiltersCfg::default(),
+        }
+    }
+}
+
+/// Locks the server on mention spam, a strike count or (with `joinraid.lock`) a join raid.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct AutoLockdownCfg {
+    pub enabled: bool,
+    pub mentions: bool,
+    /// That many mentions in the window lock the server.
+    pub mention_count: usize,
+    pub mention_window_ms: i64,
+    /// Lock when a member reaches this strike number.
+    pub strikes: Option<u32>,
+}
+
+impl Default for AutoLockdownCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mentions: true,
+            mention_count: 50,
+            mention_window_ms: 3_000,
+            strikes: None,
+        }
+    }
 }
 
 /// What a tripped filter does; the heat weights stay in [`HeatCfg`].
@@ -72,7 +185,7 @@ impl Default for FilterCfg {
 }
 
 /// Per-filter switches (Wick's Filters page). Filters default on, as the global weights always applied.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct FiltersCfg {
     pub regular: FilterCfg,
@@ -84,6 +197,22 @@ pub struct FiltersCfg {
     pub zalgo: FilterCfg,
     pub suspicion: FilterCfg,
     pub inactive_channel: FilterCfg,
+    /// Messages after a quiet spell that count as the inactive-channel burst.
+    pub inactive_messages: u32,
+    /// Mentions tab: `mentions` holds the action, the rest only switch their heat.
+    pub mentions: FilterCfg,
+    pub mention_users: FilterCfg,
+    pub mention_roles: FilterCfg,
+    pub mention_everyone: FilterCfg,
+    /// Mentions a member may send per hour before the mentions filter trips.
+    pub mention_hour_cap: usize,
+    /// Attachments tab, same split as mentions.
+    pub attachments: FilterCfg,
+    pub embeds: FilterCfg,
+    pub images: FilterCfg,
+    pub files: FilterCfg,
+    pub attach_links: FilterCfg,
+    pub stickers: FilterCfg,
     pub invites: FilterCfg,
     /// Phishing and scam sites.
     pub bad_sites: FilterCfg,
@@ -96,6 +225,43 @@ pub struct FiltersCfg {
     pub links: FilterCfg,
     /// Domains for the link blacklist.
     pub blacklisted_domains: Vec<String>,
+}
+
+impl Default for FiltersCfg {
+    fn default() -> Self {
+        let on = FilterCfg::default;
+        Self {
+            regular: on(),
+            similar: on(),
+            emojis: on(),
+            newlines: on(),
+            chars_upper: on(),
+            chars_lower: on(),
+            zalgo: on(),
+            suspicion: on(),
+            inactive_channel: on(),
+            inactive_messages: 10,
+            mentions: on(),
+            mention_users: on(),
+            mention_roles: on(),
+            mention_everyone: on(),
+            mention_hour_cap: 20,
+            attachments: on(),
+            embeds: on(),
+            images: on(),
+            files: on(),
+            attach_links: on(),
+            stickers: on(),
+            invites: on(),
+            bad_sites: on(),
+            scam_links: on(),
+            nsfw_links: on(),
+            nsfw_crawl_shorteners: false,
+            words: WordsCfg::default(),
+            links: on(),
+            blacklisted_domains: vec![],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -113,15 +279,45 @@ pub struct WordsCfg {
     pub use_discord_automod: bool,
 }
 
-/// Users, roles, channels and webhooks that automod and anti-nuke leave alone.
+/// Automod whitelists, one per tab. The top-level lists are the Spam tab, which skips automod entirely.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct WhitelistCfg {
+    #[serde(flatten)]
+    pub spam: WhitelistList,
+    pub invites: WhitelistList,
+    /// @user and @role mentions.
+    pub mentions: WhitelistList,
+    /// @everyone and @here.
+    pub everyone: WhitelistList,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct WhitelistList {
     pub users: Vec<Id<UserMarker>>,
     pub roles: Vec<Id<RoleMarker>>,
     pub channels: Vec<Id<ChannelMarker>>,
     pub categories: Vec<Id<ChannelMarker>>,
     pub webhooks: Vec<Id<WebhookMarker>>,
+}
+
+impl WhitelistList {
+    /// A message whose author, member roles, channel, category or webhook is listed.
+    pub fn covers(
+        &self,
+        user: Id<UserMarker>,
+        roles: &[Id<RoleMarker>],
+        channel: Id<ChannelMarker>,
+        category: Option<Id<ChannelMarker>>,
+        webhook: Option<Id<WebhookMarker>>,
+    ) -> bool {
+        self.users.contains(&user)
+            || roles.iter().any(|r| self.roles.contains(r))
+            || self.channels.contains(&channel)
+            || category.is_some_and(|c| self.categories.contains(&c))
+            || webhook.is_some_and(|w| self.webhooks.contains(&w))
+    }
 }
 
 pub const MAX_APPEAL_FIELDS: usize = 6;
@@ -177,7 +373,6 @@ pub struct MiscCfg {
     pub enforce_quarantine_perms: bool,
     /// Ignore commands from members without a permit.
     pub ignore_no_permit: bool,
-    pub modlogs_channel: Option<Id<ChannelMarker>>,
     pub confirm: bool,
     pub always_dm: bool,
     /// Delete the staff member's prefix command message.
@@ -205,7 +400,6 @@ impl Default for MiscCfg {
             delete_replies_secs: None,
             enforce_quarantine_perms: false,
             ignore_no_permit: false,
-            modlogs_channel: None,
             confirm: false,
             always_dm: false,
             delete_invocation: false,
@@ -337,8 +531,34 @@ mod tests {
         let a = AppealsCfg::default();
         assert_eq!(a.fields.len(), 1);
         assert!(a.fields.len() <= MAX_APPEAL_FIELDS);
-        let w: WhitelistCfg =
-            serde_json::from_value(json!({"users": [1], "webhooks": [2]})).unwrap();
-        assert_eq!(w.users.len() + w.webhooks.len(), 2);
+    }
+
+    #[test]
+    fn whitelist_tabs_keep_the_old_lists_as_spam() {
+        let w: WhitelistCfg = serde_json::from_value(
+            json!({"users": ["1"], "webhooks": ["2"], "invites": {"channels": ["3"]}}),
+        )
+        .unwrap();
+        let (u, c) = (Id::new(1), Id::new(3));
+        assert!(w.spam.covers(u, &[], Id::new(9), None, None));
+        assert!(w.invites.covers(Id::new(5), &[], c, None, None));
+        assert!(!w.mentions.covers(u, &[], c, None, Some(Id::new(2))));
+        assert!(w.spam.covers(Id::new(5), &[], c, None, Some(Id::new(2))));
+    }
+
+    #[test]
+    fn antinuke_limits_fall_back_to_wick_defaults() {
+        let c: AntinukeCfg = serde_json::from_value(json!({"limits": {
+            "Ban": {"per_minute": 2}, "RoleCreate": {"enabled": false}, "BotAdd": {"per_minute": 1, "per_hour": 2}
+        }}))
+        .unwrap();
+        let ban = c.limit(NukeAction::Ban).unwrap();
+        assert_eq!((ban.0.per_minute, ban.0.per_hour, ban.1), (2, 15, 20));
+        assert!(c.limit(NukeAction::RoleCreate).is_none());
+        assert!(
+            c.limit(NukeAction::Prune).is_none(),
+            "prunes need the toggle"
+        );
+        assert_eq!(c.watched().len(), 8);
     }
 }

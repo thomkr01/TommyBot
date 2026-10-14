@@ -316,11 +316,10 @@ pub async fn run(
             }
             ModCmd::Verify { user } => {
                 let cfg = app.cfg(gid.get()).await?;
-                let roles = &cfg.verification.roles;
-                if roles.is_empty() {
+                if cfg.verification.roles.is_empty() {
                     return Ok("Set the verification roles on the dashboard first".into());
                 }
-                crate::verify::grant(app, gid, Id::new(user), roles).await?;
+                crate::verify::grant(app, gid, Id::new(user), &cfg.verification).await?;
                 ("verify", user, None, None, format!("Verified <@{user}>"))
             }
             ModCmd::Sanitize { user } => {

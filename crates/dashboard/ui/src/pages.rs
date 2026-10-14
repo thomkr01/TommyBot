@@ -26,8 +26,10 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         }) });
     };
     let g = guild.clone();
+    let me = expect_context::<ReadSignal<Option<Value>>>();
+    let support = move || me.get().and_then(|m| m["support_url"].as_str().map(String::from)).unwrap_or_else(|| "https://github.com/thomkr01/TommyBot".into());
     view! {
-        <div class="wizbar"><button on:click=move |_| step.set(0)>"Start wizard"</button><a href="https://github.com/thomkr01/TommyBot" target="_blank" rel="noopener">"Support"</a></div>
+        <div class="wizbar"><button on:click=move |_| step.set(0)>"Start wizard"</button><a href=support target="_blank" rel="noopener">"Support"</a></div>
         <div class="card">
             <div class="split">
                 <div><h2>"Setup process"</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
@@ -53,7 +55,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         {move || match step.get() {
             0 => view! { <div class="card"><button on:click=auto.clone()>"Run auto setup"</button><p class="info">{move || msg.get()}</p></div> }.into_any(),
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
-            i => view! { <Section guild=g.clone() name=["", "misc", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() part=if i == 2 || i == 3 { "general" } else { "" } enrolled /> }.into_any(),
+            i => view! { <Section guild=g.clone() name=["", "misc", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() part=if (2..=4).contains(&i) { "general" } else { "" } enrolled /> }.into_any(),
         }}
         <p><Show when=move || step.get() < STEPS.len() - 1><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
         <StepUp need enrolled />
@@ -118,25 +120,29 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     load();
     let pct = Signal::derive(move || { let r = rows.get(); if r.is_empty() { 0 } else { r.iter().filter(|x| x["severity"] == "ok").count() * 100 / r.len() } });
     let (id, g2) = (guild.clone(), guild.clone());
+    let notes = RwSignal::new(false);
     view! {
         <div class="card"><div class="split">
             <div>
                 <h2>"Details"</h2>
                 {move || guilds.get().into_iter().find(|x| x["id"] == id.as_str()).map(|x| view! {
-                    <span class="stat"><span>"Server name"</span><b>{s(&x["name"])}</b></span>
-                    <span class="stat"><span>"Server ID"</span><b>{s(&x["id"])}</b></span>
+                    <Stat label="Server name" value=s(&x["name"]) />
+                    <Stat label="Server ID" value=s(&x["id"]) />
+                    // The bot runs a single gateway shard.
+                    <Stat label="Shard ID" value="0".into() />
+                    <span class="stat"><span>"Type"</span><b class="chip">"STANDARD"</b></span>
                     <span class="stat"><span>"Your access"</span><b>{s(&x["level"])}</b></span> })}
-                {move || (!members.get().is_null()).then(|| view! { <span class="stat"><span>"Members"</span><b>{s(&members.get())}</b></span> })}
+                {move || (!members.get().is_null()).then(|| view! { <Stat label="Members" value=s(&members.get()) /> })}
             </div>
-            <div><h2>"Security"</h2><Ring pct /></div>
+            <div><h2>"Security"</h2><Ring pct /><p><button class="ghost" on:click=move |_| notes.update(|n| *n = !*n)>"Notes"</button></p></div>
         </div></div>
         <h2 style="text-align:center">"Quick systems overview"</h2>
         <div class="cards">
             {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
         </div>
-        <h2 style="margin-top:24px">"Security checks"</h2>
         <p class="err">{move || msg.get()}</p>
-        <For each=move || rows.get() key=|r| s(&r["id"]) let:r>
+        <Show when=move || notes.get()><h2 style="margin-top:24px">"Security notes"</h2></Show>
+        <For each=move || if notes.get() { rows.get() } else { vec![] } key=|r| s(&r["id"]) let:r>
             {
                 let (g, load) = (guild.clone(), load.clone());
                 let class = match r["severity"].as_str() { Some("ok") => "ok", Some("warn") => "warn", _ => "err" };
@@ -151,6 +157,19 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         </For>
         <StepUp need enrolled />
     }
+}
+
+#[component]
+fn Stat(label: &'static str, value: String) -> impl IntoView {
+    let copied = RwSignal::new(false);
+    let v = value.clone();
+    let copy = move |_| {
+        if let Some(w) = web_sys::window() {
+            let _ = w.navigator().clipboard().write_text(&v);
+            copied.set(true);
+        }
+    };
+    view! { <span class="stat"><span>{label}</span><b>{value}</b><button class="ghost copy" on:click=copy>{move || if copied.get() { "Copied!" } else { "Copy" }}</button></span> }
 }
 
 #[component]

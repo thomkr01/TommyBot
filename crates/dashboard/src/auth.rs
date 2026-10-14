@@ -131,7 +131,8 @@ pub async fn me(State(st): State<AppState>, s: Sess) -> Result<Json<serde_json::
             .await?
             .unwrap_or(false);
     Ok(Json(
-        json!({"user_id": s.user_id.to_string(), "username": s.username, "csrf": csrf, "totp_enrolled": enrolled, "stepped_up": s.stepped_up}),
+        json!({"user_id": s.user_id.to_string(), "username": s.username, "csrf": csrf, "totp_enrolled": enrolled, "stepped_up": s.stepped_up,
+            "support_url": std::env::var("SUPPORT_URL").ok().filter(|u| !u.is_empty())}),
     ))
 }
 

@@ -12,12 +12,49 @@ pub fn account_created_ms(user_id: u64) -> i64 {
 
 /// Ordered by severity; the gate applies the harshest action any filter asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(from = "ActionRepr")]
 pub enum Action {
     Log,
-    /// Milliseconds. For the age filter this is replaced by the remaining time.
+    Warn,
+    /// Milliseconds, 0 for the default timeout. For the age filter this is replaced by the remaining time.
     Timeout(i64),
     Kick,
     Ban,
+}
+
+/// Also accepts a bare `"Timeout"` (what the dashboard select sends) as the default timeout.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ActionRepr {
+    Name(ActionName),
+    Timeout {
+        #[serde(rename = "Timeout")]
+        ms: i64,
+    },
+}
+
+#[derive(Deserialize)]
+enum ActionName {
+    Log,
+    Warn,
+    Timeout,
+    Kick,
+    Ban,
+}
+
+impl From<ActionRepr> for Action {
+    fn from(r: ActionRepr) -> Self {
+        match r {
+            ActionRepr::Timeout { ms } => Self::Timeout(ms),
+            ActionRepr::Name(n) => match n {
+                ActionName::Log => Self::Log,
+                ActionName::Warn => Self::Warn,
+                ActionName::Timeout => Self::Timeout(0),
+                ActionName::Kick => Self::Kick,
+                ActionName::Ban => Self::Ban,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,18 +69,24 @@ pub enum Filter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GateCfg {
-    #[serde(default = "yes")]
     pub enabled: bool,
+    pub dm_punished: bool,
     pub no_avatar: Option<Action>,
-    pub min_age: Option<(i64, Action)>,
+    pub account_age: Option<Action>,
+    pub min_age_days: u32,
     pub unauthorized_bot: Option<Action>,
     pub unverified_bot: Option<Action>,
     pub invite_in_name: Option<Action>,
     pub suspicious: Option<Action>,
     pub username_filter: Option<Action>,
-    /// Terms checked against the sanitized name; `*` is a wildcard, no `*` means "contains".
+    /// Wildcard words, checked against the sanitized name; `*` is a wildcard, no `*` means "contains".
     pub username_terms: Vec<String>,
+    /// Strict words: the whole name, case-insensitive.
+    pub username_strict: Vec<String>,
+    /// Also run the username filter when a member changes their name or nickname.
+    pub username_post_join: bool,
     /// Join Guard style: act only when every enabled filter matches, with the harshest action.
     pub require_all: bool,
 }
@@ -56,16 +99,36 @@ impl Default for GateCfg {
     fn default() -> Self {
         Self {
             enabled: true,
+            dm_punished: false,
             no_avatar: None,
-            min_age: None,
+            account_age: None,
+            min_age_days: 7,
             unauthorized_bot: None,
             unverified_bot: None,
             invite_in_name: None,
             suspicious: None,
             username_filter: None,
             username_terms: vec![],
+            username_strict: vec![],
+            username_post_join: false,
             require_all: false,
         }
+    }
+}
+
+impl GateCfg {
+    /// The account age filter's minimum, 0 while that filter is off.
+    pub fn min_age_ms(&self) -> i64 {
+        self.account_age
+            .map_or(0, |_| i64::from(self.min_age_days) * DAY_MS)
+    }
+
+    pub fn name_matches(&self, name: &str) -> bool {
+        self.username_terms.iter().any(|t| term_matches(t, name))
+            || self
+                .username_strict
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(name))
     }
 }
 
@@ -115,9 +178,7 @@ fn has_invite(name: &str) -> bool {
 
 /// Suspicious = default avatar, young account or username-filter match (configurable OR).
 pub fn is_suspicious(j: &Joiner, cfg: &GateCfg, min_age_ms: i64, now: i64) -> bool {
-    !j.has_avatar
-        || now - account_created_ms(j.id) < min_age_ms
-        || cfg.username_terms.iter().any(|t| term_matches(t, j.name))
+    !j.has_avatar || now - account_created_ms(j.id) < min_age_ms || cfg.name_matches(j.name)
 }
 
 /// Filters that matched, with the action each wants.
@@ -137,11 +198,8 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
         }
     };
     check(cfg.no_avatar, Filter::NoAvatar, !j.has_avatar);
-    check(
-        cfg.min_age.map(|m| m.1),
-        Filter::AccountAge,
-        cfg.min_age.is_some_and(|(min, _)| age < min.max(5_000)),
-    );
+    let min = cfg.min_age_ms();
+    check(cfg.account_age, Filter::AccountAge, age < min.max(5_000));
     check(
         cfg.unauthorized_bot,
         Filter::UnauthorizedBot,
@@ -153,7 +211,6 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
         j.is_bot && !j.bot_verified,
     );
     check(cfg.invite_in_name, Filter::InviteInName, has_invite(j.name));
-    let min = cfg.min_age.map_or(0, |m| m.0);
     check(
         cfg.suspicious,
         Filter::Suspicious,
@@ -162,12 +219,12 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
     check(
         cfg.username_filter,
         Filter::UsernameFilter,
-        cfg.username_terms.iter().any(|t| term_matches(t, j.name)),
+        cfg.name_matches(j.name),
     );
     // Age timeouts only last for the remaining period.
     for h in &mut hits {
         if let (Filter::AccountAge, Action::Timeout(_)) = *h {
-            h.1 = Action::Timeout(cfg.min_age.map_or(0, |m| m.0) - age);
+            h.1 = Action::Timeout(min - age);
         }
     }
     if cfg.require_all && hits.len() < enabled {
@@ -409,6 +466,44 @@ pub struct VerifyCfg {
     pub target: VerifyTarget,
     pub time_limit_ms: i64,
     pub on_fail: FailAction,
+    /// Legacy: quarantine every joiner until they verify.
+    pub quarantine_on_join: bool,
+    /// On a pass the member's roles are replaced by the verification roles instead of added to.
+    pub replace_roles: bool,
+    /// Helpful notes next to the captcha.
+    pub show_notes: bool,
+    pub captcha: CaptchaCfg,
+}
+
+/// The image captcha's look. The image library has one font size and fixed decoy colors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptchaCfg {
+    pub width: u32,
+    pub height: u32,
+    /// `#rrggbb`.
+    pub font_color: String,
+    pub length: u32,
+    /// A wavy trace through the characters.
+    pub trace: bool,
+    /// Mixed characters: pixel noise over the text.
+    pub mixed: bool,
+    /// Small spread-around dots to trick scripts.
+    pub spread: bool,
+}
+
+impl Default for CaptchaCfg {
+    fn default() -> Self {
+        Self {
+            width: 300,
+            height: 100,
+            font_color: "#000000".into(),
+            length: 6,
+            trace: true,
+            mixed: true,
+            spread: true,
+        }
+    }
 }
 
 impl Default for VerifyCfg {
@@ -418,6 +513,10 @@ impl Default for VerifyCfg {
             target: VerifyTarget::Everyone,
             time_limit_ms: 120_000,
             on_fail: FailAction::Nothing,
+            quarantine_on_join: false,
+            replace_roles: true,
+            show_notes: true,
+            captcha: CaptchaCfg::default(),
         }
     }
 }
@@ -473,7 +572,8 @@ mod tests {
     fn gate_picks_harshest_and_age_timeout_is_remaining() {
         let cfg = GateCfg {
             no_avatar: Some(Action::Log),
-            min_age: Some((DAY_MS, Action::Timeout(0))),
+            account_age: Some(Action::Timeout(0)),
+            min_age_days: 1,
             username_filter: Some(Action::Ban),
             username_terms: vec!["nitro*".into()],
             ..Default::default()
@@ -486,6 +586,31 @@ mod tests {
         );
         let j = joiner(id_aged(DAY_MS / 2, 0), "nitro giveaway", false);
         assert_eq!(harshest(&gate(&j, &cfg, NOW)), Some(Action::Ban));
+    }
+
+    #[test]
+    fn actions_from_the_dashboard_select_and_strict_names() {
+        let a: Vec<Action> =
+            serde_json::from_str(r#"["Warn", "Timeout", {"Timeout": 5}, "Ban"]"#).unwrap();
+        assert_eq!(
+            a,
+            [
+                Action::Warn,
+                Action::Timeout(0),
+                Action::Timeout(5),
+                Action::Ban
+            ]
+        );
+        let cfg = GateCfg {
+            username_filter: Some(Action::Kick),
+            username_strict: vec!["Admin".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            gate(&joiner(id_aged(9 * DAY_MS, 0), "admin", true), &cfg, NOW).len(),
+            1
+        );
+        assert!(gate(&joiner(id_aged(9 * DAY_MS, 0), "admins", true), &cfg, NOW).is_empty());
     }
 
     #[test]
@@ -507,7 +632,8 @@ mod tests {
     fn require_all_needs_every_filter() {
         let mut cfg = GateCfg {
             no_avatar: Some(Action::Kick),
-            min_age: Some((DAY_MS, Action::Kick)),
+            account_age: Some(Action::Kick),
+            min_age_days: 1,
             require_all: true,
             ..Default::default()
         };

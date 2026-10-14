@@ -111,59 +111,6 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
             <p class="err">{move || msg.get()}</p>
         </div>
         <Section guild=guild.clone() name="lockdown".to_string() enrolled />
-        <AutoLockdown guild enrolled />
-        <StepUp need enrolled />
-    }
-}
-
-#[component]
-fn AutoLockdown(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let (cfg, orig) = (RwSignal::new(json!({})), RwSignal::new(json!({})));
-    let version = RwSignal::new(0i64);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
-    let g = StoredValue::new(guild);
-    spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{}/config", g.get_value()), None).await {
-            version.set(v["version"].as_i64().unwrap_or(0));
-            cfg.set(v["config"].clone());
-            orig.set(v["config"].clone());
-        }
-    });
-    let num = |v: &Value| v.as_i64().map(|n| n.to_string()).unwrap_or_default();
-    let set_mentions = move |count: Option<i64>, ms: Option<i64>| cfg.update(|c| {
-        let cur = &c["automod"]["mention_lock"];
-        let (n, t) = (count.or(cur[0].as_i64()).unwrap_or(50), ms.or(cur[1].as_i64()).unwrap_or(3000));
-        c["automod"]["mention_lock"] = if n > 0 { json!([n, t]) } else { Value::Null };
-    });
-    let save = move |_| {
-        let (c, before) = (cfg.get_untracked(), orig.get_untracked());
-        orig.set(c.clone());
-        let g = g.get_value();
-        run_act(async move {
-            let mut v = api("GET", &format!("/api/guilds/{g}/config"), None).await?["version"].as_i64().unwrap_or(0);
-            let mut last = json!({"version": v});
-            for name in ["automod", "joinraid"].into_iter().filter(|n| c[n] != before[n] && c[n].is_object()) {
-                last = api("PUT", &format!("/api/guilds/{g}/config/{name}"), Some(json!({"expected_version": v, "value": c[name]}))).await?;
-                v = last["version"].as_i64().unwrap_or(v);
-            }
-            Ok(last)
-        }, msg, need, move |v| { version.set(v["version"].as_i64().unwrap_or(0)); msg.set("Saved".into()); });
-    };
-    view! {
-        <div class="card">
-            <h2>"Auto Lockdown"</h2>
-            <div class="row"><label>"Mentions: lock the server at this many"</label>
-                <input placeholder="off" prop:value=move || num(&cfg.get()["automod"]["mention_lock"][0]) on:change=move |e| set_mentions(Some(event_target_value(&e).trim().parse().unwrap_or(0)), None) />
-                <span class="muted">"mentions within"</span>
-                <input prop:value=move || num(&cfg.get()["automod"]["mention_lock"][1]) on:change=move |e| set_mentions(None, event_target_value(&e).trim().parse().ok()) /><span class="muted">"ms (default 3000)"</span></div>
-            <div class="row"><label>"Strikes: lock the server at this many strikes"</label>
-                <input placeholder="off" prop:value=move || num(&cfg.get()["automod"]["strike"]["lock_at_strikes"]) on:change=move |e| cfg.update(|c| c["automod"]["strike"]["lock_at_strikes"] = event_target_value(&e).trim().parse::<i64>().map_or(Value::Null, |n| json!(n))) /></div>
-            <div class="row"><label>"Join raid: lock when a raid starts"</label>
-                <select on:change=move |e| cfg.update(|c| { let v = event_target_value(&e); c["joinraid"]["lock"] = if v.is_empty() { Value::Null } else { json!(v) }; })>
-                    {["", "Server", "Blind", "Role", "All"].into_iter().map(|o| view! { <option value=o selected=move || cfg.get()["joinraid"]["lock"].as_str().unwrap_or("") == o>{if o.is_empty() { "off" } else { o }}</option> }).collect_view()}
-                </select></div>
-            <button on:click=save>"Save"</button><p class="info">{move || msg.get()}</p>
-        </div>
         <StepUp need enrolled />
     }
 }

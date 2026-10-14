@@ -27,6 +27,7 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
 ];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
+const WL_TABS: &[(&str, &str)] = &[("whitelist", "Spam"), ("whitelist/invites", "Invite Links"), ("whitelist/mentions", "Mentions"), ("whitelist/everyone", "@everyone")];
 const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
 /// (sub page, title, description) for the Filters index.
 const FILTER_PAGES: &[(&str, &str, &str)] = &[
@@ -121,6 +122,7 @@ fn App() -> impl IntoView {
     let (enrolled, set_enrolled) = signal(false);
     let (guilds, set_guilds) = signal(Vec::<Value>::new());
     provide_context(guilds);
+    provide_context(me);
     let (nav_open, set_nav_open) = signal(false);
     let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
     let load_guilds = move || async move {
@@ -210,6 +212,10 @@ fn App() -> impl IntoView {
                                 ("filters", Some(sub)) => {
                                     let tabs = sub.starts_with("spam_").then(|| view! { <Tabs guild=g.clone() items=SPAM_TABS active=format!("filters/{sub}") /> });
                                     view! { <p><a href=format!("#/{g}/filters")><button class="ghost">"Go back"</button></a></p>{tabs}{sec("automod", sub)} }.into_any()
+                                }
+                                ("whitelist", sub) => {
+                                    let active = sub.map_or_else(|| "whitelist".to_string(), |s| format!("whitelist/{s}"));
+                                    view! { <Tabs guild=g.clone() items=WL_TABS active />{sec("whitelist", sub.map_or("general", String::as_str))} }.into_any()
                                 }
                                 ("automod", _) => sec("automod", "general"),
                                 ("antinuke", _) => sec("antinuke", "general"),

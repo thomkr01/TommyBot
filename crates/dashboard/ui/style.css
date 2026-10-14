@@ -54,6 +54,8 @@ details { margin:12px 0; }
 .sys { display:flex; flex-direction:column; border-left:48px solid var(--primary); } .sys h3 { margin:0 0 6px; font-size:24px; }
 .sys .foot { display:flex; justify-content:space-between; align-items:center; margin-top:auto; padding-top:12px; }
 .bar { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); z-index:40; display:flex; gap:12px; align-items:center; background:var(--b2); padding:10px 20px; border-radius:12px; box-shadow:0 4px 24px #000a; }
+.toast { position:fixed; right:16px; top:72px; z-index:41; max-width:min(90vw,360px); margin:0; background:var(--b2); padding:10px 16px; border-radius:12px; box-shadow:0 4px 24px #000a; cursor:pointer; }
+.stat .copy { padding:0 6px; font-size:11px; }
 .wizbar { display:flex; margin-bottom:0; } .wizbar button { flex:1; border-radius:6px 0 0 0; background:var(--ok); border-color:var(--ok); color:#000; padding:12px; } .wizbar a { background:var(--info); color:#000; padding:12px 24px; font-weight:600; text-decoration:none; border-radius:0 6px 0 0; text-transform:uppercase; }
 .steps { display:flex; flex-wrap:wrap; gap:8px 16px; margin:16px 0; } .steps button { background:none; border:0; color:var(--fg); padding:4px 0; text-transform:none; } .steps button.on { color:var(--primary); }
 .steps button i { display:inline-block; width:24px; height:24px; line-height:24px; border-radius:50%; background:var(--line); font-style:normal; margin-right:6px; } .steps button:hover i { background:var(--info); }

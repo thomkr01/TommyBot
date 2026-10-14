@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
 use tommybot_automod::discord_api::{Api, DiscordAutomodCfg};
 use tommybot_automod::{
-    heat::{HeatState, UserHistory},
+    heat::{ChannelActivity, HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
     lockdown::{LockdownPrefs, MentionWatch},
 };
@@ -96,6 +96,12 @@ pub struct App {
     /// Pending image-captcha answers per (guild, user); lost on restart, the member just clicks again.
     pub captchas: Mutex<HashMap<(u64, u64), String>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
+    /// Mentions per (guild, user) for the mentions filter's hour cap.
+    pub pings: Mutex<HashMap<(u64, u64), MentionWatch>>,
+    /// Last message per channel, for the inactive channel filter.
+    pub channels: Mutex<HashMap<u64, ChannelActivity>>,
+    /// Anti-nuke heat per (guild, staff member) for panic mode's heat algorithm.
+    pub nuke_heat: Mutex<HashMap<(u64, u64), HeatState>>,
     /// The open nuke case per guild and when it last grew; a long quiet gap starts a new case.
     pub nukes: Mutex<HashMap<u64, (NukeCase, Instant)>>,
     /// Anti-nuke quarantines and automod heat trips are counted apart, each with its own threshold.
@@ -132,6 +138,9 @@ impl App {
             raids: Default::default(),
             captchas: Default::default(),
             mentions: Default::default(),
+            pings: Default::default(),
+            channels: Default::default(),
+            nuke_heat: Default::default(),
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
             panic_heat: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
@@ -248,14 +257,14 @@ mod tests {
     fn parses_sections_and_survives_bad_ones() {
         let c = GuildCfg::parse(&json!({
             "antinuke": {"limits": {"Ban": {"per_minute": 3, "per_hour": 10}}, "quarantine_role": "7"},
-            "automod": {"enabled": true, "mention_lock": [5, 10000]},
+            "automod": {"enabled": true, "auto_lockdown": {"mention_count": 5}},
             "logging": {"fallback": "42"},
             "joingate": "not an object",
             "lockdown": {"main_roles": ["9"]}
         }));
-        assert_eq!(c.antinuke.limits[&NukeAction::Ban].per_minute, 3);
+        assert_eq!(c.antinuke.limit(NukeAction::Ban).unwrap().0.per_minute, 3);
         assert_eq!(c.antinuke.quarantine_role, Some(Id::new(7)));
-        assert!(c.automod.enabled && c.automod.mention_lock == Some((5, 10_000)));
+        assert!(c.automod.enabled && c.automod.auto_lockdown.mention_count == 5);
         assert_eq!(c.logging.fallback, Some(Id::new(42)));
         assert_eq!(c.lockdown.main_roles, vec![Id::new(9)]);
         assert!(!GuildCfg::parse(&json!({})).automod.enabled);

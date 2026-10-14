@@ -28,6 +28,36 @@ pub enum Action {
     BotAdd,
 }
 
+impl Action {
+    pub const ALL: [Action; 10] = [
+        Action::ChannelCreate,
+        Action::ChannelDelete,
+        Action::RoleCreate,
+        Action::RoleDelete,
+        Action::Ban,
+        Action::Kick,
+        Action::WebhookCreate,
+        Action::WebhookDelete,
+        Action::Prune,
+        Action::BotAdd,
+    ];
+
+    /// Wick's defaults (per minute, per hour, heat %); None: watched only when configured.
+    pub fn default_limit(self) -> Option<(u32, u32, u32)> {
+        Some(match self {
+            Action::Ban | Action::Kick => (5, 15, 20),
+            Action::RoleCreate => (5, 15, 10),
+            Action::RoleDelete => (3, 10, 25),
+            Action::ChannelCreate => (4, 12, 16),
+            Action::ChannelDelete => (3, 8, 25),
+            Action::WebhookCreate => (3, 10, 15),
+            Action::WebhookDelete => (3, 8, 10),
+            Action::Prune => (1, 1, 0),
+            Action::BotAdd => return None,
+        })
+    }
+}
+
 /// Reaching either limit trips (spec: "Reaching either quarantines them").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limit {
