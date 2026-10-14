@@ -28,13 +28,15 @@ fn render(gauges: &[(&str, u64)]) -> String {
     ];
     let mut out = String::new();
     for (name, v) in counters {
-        out += &format!(
+        out.push_str(&format!(
             "# TYPE tommybot_{name} counter\ntommybot_{name} {}\n",
             v.load(Relaxed)
-        );
+        ));
     }
     for (name, v) in gauges {
-        out += &format!("# TYPE tommybot_{name} gauge\ntommybot_{name} {v}\n");
+        out.push_str(&format!(
+            "# TYPE tommybot_{name} gauge\ntommybot_{name} {v}\n"
+        ));
     }
     out
 }
