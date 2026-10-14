@@ -1,5 +1,5 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
-//! shortcut: web mode needs the web crate, DM and simple-captcha modes fall back to the image captcha.
+//! shortcut: web mode needs the web crate and says so; the other modes are handled here.
 use anyhow::Result;
 use captcha::{
     filters::{Dots, Noise, Wave},
@@ -44,14 +44,17 @@ pub struct VerificationCfg {
 }
 
 const START: &str = "verify:start";
-const ENTER: &str = "verify:enter";
-const CODE: &str = "verify:code";
+// The enter and code ids end in the guild id: a DM interaction has no guild of its own.
+const ENTER: &str = "verify:enter:";
+const CODE: &str = "verify:code:";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
     Say(&'static str),
     Grant,
     Captcha,
+    Simple,
+    Dm,
 }
 
 /// What a click on the verify button leads to.
@@ -68,7 +71,9 @@ fn decide(cfg: &VerificationCfg, raid_active: bool, suspicious: bool, has_role: 
     match effective_mode(&cfg.verify, raid_active) {
         VerifyMode::Button => Step::Grant,
         VerifyMode::Web => Step::Say("Verification for this server happens on its web page."),
-        _ => Step::Captcha,
+        VerifyMode::SimpleCaptcha => Step::Simple,
+        VerifyMode::Dm => Step::Dm,
+        VerifyMode::Captcha => Step::Captcha,
     }
 }
 
@@ -227,6 +232,23 @@ fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     (cap.chars_as_string(), cap.as_png().unwrap_or_default())
 }
 
+/// A sum a member types; no image, so screen readers and slow connections cope. Returns (question, answer).
+fn new_sum() -> (String, String) {
+    use std::hash::{BuildHasher, Hasher};
+    let r = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let (a, b) = (r % 9 + 1, (r >> 8) % 9 + 1);
+    (format!("What is {a} + {b}?"), (a + b).to_string())
+}
+
+/// Which guild a verify interaction belongs to; DM ones carry it in the custom id.
+fn guild_of(i: &Interaction, id: &str) -> Option<Id<GuildMarker>> {
+    i.guild_id
+        .or_else(|| id.rsplit(':').next()?.parse().ok().map(Id::new))
+}
+
+const PROMPT: &str = "Type the characters you see.";
 const NOTES: &str = "Type the characters you see.\n-# Letters are not case sensitive. Ignore the dots and lines, they are only there to stop bots. Press Verify again for a new image.";
 
 /// The text a member typed, wherever the modal nests the input.
@@ -241,7 +263,15 @@ fn typed_text(c: &ModalInteractionComponent) -> Option<String> {
 
 /// Handles the verify button, the "enter code" button and the code modal. Returns false for other interactions.
 pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
-    let (Some(gid), Some(u)) = (i.guild_id, i.author()) else {
+    let id = match &i.data {
+        Some(InteractionData::MessageComponent(c)) => c.custom_id.as_str(),
+        Some(InteractionData::ModalSubmit(m)) => m.custom_id.as_str(),
+        _ => return Ok(false),
+    };
+    if !id.starts_with("verify:") {
+        return Ok(false);
+    }
+    let (Some(gid), Some(u)) = (guild_of(i, id), i.author()) else {
         return Ok(false);
     };
     let user = u.id;
@@ -284,43 +314,66 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                         .create_response(i.id, &i.token, &reply("Verified, welcome!"))
                         .await?;
                 }
-                Step::Captcha => {
-                    let (code, png) = new_captcha(&cfg.verification.verify.captcha);
+                step => {
+                    let v = &cfg.verification.verify;
+                    let (code, png, text) = match step {
+                        Step::Simple => {
+                            let (q, a) = new_sum();
+                            (a, None, q)
+                        }
+                        _ => {
+                            let (code, png) = new_captcha(&v.captcha);
+                            let note = if v.show_notes { NOTES } else { PROMPT };
+                            (code, Some(png), note.to_string())
+                        }
+                    };
                     app.captchas
                         .lock()
                         .unwrap()
                         .insert((gid.get(), user.get()), code);
-                    client
-                        .create_response(
-                            i.id,
-                            &i.token,
-                            &ephemeral(
-                                InteractionResponseType::DeferredChannelMessageWithSource,
-                                None,
-                            ),
-                        )
-                        .await?;
-                    client
-                        .update_response(&i.token)
-                        .content(Some(if cfg.verification.verify.show_notes {
-                            NOTES
+                    let enter = [row(button("Enter answer", &format!("{ENTER}{gid}")))];
+                    let file = png.map(|p| [Attachment::from_bytes("captcha.png".into(), p, 1)]);
+                    if step == Step::Dm {
+                        let ch = app.http.create_private_channel(user).await;
+                        let sent = match ch {
+                            Ok(ch) => {
+                                let ch = ch.model().await?;
+                                let mut m = app.http.create_message(ch.id).content(&text);
+                                if let Some(f) = &file {
+                                    m = m.attachments(f);
+                                }
+                                m.components(&enter).await.is_ok()
+                            }
+                            Err(_) => false,
+                        };
+                        let t = if sent {
+                            "Check your DMs for the challenge."
                         } else {
-                            "Type the characters you see."
-                        }))
-                        .attachments(&[Attachment::from_bytes("captcha.png".into(), png, 1)])
-                        .components(Some(&[row(button("Enter code", ENTER))]))
-                        .await?;
+                            "I could not DM you. Open your DMs for this server and press Verify again."
+                        };
+                        client.create_response(i.id, &i.token, &reply(t)).await?;
+                    } else {
+                        let defer = InteractionResponseType::DeferredChannelMessageWithSource;
+                        client
+                            .create_response(i.id, &i.token, &ephemeral(defer, None))
+                            .await?;
+                        let mut u = client.update_response(&i.token).content(Some(&text));
+                        if let Some(f) = &file {
+                            u = u.attachments(f);
+                        }
+                        u.components(Some(&enter)).await?;
+                    }
                 }
             }
             Ok(true)
         }
-        Some(InteractionData::MessageComponent(c)) if c.custom_id == ENTER => {
+        Some(InteractionData::MessageComponent(c)) if c.custom_id.starts_with(ENTER) => {
             #[allow(deprecated)]
             // Discord moved labels to the Label component; a plain row still works.
             let input = Component::TextInput(TextInput {
                 id: None,
                 custom_id: "code".into(),
-                label: Some("Characters in the image".into()),
+                label: Some("Your answer".into()),
                 max_length: Some(10),
                 min_length: Some(1),
                 placeholder: None,
@@ -335,7 +388,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                     &InteractionResponse {
                         kind: InteractionResponseType::Modal,
                         data: Some(InteractionResponseData {
-                            custom_id: Some(CODE.into()),
+                            custom_id: Some(format!("{CODE}{gid}")),
                             title: Some("Verify".into()),
                             components: Some(vec![row(input)]),
                             ..Default::default()
@@ -345,7 +398,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 .await?;
             Ok(true)
         }
-        Some(InteractionData::ModalSubmit(m)) if m.custom_id == CODE => {
+        Some(InteractionData::ModalSubmit(m)) if m.custom_id.starts_with(CODE) => {
             let typed = m.components.iter().find_map(typed_text).unwrap_or_default();
             let expected = app
                 .captchas
@@ -393,6 +446,16 @@ mod tests {
         let c = cfg(VerifyMode::Captcha, VerifyTarget::SuspiciousOnly);
         assert_eq!(decide(&c, false, false, false), Step::Grant);
         assert_eq!(decide(&c, false, true, false), Step::Captcha);
+        for (mode, step) in [
+            (VerifyMode::SimpleCaptcha, Step::Simple),
+            (VerifyMode::Dm, Step::Dm),
+            (VerifyMode::Captcha, Step::Captcha),
+        ] {
+            assert_eq!(
+                decide(&cfg(mode, VerifyTarget::Everyone), false, false, false),
+                step
+            );
+        }
         assert!(matches!(
             decide(&VerificationCfg::default(), false, true, false),
             Step::Say(_)
@@ -424,6 +487,18 @@ mod tests {
                 };
                 assert!(!new_captcha(&c).1.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn sum_answer_matches_question() {
+        for _ in 0..20 {
+            let (q, a) = new_sum();
+            let n: Vec<u32> = q
+                .split(|c: char| !c.is_ascii_digit())
+                .filter_map(|x| x.parse().ok())
+                .collect();
+            assert_eq!(n.iter().sum::<u32>().to_string(), a);
         }
     }
 
