@@ -705,7 +705,14 @@ pub fn schema() -> Vec<Value> {
                 choice(
                     "General",
                     "mode",
-                    &["Button", "Captcha", "SimpleCaptcha", "Dm", "Web"],
+                    &[
+                        "Button",
+                        "Captcha",
+                        "SimpleCaptcha",
+                        "Dm",
+                        "Web",
+                        "ThirdParty",
+                    ],
                 ),
                 "Verification mode",
             ),
