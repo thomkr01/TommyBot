@@ -6,15 +6,19 @@ use sqlx::types::Json;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tommybot_antinuke::{
-    describe, map_overwrites, plan, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
+    describe, map_overwrites, plan, Action, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
+    Settings,
 };
 use twilight_http::Client;
 use twilight_model::{
     channel::{
         permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
-        ChannelType,
+        Channel, ChannelType,
     },
-    guild::{Permissions, RolePosition},
+    guild::{
+        DefaultMessageNotificationLevel, ExplicitContentFilter, Permissions, Role, RolePosition,
+        VerificationLevel,
+    },
     id::{marker::GuildMarker, Id},
 };
 
@@ -26,50 +30,97 @@ pub const INTERVAL: Duration = Duration::from_secs(3 * 3600);
 
 // Role::color is deprecated upstream in favour of `colors`, but create/update_role still take it.
 #[allow(deprecated)]
+pub fn role_img(r: Role) -> RoleImg {
+    RoleImg {
+        id: r.id.get(),
+        name: r.name,
+        color: r.color,
+        permissions: r.permissions.bits(),
+        position: r.position,
+        hoist: r.hoist,
+        mentionable: r.mentionable,
+        managed: r.managed,
+    }
+}
+
+pub fn channel_img(c: Channel) -> ChannelImg {
+    ChannelImg {
+        id: c.id.get(),
+        name: c.name.unwrap_or_default(),
+        kind: u8::from(c.kind),
+        parent: c.parent_id.map(|p| p.get()),
+        position: c.position.map_or(0, i64::from),
+        topic: c.topic,
+        nsfw: c.nsfw.unwrap_or(false),
+        overwrites: c
+            .permission_overwrites
+            .unwrap_or_default()
+            .into_iter()
+            .map(|o| OverwriteImg {
+                target: o.id.get(),
+                is_role: o.kind == PermissionOverwriteType::Role,
+                allow: o.allow.bits(),
+                deny: o.deny.bits(),
+            })
+            .collect(),
+    }
+}
+
 pub async fn snapshot(http: &Client, gid: Id<GuildMarker>) -> Result<Image> {
-    let name = http.guild(gid).await?.model().await?.name;
+    let g = http.guild(gid).await?.model().await?;
     let roles = http.roles(gid).await?.models().await?;
     let channels = http.guild_channels(gid).await?.models().await?;
     Ok(Image {
         guild: gid.get(),
-        name,
-        roles: roles
-            .into_iter()
-            .map(|r| RoleImg {
-                id: r.id.get(),
-                name: r.name,
-                color: r.color,
-                permissions: r.permissions.bits(),
-                position: r.position,
-                hoist: r.hoist,
-                mentionable: r.mentionable,
-                managed: r.managed,
-            })
-            .collect(),
-        channels: channels
-            .into_iter()
-            .map(|c| ChannelImg {
-                id: c.id.get(),
-                name: c.name.unwrap_or_default(),
-                kind: u8::from(c.kind),
-                parent: c.parent_id.map(|p| p.get()),
-                position: c.position.map_or(0, i64::from),
-                topic: c.topic,
-                nsfw: c.nsfw.unwrap_or(false),
-                overwrites: c
-                    .permission_overwrites
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|o| OverwriteImg {
-                        target: o.id.get(),
-                        is_role: o.kind == PermissionOverwriteType::Role,
-                        allow: o.allow.bits(),
-                        deny: o.deny.bits(),
-                    })
-                    .collect(),
-            })
-            .collect(),
+        settings: Some(Settings {
+            name: g.name.clone(),
+            verification: u8::from(g.verification_level),
+            notifications: u8::from(g.default_message_notifications),
+            content_filter: u8::from(g.explicit_content_filter),
+            afk_channel: g.afk_channel_id.map(|c| c.get()),
+            afk_timeout: g.afk_timeout.get().into(),
+            system_channel: g.system_channel_id.map(|c| c.get()),
+            locale: g.preferred_locale,
+        }),
+        name: g.name,
+        roles: roles.into_iter().map(role_img).collect(),
+        channels: channels.into_iter().map(channel_img).collect(),
     })
+}
+
+/// Adds a role or channel made by a whitelisted member to the latest backup, so deleting it before
+/// the next backup can't make it unrecoverable. Attackers' creations are never added, or a
+/// restore would keep them. Does nothing without a backup.
+pub async fn track_created(app: &App, gid: Id<GuildMarker>, action: Action, id: u64) -> Result<()> {
+    let mut tx = app.pool.begin().await?;
+    let row: Option<(i64, Json<Image>)> = sqlx::query_as(
+        "SELECT id, image FROM backups WHERE guild_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((row_id, Json(mut image))) = row else {
+        return Ok(());
+    };
+    if action == Action::RoleCreate {
+        let roles = app.http.roles(gid).await?.models().await?;
+        match roles.into_iter().find(|r| r.id.get() == id) {
+            Some(r) if !image.roles.iter().any(|x| x.id == id) => image.roles.push(role_img(r)),
+            _ => return Ok(()),
+        }
+    } else {
+        let c = app.http.channel(Id::new(id)).await?.model().await?;
+        if image.channels.iter().any(|x| x.id == id) {
+            return Ok(());
+        }
+        image.channels.push(channel_img(c));
+    }
+    sqlx::query("UPDATE backups SET image = $1 WHERE id = $2")
+        .bind(Json(&image))
+        .bind(row_id)
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx.commit().await?)
 }
 
 pub async fn save(app: &App, gid: Id<GuildMarker>) -> Result<i64> {
@@ -201,6 +252,7 @@ pub async fn recreate(app: &App, gid: Id<GuildMarker>, ids: &HashSet<u64>) -> Re
         .chain(live.channels.iter().map(|c| c.id))
         .collect();
     let mut p = plan(&image, &live, &keep, true);
+    p.settings = None;
     p.roles
         .retain(|c| matches!(c, Change::Create(r) if ids.contains(&r.id)));
     p.channels.retain(|c| match c {
@@ -341,6 +393,31 @@ async fn execute(
         }
         .await;
         count(r, &mut done, "channel");
+    }
+
+    if let Some(w) = p.settings.take() {
+        let map = |c: Option<u64>| {
+            c.and_then(|c| id_map.get(&c).copied().or(Some(c)))
+                .map(Id::new)
+        };
+        let r = http
+            .update_guild(gid)
+            .name(&w.name)
+            .verification_level(Some(VerificationLevel::from(w.verification)))
+            .default_message_notifications(Some(DefaultMessageNotificationLevel::from(
+                w.notifications,
+            )))
+            .explicit_content_filter(Some(ExplicitContentFilter::from(w.content_filter)))
+            .afk_channel_id(map(w.afk_channel))
+            .afk_timeout(w.afk_timeout)
+            .system_channel(map(w.system_channel))
+            .preferred_locale(Some(&w.locale))
+            .await;
+        count(
+            r.map(drop).map_err(Into::into),
+            &mut done,
+            "server settings",
+        );
     }
 
     // Recreated roles land at the bottom; put every restored role back in its image order.

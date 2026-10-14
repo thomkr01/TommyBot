@@ -588,6 +588,10 @@ pub fn schema() -> Vec<Value> {
             pg(dv(fg("Trigger", "heat_executors", "int"), 3), "heat"),
             "Punished accounts to trip",
         ),
+        ti(
+            pg(dv(fg("Trigger", "heat_decay", "float"), 0.01), "nuke"),
+            "Heat degradation (every second)",
+        ),
         dv(fg("Trigger", "window_secs", "int"), 600),
         dv(fg("Response", "duration_secs", "int"), 600),
         fg("Response", "lock_mod_commands", "bool"),

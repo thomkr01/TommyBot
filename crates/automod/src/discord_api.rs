@@ -2,6 +2,7 @@
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 const API: &str = "https://discord.com/api/v10";
 const KEYWORD_RULE: &str = "TommyBot keywords";
@@ -10,6 +11,19 @@ const MAX_KEYWORDS: usize = 1000;
 const MAX_KEYWORD_LEN: usize = 60;
 /// Discord pauses invites for at most 24 hours.
 pub const MAX_INVITE_PAUSE_MS: i64 = 24 * 3_600_000;
+
+const MAX_RETRIES: u32 = 4;
+/// Longest single wait on a 429, so a global ban on the token can't stall a caller for minutes.
+const MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// `retry_after` seconds from a 429 body, one second if missing, capped at `MAX_WAIT`.
+fn retry_after(body: &str) -> Duration {
+    let secs = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["retry_after"].as_f64())
+        .unwrap_or(1.0);
+    Duration::from_secs_f64(secs.clamp(0.0, MAX_WAIT.as_secs_f64()))
+}
 
 #[derive(Clone)]
 pub struct Api {
@@ -35,19 +49,30 @@ impl Api {
 
     async fn send(&self, req: reqwest::RequestBuilder, body: Option<Value>) -> Result<Value> {
         let req = req.header("Authorization", format!("Bot {}", self.token));
-        let res = if let Some(b) = body {
+        let req = if let Some(b) = body {
             req.json(&b)
         } else {
             req
+        };
+        // On 429 wait what Discord says and retry; a few tries, then give up with the error.
+        for _ in 0..MAX_RETRIES {
+            let res = req
+                .try_clone()
+                .expect("json body is cloneable")
+                .send()
+                .await?;
+            let status = res.status();
+            let text = res.text().await?;
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                tokio::time::sleep(retry_after(&text)).await;
+                continue;
+            }
+            if !status.is_success() {
+                bail!("discord {status}: {text}");
+            }
+            return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
         }
-        .send()
-        .await?;
-        let status = res.status();
-        let text = res.text().await?;
-        if !status.is_success() {
-            bail!("discord {status}: {text}");
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+        bail!("discord rate limit: still limited after {MAX_RETRIES} tries")
     }
 
     /// Pause invites until `until_ms` (unix ms, clamped to 24h from `now_ms`), or lift the pause with `None`.
@@ -292,6 +317,16 @@ fn keyword_rule_body(words: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_reads_the_body_and_is_capped() {
+        assert_eq!(
+            retry_after(r#"{"retry_after":0.5}"#),
+            Duration::from_millis(500)
+        );
+        assert_eq!(retry_after("<html>"), Duration::from_secs(1));
+        assert_eq!(retry_after(r#"{"retry_after":600}"#), MAX_WAIT);
+    }
 
     #[test]
     fn invite_pause_is_capped_and_lifted_with_null() {

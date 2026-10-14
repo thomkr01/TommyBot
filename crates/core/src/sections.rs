@@ -453,6 +453,8 @@ pub struct PanicCfg {
     pub heat_algorithm: bool,
     /// Distinct accounts that must hit the heat limit within `window_secs` to trip it.
     pub heat_executors: usize,
+    /// Fraction of a staff member's anti-nuke heat lost per second (0.01 = 1%/s).
+    pub heat_decay: f64,
     /// Categories panic mode leaves unlocked.
     pub whitelisted_categories: Vec<Id<ChannelMarker>>,
 }
@@ -468,6 +470,7 @@ impl Default for PanicCfg {
             unlock_when_ending: false,
             heat_algorithm: false,
             heat_executors: 3,
+            heat_decay: 0.01,
             whitelisted_categories: vec![],
         }
     }

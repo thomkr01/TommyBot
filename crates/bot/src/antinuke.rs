@@ -101,6 +101,11 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     };
     let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?;
     let inv = inverse(action, e.target_id.map(|t| t.get()));
+    if let (true, Some(t), Action::ChannelCreate | Action::RoleCreate) =
+        (exempt, e.target_id, action)
+    {
+        backup::track_created(app, gid, action, t.get()).await?;
+    }
     if !exempt {
         sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
             .bind(gid.get() as i64)
@@ -110,7 +115,10 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             .bind(inv.as_ref().map(|i| json!(i)))
             .execute(&app.pool)
             .await?;
-        if heat > 0 && cfg.panic.heat_algorithm && add_heat(app, gid, actor, heat) {
+        if heat > 0
+            && cfg.panic.heat_algorithm
+            && add_heat(app, gid, actor, heat, cfg.panic.heat_decay)
+        {
             crate::panic::note(app, gid, actor, true).await?;
         }
     }
@@ -130,10 +138,9 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
 }
 
 /// Adds a staff action's heat %; true when the member just reached 100.
-fn add_heat(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, heat: u32) -> bool {
-    // shortcut: staff heat cools 1% per second, Wick's rate is unknown.
+fn add_heat(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, heat: u32, decay: f64) -> bool {
     let cfg = HeatCfg {
-        decay_per_sec: 0.01,
+        decay_per_sec: decay.clamp(0.0, 1.0),
         ..Default::default()
     };
     let b = Breakdown {

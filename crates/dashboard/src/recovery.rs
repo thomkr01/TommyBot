@@ -88,6 +88,7 @@ fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
     Image {
         guild: guild as u64,
         name: String::new(),
+        settings: None,
         roles: items(roles)
             .iter()
             .map(|r| RoleImg {
