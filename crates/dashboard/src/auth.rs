@@ -53,13 +53,14 @@ impl FromRequestParts<AppState> for Sess {
         ).bind(&sid).fetch_optional(&st.db).await?.ok_or(ApiError::Unauthorized)?;
         let (user_id, username, access_token, csrf, step_up) = row;
         // CSRF: every state-changing request must echo the per-session token.
-        if parts.method != Method::GET
-            && parts
+        if !csrf_ok(
+            &parts.method,
+            parts
                 .headers
                 .get("x-csrf-token")
-                .and_then(|v| v.to_str().ok())
-                != Some(&csrf)
-        {
+                .and_then(|v| v.to_str().ok()),
+            &csrf,
+        ) {
             return Err(ApiError::Forbidden("bad csrf token"));
         }
         Ok(Sess {
@@ -71,6 +72,11 @@ impl FromRequestParts<AppState> for Sess {
             csrf,
         })
     }
+}
+
+/// Safe methods need no token; everything else must echo the session's.
+fn csrf_ok(method: &Method, header: Option<&str>, csrf: &str) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || header == Some(csrf)
 }
 
 #[derive(Deserialize)]
@@ -224,4 +230,19 @@ pub async fn totp_verify(
         .execute(&st.db)
         .await?;
     Ok(Json(json!({"stepped_up": true})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csrf_token_required_on_writes() {
+        for m in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+            assert!(!csrf_ok(&m, None, "t"));
+            assert!(!csrf_ok(&m, Some("x"), "t"));
+            assert!(csrf_ok(&m, Some("t"), "t"));
+        }
+        assert!(csrf_ok(&Method::GET, None, "t"));
+    }
 }

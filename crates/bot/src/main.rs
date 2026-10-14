@@ -7,6 +7,7 @@ mod commands;
 mod events;
 mod hierarchy;
 mod lockdown;
+mod metrics;
 mod modcmds;
 mod panic;
 mod prefix;
@@ -54,6 +55,17 @@ async fn main() -> Result<()> {
         tracing::warn!(?e, "restoring panic mode failed");
     }
     tokio::spawn(scheduler::run(app.clone()));
+    tokio::spawn(scheduler::run_restore(app.clone()));
+    if let Ok(addr) = std::env::var("METRICS_ADDR") {
+        tokio::spawn({
+            let app = app.clone();
+            async move {
+                if let Err(e) = metrics::serve(app, addr).await {
+                    tracing::error!(?e, "metrics server stopped");
+                }
+            }
+        });
+    }
     tokio::spawn(events::flush_logs(app.clone()));
     tokio::spawn(backup::auto_backup(app.clone()));
 
@@ -69,13 +81,41 @@ async fn main() -> Result<()> {
         | Intents::MESSAGE_CONTENT;
     let mut shard = Shard::new(ShardId::ONE, cfg.discord_token, intents);
 
-    while let Some(event) = shard.next_event(EventTypeFlags::all()).await {
+    let stop = shutdown_signal();
+    tokio::pin!(stop);
+    loop {
+        let event = tokio::select! {
+            _ = &mut stop => break,
+            e = shard.next_event(EventTypeFlags::all()) => e,
+        };
         match event {
-            Ok(event) => {
+            Some(Ok(event)) => {
                 tokio::spawn(events::handle(app.clone(), event));
             }
-            Err(e) => tracing::warn!(?e, "gateway error"),
+            Some(Err(e)) => {
+                tracing::warn!(?e, "gateway error");
+                metrics::GATEWAY_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            None => break,
         }
     }
+    tracing::info!("shutting down");
+    events::shutdown(&app).await;
     Ok(())
+}
+
+/// Resolves on Ctrl-C or, on Unix, SIGTERM (what `docker stop` sends).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
