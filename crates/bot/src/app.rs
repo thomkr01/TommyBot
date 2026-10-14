@@ -92,6 +92,8 @@ pub struct App {
     pub antinuke: Mutex<AntiNuke>,
     pub rate_limiter: Mutex<RateLimiter>,
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
+    /// Phishing and NSFW domain lists, refreshed in the background.
+    pub sites: tommybot_automod::sites::Sites,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
     /// Pending image-captcha answers per (guild, user); lost on restart, the member just clicks again.
     pub captchas: Mutex<HashMap<(u64, u64), String>>,
@@ -135,6 +137,7 @@ impl App {
             antinuke: Mutex::new(AntiNuke::new(HashMap::new())),
             rate_limiter: Default::default(),
             heat: Default::default(),
+            sites: Default::default(),
             raids: Default::default(),
             captchas: Default::default(),
             mentions: Default::default(),

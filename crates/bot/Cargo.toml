@@ -20,3 +20,4 @@ tommybot-antinuke.workspace = true
 tommybot-automod.workspace = true
 tommybot-logging.workspace = true
 captcha = "1"
+decancer = "3"

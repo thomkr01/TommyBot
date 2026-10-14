@@ -53,6 +53,15 @@ async fn main() -> Result<()> {
         tracing::warn!(?e, "restoring panic mode failed");
     }
     tokio::spawn(scheduler::run(app.clone()));
+    tokio::spawn({
+        let app = app.clone();
+        async move {
+            loop {
+                app.sites.refresh().await;
+                tokio::time::sleep(tommybot_automod::sites::REFRESH).await;
+            }
+        }
+    });
     tokio::spawn(events::flush_logs(app.clone()));
     tokio::spawn(backup::auto_backup(app.clone()));
 

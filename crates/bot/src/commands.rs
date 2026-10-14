@@ -195,7 +195,7 @@ pub async fn apply_dm(
     );
     if kind == ModKind::Warn {
         if let Some(extra) = apply_warn_actions(app, &cfg.misc, gid, target, points).await? {
-            text += &format!("\n{extra}");
+            text += format!("\n{extra}").as_str();
         }
     }
     Ok(text)

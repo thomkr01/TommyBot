@@ -21,11 +21,12 @@ use twilight_model::{
     gateway::payload::incoming::{
         AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
     },
-    guild::auto_moderation::AutoModerationActionType,
+    guild::{audit_log::AuditLogEventType, auto_moderation::AutoModerationActionType},
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
     },
+    user::UserFlags,
 };
 
 use crate::{
@@ -71,6 +72,13 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let content = m.content.as_str();
     let f = &am.filters;
     let hosts = filters::hosts(content);
+    let mut checked = hosts.clone();
+    if f.nsfw_crawl_shorteners {
+        for u in filters::shortener_urls(content).into_iter().take(3) {
+            checked.extend(app.sites.unshorten(u).await);
+        }
+    }
+    let bad_site = f.bad_sites.enabled && app.sites.phishing(&checked);
     let (upper_chars, lower_chars) = filters::case_counts(content);
     let words = if f.words.use_discord_automod {
         vec![]
@@ -109,8 +117,8 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             && ["discord.gg/", "discord.com/invite/"]
                 .iter()
                 .any(|p| content.to_lowercase().contains(p)),
-        // shortcut: no phishing/NSFW site lists are bundled, so bad_sites and nsfw_links never trip.
-        malicious_link: f.scam_links.enabled && filters::is_nitro_steam_scam(content),
+        malicious_link: bad_site || f.scam_links.enabled && filters::is_nitro_steam_scam(content),
+        nsfw_link: f.nsfw_links.enabled && app.sites.nsfw(&checked),
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
         blacklisted_words: if f.words.filter.enabled {
@@ -150,7 +158,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .on_mentions(pings, now, lock.mention_count, lock.mention_window_ms);
     let over_hour_cap = am.anti_spam && f.mentions.enabled && pings > 0 && {
         let mut map = app.pings.lock().unwrap();
-        // shortcut: dropped wholesale past 100k members, like the heat map.
+        // shortcut: dropped wholesale past 100k members, move to a TTL cache when that bites.
         if map.len() > 100_000 {
             map.clear();
         }
@@ -162,9 +170,12 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let heat_cfg = enabled_weights(am);
     let (triggered, breakdown) = {
         let mut map = app.heat.lock().unwrap();
-        // shortcut: heat state is dropped wholesale past 100k users, move to a TTL cache when that bites.
+        // Past 100k users, users idle for 10 minutes go first; everyone only if that frees nothing.
         if map.len() > 100_000 {
-            map.clear();
+            map.retain(|_, (s, _)| s.at_ms > now - 600_000);
+            if map.len() > 100_000 {
+                map.clear();
+            }
         }
         let (state, hist) = map.entry(key).or_default();
         let mut b = heat(&facts, hist, &heat_cfg);
@@ -172,6 +183,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             b.parts.push(("mentions", heat_cfg.max));
         }
         hist.remember(content);
+        hist.track(m.channel_id.get(), m.id.get());
         (state.apply(&b, now, &heat_cfg), b)
     };
     if !triggered && !mention_lock {
@@ -198,7 +210,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         return delete_new_webhooks(app, gid).await;
     }
     crate::panic::note(app, gid, m.author.id, true).await?;
-    if let Some(fc) = tripped_filter(&breakdown, f) {
+    if let Some(fc) = tripped_filter(&breakdown, f, bad_site) {
         if let Some(action) = fc.action {
             return filter_action(app, &cfg, gid, m, action, fc.duration_secs).await;
         }
@@ -206,14 +218,21 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
     let act = strike(&mut st, &am.strike, now);
     store::save_strikes(&app.pool, gid.get(), m.author.id.get(), &st).await?;
-    if act.reset_heat {
-        if let Some((s, _)) = app.heat.lock().unwrap().get_mut(&key) {
+    let tracked = app.heat.lock().unwrap().get_mut(&key).map(|(s, h)| {
+        if act.reset_heat {
             s.value = 0.0;
         }
-    }
+        h.take_msgs()
+    });
     app.http.delete_message(m.channel_id, m.id).await.ok();
     if cfg.misc.purge_last_100 {
         reply::purge_user(app, m.channel_id, m.author.id).await.ok();
+        let others: Vec<_> = tracked
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&(c, _)| c != m.channel_id.get())
+            .collect();
+        reply::purge_ids(app, &others).await;
     }
     if am.strike.enabled {
         if cfg.misc.show_reason_on_auto {
@@ -301,7 +320,7 @@ fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
 }
 
 /// The filter behind the biggest heat contribution.
-fn tripped_filter<'a>(b: &Breakdown, f: &'a FiltersCfg) -> Option<&'a FilterCfg> {
+fn tripped_filter<'a>(b: &Breakdown, f: &'a FiltersCfg, bad_site: bool) -> Option<&'a FilterCfg> {
     let (name, _) = b.parts.iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
     Some(match *name {
         "message" => &f.regular,
@@ -315,6 +334,7 @@ fn tripped_filter<'a>(b: &Breakdown, f: &'a FiltersCfg) -> Option<&'a FilterCfg>
         "inactive_channel" => &f.inactive_channel,
         "blacklisted_words" => &f.words.filter,
         "invites" => &f.invites,
+        "malicious" if bad_site => &f.bad_sites,
         "malicious" => &f.scam_links,
         "nsfw" => &f.nsfw_links,
         "links_blacklist" => &f.links,
@@ -400,18 +420,18 @@ async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     let mut hooks = vec![];
     let mut immune: HashMap<u64, bool> = HashMap::new();
     for h in app.http.guild_webhooks(gid).await?.models().await? {
-        // shortcut: hooks without an owner (integrations) are never deleted.
-        let Some(owner) = h.user.as_ref().map(|u| u.id) else {
-            continue;
-        };
-        if let Entry::Vacant(e) = immune.entry(owner.get()) {
-            e.insert(app.is_immune(gid, owner).await?);
+        // Hooks without an owner (integrations, channel follows) count as owner 0, never immune.
+        let owner = h.user.as_ref().map(|u| u.id);
+        if let Some(owner) = owner {
+            if let Entry::Vacant(e) = immune.entry(owner.get()) {
+                e.insert(app.is_immune(gid, owner).await?);
+            }
         }
         // Snowflake timestamp: ms since the Discord epoch in the top bits.
         let created_at = ((h.id.get() >> 22) + 1_420_070_400_000) / 1000;
         hooks.push(Webhook {
             id: h.id.get(),
-            owner: owner.get(),
+            owner: owner.map_or(0, |o| o.get()),
             created_at: created_at as i64,
         });
     }
@@ -419,7 +439,7 @@ async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     let doomed = webhooks_to_delete(
         &hooks,
         now_secs() - 600,
-        |o| immune[&o],
+        |o| immune.get(&o).copied().unwrap_or(false),
         |id| cfg.whitelist.spam.webhooks.iter().any(|w| w.get() == id),
     );
     for id in &doomed {
@@ -440,15 +460,16 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         };
         return punish(app, &cfg, gid, user.id.get(), action, "join lock").await;
     }
-    // shortcut: names are not run through decancer, and bot adders/verification are not looked up
-    // (bots count as authorized so the unauthorized-bot filter never fires).
+    let name = cure(&user.name);
     let j = Joiner {
         id: user.id.get(),
-        name: &user.name,
+        name: &name,
         has_avatar: user.avatar.is_some(),
         is_bot: user.bot,
-        bot_verified: false,
-        added_by_authorized: true,
+        bot_verified: user
+            .public_flags
+            .is_some_and(|f| f.contains(UserFlags::VERIFIED_BOT)),
+        added_by_authorized: !user.bot || bot_added_by_authorized(app, gid, user.id).await,
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     verify::on_join(app, gid, user.id, suspicious).await;
@@ -571,6 +592,35 @@ async fn native_action(
     Ok(())
 }
 
+/// Names with fancy Unicode, lookalikes and leetspeak folded to plain letters, for the username filter.
+fn cure(name: &str) -> String {
+    decancer::cure!(name).map_or_else(|_| name.to_string(), |c| c.to_string())
+}
+
+/// Whether whoever added the bot is Owner/EO/TA; when the audit log has no entry the bot counts as authorized.
+async fn bot_added_by_authorized(app: &App, gid: Id<GuildMarker>, bot: Id<UserMarker>) -> bool {
+    let adder = async {
+        let log = app
+            .http
+            .audit_log(gid)
+            .action_type(AuditLogEventType::BotAdd)
+            .limit(10)
+            .await?
+            .model()
+            .await?;
+        anyhow::Ok(
+            log.entries
+                .iter()
+                .find(|e| e.target_id.is_some_and(|t| t.get() == bot.get()))
+                .and_then(|e| e.user_id),
+        )
+    };
+    match adder.await {
+        Ok(Some(adder)) => app.is_immune(gid, adder).await.unwrap_or(true),
+        _ => true,
+    }
+}
+
 /// Re-runs the username filter when a member renames, if the gate asks for it.
 pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     let cfg = app.cfg(m.guild_id.get()).await?;
@@ -587,7 +637,12 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         .communication_disabled_until
         .is_some_and(|t| t.as_secs() > now_secs());
     let names = [Some(m.user.name.as_str()), m.nick.as_deref()];
-    if timed_out || !names.into_iter().flatten().any(|n| g.name_matches(n)) {
+    if timed_out
+        || !names
+            .into_iter()
+            .flatten()
+            .any(|n| g.name_matches(&cure(n)))
+    {
         return Ok(());
     }
     punish(
@@ -676,11 +731,20 @@ mod tests {
     }
 
     #[test]
+    fn cure_folds_fancy_names() {
+        assert_eq!(cure("ⓗⓔⓛⓛⓞ"), "hello");
+    }
+
+    #[test]
     fn biggest_part_picks_the_filter() {
         let mut f = FiltersCfg::default();
         f.zalgo.action = Some(FilterAction::Ban);
         f.invites.action = Some(FilterAction::Kick);
-        let pick = |parts| tripped_filter(&Breakdown { parts }, &f).unwrap().action;
+        let pick = |parts| {
+            tripped_filter(&Breakdown { parts }, &f, false)
+                .unwrap()
+                .action
+        };
         assert_eq!(
             pick(vec![("message", 18.0), ("zalgo", 40.0)]),
             Some(FilterAction::Ban)
