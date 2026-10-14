@@ -70,3 +70,6 @@ details { margin:12px 0; }
 .card.empty { text-align:center; } button.dashed { border-style:dashed; width:100%; padding:16px; }
 .banner { background:var(--warn); color:#000; border-radius:8px; padding:10px 16px; margin:0 0 16px; font-weight:600; }
 button.ghost.on { background:var(--primary); color:#fff; border-color:var(--primary); }
+.wizart { width:120px; height:120px; flex:none; }
+header details.ico summary { background:none; font-size:18px; }
+.card .bell { float:right; width:28px; height:28px; border-radius:50%; background:var(--bad); display:grid; place-items:center; text-decoration:none; font-size:14px; }

@@ -58,6 +58,19 @@ fn Tabs(guild: String, items: &'static [(&'static str, &'static str)], active: S
     view! { <div class="tabs">{items.iter().map(|(p, t)| view! { <a class:on=*p == active href=format!("#/{guild}/{p}")>{*t}</a> }).collect_view()}</div> }
 }
 
+#[component]
+fn Bell(route: ReadSignal<Vec<String>>) -> impl IntoView {
+    let rows = RwSignal::new(Vec::<Value>::new());
+    let load = move |_| {
+        let Some(g) = route.get_untracked().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())) else { return };
+        spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await { rows.set(v.as_array().cloned().unwrap_or_default()) } });
+    };
+    view! { <details class="ico" on:toggle=load><summary aria-label="notifications">"🔔"</summary><div>
+        {move || if rows.get().is_empty() { view! { <a href="#/">"No recent changes"</a> }.into_any() } else {
+            rows.get().into_iter().take(5).map(|r| view! { <a href="#/">{format!("v{} · {}", r["version"], r["at"].as_str().unwrap_or("").get(..16).unwrap_or(""))}</a> }).collect_view().into_any() }}
+    </div></details> }
+}
+
 fn toggle_theme() {
     let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) else { return };
     let next = if root.get_attribute("data-theme").as_deref() == Some("light") { "dark" } else { "light" };
@@ -148,6 +161,8 @@ fn App() -> impl IntoView {
             <header>
                 <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>"☰"</button>
                 <a class="logo" href="#/">"TommyBot"</a><span class="sp"></span>
+                <details class="ico"><summary aria-label="language">"🌐"</summary><div><button>"English"</button></div></details>
+                <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>"Theme"</button>
                 <details>
                     <summary>{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>

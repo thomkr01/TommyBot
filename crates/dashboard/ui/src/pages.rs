@@ -34,6 +34,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <div class="split">
                 <div><h2>"Setup process"</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
                 <Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) color=Some("var(--primary)") />
+                <svg class="wizart" viewBox="0 0 120 120" aria-hidden="true"><path d="M60 8 104 26v32c0 28-19 46-44 54C35 104 16 86 16 58V26z" fill="var(--primary)" opacity=".25" stroke="var(--primary)" stroke-width="4"/><path d="m40 60 14 14 28-30" fill="none" stroke="var(--primary)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </div>
             <h2>"Steps"</h2>
             <div class="steps">
