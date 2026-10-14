@@ -199,6 +199,8 @@ pub struct FiltersCfg {
     pub inactive_channel: FilterCfg,
     /// Messages after a quiet spell that count as the inactive-channel burst.
     pub inactive_messages: u32,
+    /// Hours without a message before a channel counts as inactive.
+    pub inactive_hours: u32,
     /// Mentions tab: `mentions` holds the action, the rest only switch their heat.
     pub mentions: FilterCfg,
     pub mention_users: FilterCfg,
@@ -241,6 +243,7 @@ impl Default for FiltersCfg {
             suspicion: on(),
             inactive_channel: on(),
             inactive_messages: 10,
+            inactive_hours: 1,
             mentions: on(),
             mention_users: on(),
             mention_roles: on(),

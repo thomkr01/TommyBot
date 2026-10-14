@@ -268,12 +268,9 @@ pub struct ChannelActivity {
 }
 
 impl ChannelActivity {
-    /// shortcut: a fixed hour of silence makes a channel inactive; make it a setting if servers ask.
-    pub const QUIET_MS: i64 = 3_600_000;
-
-    /// True for the first `burst` messages after the channel was quiet.
-    pub fn on_message(&mut self, now: i64, burst: u32) -> bool {
-        if self.last_ms > 0 && now - self.last_ms >= Self::QUIET_MS {
+    /// True for the first `burst` messages after the channel was quiet for `quiet_hours`.
+    pub fn on_message(&mut self, now: i64, burst: u32, quiet_hours: u32) -> bool {
+        if self.last_ms > 0 && now - self.last_ms >= i64::from(quiet_hours.max(1)) * 3_600_000 {
             self.burst_left = burst;
         }
         self.last_ms = now;
@@ -327,10 +324,15 @@ mod tests {
     #[test]
     fn quiet_channel_flags_the_next_burst() {
         let mut c = ChannelActivity::default();
-        assert!(!c.on_message(1, 2));
-        let later = 1 + ChannelActivity::QUIET_MS;
+        assert!(!c.on_message(1, 2, 2));
+        let later = 1 + 3_600_000;
+        assert!(
+            !c.on_message(later, 2, 2),
+            "one hour is not quiet for a 2 h setting"
+        );
+        let later = later + 2 * 3_600_000;
         assert_eq!(
-            [later, later + 1, later + 2].map(|t| c.on_message(t, 2)),
+            [later, later + 1, later + 2].map(|t| c.on_message(t, 2, 2)),
             [true, true, false]
         );
     }
