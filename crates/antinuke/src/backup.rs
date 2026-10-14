@@ -41,12 +41,28 @@ pub struct ChannelImg {
 
 pub const CATEGORY: u8 = 4;
 
+/// Server-level settings a nuker can change. Channel ids are image ids, mapped on restore.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Settings {
+    pub name: String,
+    pub verification: u8,
+    pub notifications: u8,
+    pub content_filter: u8,
+    pub afk_channel: Option<u64>,
+    pub afk_timeout: u64,
+    pub system_channel: Option<u64>,
+    pub locale: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub guild: u64,
     pub name: String,
     pub roles: Vec<RoleImg>,
     pub channels: Vec<ChannelImg>,
+    /// `None` in backups made before settings were captured and in dashboard previews.
+    #[serde(default)]
+    pub settings: Option<Settings>,
 }
 
 /// A planned change. Ids on `Update`/`Delete` are live ids; `Create` carries the image object.
@@ -62,6 +78,8 @@ pub struct Plan {
     pub roles: Vec<Change<RoleImg>>,
     /// Categories first, so children can resolve their parent through the id map.
     pub channels: Vec<Change<ChannelImg>>,
+    /// Server settings to restore, still with image channel ids.
+    pub settings: Option<Settings>,
     /// Image id -> live id for objects that already exist. The bot adds created objects as it goes.
     pub id_map: HashMap<u64, u64>,
 }
@@ -89,6 +107,9 @@ pub fn describe(plan: &Plan, live: &Image) -> Vec<String> {
                 format!("- channel {}", name.map_or(id.to_string(), Clone::clone))
             }
         });
+    }
+    if plan.settings.is_some() {
+        out.push("~ server settings".into());
     }
     out
 }
@@ -201,6 +222,16 @@ pub fn plan(image: &Image, live: &Image, keep: &HashSet<u64>, respect_lock: bool
             p.channels.push(Change::Delete(l.id));
         }
     }
+    // Channel ids compare after mapping, so a recreated AFK channel doesn't look changed.
+    let map = |id: &Option<u64>| id.map(|i| p.id_map.get(&i).copied().unwrap_or(i));
+    p.settings = image.settings.clone().filter(|want| {
+        live.settings.as_ref().is_some_and(|now| {
+            let mut want = want.clone();
+            want.afk_channel = map(&want.afk_channel);
+            want.system_channel = map(&want.system_channel);
+            &want != now
+        })
+    });
     p
 }
 
@@ -241,6 +272,7 @@ mod tests {
             name: "g".into(),
             roles,
             channels,
+            ..Default::default()
         }
     }
 
@@ -350,6 +382,27 @@ mod tests {
         let (image, live) = (img(vec![want], vec![]), img(vec![locked], vec![]));
         assert!(is_empty(&plan(&image, &live, &HashSet::new(), true)));
         assert_eq!(plan(&image, &live, &HashSet::new(), false).roles.len(), 1);
+    }
+
+    #[test]
+    fn settings_restore_only_when_changed() {
+        let mut image = img(vec![], vec![chan(20, "afk", 2, None)]);
+        let want = Settings {
+            name: "Home".into(),
+            afk_channel: Some(20),
+            ..Default::default()
+        };
+        image.settings = Some(want.clone());
+        let mut live = img(vec![], vec![chan(20, "afk", 2, None)]);
+        live.settings = Some(want.clone());
+        assert_eq!(plan(&image, &live, &HashSet::new(), false).settings, None);
+        live.settings = Some(Settings {
+            name: "hacked".into(),
+            ..want.clone()
+        });
+        let p = plan(&image, &live, &HashSet::new(), false);
+        assert_eq!(p.settings, Some(want));
+        assert_eq!(describe(&p, &live).last().unwrap(), "~ server settings");
     }
 
     #[test]
