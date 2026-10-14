@@ -111,8 +111,15 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
     }
 }
 
-fn blank_rule() -> Value {
-    json!({"name": "New rule", "enabled": true, "trigger": "keyword", "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 10,
+const RULE_KINDS: [(&str, &str, &str); 4] = [
+    ("Block Mention Spam", "mention", "Blocks messages that mention too many members or roles."),
+    ("Block Commonly Flagged Words", "preset", "Discord's profanity, sexual content and slurs lists."),
+    ("Block Suspected Spam Content", "spam", "Blocks messages Discord thinks are spam."),
+    ("Block Custom Words", "keyword", "Blocks the words you list."),
+];
+
+fn blank_rule(name: &str, trigger: &str) -> Value {
+    json!({"name": name, "enabled": true, "trigger": trigger, "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 10,
         "custom_message": "", "alert_channel": "", "timeout_s": 0, "exempt_roles": [], "exempt_channels": [], "bot_actions": []})
 }
 
@@ -170,6 +177,7 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
 pub fn DiscordRules(guild: String) -> impl IntoView {
     let rules = RwSignal::new(Vec::<Value>::new());
     let (msg, dc, editing) = (RwSignal::new(String::new()), RwSignal::new(json!({})), RwSignal::new(None::<Value>));
+    let picking = RwSignal::new(false);
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/discord-rules", g.get_value()), None).await {
@@ -190,12 +198,19 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
     view! {
         <div class="card row">
             <button on:click=move |_| load()>"Refresh"</button>
-            <button class="go" on:click=move |_| editing.set(Some(blank_rule()))>"+ Create"</button>
+            <button class="go" on:click=move |_| picking.set(true)>"+ Create"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
         <Show when=move || rules.get().is_empty()>
             <div class="card empty"><p class="warn">"No Discord AutoMod rules found."</p>
-                <button class="ghost dashed" on:click=move |_| editing.set(Some(blank_rule()))>"+ CREATE NEW RULE"</button></div>
+                <button class="ghost dashed" on:click=move |_| picking.set(true)>"+ CREATE NEW RULE"</button></div>
+        </Show>
+        <Show when=move || picking.get()>
+            <div class="card"><h2>"Create a rule"</h2>
+                {RULE_KINDS.map(|(name, trigger, tip)| view! { <div class="row">
+                    <button class="go" on:click=move |_| { picking.set(false); editing.set(Some(blank_rule(name, trigger))); }>{name}</button>
+                    <span class="muted">{tip}</span></div> })}
+                <button class="ghost" on:click=move |_| picking.set(false)>"Cancel"</button></div>
         </Show>
         <For each=move || rules.get() key=|r| r.to_string() let:r>
             {
