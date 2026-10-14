@@ -11,7 +11,16 @@ pub enum Level {
 }
 
 /// Sections that need Admin + TOTP step-up (spec 2.5.5).
-pub const SENSITIVE: &[&str] = &["antinuke", "whitelist"];
+pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic"];
+
+/// Level and step-up a write to `section` needs.
+pub fn write_bar(section: &str) -> (Level, bool) {
+    if SENSITIVE.contains(&section) {
+        (Level::Admin, true)
+    } else {
+        (Level::Editor, false)
+    }
+}
 
 pub const SECTIONS: &[&str] = &[
     "wizard",
@@ -61,6 +70,18 @@ pub fn level(f: &Facts) -> Level {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_section_has_a_write_bar() {
+        for s in SECTIONS {
+            let (min, step_up) = write_bar(s);
+            assert_eq!(step_up, SENSITIVE.contains(s));
+            assert_eq!(min, if step_up { Level::Admin } else { Level::Editor });
+        }
+        assert!(SENSITIVE.iter().all(|s| SECTIONS.contains(s)));
+        // A viewer can never write, and an editor never touches anti-nuke.
+        assert!(Level::Viewer < write_bar("misc").0 && Level::Editor < write_bar("antinuke").0);
+    }
 
     #[test]
     fn levels() {

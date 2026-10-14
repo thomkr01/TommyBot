@@ -57,6 +57,19 @@ impl Role {
     }
 }
 
+/// Roles the bot can safely strip in one go: not managed, not @everyone, below the bot.
+fn strip_targets(roles: &[Role], guild: i64, bot_pos: i64) -> Vec<&Role> {
+    roles
+        .iter()
+        .filter(|r| {
+            !r.managed
+                && r.id != guild.to_string()
+                && r.position < bot_pos
+                && r.perms() & DANGEROUS != 0
+        })
+        .collect()
+}
+
 fn row(id: &str, severity: &str, title: &str, detail: String, fix: Option<(&str, &str)>) -> Value {
     json!({"id": id, "severity": severity, "title": title, "detail": detail,
            "fix": fix.map(|(label, role_id)| json!({"label": label, "role_id": role_id}))})
@@ -142,6 +155,18 @@ fn checks(roles: &[Role], guild: i64, bot_pos: i64, config: &Value) -> Vec<Value
             Some(("Strip permissions", &r.id)),
         ));
     }
+    let strippable = strip_targets(roles, guild, bot_pos).len();
+    if strippable > 1 {
+        out.push(row(
+            "roles_bulk",
+            "warn",
+            "Remove dangerous permissions from all roles",
+            format!(
+                "{strippable} roles below the bot can administer, ban, kick or manage the server."
+            ),
+            Some(("Strip all", "*")),
+        ));
+    }
     if config["logging"]["fallback"]
         .as_str()
         .is_none_or(str::is_empty)
@@ -205,36 +230,43 @@ async fn fix(
     Json(b): Json<FixBody>,
 ) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
-    let roles = roles_of(&st, guild).await?;
-    let r = roles
-        .iter()
-        .find(|r| r.id == b.role_id)
-        .ok_or(ApiError::NotFound)?;
-    if r.managed || r.id == guild.to_string() {
-        return Err(ApiError::BadRequest(
-            "managed and @everyone roles cannot be changed here".into(),
-        ));
+    let (roles, bot_pos) = roles_and_bot_pos(&st, guild).await?;
+    let targets = if b.role_id == "*" {
+        strip_targets(&roles, guild, bot_pos)
+    } else {
+        let r = roles
+            .iter()
+            .find(|r| r.id == b.role_id)
+            .ok_or(ApiError::NotFound)?;
+        if r.managed || r.id == guild.to_string() {
+            return Err(ApiError::BadRequest(
+                "managed and @everyone roles cannot be changed here".into(),
+            ));
+        }
+        vec![r]
+    };
+    for r in &targets {
+        st.discord
+            .call(
+                Method::PATCH,
+                &format!("/guilds/{guild}/roles/{}", r.id),
+                Some(json!({"permissions": (r.perms() & !DANGEROUS).to_string()})),
+            )
+            .await?;
     }
-    let perms = (r.perms() & !DANGEROUS).to_string();
-    st.discord
-        .call(
-            Method::PATCH,
-            &format!("/guilds/{guild}/roles/{}", r.id),
-            Some(json!({"permissions": perms})),
-        )
-        .await?;
-    {
-        let (_, c) = crate::store::current(&st.db, guild).await?;
-        log_change(
-            &st,
-            &c,
-            format!(
-                "{} (<@{}>) stripped dangerous permissions from role `{}`",
-                s.username, s.user_id, r.name
-            ),
-        )
-        .await;
-    }
+    let names: Vec<&str> = targets.iter().map(|r| r.name.as_str()).collect();
+    let (_, c) = crate::store::current(&st.db, guild).await?;
+    log_change(
+        &st,
+        &c,
+        format!(
+            "{} (<@{}>) stripped dangerous permissions from role(s) `{}`",
+            s.username,
+            s.user_id,
+            names.join("`, `")
+        ),
+    )
+    .await;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -464,6 +496,22 @@ mod tests {
             &json!({"antinuke": {"quarantine_role": "9"}, "logging": {"fallback": "5"}}),
         );
         assert!(rows.iter().any(|r| r["id"] == "quarantine_above_bot"));
+    }
+
+    #[test]
+    fn bulk_strip_skips_managed_everyone_and_roles_above_bot() {
+        let roles = [
+            role("1", 0, false, 0x8),
+            role("2", 2, false, 0x8),
+            role("3", 3, true, 0x8),
+            role("4", 4, false, 0x8),
+            role("5", 1, false, 0x400),
+        ];
+        let ids: Vec<&str> = strip_targets(&roles, 1, 4)
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, ["2"]);
     }
 
     #[test]
