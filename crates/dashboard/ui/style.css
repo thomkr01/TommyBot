@@ -72,4 +72,11 @@ details { margin:12px 0; }
 button.ghost.on { background:var(--primary); color:#fff; border-color:var(--primary); }
 .wizart { width:120px; height:120px; flex:none; }
 header details.ico summary { background:none; font-size:18px; }
-.card .bell { float:right; width:28px; height:28px; border-radius:50%; background:var(--bad); display:grid; place-items:center; text-decoration:none; font-size:14px; }
+.modal { position:fixed; inset:0; z-index:50; background:#000a; display:grid; place-items:center; overflow:auto; } .modal .card { width:min(92vw,640px); max-height:90vh; overflow:auto; margin:0; }
+.card .back { cursor:pointer; color:var(--info); display:block; margin-bottom:8px; } button.menu { display:block; width:100%; margin:6px 0; text-align:left; }
+table.permits { width:100%; max-width:900px; margin:0 auto; border-collapse:collapse; } table.permits th { text-align:left; text-transform:uppercase; } table.permits th, table.permits td { padding:10px 12px; border-bottom:1px solid var(--line); } table.permits td:last-child { text-align:right; }
+.chip.new { background:var(--ok); color:#000; margin-left:6px; font-size:10px; }
+.cards.five { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+details.notes { margin:8px 0 0; } details.notes summary { cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; } details.notes .bell { float:none; } details.notes p { margin:6px 0 0; color:var(--warn); }
+.bell { width:28px; height:28px; border-radius:50%; background:var(--bad); display:grid; place-items:center; font-size:14px; }
+.stack.narrow { max-width:36rem; }

@@ -76,11 +76,12 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
     }
 }
 
-/// Page header: the page name over the server name.
+/// Page header: small label over the big title (the server name unless `big` is given; an empty `big` hides it).
 #[component]
-pub fn Head(guild: String, page: String) -> impl IntoView {
+pub fn Head(guild: String, page: String, #[prop(optional)] big: Option<String>) -> impl IntoView {
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
-    view! { <div class="head"><small>{page}</small><h1>{move || guilds.get().iter().find(|g| g["id"] == guild.as_str()).and_then(|g| g["name"].as_str().map(String::from)).unwrap_or_else(|| guild.clone())}</h1></div> }
+    let title = move || big.clone().unwrap_or_else(|| guilds.get().iter().find(|g| g["id"] == guild.as_str()).and_then(|g| g["name"].as_str().map(String::from)).unwrap_or_else(|| guild.clone()));
+    view! { <div class="head"><small>{page}</small>{move || Some(title()).filter(|t| !t.is_empty()).map(|t| view! { <h1>{t}</h1> })}</div> }
 }
 
 /// Runs a request, routing `step_up_required` to the prompt and other errors to `msg`.

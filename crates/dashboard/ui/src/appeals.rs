@@ -30,7 +30,7 @@ pub fn AppealList(guild: String) -> impl IntoView {
     view! {
         <div class="card row">
             <div class="chips">
-                {[("", "All"), ("ban", "Ban"), ("timeout", "Timeout")].map(|(k, l)| view! { <button class="ghost" class:on=move || kind.get() == k on:click=move |_| { kind.set(k.into()); load() }>{l}</button> }).collect_view()}
+                {["ban", "timeout"].map(|k| view! { <button class="ghost" class:on=move || kind.get() == k on:click=move |_| { kind.set(if kind.get_untracked() == k { String::new() } else { k.into() }); load() }>{k}</button> }).collect_view()}
             </div>
             <input placeholder="User ID/tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
             <button class="ghost" on:click=move |_| load()>"Search"</button>
