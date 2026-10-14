@@ -181,7 +181,7 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: i64, confirm: bool) -> Re
         lines[..shown].join("\n")
     );
     if lines.len() > shown {
-        text += &format!("\n...and {} more", lines.len() - shown);
+        text += format!("\n...and {} more", lines.len() - shown).as_str();
     }
     text += "\nRun again with confirm:true to apply.";
     Ok(text)

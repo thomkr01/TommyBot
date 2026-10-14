@@ -16,14 +16,20 @@ pub fn case_counts(s: &str) -> (usize, usize) {
     })
 }
 
+/// Every http(s) URL in the text, with the wrapping punctuation trimmed.
+pub fn urls(s: &str) -> Vec<&str> {
+    s.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| "<>()[]\"'".contains(c)))
+        .filter(|w| w.starts_with("https://") || w.starts_with("http://"))
+        .collect()
+}
+
 /// Hosts of every http(s) URL in the text, lowercased, without port or `www.`.
 pub fn hosts(s: &str) -> Vec<String> {
-    s.split_whitespace()
-        .filter_map(|w| {
-            let rest = w.trim_matches(|c: char| "<>()[]\"'".contains(c));
-            let rest = rest
-                .strip_prefix("https://")
-                .or_else(|| rest.strip_prefix("http://"))?;
+    urls(s)
+        .into_iter()
+        .filter_map(|u| {
+            let rest = u.split_once("://")?.1;
             let host = rest
                 .split(['/', '?', '#'])
                 .next()?
@@ -64,6 +70,14 @@ pub fn has_shortener(hosts: &[String]) -> bool {
     hosts
         .iter()
         .any(|h| SHORTENERS.iter().any(|d| on_domain(h, d)))
+}
+
+/// The URLs in the text that point at a known shortener.
+pub fn shortener_urls(s: &str) -> Vec<&str> {
+    urls(s)
+        .into_iter()
+        .filter(|u| has_shortener(&hosts(u)))
+        .collect()
 }
 
 const OFFICIAL: &[&str] = &[
@@ -171,6 +185,10 @@ mod tests {
         ));
         assert!(has_shortener(&hosts("https://bit.ly/abc")));
         assert!(!has_shortener(&hosts("https://example.com")));
+        assert_eq!(
+            shortener_urls("see <https://bit.ly/x> and https://example.com/y"),
+            ["https://bit.ly/x"]
+        );
     }
 
     #[test]

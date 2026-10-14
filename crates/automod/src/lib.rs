@@ -8,6 +8,7 @@ pub mod filters;
 pub mod heat;
 pub mod join;
 pub mod lockdown;
+pub mod sites;
 pub mod store;
 pub mod strike;
 pub mod window;

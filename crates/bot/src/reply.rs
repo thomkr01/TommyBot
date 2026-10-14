@@ -1,6 +1,7 @@
 //! Reply-shaping helpers driven by `MiscCfg`: compact text, DMs, delayed deletes, message purges.
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use tommybot_core::jobs;
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
@@ -18,9 +19,9 @@ pub fn case_text(
 ) -> String {
     let mut s = format!("Case #{case_no}: {kind} <@{target}>");
     if !compact {
-        s += &format!("\nModerator: <@{actor}>");
+        s += format!("\nModerator: <@{actor}>").as_str();
         if let Some(r) = reason {
-            s += &format!("\nReason: {r}");
+            s += format!("\nReason: {r}").as_str();
         }
     }
     s
@@ -30,9 +31,9 @@ pub fn case_text(
 pub fn dm_text(kind: &str, reason: Option<&str>, actor: Option<u64>) -> String {
     let mut s = format!("You received a {kind} in a server");
     if let Some(a) = actor {
-        s += &format!(" from <@{a}>");
+        s += format!(" from <@{a}>").as_str();
     }
-    s + &format!(". Reason: {}", reason.unwrap_or("none given"))
+    s + format!(". Reason: {}", reason.unwrap_or("none given")).as_str()
 }
 
 /// Best effort: closed DMs are normal, so failures are ignored.
@@ -69,7 +70,6 @@ pub async fn run_delete(app: &App, payload: &Value) -> Result<()> {
 }
 
 /// Bulk delete `user`'s messages among the channel's last 100. Discord refuses messages older than 14 days.
-// shortcut: only the triggering channel, the bot keeps no per-user channel history.
 pub async fn purge_user(app: &App, channel: Id<ChannelMarker>, user: Id<UserMarker>) -> Result<()> {
     let msgs = app.http.channel_messages(channel).limit(100).await?;
     let cutoff = now_secs() - 14 * 86_400 + 60;
@@ -80,13 +80,36 @@ pub async fn purge_user(app: &App, channel: Id<ChannelMarker>, user: Id<UserMark
         .filter(|m| m.author.id == user && m.timestamp.as_secs() > cutoff)
         .map(|m| m.id)
         .collect();
-    match ids.len() {
-        0 => {}
-        1 => {
-            app.http.delete_message(channel, ids[0]).await?;
+    delete_batch(app, channel, &ids).await
+}
+
+/// Deletes tracked (channel, message) pairs, one bulk delete per channel; too old ones are skipped.
+pub async fn purge_ids(app: &App, msgs: &[(u64, u64)]) {
+    let cutoff_ms = (now_secs() - 14 * 86_400 + 60) * 1000;
+    let mut by_channel: HashMap<u64, Vec<Id<MessageMarker>>> = HashMap::new();
+    for &(c, m) in msgs {
+        // Snowflake timestamp: ms since the Discord epoch in the top bits.
+        if ((m >> 22) + 1_420_070_400_000) as i64 > cutoff_ms {
+            by_channel.entry(c).or_default().push(Id::new(m));
+        }
+    }
+    for (c, ids) in by_channel {
+        delete_batch(app, Id::new(c), &ids).await.ok();
+    }
+}
+
+async fn delete_batch(
+    app: &App,
+    channel: Id<ChannelMarker>,
+    ids: &[Id<MessageMarker>],
+) -> Result<()> {
+    match ids {
+        [] => {}
+        [one] => {
+            app.http.delete_message(channel, *one).await?;
         }
         _ => {
-            app.http.delete_messages(channel, &ids).await?;
+            app.http.delete_messages(channel, ids).await?;
         }
     }
     Ok(())
