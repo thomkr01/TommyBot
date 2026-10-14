@@ -6,6 +6,11 @@ use twilight_model::{
         ChannelType,
     },
     gateway::payload::incoming::GuildCreate,
+    guild::audit_log::AuditLogEventType,
+    id::{
+        marker::{GuildMarker, UserMarker},
+        Id,
+    },
 };
 use twilight_util::builder::embed::EmbedBuilder;
 
@@ -56,9 +61,9 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
             .find(|c| c.kind == ChannelType::GuildText)
             .map(|c| c.id)
     });
-    let (true, Some(channel)) = (new, channel) else {
+    if !new {
         return Ok(());
-    };
+    }
 
     let dashboard = std::env::var("DASHBOARD_URL")
         .ok()
@@ -94,12 +99,57 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
             components: links,
         })]
     };
+    // Like Wick: tell whoever added the bot, and fall back to the server when their DMs are closed.
+    if let Some(adder) = bot_adder(app, g.id, app.me).await {
+        let dm = async {
+            let ch = app
+                .http
+                .create_private_channel(adder)
+                .await?
+                .model()
+                .await?;
+            app.http
+                .create_message(ch.id)
+                .embeds(&embeds)
+                .components(&rows)
+                .await?;
+            anyhow::Ok(())
+        };
+        if dm.await.is_ok() {
+            return Ok(());
+        }
+    }
+    let Some(channel) = channel else {
+        return Ok(());
+    };
     app.http
         .create_message(channel)
         .embeds(&embeds)
         .components(&rows)
         .await?;
     Ok(())
+}
+
+/// Who added `bot`, from the audit log; None when there is no entry or the lookup fails.
+pub async fn bot_adder(
+    app: &App,
+    gid: Id<GuildMarker>,
+    bot: Id<UserMarker>,
+) -> Option<Id<UserMarker>> {
+    let log = app
+        .http
+        .audit_log(gid)
+        .action_type(AuditLogEventType::BotAdd)
+        .limit(10)
+        .await
+        .ok()?
+        .model()
+        .await
+        .ok()?;
+    log.entries
+        .iter()
+        .find(|e| e.target_id.is_some_and(|t| t.get() == bot.get()))
+        .and_then(|e| e.user_id)
 }
 
 #[cfg(test)]

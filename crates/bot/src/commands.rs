@@ -156,12 +156,19 @@ pub async fn apply_dm(
     let t = target.get();
     let cfg = app.cfg(gid.get()).await?;
     let soft = flags.soft && kind == ModKind::Ban;
-    if matches!(kind, ModKind::Ban | ModKind::Timeout) && !soft {
-        appeals::dm_link(app, &cfg.appeals, gid, target).await; // before the ban: a banned user can't be DMed
-    }
-    if flags.dm || cfg.misc.always_dm {
+    // One DM before the action: a banned user can't be DMed afterwards.
+    let note = appeals::note(&cfg.appeals, gid)
+        .filter(|_| matches!(kind, ModKind::Ban | ModKind::Timeout) && !soft);
+    let told = (flags.dm || cfg.misc.always_dm).then(|| {
         let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());
-        reply::dm(app, target, &reply::dm_text(perm, reason, who)).await;
+        reply::dm_text(perm, reason, who)
+    });
+    if let Some(text) = [told, note]
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| format!("{a}\n{b}"))
+    {
+        reply::dm(app, target, &text).await;
     }
     let (inverse, points) = match kind {
         ModKind::Ban if soft => {
