@@ -37,6 +37,41 @@ pub fn name_of(dc: &Value, key: &str, id: &str) -> String {
     items(dc, key).into_iter().find(|(i, _)| i == id).map_or_else(|| id.to_string(), |(_, l)| l)
 }
 
+/// Wick's wording for the stored option values; anything else just gets a capital letter.
+fn opt_label(v: &str) -> String {
+    match v {
+        "Nothing" => "Keep Unverified".into(),
+        "SuspiciousOnly" => "Suspicious".into(),
+        "Dm" => "DMs".into(),
+        "Web" => "Website".into(),
+        "Button" => "Instant Access".into(),
+        "ThirdParty" => "Third-party captcha".into(),
+        "Captcha" => "TommyBot Captcha (Channel)".into(),
+        "SimpleCaptcha" => "Simple Captcha (Channel)".into(),
+        _ => v.chars().next().map_or(String::new(), |c| c.to_uppercase().chain(v.chars().skip(1)).collect()),
+    }
+}
+
+/// What the trigger action does, for the help text under an automod filter's action.
+fn action_desc(a: &str) -> &'static str {
+    match a {
+        "timeout" => "Discord's native timeout feature used to prevent the member from sending messages or joining voice channels",
+        "warn" => "issuing a warn to the member triggering this filter, multiple warns lead to an actual punishment",
+        "kick" => "Discord's native kick feature",
+        "ban" => "Discord's native ban feature",
+        "delete" => "deleting the message",
+        _ => "left to the strike system",
+    }
+}
+
+/// (anti-nuke action, verb, things, per-second noun) for the limit sentences.
+const NUKE_WORDS: [(&str, &str, &str, &str); 8] = [
+    ("Kick", "kick", "members", "removal"), ("Ban", "ban", "members", "removal"),
+    ("RoleCreate", "create", "roles", "creation"), ("RoleDelete", "delete", "roles", "deletion"),
+    ("ChannelCreate", "create", "channels", "creation"), ("ChannelDelete", "delete", "channels", "deletion"),
+    ("WebhookCreate", "create", "webhooks", "creation"), ("WebhookDelete", "delete", "webhooks", "deletion"),
+];
+
 /// (id, label) pairs from `/discord` for `key` ("channels" or "roles").
 fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
     let pre = if key == "channels" { "#" } else { "@" };
@@ -78,7 +113,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 let x = get().as_f64().unwrap_or(0.0) + d;
                 set(if float { json!(x) } else { json!(x as i64) })
             };
-            let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "points", n if n.ends_with("_pct") || n == "heat" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" => "px", "length" => "characters", _ => "" };
+            let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
             view! { <div class="step"><button class="ghost" on:click=move |_| step(-1.0)>"-"</button>
                 <input prop:value=move || show(&get()) on:change=move |e| {
                     let s = event_target_value(&e);
@@ -95,7 +130,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             let opts = f["options"].as_array().cloned().unwrap_or_default();
             let none = f["none_label"].as_str().unwrap_or("off").to_string();
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
-                {opts.iter().map(|o| { let v = show(o); let l = if v.is_empty() { none.clone() } else { v.clone() };
+                {opts.iter().map(|o| { let v = show(o); let l = if v.is_empty() { none.clone() } else { opt_label(&v) };
                     view! { <option value=v.clone() selected=move || show(&get()) == v>{l}</option> } }).collect_view()}
             </select> }.into_any()
         }
@@ -210,8 +245,18 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             format!("A member approximately needs to send {n:.2} {} before getting timed out for {} {}(s), the Auto Timeouts regular strike duration.", h["noun"].as_str().unwrap_or("messages"), secs / UNITS[u].1, UNITS[u].0)
         }}</span> }
     });
+    let nuke = path.strip_prefix("antinuke.limits.").and_then(|r| r.split_once('.')).and_then(|(a, k)| NUKE_WORDS.iter().find(|w| w.0 == a).map(|w| (w, k == "per_hour"))).filter(|_| tail == "per_minute" || tail == "per_hour").map(|(w, hour)| view! { <span class="muted">{move || {
+        let n = get().as_f64().unwrap_or(0.0);
+        let (span, per, div) = if hour { ("1 hour", "minute", 60.0) } else { ("60 seconds", "second", 60.0) };
+        format!("A staff member needs to {} {n} {} in less than {span}, That's an average of {:.2} {} every single {per} that they need to stay under if they want TommyBot not coming after them.", w.1, w.2, n / div, w.3)
+    }}</span> });
+    let action = (path.starts_with("automod.filters.") && tail == "action").then(|| view! { <span class="muted">{move || {
+        let a = get();
+        let a = a.as_str().unwrap_or("");
+        format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "strike system" } else { a }, action_desc(a))
+    }}</span> });
     let label = f["title"].as_str().map_or_else(|| tail.replace('_', " "), String::from);
-    view! { <div class="row" class:tog=kind == "bool"><label>{label}</label>{input}{help}{helper}</div> }
+    view! { <div class="row" class:tog=kind == "bool"><label>{label}</label>{input}{help}{helper}{nuke}{action}</div> }
 }
 
 /// Raw JSON of one section of the config in `val`.
@@ -232,7 +277,6 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
     let fields = RwSignal::new(Vec::<Value>::new());
     let orig = RwSignal::new(json!({}));
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
-    let gid0 = StoredValue::new(guild.clone());
     let (g, n) = (guild.clone(), name.clone());
     spawn_local(async move {
         match api("GET", &format!("/api/guilds/{g}/config"), None).await {
@@ -291,8 +335,7 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
                     let sec = n.get_value();
                     let off = val.get()[&sec]["enabled"] == json!(false);
                     let switch = format!("{sec}.enabled");
-                    let gid = gid0.get_value();
-                    groups.into_iter().map(|(g, fs)| { let ring = off && !fs.iter().any(|f| f["path"] == switch.as_str()); view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}<a class="bell" href=format!("#/{gid}/logging") title="Alerts for this system go to your log channels" aria-label="alerts">"🔔"</a></div> } }).collect_view()
+                    groups.into_iter().map(|(g, fs)| { let ring = off && !fs.iter().any(|f| f["path"] == switch.as_str()); view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}{ring.then(|| view! { <details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{format!("Your whole {sec} is disabled, the settings of this card have no effect.")}</p></details> })}</div> } }).collect_view()
                 }}
             </div>
             <details><summary>"Advanced (raw JSON)"</summary>

@@ -28,6 +28,8 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
     ("Raw JSON", &[("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
+/// Groups Wick has; the rest are TommyBot extras that stay folded until visited.
+const WICK_GROUPS: [&str; 3] = ["Auto Mod", "Anti Nuke", "Server Joins"];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
 const REPORT_TABS: &[(&str, &str)] = &[("report_list", "List"), ("report_blacklist", "Blacklist")];
@@ -43,18 +45,27 @@ const FILTER_PAGES: &[(&str, &str, &str)] = &[
     ("links", "Link Blacklist", "Target websites found in messages that you manage."),
 ];
 
-fn title(p: &str) -> String {
+/// (small label, big title) like Wick's page header; no title means the server name.
+fn title(p: &str) -> (String, Option<String>) {
+    let two = |a: &str, b: &str| (a.to_string(), Some(b.to_string()));
     match p {
-        _ if p.starts_with("appeal") => "Appeals".into(),
-        _ if p.starts_with("report") => "Reports".into(),
-        _ if p.starts_with("lockdown") => "Lockdown".into(),
-        "discord_automod" => "Discord AutoMod".into(),
-        "antinuke" | "antinuke_filters" => format!("Anti Nuke {}", if p == "antinuke" { "General" } else { "Filters" }),
-        "automod" => "Auto Mod General".into(),
-        "automod_panic" => "Auto Mod Panic Mode".into(),
-        "antinuke_panic" => "Anti Nuke Panic Mode".into(),
-        "filters" => "Auto Mod Filters".into(),
-        _ => NAV.iter().flat_map(|(_, i)| i.iter()).chain(TOP).find(|(k, _)| *k == p).map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()),
+        "permits" => two("Permits", "Customize your permissions."),
+        "logging" => ("Custom Logging".into(), None),
+        _ if p.starts_with("lockdown") => two("Lockdown", "Manage your lockdown modes"),
+        _ if p.starts_with("appeal") => ("Appeals".into(), None),
+        _ if p.starts_with("report") => ("Reports".into(), None),
+        "wizard" => ("Wizard".into(), Some(String::new())),
+        "discord_automod" => ("Discord built-in AutoMod".into(), None),
+        "automod" => two("Automod", "General Settings"),
+        "filters" => two("Automod", "Filters"),
+        "whitelist" => two("Automod", "Whitelist"),
+        "antinuke" => two("Anti Nuke", "General Settings"),
+        "antinuke_filters" => two("Anti Nuke", "Filters"),
+        "joingate" => two("Join gate", "General Settings"),
+        "verification" => two("Verification", "General Settings"),
+        "automod_panic" => ("Auto Mod Panic Mode".into(), None),
+        "antinuke_panic" => ("Anti Nuke Panic Mode".into(), None),
+        _ => (NAV.iter().flat_map(|(_, i)| i.iter()).chain(TOP).find(|(k, _)| *k == p).map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()), None),
     }
 }
 
@@ -168,7 +179,7 @@ fn App() -> impl IntoView {
                 <a class="logo" href="#/">"TommyBot"</a><span class="sp"></span>
                 <details class="ico"><summary aria-label="language">"🌐"</summary><div><button>"English"</button></div></details>
                 <Bell route />
-                <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>"Theme"</button>
+                <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>"🌓"</button>
                 <details>
                     <summary>{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
                     <div><a href="#/">"Servers"</a><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
@@ -182,7 +193,7 @@ fn App() -> impl IntoView {
                         Some(g) => {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
-                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}</a> } };
+                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{matches!(p, "logging" | "discord_automod").then(|| view! { <span class="chip new">"new"</span> })}</a> } };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -192,7 +203,7 @@ fn App() -> impl IntoView {
                             view! {
                                 <a class="srv" href="#/" title="Switch server">{icon}{name}<button class="refresh" on:click=move |e| { e.prevent_default(); e.stop_propagation(); spawn_local(load_guilds()) }>"refresh server"</button></a>
                                 {TOP.iter().map(|(p, t)| link(p, t)).collect_view()}
-                                {NAV.iter().map(|(grp, items)| view! { <details open=*grp != "Raw JSON"><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
+                                {NAV.iter().map(|(grp, items)| view! { <details open=WICK_GROUPS.contains(grp) || items.iter().any(|(p, _)| *p == page)><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
                             }.into_any()
                         }
                     }}
@@ -208,7 +219,7 @@ fn App() -> impl IntoView {
                                 <b>{g["name"].as_str().unwrap_or("").to_string()}</b><span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></a></div> }).collect_view()}</div>
                         }.into_any(),
                         [a, g] if a == "appeal" => view! { <AppealForm guild=g.clone() /> }.into_any(),
-                        [g] => view! { <Head guild=g.clone() page=title("overview") /><Score guild=g.clone() enrolled /> }.into_any(),
+                        [g] => view! { <Head guild=g.clone() page=title("overview").0 /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, rest @ ..] => {
                             let sec = |name: &str, part: &str| view! { <Section guild=g.clone() name=name.to_string() part=part.to_string() enrolled /> }.into_any();
                             let page = match (p.as_str(), rest.first()) {
@@ -235,7 +246,8 @@ fn App() -> impl IntoView {
                                 ("filters", None) => view! { <div class="stack">{FILTER_PAGES.iter().map(|(sub, t, d)| view! { <a class="card link" href=format!("#/{g}/filters/{sub}")><span class="ico"></span><span><h3>{*t}</h3><span class="muted">{*d}</span></span><span class="sp"></span>"›"</a> }).collect_view()}</div> }.into_any(),
                                 ("filters", Some(sub)) => {
                                     let tabs = sub.starts_with("spam_").then(|| view! { <Tabs guild=g.clone() items=SPAM_TABS active=format!("filters/{sub}") /> });
-                                    view! { <p><a href=format!("#/{g}/filters")><button class="ghost">"Go back"</button></a></p>{tabs}{sec("automod", sub)} }.into_any()
+                                    let name = FILTER_PAGES.iter().find(|(s, ..)| sub.starts_with(s) || (*s == "spam_text" && sub.starts_with("spam_"))).map_or("", |(_, t, _)| *t);
+                                    view! { <p><a href=format!("#/{g}/filters")><button class="ghost">"Go Back"</button></a></p><h2 style="text-align:center">{name}</h2>{tabs}<h3 style="text-align:center">{match sub.as_str() { "spam_text" => "Text Message Filters", "spam_mentions" => "Mention Filters", "spam_attach" => "Attachment Filters", _ => "" }}</h3>{sec("automod", sub)} }.into_any()
                                 }
                                 ("whitelist", sub) => {
                                     let active = sub.map_or_else(|| "whitelist".to_string(), |s| format!("whitelist/{s}"));
@@ -246,7 +258,7 @@ fn App() -> impl IntoView {
                                 ("antinuke_filters", _) => sec("antinuke", "limits"),
                                 _ => sec(p, ""),
                             };
-                            view! { <Head guild=g.clone() page=title(p) />{page} }.into_any()
+                            { let (page_name, big) = title(p); let head = match big { Some(b) => view! { <Head guild=g.clone() page=page_name big=b /> }.into_any(), None => view! { <Head guild=g.clone() page=page_name /> }.into_any() }; view! { {head}{page} }.into_any() }
                         }
                     }}
                 </main>

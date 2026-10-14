@@ -182,7 +182,10 @@ const GATE_ACTIONS: &[&str] = &["", "Log", "Warn", "Timeout", "Kick", "Ban"];
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
 pub fn schema() -> Vec<Value> {
     let mut log = vec![
-        ti(pg(f("fallback", "channel"), "wick_essential"), "Wick logs"),
+        ti(
+            pg(f("fallback", "channel"), "wick_essential"),
+            "TommyBot logs",
+        ),
         ti(
             pg(
                 fg("Channels", "routes.mod_command", "channel"),
@@ -618,12 +621,12 @@ pub fn schema() -> Vec<Value> {
         }
     }
     let misc = vec![
-        dv(fg("General", "prefix", "text"), "w!"),
-        dv(fg("General", "use_slash", "bool"), true),
-        fg("General", "compact_replies", "bool"),
-        fg("General", "delete_replies_secs", "int"),
-        fg("General", "enforce_quarantine_perms", "bool"),
-        fg("General", "ignore_no_permit", "bool"),
+        ti(dv(fg("General", "prefix", "text"), "w!"), "Prefix"),
+        ti(dv(fg("General", "use_slash", "bool"), true), "Use slash commands"),
+        ti(fg("General", "compact_replies", "bool"), "Minify TommyBot's message replies to compact embeds"),
+        ti(fg("General", "delete_replies_secs", "int"), "Delete TommyBot's auto messages after few seconds"),
+        ti(fg("General", "enforce_quarantine_perms", "bool"), "Always enforce the proper permissions of Quarantine role in channels"),
+        ti(fg("General", "ignore_no_permit", "bool"), "Always ignore commands issued by members without any permits"),
         sx(
             "logging",
             hp(
@@ -655,24 +658,24 @@ pub fn schema() -> Vec<Value> {
                 "The roles your members have; lockdown and verification use them.",
             ),
         ),
-        fg("Moderation commands", "confirm", "bool"),
-        fg("Moderation commands", "always_dm", "bool"),
-        fg("Moderation commands", "delete_invocation", "bool"),
-        fg("Moderation commands", "hide_staff_in_dms", "bool"),
+        ti(fg("Moderation commands", "confirm", "bool"), "Display a confirmation message before executing the moderation action a moderator wants"),
+        ti(fg("Moderation commands", "always_dm", "bool"), "Always DM the members punished regardless of the presence of a ?dm parameter"),
+        ti(fg("Moderation commands", "delete_invocation", "bool"), "Always delete the moderation execution messages for regular prefix commands"),
+        ti(fg("Moderation commands", "hide_staff_in_dms", "bool"), "Hide the staff member responsible when DMing the punished member"),
         hp(
-            dv(
-                fg("Moderation commands", "default_timeout_secs", "int"),
-                600,
+            ti(
+                dv(fg("Moderation commands", "default_timeout_secs", "int"), 600),
+                "Default timeout duration",
             ),
             "0 means 28 days",
         ),
-        dv(fg("Moderation commands", "ban_purge_days", "int"), 0),
-        dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true),
-        fg("Auto moderation", "purge_last_100", "bool"),
-        dv(fg("Auto moderation", "staff_only_permitted", "bool"), true),
-        dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true),
-        dv(fg("Auto warn actions", "warn_base_points", "int"), 1),
-        fg("Auto warn actions", "warn_actions", "warn_actions"),
+        ti(dv(fg("Moderation commands", "ban_purge_days", "int"), 0), "Days purged on bans"),
+        ti(dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true), "Display the reason behind the auto punishment in the message TommyBot sends"),
+        ti(fg("Auto moderation", "purge_last_100", "bool"), "Always purge the messages sent by the punished member found in the recent 100 messages"),
+        ti(dv(fg("Auto moderation", "staff_only_permitted", "bool"), true), "Consider only owners, trusted admins and any member with the flags (IMMUNITY|AUTOMOD IMMUNITY) to be considered staff members. Punish anyone else triggering the auto mod"),
+        ti(dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true), "Issue an action once a member reaches certain points"),
+        ti(dv(fg("Auto warn actions", "warn_base_points", "int"), 1), "Base points"),
+        ti(fg("Auto warn actions", "warn_actions", "warn_actions"), "Custom actions"),
     ];
     let verification = vec![
         ti(

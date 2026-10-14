@@ -25,6 +25,8 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             msg.set(format!("Created: quarantine role {}, log channel {}, mod log channel {}", n("quarantine_role", "roles"), n("logs", "channels"), n("modlogs", "channels")));
         }) });
     };
+    let guilds = expect_context::<ReadSignal<Vec<Value>>>();
+    let g_id = guild.clone();
     let g = guild.clone();
     let me = expect_context::<ReadSignal<Option<Value>>>();
     let support = move || me.get().and_then(|m| m["support_url"].as_str().map(String::from)).unwrap_or_else(|| "https://github.com/thomkr01/TommyBot".into());
@@ -32,7 +34,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         <div class="wizbar"><button on:click=move |_| step.set(0)>"Start wizard"</button><a href=support target="_blank" rel="noopener">"Support"</a></div>
         <div class="card">
             <div class="split">
-                <div><h2>"Setup process"</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
+                <div><h2>{move || format!("{} Setup Process", guilds.get().iter().find(|x| x["id"] == g_id.as_str()).and_then(|x| x["name"].as_str().map(String::from)).unwrap_or_default())}</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
                 <Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) color=Some("var(--primary)") />
                 <svg class="wizart" viewBox="0 0 120 120" aria-hidden="true"><path d="M60 8 104 26v32c0 28-19 46-44 54C35 104 16 86 16 58V26z" fill="var(--primary)" opacity=".25" stroke="var(--primary)" stroke-width="4"/><path d="m40 60 14 14 28-30" fill="none" stroke="var(--primary)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </div>
@@ -127,22 +129,15 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <div>
                 <h2>"Details"</h2>
                 {move || guilds.get().into_iter().find(|x| x["id"] == id.as_str()).map(|x| view! {
-                    <Stat label="Server name" value=s(&x["name"]) />
+                    <Stat label="Server Name" value=s(&x["name"]) />
                     <Stat label="Server ID" value=s(&x["id"]) />
                     // The bot runs a single gateway shard.
                     <Stat label="Shard ID" value="0".into() />
-                    <span class="stat"><span>"Type"</span><b class="chip">"STANDARD"</b></span>
-                    <span class="stat"><span>"Your access"</span><b>{s(&x["level"])}</b></span> })}
+                    <span class="stat"><span>"Type"</span><b class="chip">"STANDARD"</b></span> })}
                 {move || (!members.get().is_null()).then(|| view! { <Stat label="Members" value=s(&members.get()) /> })}
             </div>
             <div><h2>"Security"</h2><Ring pct /><p><button class="ghost" on:click=move |_| notes.update(|n| *n = !*n)>"Notes"</button></p></div>
-        </div></div>
-        <h2 style="text-align:center">"Quick systems overview"</h2>
-        <div class="cards">
-            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
         </div>
-        <p class="err">{move || msg.get()}</p>
-        <Show when=move || notes.get()><h2 style="margin-top:24px">"Security notes"</h2></Show>
         <For each=move || if notes.get() { rows.get() } else { vec![] } key=|r| s(&r["id"]) let:r>
             {
                 let (g, load) = (guild.clone(), load.clone());
@@ -153,9 +148,14 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     view! { <button on:click=move |_| { let (g, role, load) = (g.clone(), role.clone(), load.clone());
                         run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(json!({"role_id": role}))).await }, msg, need, move |_| load()) }>{l}</button> }
                 });
-                view! { <div class="card"><b class=class>{s(&r["title"])}</b><p class="muted">{s(&r["detail"])}</p>{fix}</div> }
+                view! { <div class="row"><b class=class>{s(&r["title"])}</b><span class="muted">{s(&r["detail"])}</span>{fix}</div> }
             }
-        </For>
+        </For></div>
+        <h2 style="text-align:center">"Quick Systems Overview"</h2>
+        <div class="cards five">
+            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
+        </div>
+        <p class="err">{move || msg.get()}</p>
         <StepUp need enrolled />
     }
 }
@@ -268,8 +268,8 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
     let part = format!("{tab}_{sub}");
     view! {
         <div class="tabs">
-            <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"wick"</a>
-            <a class:on=tab == "discord" href=format!("#/{guild}/logging/discord/{sub}")>"discord"</a>
+            <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"tommybot"<span class="chip new">"new"</span></a>
+            <a class:on=tab == "discord" href=format!("#/{guild}/logging/discord/{sub}")>"discord"<span class="chip new">"new"</span></a>
         </div>
         <div class="tabs">
             <a class:on=sub == "essential" href=format!("#/{guild}/logging/{tab}/essential")>"essential"</a>

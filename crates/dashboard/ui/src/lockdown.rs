@@ -50,6 +50,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
     let lock = move |kind: &'static str, channel: Option<String>| act("lock", json!({"kind": kind, "channel": channel, "duration_s": (secs.get_untracked() > 0).then(|| secs.get_untracked())}));
     let locked = move || Some(status.get()["locked"].clone()).filter(|l| !l.is_null());
     view! {
+        <div class="stack narrow">
         <div class="card row">
             <label>"Lock length"</label>
             <select on:change=move |e| secs.set(event_target_value(&e).parse().unwrap_or(0))>
@@ -61,9 +62,9 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
         {LOCKS.iter().map(|(title, what, kind, covers)| {
             let is_on = move || locked().is_some_and(|l| covers(&l));
             view! { <div class="card row lockrow">
-                <div><h3>{*title}</h3><span class="muted">{*what}</span></div><span class="sp"></span>
-                <Show when=move || *kind == "server" && !is_on()><button class="ghost" on:click=move |_| single.update(|x| *x = !*x)>"Individual channels"</button></Show>
-                <Show when=is_on fallback=move || view! { <span class="chip ok">"Unlocked"</span><button class="danger" disabled=move || locked().is_some() on:click=move |_| lock(kind, None)>"Lock"</button> }>
+                <h3 title=*what>{*title}</h3><span class="sp"></span>
+                <Show when=move || *kind == "server" && !is_on()><button class="ghost" title="Individual Channels" on:click=move |_| single.update(|x| *x = !*x)>"Individual channels"</button></Show>
+                <Show when=is_on fallback=move || view! { <span class="chip ok">"Already Unlocked"</span><button class="danger" disabled=move || locked().is_some() on:click=move |_| lock(kind, None)>"Lock"</button> }>
                     <span class="chip">{move || status.get()["unlock_at"].as_str().map_or("Locked".to_string(), |t| format!("Locked until {}", t.replace('T', " ").split('.').next().unwrap_or("")))}</span>
                     <button class="go" on:click=move |_| act("unlock", json!({}))>"Unlock"</button>
                 </Show>
@@ -80,6 +81,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
             </div>
         </Show>
         <p class="info">{move || msg.get()}</p>
+        </div>
     }
 }
 
@@ -128,6 +130,7 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
     let val = RwSignal::new(rule.get_untracked().unwrap_or_default());
     let msg = RwSignal::new(String::new());
     let id = val.get_untracked()["id"].as_str().map(String::from);
+    let creating = id.is_none();
     let trigger = move || s(&val.get()["trigger"]);
     let fld = move |path: &str, kind: &str, title: &str| view! { <Field f=json!({"path": path, "kind": kind, "title": title}) val dc /> };
     let save = {
@@ -145,30 +148,30 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
     };
     view! {
         <div class="card">
-            <h2>"Rule editor"</h2>
-            {fld("name", "text", "name")}
+            <span class="chip" title="Message Rule">"Message Rule"</span>
+            {fld("name", "text", "Rule name")}
             <div class="row"><label>"Trigger"</label>
                 <select on:change=move |e| val.update(|v| v["trigger"] = json!(event_target_value(&e)))>
                     {[("keyword", "Keywords"), ("spam", "Spam"), ("mention", "Mention spam"), ("preset", "Keyword preset")].into_iter().map(|(k, t)| view! { <option value=k selected=move || trigger() == k>{t}</option> }).collect_view()}
                 </select></div>
-            <Show when=move || trigger() == "keyword">{fld("keywords", "list", "keywords (comma separated)")}</Show>
-            <Show when=move || matches!(trigger().as_str(), "keyword" | "preset")>{fld("allow", "list", "allow list")}</Show>
+            <Show when=move || trigger() == "keyword"><h3>"1 Words"</h3>{fld("keywords", "list", "Add Word")}</Show>
+            <Show when=move || matches!(trigger().as_str(), "keyword" | "preset")>{fld("allow", "list", "Add Keyword")}</Show>
             <Show when=move || trigger() == "mention">{fld("mention_limit", "int", "mentions per message")}</Show>
             <Show when=move || trigger() == "preset"><div class="row"><label>"Presets"</label>
                 {[(1, "Profanity"), (2, "Sexual content"), (3, "Slurs")].into_iter().map(|(n, t)| view! { <label><input type="checkbox" prop:checked=move || val.get()["presets"].as_array().is_some_and(|a| a.contains(&json!(n)))
                     on:change=move |e| val.update(|v| { let mut p: Vec<i64> = v["presets"].as_array().map(|a| a.iter().filter_map(Value::as_i64).filter(|x| *x != n).collect()).unwrap_or_default(); if event_target_checked(&e) { p.push(n); } v["presets"] = json!(p); }) /> {t}</label> }).collect_view()}</div></Show>
-            <h3>"Actions"</h3>
-            {fld("block_message", "bool", "block message")}
-            {fld("custom_message", "text", "message shown to the member")}
-            {fld("alert_channel", "channel", "send an alert to")}
-            <Show when=move || matches!(trigger().as_str(), "keyword" | "mention")>{fld("timeout_s", "int", "timeout (seconds, 0 = none)")}</Show>
-            <Show when=move || val.get()["block_message"] == true><div class="row"><label>"Bot actions"</label>
+            <h3>"2 Discord Response"</h3>
+            {fld("block_message", "bool", "Block Message")}
+            {fld("custom_message", "text", "Add Custom Message")}
+            {fld("alert_channel", "channel", "Send Alert")}
+            <Show when=move || matches!(trigger().as_str(), "keyword" | "mention")>{fld("timeout_s", "int", "Timeout User (seconds, 0 = none)")}</Show>
+            <Show when=move || val.get()["block_message"] == true><div class="row"><label>"TommyBot Response"</label><span class="muted">"You need at least 1 TommyBot action if you want TommyBot to consider this rule."</span>
                 {["report", "warn", "timeout", "kick", "ban", "lock"].into_iter().map(|a| view! { <label><input type="checkbox" prop:checked=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!(a)))
                     on:change=move |e| val.update(|v| { let mut l: Vec<String> = v["bot_actions"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).filter(|x| x != a).collect()).unwrap_or_default(); if event_target_checked(&e) { l.push(a.into()); } v["bot_actions"] = json!(l); }) /> {a}</label> }).collect_view()}</div></Show>
-            <h3>"Exempt"</h3>
-            {fld("exempt_roles", "roles", "roles")}
-            {fld("exempt_channels", "channels", "channels")}
-            <div class="row"><button on:click=save>"Save rule"</button><button class="ghost" on:click=move |_| rule.set(None)>"Cancel"</button><span class="err">{move || msg.get()}</span></div>
+            <h3>"3 Allowed Keywords"</h3>
+            {fld("exempt_roles", "roles", "Whitelisted Roles")}
+            {fld("exempt_channels", "channels", "Whitelisted Channels")}
+            <div class="row"><button on:click=save>{if creating { "Create" } else { "Save" }}</button><button class="ghost" on:click=move |_| rule.set(None)>"Cancel"</button><span class="err">{move || msg.get()}</span></div>
         </div>
     }
 }
@@ -197,7 +200,7 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
     });
     view! {
         <div class="card row">
-            <button on:click=move |_| load()>"Refresh"</button>
+            <button on:click=move |_| load()>"Refresh"</button><span class="sp"></span>
             <button class="go" on:click=move |_| picking.set(true)>"+ Create"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
