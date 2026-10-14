@@ -102,6 +102,8 @@ pub struct App {
     pub pings: Mutex<HashMap<(u64, u64), MentionWatch>>,
     /// Last message per channel, for the inactive channel filter.
     pub channels: Mutex<HashMap<u64, ChannelActivity>>,
+    /// Name pair last punished by the post-join username check, so unrelated member updates do not repeat it.
+    pub punished_names: Mutex<HashMap<(u64, u64), String>>,
     /// Anti-nuke heat per (guild, staff member) for panic mode's heat algorithm.
     pub nuke_heat: Mutex<HashMap<(u64, u64), HeatState>>,
     /// The open nuke case per guild and when it last grew; a long quiet gap starts a new case.
@@ -145,6 +147,7 @@ impl App {
             mentions: Default::default(),
             pings: Default::default(),
             channels: Default::default(),
+            punished_names: Default::default(),
             nuke_heat: Default::default(),
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),

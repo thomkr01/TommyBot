@@ -403,6 +403,16 @@ pub fn schema() -> Vec<Value> {
         pg(
             dv(
                 ti(
+                    fg("Inactive channel", "filters.inactive_hours", "int"),
+                    "Quiet hours",
+                ),
+                1,
+            ),
+            "spam_text",
+        ),
+        pg(
+            dv(
+                ti(
                     fg("General", "filters.mention_hour_cap", "int"),
                     "Hour cap (pings)",
                 ),

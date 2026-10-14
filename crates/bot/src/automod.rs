@@ -96,8 +96,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         .count();
     let mut facts = MsgFacts {
         content,
-        // shortcut: custom emoji only, unicode emoji are not counted.
-        emojis: content.matches("<:").count() + content.matches("<a:").count(),
+        emojis: count_emojis(content),
         user_mentions: m.mentions.len(),
         everyone_mentions: usize::from(m.mention_everyone),
         role_mentions: m.mention_roles.len(),
@@ -112,7 +111,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .unwrap()
             .entry(m.channel_id.get())
             .or_default()
-            .on_message(now, f.inactive_messages),
+            .on_message(now, f.inactive_messages, f.inactive_hours),
         invite_link: f.invites.enabled
             && ["discord.gg/", "discord.com/invite/"]
                 .iter()
@@ -592,6 +591,15 @@ async fn native_action(
     Ok(())
 }
 
+/// Custom emoji plus unicode emoji (pictograph blocks and regional-indicator flags; a flag pair or ZWJ sequence counts per symbol).
+fn count_emojis(s: &str) -> usize {
+    let unicode = s
+        .chars()
+        .filter(|c| matches!(*c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF | 0x2B50 | 0x2B55 | 0x231A..=0x231B | 0x23E9..=0x23F3))
+        .count();
+    unicode + s.matches("<:").count() + s.matches("<a:").count()
+}
+
 /// Names with fancy Unicode, lookalikes and leetspeak folded to plain letters, for the username filter.
 fn cure(name: &str) -> String {
     decancer::cure!(name).map_or_else(|_| name.to_string(), |c| c.to_string())
@@ -631,8 +639,7 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     else {
         return Ok(());
     };
-    // shortcut: without the old name every update of a matching member (a new role too) acts again;
-    // keep a name cache if that gets noisy. A timeout fires another update, so it must not loop.
+    // A timeout fires another update, so it must not loop.
     let timed_out = m
         .communication_disabled_until
         .is_some_and(|t| t.as_secs() > now_secs());
@@ -643,6 +650,12 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
             .flatten()
             .any(|n| g.name_matches(&cure(n)))
     {
+        return Ok(());
+    }
+    // A role change or other update keeps the same name, so act once per name pair.
+    let seen = format!("{}\0{}", m.user.name, m.nick.as_deref().unwrap_or_default());
+    let key = (m.guild_id.get(), m.user.id.get());
+    if app.punished_names.lock().unwrap().insert(key, seen.clone()) == Some(seen) {
         return Ok(());
     }
     punish(
@@ -728,6 +741,12 @@ mod tests {
         am.anti_spam = false;
         let h = enabled_weights(&am);
         assert_eq!((h.per_emoji, h.invite), (0.0, HeatCfg::default().invite));
+    }
+
+    #[test]
+    fn emojis_count_unicode_and_custom() {
+        assert_eq!(count_emojis("hi 😀🔥 <:a:1> <a:b:2> ok"), 4);
+        assert_eq!(count_emojis("plain text"), 0);
     }
 
     #[test]
