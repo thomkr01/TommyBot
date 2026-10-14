@@ -232,6 +232,7 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
     let fields = RwSignal::new(Vec::<Value>::new());
     let orig = RwSignal::new(json!({}));
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let gid0 = StoredValue::new(guild.clone());
     let (g, n) = (guild.clone(), name.clone());
     spawn_local(async move {
         match api("GET", &format!("/api/guilds/{g}/config"), None).await {
@@ -290,7 +291,8 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
                     let sec = n.get_value();
                     let off = val.get()[&sec]["enabled"] == json!(false);
                     let switch = format!("{sec}.enabled");
-                    groups.into_iter().map(|(g, fs)| { let ring = off && !fs.iter().any(|f| f["path"] == switch.as_str()); view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}</div> } }).collect_view()
+                    let gid = gid0.get_value();
+                    groups.into_iter().map(|(g, fs)| { let ring = off && !fs.iter().any(|f| f["path"] == switch.as_str()); view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}<a class="bell" href=format!("#/{gid}/logging") title="Alerts for this system go to your log channels" aria-label="alerts">"🔔"</a></div> } }).collect_view()
                 }}
             </div>
             <details><summary>"Advanced (raw JSON)"</summary>
