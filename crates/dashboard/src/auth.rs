@@ -94,7 +94,7 @@ pub async fn login(
     let mut jar = jar.add(cookie("oauth_state", state, st.secure));
     if let Some(n) = q
         .next
-        .filter(|n| n.starts_with("/verify/") && !n.contains("//"))
+        .filter(|n| (n.starts_with("/verify/") || n.starts_with("/#/")) && !n.contains("//"))
     {
         jar = jar.add(cookie("login_next", n, st.secure));
     }

@@ -162,7 +162,7 @@ fn App() -> impl IntoView {
         }
     });
     view! {
-        <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a href="/auth/login"><button>"Log in with Discord"</button></a></main> }>
+        <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))><button>"Log in with Discord"</button></a></main> }>
             <header>
                 <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>"☰"</button>
                 <a class="logo" href="#/">"TommyBot"</a><span class="sp"></span>

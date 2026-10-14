@@ -21,7 +21,7 @@ use twilight_model::{
     gateway::payload::incoming::{
         AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
     },
-    guild::{audit_log::AuditLogEventType, auto_moderation::AutoModerationActionType},
+    guild::auto_moderation::AutoModerationActionType,
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -599,25 +599,9 @@ fn cure(name: &str) -> String {
 
 /// Whether whoever added the bot is Owner/EO/TA; when the audit log has no entry the bot counts as authorized.
 async fn bot_added_by_authorized(app: &App, gid: Id<GuildMarker>, bot: Id<UserMarker>) -> bool {
-    let adder = async {
-        let log = app
-            .http
-            .audit_log(gid)
-            .action_type(AuditLogEventType::BotAdd)
-            .limit(10)
-            .await?
-            .model()
-            .await?;
-        anyhow::Ok(
-            log.entries
-                .iter()
-                .find(|e| e.target_id.is_some_and(|t| t.get() == bot.get()))
-                .and_then(|e| e.user_id),
-        )
-    };
-    match adder.await {
-        Ok(Some(adder)) => app.is_immune(gid, adder).await.unwrap_or(true),
-        _ => true,
+    match crate::welcome::bot_adder(app, gid, bot).await {
+        Some(adder) => app.is_immune(gid, adder).await.unwrap_or(true),
+        None => true,
     }
 }
 
@@ -672,7 +656,14 @@ async fn punish(
         } else {
             format!("Automod action: {action:?}")
         };
-        reply::dm(app, uid, &text).await;
+        let note = crate::appeals::note(&cfg.appeals, gid)
+            .filter(|_| matches!(action, Action::Ban | Action::Timeout(_)));
+        reply::dm(
+            app,
+            uid,
+            &note.map_or(text.clone(), |n| format!("{text}\n{n}")),
+        )
+        .await;
     }
     match action {
         Action::Log => {}

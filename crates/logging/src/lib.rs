@@ -98,13 +98,24 @@ impl Logger {
             let user = cached.as_ref().map(|c| c.author);
             if let Some(log) = cfg.target(LogKind::Message, Some(LogEvent::MessageDelete)) {
                 if !ignored(cfg, Some(m.channel_id), user) {
-                    self.held.push_back(HeldDelete {
+                    let held = HeldDelete {
                         at: now,
                         log,
                         id: m.id,
                         channel: m.channel_id,
                         cached,
-                    });
+                    };
+                    // Without the cached author no audit entry can name a deleter, so waiting is pointless.
+                    // A delete flood sends the oldest early instead of growing the queue.
+                    if held.cached.is_none() {
+                        out.push(self.release(held, now));
+                    } else {
+                        if self.held.len() >= MAX_RECENT {
+                            let oldest = self.held.pop_front().expect("queue is full");
+                            out.push(self.release(oldest, now));
+                        }
+                        self.held.push_back(held);
+                    }
                 }
             }
             return out;
@@ -136,22 +147,26 @@ impl Logger {
             let Some(h) = self.held.pop_front() else {
                 break;
             };
-            let deleter = h
-                .cached
-                .as_ref()
-                .and_then(|c| self.deleter(c.author, h.channel, now));
-            out.push(LogMessage {
-                channel_id: h.log,
-                kind: LogKind::Message,
-                content: clamp(render::message_delete(
-                    h.id,
-                    h.channel,
-                    h.cached.as_ref(),
-                    deleter,
-                )),
-            });
+            out.push(self.release(h, now));
         }
         out
+    }
+
+    fn release(&self, h: HeldDelete, now: Instant) -> LogMessage {
+        let deleter = h
+            .cached
+            .as_ref()
+            .and_then(|c| self.deleter(c.author, h.channel, now));
+        LogMessage {
+            channel_id: h.log,
+            kind: LogKind::Message,
+            content: clamp(render::message_delete(
+                h.id,
+                h.channel,
+                h.cached.as_ref(),
+                deleter,
+            )),
+        }
     }
 
     fn entry(&mut self, event: &Event, now: Instant) -> Option<Entry> {
@@ -383,6 +398,24 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn uncached_delete_is_logged_at_once() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(2)),
+            ..Default::default()
+        };
+        let delete =
+            Event::MessageDelete(twilight_model::gateway::payload::incoming::MessageDelete {
+                channel_id: Id::new(30),
+                guild_id: Some(Id::new(5)),
+                id: Id::new(7),
+            });
+        let mut logger = Logger::new(Id::new(1));
+        let now = Instant::now();
+        assert_eq!(logger.handle(&cfg, &delete, now).len(), 1);
+        assert!(logger.held.is_empty());
     }
 
     #[test]
