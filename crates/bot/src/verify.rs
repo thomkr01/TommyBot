@@ -153,7 +153,6 @@ pub async fn web_grant(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) ->
     let Ok(member) = app.http.guild_member(gid, user).await else {
         return Ok(());
     };
-    // Granting again would reset the roles of someone already verified when roles are replaced.
     if member
         .model()
         .await?
@@ -205,6 +204,28 @@ fn ephemeral(kind: InteractionResponseType, content: Option<&str>) -> Interactio
             ..Default::default()
         }),
     }
+}
+
+fn web_link(gid: Id<GuildMarker>) -> InteractionResponse {
+    let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
+    let mut r = ephemeral(
+        InteractionResponseType::ChannelMessageWithSource,
+        Some("The dashboard URL is not configured, ask the server staff."),
+    );
+    if let (Some(d), false) = (r.data.as_mut(), base.is_empty()) {
+        d.content = Some("Open the page to verify.".into());
+        d.components = Some(vec![row(Component::Button(Button {
+            id: None,
+            custom_id: None,
+            disabled: false,
+            emoji: None,
+            label: Some("Verify on the website".into()),
+            style: ButtonStyle::Link,
+            url: Some(format!("{}/verify/{gid}", base.trim_end_matches('/'))),
+            sku_id: None,
+        }))]);
+    }
+    r
 }
 
 /// Hands out the verification roles; a member quarantined on join leaves quarantine.
@@ -333,22 +354,9 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                     client.create_response(i.id, &i.token, &reply(t)).await?;
                 }
                 Step::Web => {
-                    let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
-                    let mut r = reply("The dashboard URL is not configured, ask the server staff.");
-                    if let (Some(d), false) = (r.data.as_mut(), base.is_empty()) {
-                        d.content = Some("Open the page to verify.".into());
-                        d.components = Some(vec![row(Component::Button(Button {
-                            id: None,
-                            custom_id: None,
-                            disabled: false,
-                            emoji: None,
-                            label: Some("Verify on the website".into()),
-                            style: ButtonStyle::Link,
-                            url: Some(format!("{}/verify/{gid}", base.trim_end_matches('/'))),
-                            sku_id: None,
-                        }))]);
-                    }
-                    client.create_response(i.id, &i.token, &r).await?;
+                    client
+                        .create_response(i.id, &i.token, &web_link(gid))
+                        .await?;
                 }
                 Step::Grant => {
                     grant(app, gid, user, &cfg.verification).await?;

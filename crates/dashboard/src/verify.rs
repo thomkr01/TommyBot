@@ -14,13 +14,11 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/verify/{guild}", get(page).post(submit))
 }
 
-/// Turnstile keys from the environment; both must be set for the widget to show.
 fn keys() -> Option<(String, String)> {
     let k = |n| std::env::var(n).ok().filter(|v| !v.is_empty());
     Some((k("TURNSTILE_SITE_KEY")?, k("TURNSTILE_SECRET_KEY")?))
 }
 
-/// Whether this guild's verification config asks for the page, and whether it needs a captcha.
 fn gate(cfg: &Value, have_keys: bool) -> Result<bool, &'static str> {
     let v = &cfg["verification"];
     let third = v["mode"] == "ThirdParty";

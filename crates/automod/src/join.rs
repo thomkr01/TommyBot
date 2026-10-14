@@ -442,9 +442,7 @@ pub enum VerifyMode {
     Captcha,
     SimpleCaptcha,
     Dm,
-    /// Sign in on the dashboard website, with Turnstile when its keys are set.
     Web,
-    /// The same page, but the captcha is required.
     ThirdParty,
 }
 

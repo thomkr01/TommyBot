@@ -86,7 +86,6 @@ pub async fn login(
     let state = token();
     let url = st.discord.authorize_url(&state);
     let mut jar = jar.add(cookie("oauth_state", state, st.secure));
-    // Only the verify page may be returned to; anything else would be an open redirect.
     if let Some(n) = q
         .next
         .filter(|n| n.starts_with("/verify/") && !n.contains("//"))
