@@ -24,7 +24,9 @@ type CaseRow = (
 
 const NOTE_MAX: usize = 500;
 const CASE_TEXT_MAX: usize = 1000;
-const OK: fn() -> Res = || Ok(Json(json!({"ok": true})));
+fn ok() -> Res {
+    Ok(Json(json!({"ok": true})))
+}
 
 pub fn routes() -> Router<AppState> {
     let g = "/api/guilds/{guild}";
@@ -135,7 +137,7 @@ async fn case_edit(
     if n == 0 {
         return Err(ApiError::NotFound);
     }
-    OK()
+    ok()
 }
 
 /// Deleting erases the audit trail, so it stays with the trusted admins and owners.
@@ -150,7 +152,7 @@ async fn case_delete(
         .bind(no)
         .execute(&st.db)
         .await?;
-    OK()
+    ok()
 }
 
 #[derive(Deserialize)]
@@ -201,7 +203,7 @@ async fn note_add(
         .bind(clip(&b.text, NOTE_MAX)?)
         .execute(&st.db)
         .await?;
-    OK()
+    ok()
 }
 
 async fn note_edit(
@@ -221,7 +223,7 @@ async fn note_edit(
     if n == 0 {
         return Err(ApiError::NotFound);
     }
-    OK()
+    ok()
 }
 
 async fn note_delete(
@@ -235,10 +237,9 @@ async fn note_delete(
         .bind(id)
         .execute(&st.db)
         .await?;
-    OK()
+    ok()
 }
 
-/// Removes every note of one member.
 async fn note_sweep(
     State(st): State<AppState>,
     s: Sess,
@@ -319,7 +320,7 @@ async fn report_status(
     if n == 0 {
         return Err(ApiError::NotFound);
     }
-    OK()
+    ok()
 }
 
 async fn blacklist(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -349,7 +350,7 @@ async fn blacklist_add(
         .bind(s.user_id)
         .execute(&st.db)
         .await?;
-    OK()
+    ok()
 }
 
 async fn blacklist_remove(
@@ -363,7 +364,7 @@ async fn blacklist_remove(
         .bind(user)
         .execute(&st.db)
         .await?;
-    OK()
+    ok()
 }
 
 #[cfg(test)]

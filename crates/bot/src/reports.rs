@@ -44,8 +44,10 @@ pub async fn message_menu(
     }
     let owner = app.guild_info(gid).await?.owner;
     let actor = app.level(gid, owner, actor_id).await?;
-    let cmd = ModCmd::PurgeFrom {
-        message: msg.id.get(),
+    let cmd = ModCmd::Purge {
+        count: modcmds::PURGE_MAX,
+        user: None,
+        from: Some(msg.id.get()),
     };
     modcmds::run(
         app,

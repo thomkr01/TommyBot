@@ -54,6 +54,8 @@ pub enum ModCmd {
     Purge {
         count: usize,
         user: Option<u64>,
+        /// Start at this message id (message context menu) instead of the newest.
+        from: Option<u64>,
     },
     Slowmode {
         secs: u16,
@@ -71,10 +73,6 @@ pub enum ModCmd {
     },
     Sanitize {
         user: u64,
-    },
-    /// Deletes this message and the newer ones (message context menu).
-    PurgeFrom {
-        message: u64,
     },
     NoteAdd {
         user: u64,
@@ -94,7 +92,7 @@ pub enum ModCmd {
 /// Numbers below this are case numbers / counts, not snowflakes.
 const SMALL: u64 = 1_000_000;
 const MAX_SLOWMODE: u64 = 21_600;
-const PURGE_MAX: usize = 100;
+pub(crate) const PURGE_MAX: usize = 100;
 const NOTE_MAX: usize = 500;
 /// Discord refuses bulk deletes of messages older than 14 days (a minute of margin).
 const BULK_AGE_S: i64 = 14 * 86_400 - 60;
@@ -107,7 +105,7 @@ impl ModCmd {
             Self::Untimeout { .. } => "timeout",
             Self::Unwarn { .. } => "warn",
             Self::Quarantine { .. } | Self::Unquarantine { .. } => "quarantine",
-            Self::Purge { .. } | Self::PurgeFrom { .. } => "purge",
+            Self::Purge { .. } => "purge",
             Self::NoteList { .. } => "notes_view",
             Self::NoteAdd { .. } | Self::NoteRemove { .. } | Self::NoteSweep { .. } => {
                 "notes_manage"
@@ -157,6 +155,7 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                 .filter(|n| (1..=PURGE_MAX as u64).contains(n))
                 .ok_or("Give a message count from 1 to 100")? as usize,
             user,
+            from: None,
         },
         "slowmode" => {
             let off = p.names.iter().any(|n| n == "off");
@@ -413,12 +412,7 @@ pub async fn run(
                 let text = format!("Renamed <@{user}> to `{clean}`");
                 ("sanitize", user, None, Some(note), text)
             }
-            ModCmd::Purge { .. } | ModCmd::PurgeFrom { .. } => {
-                let (count, user, from) = match cmd {
-                    ModCmd::Purge { count, user } => (count, user, None),
-                    ModCmd::PurgeFrom { message } => (PURGE_MAX, None, Some(message)),
-                    _ => unreachable!(),
-                };
+            ModCmd::Purge { count, user, from } => {
                 let n = purge(app, channel, count, user, from).await?;
                 if n == 0 {
                     return Ok("No deletable messages found (over 14 days old are skipped)".into());
@@ -607,6 +601,7 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                 .ok_or("missing count")?
                 .clamp(1, PURGE_MAX as i64) as usize,
             user: user(o, "user").map(|u| u.get()),
+            from: None,
         },
         "slowmode" => ModCmd::Slowmode {
             secs: int(o, "seconds")
@@ -786,7 +781,8 @@ mod tests {
             pf(&format!("purge 50 {big}"), None),
             Ok(ModCmd::Purge {
                 count: 50,
-                user: Some(big)
+                user: Some(big),
+                from: None
             })
         );
         assert!(pf("purge 500", None).is_err());
