@@ -1,6 +1,9 @@
 //! Gateway event dispatch: logging first, then commands, automod and anti-nuke.
 use anyhow::Result;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{atomic::Ordering::Relaxed, Arc},
+    time::Instant,
+};
 use tommybot_logging::LogKind;
 use twilight_gateway::Event;
 use twilight_model::{
@@ -11,7 +14,7 @@ use twilight_model::{
     },
 };
 
-use crate::{antinuke, app::App, automod, commands, prefix, slash, verify};
+use crate::{antinuke, app::App, automod, commands, metrics, prefix, slash, verify};
 
 fn guild_of(ev: &Event) -> Option<u64> {
     let g = match ev {
@@ -86,9 +89,35 @@ pub async fn flush_logs(app: Arc<App>) {
 }
 
 pub async fn handle(app: Arc<App>, ev: Event) {
+    metrics::EVENTS.fetch_add(1, Relaxed);
+    metrics::IN_FLIGHT.fetch_add(1, Relaxed);
     if let Err(e) = run(&app, &ev).await {
         tracing::warn!(?e, kind = ?ev.kind(), "event handler failed");
+        metrics::EVENT_ERRORS.fetch_add(1, Relaxed);
     }
+    metrics::IN_FLIGHT.fetch_sub(1, Relaxed);
+}
+
+/// Last step before exit: lets running handlers finish (strikes and locks are written as they
+/// happen, so nothing else is pending), sends the held logs and closes the pool.
+pub async fn shutdown(app: &App) {
+    for _ in 0..50 {
+        if metrics::IN_FLIGHT.load(Relaxed) == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let held = app
+        .logger
+        .lock()
+        .unwrap()
+        .flush(Instant::now() + std::time::Duration::from_secs(3600));
+    for m in held {
+        if let Err(e) = send(app, m.channel_id, &m.content, &AllowedMentions::default()).await {
+            tracing::warn!(?e, "log send failed during shutdown");
+        }
+    }
+    app.pool.close().await;
 }
 
 async fn run(app: &App, ev: &Event) -> Result<()> {

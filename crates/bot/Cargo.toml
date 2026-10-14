@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 tommybot-core.workspace = true
 anyhow.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 twilight-gateway.workspace = true

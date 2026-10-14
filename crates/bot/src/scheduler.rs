@@ -1,7 +1,10 @@
 //! Polls `scheduled_jobs` and runs what is due; failures are logged, never fatal.
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{atomic::Ordering::Relaxed, Arc},
+    time::Duration,
+};
 use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
 use tommybot_logging::LogKind;
@@ -11,7 +14,7 @@ use crate::{
     app::{now_secs, App},
     backup, commands,
     events::send_log,
-    lockdown, panic, verify,
+    lockdown, metrics, panic, verify,
 };
 
 fn user(payload: &Value) -> Result<Id<UserMarker>> {
@@ -89,32 +92,51 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
     Ok(())
 }
 
+/// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
+async fn round(app: &App, heavy: bool) {
+    match jobs::claim_due(&app.pool, 50, heavy).await {
+        Ok(due) => {
+            for job in due {
+                let done = match dispatch(app, &job).await {
+                    Ok(()) => {
+                        metrics::JOBS_DONE.fetch_add(1, Relaxed);
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
+                        metrics::JOBS_FAILED.fetch_add(1, Relaxed);
+                        // Otherwise the lease expires and it runs again.
+                        job.attempts >= jobs::MAX_ATTEMPTS
+                    }
+                };
+                if done {
+                    if let Err(e) = jobs::finish(&app.pool, job.id).await {
+                        tracing::warn!(?e, id = job.id, "finishing job failed");
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(?e, "claiming jobs failed"),
+    }
+}
+
 pub async fn run(app: Arc<App>) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tick.tick().await;
-        match jobs::claim_due(&app.pool, 50).await {
-            Ok(due) => {
-                for job in due {
-                    let done = match dispatch(&app, &job).await {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
-                            // Otherwise the lease expires and it runs again.
-                            job.attempts >= jobs::MAX_ATTEMPTS
-                        }
-                    };
-                    if done {
-                        if let Err(e) = jobs::finish(&app.pool, job.id).await {
-                            tracing::warn!(?e, id = job.id, "finishing job failed");
-                        }
-                    }
-                }
-            }
-            Err(e) => tracing::warn!(?e, "claiming jobs failed"),
-        }
+        round(&app, false).await;
         if let Err(e) = jobs::expire_cases(&app.pool).await {
             tracing::warn!(?e, "case expiry failed");
         }
+    }
+}
+
+/// The restore worker: backup loads and panic starts run here, on their own task and HTTP
+/// client, so a long restore never holds up the timers in [`run`].
+pub async fn run_restore(app: Arc<App>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tick.tick().await;
+        round(&app, true).await;
     }
 }
