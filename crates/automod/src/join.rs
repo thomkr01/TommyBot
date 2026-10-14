@@ -331,6 +331,15 @@ pub struct RaidOutcome {
 }
 
 impl RaidDetector {
+    /// A raid that was still running at restart; the joins that started it are gone but the
+    /// algorithms keep flagging until `until_ms`.
+    pub fn restored(until_ms: i64) -> Self {
+        Self {
+            active_until: until_ms,
+            ..Self::default()
+        }
+    }
+
     pub fn active(&self, now: i64) -> bool {
         now < self.active_until
     }
@@ -710,6 +719,18 @@ mod tests {
         let out = d.on_join(&joiner(4, "d", false), false, &cfg, NOW + 4000);
         assert_eq!((out.triggered, out.flagged), (false, vec![4]));
         assert!(!d.active(NOW + 700_000));
+    }
+
+    #[test]
+    fn restored_raid_keeps_flagging_new_joiners() {
+        let cfg = RaidCfg {
+            flag_no_avatar: true,
+            ..raid_cfg()
+        };
+        let mut d = RaidDetector::restored(NOW + 5000);
+        let out = d.on_join(&joiner(9, "z", false), false, &cfg, NOW);
+        assert_eq!((out.triggered, out.flagged), (false, vec![9]));
+        assert!(!d.active(NOW + 5000));
     }
 
     #[test]

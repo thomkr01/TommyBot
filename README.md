@@ -82,6 +82,7 @@ DATABASE_URL=postgres://... cargo test --workspace
 | `SUPPORT_URL` | bot, dashboard | no | Link behind the Support buttons in the welcome message and the dashboard wizard |
 | `BIND` | dashboard | no | Listen address, default `0.0.0.0:8080` |
 | `DASHBOARD_DIST` | dashboard | no | Built UI folder |
+| `METRICS_ADDR` | bot | no | Serves Prometheus metrics on this address, e.g. `127.0.0.1:9100`. Off when unset. No auth, so keep it private |
 | `RUST_LOG` | both | no | Log level, default `info` in Docker |
 
 Dashboard access rules are in `crates/dashboard/README.md`.
