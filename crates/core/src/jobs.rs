@@ -34,7 +34,10 @@ pub async fn enqueue(
 
 /// Jobs that fail this many times are dropped by the scheduler.
 pub const MAX_ATTEMPTS: i32 = 5;
+/// Kinds that can run for minutes; a separate worker takes them so they never delay unbans or unlocks.
+pub const HEAVY: [&str; 2] = ["backup_load", "panic_start"];
 const LEASE_SECS: i32 = 60;
+const HEAVY_LEASE_SECS: i32 = 900;
 
 /// Replaces any pending job of the same guild and kind (e.g. panic mode restarted).
 pub async fn replace(
@@ -52,9 +55,10 @@ pub async fn replace(
     enqueue(pool, guild, kind, payload, run_at_secs).await
 }
 
-/// Leases due jobs for a minute and returns them; call [`finish`] when done. SKIP LOCKED keeps
-/// two instances from claiming the same row, and a crashed claimer's jobs return after the lease.
-pub async fn claim_due(pool: &PgPool, limit: i64) -> Result<Vec<Job>> {
+/// Leases due jobs (the [`HEAVY`] kinds or all others) and returns them; call [`finish`] when done.
+/// SKIP LOCKED keeps two instances from claiming the same row, and a crashed claimer's jobs
+/// return after the lease.
+pub async fn claim_due(pool: &PgPool, limit: i64, heavy: bool) -> Result<Vec<Job>> {
     Ok(sqlx::query_as(
         "WITH c AS (
              UPDATE scheduled_jobs
@@ -62,12 +66,15 @@ pub async fn claim_due(pool: &PgPool, limit: i64) -> Result<Vec<Job>> {
              WHERE id IN (
                  SELECT id FROM scheduled_jobs
                  WHERE run_at <= now() AND (locked_until IS NULL OR locked_until < now())
+                   AND (kind = ANY($4)) = $3
                  ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT $1)
              RETURNING id, guild_id, kind, payload, run_at, attempts)
          SELECT id, guild_id, kind, payload, attempts FROM c ORDER BY run_at",
     )
     .bind(limit)
-    .bind(LEASE_SECS)
+    .bind(if heavy { HEAVY_LEASE_SECS } else { LEASE_SECS })
+    .bind(heavy)
+    .bind(HEAVY.as_slice())
     .fetch_all(pool)
     .await?)
 }
@@ -88,6 +95,16 @@ pub async fn pending(pool: &PgPool, kind: &str) -> Result<Vec<(i64, Value)>> {
             .fetch_all(pool)
             .await?,
     )
+}
+
+/// Jobs that are due now and not leased, for the metrics endpoint.
+pub async fn backlog(pool: &PgPool) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM scheduled_jobs
+         WHERE run_at <= now() AND (locked_until IS NULL OR locked_until < now())",
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Deactivates cases whose expiry passed; returns how many.
@@ -142,7 +159,7 @@ mod tests {
         enqueue(&pool, gid, "later", Value::Null, n + 3600)
             .await
             .unwrap();
-        let got = claim_due(&pool, 1000).await.unwrap();
+        let got = claim_due(&pool, 1000, false).await.unwrap();
         let kinds: Vec<_> = got
             .iter()
             .filter(|j| j.guild_id == gid)
@@ -150,7 +167,7 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["a", "b"]);
         // Leased jobs are not handed out again until finished or the lease runs out.
-        let again = claim_due(&pool, 1000).await.unwrap();
+        let again = claim_due(&pool, 1000, false).await.unwrap();
         assert!(again.iter().all(|j| j.guild_id != gid));
         for j in got.iter().filter(|j| j.guild_id == gid) {
             finish(&pool, j.id).await.unwrap();
@@ -170,7 +187,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let (a, b) = tokio::join!(claim_due(&pool, 10), claim_due(&pool, 10));
+        let (a, b) = tokio::join!(claim_due(&pool, 10, false), claim_due(&pool, 10, false));
         let mut ids: Vec<i64> = [a.unwrap(), b.unwrap()]
             .into_iter()
             .flatten()
@@ -182,7 +199,29 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), total);
         clean(&pool, gid).await;
+        heavy_kinds_use_their_own_claim(&pool, gid).await;
         lease_expiry_and_replace(&pool, gid).await;
+    }
+
+    async fn heavy_kinds_use_their_own_claim(pool: &PgPool, gid: i64) {
+        for k in ["unban", "backup_load"] {
+            enqueue(pool, gid, k, Value::Null, now() - 5).await.unwrap();
+        }
+        let kinds = |v: Vec<Job>| -> Vec<String> {
+            v.into_iter()
+                .filter(|j| j.guild_id == gid)
+                .map(|j| j.kind)
+                .collect()
+        };
+        assert_eq!(
+            kinds(claim_due(pool, 1000, true).await.unwrap()),
+            ["backup_load"]
+        );
+        assert_eq!(
+            kinds(claim_due(pool, 1000, false).await.unwrap()),
+            ["unban"]
+        );
+        clean(pool, gid).await;
     }
 
     /// Called from the claim test: claim_due takes every guild's rows, so it cannot run in parallel.
@@ -191,7 +230,7 @@ mod tests {
         enqueue(&pool, gid, "x", Value::Null, now() - 5)
             .await
             .unwrap();
-        let first = claim_due(&pool, 1000).await.unwrap();
+        let first = claim_due(&pool, 1000, false).await.unwrap();
         assert!(first.iter().any(|j| j.guild_id == gid && j.attempts == 1));
         // Simulate a crash: the claimer never finished and the lease ran out.
         sqlx::query("UPDATE scheduled_jobs SET locked_until = now() - interval '1 second' WHERE guild_id=$1")
@@ -199,7 +238,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let second = claim_due(&pool, 1000).await.unwrap();
+        let second = claim_due(&pool, 1000, false).await.unwrap();
         assert!(second.iter().any(|j| j.guild_id == gid && j.attempts == 2));
         clean(&pool, gid).await;
 

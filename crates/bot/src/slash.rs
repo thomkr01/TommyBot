@@ -1,6 +1,7 @@
 //! Slash commands and user context menus. No default_member_permissions: staff need no Discord
 //! permissions (spec 2.6), the bot checks permits instead.
 use anyhow::Result;
+use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{duration, permits};
 use twilight_model::{
     application::{
@@ -37,6 +38,7 @@ pub enum Cmd {
         points: i32,
     },
     Lock {
+        kind: Option<LockKind>,
         duration_s: Option<i64>,
     },
     Unlock,
@@ -131,9 +133,14 @@ pub fn parse(
         "timeout" | "Timeout" => ModKind::Timeout,
         "warn" => ModKind::Warn,
         "lock" => {
+            let kind = match string(o, "type") {
+                Some(n) => Some(kind_from(n, None).ok_or(commands::LOCK_TYPES)?),
+                None => None,
+            };
             return Ok(Cmd::Lock {
+                kind,
                 duration_s: dur(o, "duration")?,
-            })
+            });
         }
         "unlock" => return Ok(Cmd::Unlock),
         "backup" => return backup(o),
@@ -203,6 +210,10 @@ pub fn definitions() -> Vec<Command> {
         ),
         guild_only(
             chat("lock", "Lock the server")
+                .option(StringBuilder::new(
+                    "type",
+                    "server, blind, role, kick, ban or all",
+                ))
                 .option(StringBuilder::new("duration", "Unlock after, e.g. 30m")),
         ),
         guild_only(chat("unlock", "Unlock the server")),
@@ -317,10 +328,10 @@ async fn run(
             )
             .await
         }
-        Cmd::Lock { duration_s } => {
-            commands::lockdown_cmd(app, gid, &actor, false, duration_s).await
+        Cmd::Lock { kind, duration_s } => {
+            commands::lockdown_cmd(app, gid, &actor, false, kind, duration_s).await
         }
-        Cmd::Unlock => commands::lockdown_cmd(app, gid, &actor, true, None).await,
+        Cmd::Unlock => commands::lockdown_cmd(app, gid, &actor, true, None, None).await,
         Cmd::Revert { target, since_s } => {
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }

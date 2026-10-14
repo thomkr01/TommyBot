@@ -489,7 +489,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
                 &app.pool,
                 gid.get() as i64,
                 "raid_end",
-                serde_json::Value::Null,
+                serde_json::json!({ "until_ms": now + raid.active_ms }),
                 (now / 1000) + raid.active_ms / 1000,
             )
             .await?;

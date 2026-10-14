@@ -178,8 +178,15 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
     send_log(app, gid.get(), LogKind::Panic, "Panic mode ended").await
 }
 
-/// Re-arms panic mode after a restart: the pending `panic_end` jobs say which guilds are still in it.
+/// Re-arms panic mode and join raids after a restart: the pending `panic_end` and `raid_end` jobs
+/// say which guilds are still in them.
 pub async fn restore(app: &App) -> Result<()> {
+    for (guild, payload) in jobs::pending(&app.pool, "raid_end").await? {
+        if let Some(until) = payload["until_ms"].as_i64() {
+            let d = tommybot_automod::join::RaidDetector::restored(until);
+            app.raids.lock().unwrap().insert(guild as u64, d);
+        }
+    }
     for (guild, payload) in jobs::pending(&app.pool, "panic_end").await? {
         app.panic_runs.lock().unwrap().insert(
             guild as u64,

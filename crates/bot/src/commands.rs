@@ -1,11 +1,19 @@
 //! Prefix mod commands: permit check -> action -> case (+ undo data). ban/kick/timeout/warn.
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use serde_json::json;
+use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
 use twilight_http::Client;
 use twilight_model::{
-    channel::message::AllowedMentions,
+    application::interaction::{Interaction, InteractionData},
+    channel::message::{
+        component::{ActionRow, Button, ButtonStyle, Component},
+        AllowedMentions, MessageFlags,
+    },
     gateway::payload::incoming::MessageCreate,
+    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -19,7 +27,7 @@ use crate::{
     appeals, backup,
     hierarchy::top_position,
     lockdown, modcmds,
-    prefix::Parsed,
+    prefix::{Flags, Parsed},
     reply,
     slash::BackupCmd,
     targets,
@@ -101,12 +109,21 @@ pub async fn apply(
     points: i32,
 ) -> Result<String> {
     apply_dm(
-        app, gid, owner, actor, kind, target, reason, duration_s, points, false,
+        app,
+        gid,
+        owner,
+        actor,
+        kind,
+        target,
+        reason,
+        duration_s,
+        points,
+        Flags::default(),
     )
     .await
 }
 
-/// [`apply`] with the `?dm` flag: the target is told before the action.
+/// [`apply`] with the prefix flags: `dm` tells the target first, `soft` turns a ban into a softban, `compact` shortens the reply.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_dm(
     app: &App,
@@ -118,7 +135,7 @@ pub async fn apply_dm(
     reason: Option<&str>,
     duration_s: Option<i64>,
     points: i32,
-    dm: bool,
+    flags: Flags,
 ) -> Result<String> {
     let perm = kind.name();
     let target_level = app.level(gid, owner, target).await?;
@@ -138,14 +155,24 @@ pub async fn apply_dm(
     }
     let t = target.get();
     let cfg = app.cfg(gid.get()).await?;
-    if matches!(kind, ModKind::Ban | ModKind::Timeout) {
+    let soft = flags.soft && kind == ModKind::Ban;
+    if matches!(kind, ModKind::Ban | ModKind::Timeout) && !soft {
         appeals::dm_link(app, &cfg.appeals, gid, target).await; // before the ban: a banned user can't be DMed
     }
-    if dm || cfg.misc.always_dm {
+    if flags.dm || cfg.misc.always_dm {
         let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());
         reply::dm(app, target, &reply::dm_text(perm, reason, who)).await;
     }
     let (inverse, points) = match kind {
+        ModKind::Ban if soft => {
+            // A softban exists to purge messages, so purge a day when the server default is none.
+            app.http
+                .create_ban(gid, target)
+                .delete_message_seconds(cfg.misc.purge_secs().max(86_400))
+                .await?;
+            app.http.delete_ban(gid, target).await?;
+            (None, 0)
+        }
         ModKind::Ban => {
             app.http
                 .create_ban(gid, target)
@@ -177,7 +204,7 @@ pub async fn apply_dm(
         &app.pool,
         cases::NewCase {
             guild_id: gid.get() as i64,
-            kind: perm,
+            kind: if soft { "softban" } else { perm },
             user_id: t as i64,
             mod_id: actor_id.get() as i64,
             reason,
@@ -188,8 +215,8 @@ pub async fn apply_dm(
     )
     .await?;
     let mut text = reply::case_text(
-        cfg.misc.compact_replies,
-        (case_no.into(), perm, t),
+        cfg.misc.compact_replies || flags.compact,
+        (case_no.into(), if soft { "softban" } else { perm }, t),
         reason,
         actor_id.get(),
     );
@@ -202,12 +229,13 @@ pub async fn apply_dm(
 }
 
 /// Prefix entry: resolves names, then runs [`apply`] per target and posts each reply.
-pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
+pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
     let Some(gid) = msg.guild_id else {
         return Ok(());
     };
+    p.flags.soft |= p.command == "softban";
     let kind = match p.command.as_str() {
-        "ban" => ModKind::Ban,
+        "ban" | "softban" => ModKind::Ban,
         "kick" => ModKind::Kick,
         "warn" => ModKind::Warn,
         "timeout" | "mute" => ModKind::Timeout,
@@ -221,7 +249,16 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
         "lock" | "unlock" => {
             let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;
-            let text = lockdown_cmd(app, gid, &actor, p.command == "unlock", p.duration_s).await?;
+            // `lock role`, `lock server`, `lock channel`...: one-off type instead of the dashboard default.
+            let kind = match p.names.first() {
+                Some(n) => match kind_from(n, Some(msg.channel_id.get())) {
+                    Some(k) => Some(k),
+                    None => return say(app, msg, LOCK_TYPES).await,
+                },
+                None => None,
+            };
+            let unlock = p.command == "unlock";
+            let text = lockdown_cmd(app, gid, &actor, unlock, kind, p.duration_s).await?;
             return say(app, msg, &text).await;
         }
         "unban" | "hackban" | "untimeout" | "unmute" | "unwarn" | "quarantine" | "unquarantine"
@@ -249,32 +286,192 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
             Err(e) => say(app, msg, &e).await?,
         }
     }
-    for t in targets {
-        // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
-        let actor = app.level(gid, owner, msg.author.id).await?;
-        let text = match apply_dm(
-            app,
-            gid,
-            owner,
-            (msg.author.id, &actor),
-            kind,
-            t,
-            p.reason.as_deref(),
-            p.duration_s,
-            cfg.misc.warn_base_points,
-            p.dm,
-        )
-        .await
-        {
-            Ok(text) => text,
-            Err(e) => {
-                tracing::warn!(?e, "mod command failed");
-                format!("Failed to {} <@{t}>, see logs", kind.name())
-            }
-        };
+    let job = Pending {
+        gid,
+        actor: msg.author.id,
+        kind,
+        targets,
+        reason: p.reason,
+        duration_s: p.duration_s,
+        flags: p.flags,
+        at: Instant::now(),
+    };
+    if cfg.misc.confirm && kind != ModKind::Warn && !job.targets.is_empty() {
+        return ask_confirm(app, msg, job).await;
+    }
+    for text in job.run(app, owner, cfg.misc.warn_base_points).await? {
         say(app, msg, &text).await?;
     }
     Ok(())
+}
+
+/// A prefix command waiting for its Confirm click. Lost on restart: the staff member just types it again.
+pub struct Pending {
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    kind: ModKind,
+    targets: Vec<Id<UserMarker>>,
+    reason: Option<String>,
+    duration_s: Option<i64>,
+    flags: Flags,
+    at: Instant,
+}
+
+const CONFIRM_TTL: Duration = Duration::from_secs(60);
+
+impl Pending {
+    /// One reply per target.
+    async fn run(&self, app: &App, owner: Id<UserMarker>, points: i32) -> Result<Vec<String>> {
+        let mut out = vec![];
+        for &t in &self.targets {
+            // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
+            let actor = app.level(self.gid, owner, self.actor).await?;
+            let text = match apply_dm(
+                app,
+                self.gid,
+                owner,
+                (self.actor, &actor),
+                self.kind,
+                t,
+                self.reason.as_deref(),
+                self.duration_s,
+                points,
+                self.flags,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(?e, "mod command failed");
+                    format!("Failed to {} <@{t}>, see logs", self.kind.name())
+                }
+            };
+            out.push(text);
+        }
+        Ok(out)
+    }
+}
+
+fn confirm_button(label: &str, id: String, style: ButtonStyle) -> Component {
+    Component::Button(Button {
+        id: None,
+        custom_id: Some(id),
+        disabled: false,
+        emoji: None,
+        label: Some(label.into()),
+        style,
+        url: None,
+        sku_id: None,
+    })
+}
+
+async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()> {
+    let what = if job.flags.soft && job.kind == ModKind::Ban {
+        "softban"
+    } else {
+        job.kind.name()
+    };
+    let who: Vec<String> = job.targets.iter().map(|t| format!("<@{t}>")).collect();
+    let text = format!("Really {what} {}?", who.join(", "));
+    let nonce = msg.id.get();
+    let row = Component::ActionRow(ActionRow {
+        id: None,
+        components: vec![
+            confirm_button(
+                "Confirm",
+                format!("{CONFIRM}{nonce}:y"),
+                ButtonStyle::Danger,
+            ),
+            confirm_button(
+                "Cancel",
+                format!("{CONFIRM}{nonce}:n"),
+                ButtonStyle::Secondary,
+            ),
+        ],
+    });
+    {
+        let mut pending = app.pending.lock().unwrap();
+        pending.retain(|_, p| p.at.elapsed() < CONFIRM_TTL);
+        pending.insert(nonce, job);
+    }
+    app.http
+        .create_message(msg.channel_id)
+        .content(&text)
+        .components(&[row])
+        .allowed_mentions(Some(&AllowedMentions::default()))
+        .await?;
+    Ok(())
+}
+
+const CONFIRM: &str = "confirm:";
+
+/// Handles the Confirm / Cancel buttons. Returns false for other interactions.
+pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
+    let Some(InteractionData::MessageComponent(c)) = &i.data else {
+        return Ok(false);
+    };
+    let Some((nonce, yes)) = c
+        .custom_id
+        .strip_prefix(CONFIRM)
+        .and_then(|r| r.split_once(':'))
+        .and_then(|(n, a)| Some((n.parse::<u64>().ok()?, a == "y")))
+    else {
+        return Ok(false);
+    };
+    let client = app.http.interaction(Id::new(app.me.get()));
+    let respond = |kind, content: Option<&str>, flags| InteractionResponse {
+        kind,
+        data: Some(InteractionResponseData {
+            content: content.map(Into::into),
+            flags,
+            ..Default::default()
+        }),
+    };
+    let taken = {
+        let mut pending = app.pending.lock().unwrap();
+        match pending.get(&nonce) {
+            Some(p) if Some(p.actor) != i.author_id() => {
+                Err("Only the staff member who typed the command can answer.")
+            }
+            Some(p) if p.at.elapsed() >= CONFIRM_TTL => {
+                pending.remove(&nonce);
+                Err("This confirmation expired, type the command again.")
+            }
+            Some(_) => Ok(pending.remove(&nonce).unwrap()),
+            None => Err("This confirmation expired, type the command again."),
+        }
+    };
+    let job = match taken {
+        Ok(j) => j,
+        Err(e) => {
+            let r = respond(
+                InteractionResponseType::ChannelMessageWithSource,
+                Some(e),
+                Some(MessageFlags::EPHEMERAL),
+            );
+            client.create_response(i.id, &i.token, &r).await?;
+            return Ok(true);
+        }
+    };
+    // Several HTTP calls can exceed the 3s answer window, so acknowledge first.
+    let ack = respond(InteractionResponseType::DeferredUpdateMessage, None, None);
+    client.create_response(i.id, &i.token, &ack).await?;
+    let text = if yes {
+        let owner = app.guild_info(job.gid).await?.owner;
+        let points = app.cfg(job.gid.get()).await?.misc.warn_base_points;
+        let mut t = job.run(app, owner, points).await?.join("\n");
+        t.truncate(t.floor_char_boundary(2000));
+        t
+    } else {
+        "Cancelled.".into()
+    };
+    client
+        .update_response(&i.token)
+        .content(Some(&text))
+        .components(Some(&[]))
+        .allowed_mentions(Some(&AllowedMentions::default()))
+        .await?;
+    Ok(true)
 }
 
 pub(crate) async fn apply_warn_actions(
@@ -378,12 +575,15 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
     Ok(())
 }
 
-/// Lock or unlock the server; shared by the prefix and slash commands.
+pub const LOCK_TYPES: &str = "Lock type: server, blind, role, channel, kick, ban or all";
+
+/// Lock or unlock the server; shared by the prefix and slash commands. `kind` overrides the dashboard's lock type.
 pub async fn lockdown_cmd(
     app: &App,
     gid: Id<GuildMarker>,
     actor: &permits::Level,
     unlock: bool,
+    kind: Option<LockKind>,
     duration_s: Option<i64>,
 ) -> Result<String> {
     if !actor.has("lockdown") {
@@ -393,7 +593,10 @@ pub async fn lockdown_cmd(
         lockdown::unlock(app, gid).await?;
         return Ok("Server unlocked".into());
     }
-    let kind = app.cfg(gid.get()).await?.lockdown_prefs.kind();
+    let kind = match kind {
+        Some(k) => k,
+        None => app.cfg(gid.get()).await?.lockdown_prefs.kind(),
+    };
     let done = lockdown::lock(app, gid, kind).await?;
     if done {
         if let Some(d) = duration_s {

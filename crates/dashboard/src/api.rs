@@ -145,19 +145,8 @@ pub async fn put_section(
         return Err(ApiError::BadRequest("section must be an object".into()));
     }
     validate(&section, &b.value)?;
-    let sensitive = access::SENSITIVE.contains(&section.as_str());
-    require(
-        &st,
-        &s,
-        guild,
-        if sensitive {
-            Level::Admin
-        } else {
-            Level::Editor
-        },
-        sensitive,
-    )
-    .await?;
+    let (min, step_up) = access::write_bar(&section);
+    require(&st, &s, guild, min, step_up).await?;
     let (_, mut config) = store::current(&st.db, guild).await?;
     config[&section] = b.value;
     let mut tx = st.db.begin().await?;
