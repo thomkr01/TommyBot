@@ -25,6 +25,7 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let open = RwSignal::new(None::<i32>); // permit being edited
     let tab = RwSignal::new(0u8);
     let orig = RwSignal::new(json!({}));
+    let deleting = RwSignal::new(None::<usize>);
     let g = guild.clone();
     spawn_local(async move {
         if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
@@ -103,21 +104,19 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     };
     let delete = move |i: usize| set_cfg.update(|c| { c["custom"].as_array_mut().map(|a| a.remove(i)); });
     view! {
-        <div class="row"><button class="go" title="Create New Permit" on:click=move |_| { set_cfg.update(|c| { if !c["custom"].is_array() { c["custom"] = json!([]); } c["custom"].as_array_mut().unwrap().push(json!({"name": "New permit", "rank": 0, "perms": [], "roles": [], "whitelist": [], "limits": {}})); }); start(cfg.get_untracked()["custom"].as_array().map_or(0, |a| a.len() as i32 - 1)) }>"+"</button></div>
+        <div class="row"><button class="go" title="Create New Permit" on:click=move |_| { let before = cfg.get_untracked(); set_cfg.update(|c| { if !c["custom"].is_array() { c["custom"] = json!([]); } c["custom"].as_array_mut().unwrap().push(json!({"name": "New permit", "rank": 0, "perms": [], "roles": [], "whitelist": [], "limits": {}})); }); start(cfg.get_untracked()["custom"].as_array().map_or(0, |a| a.len() as i32 - 1)); snap.set(before) }>"+"</button></div>
         <table class="permits"><thead><tr><th>"Name"</th><th>"Actions"</th></tr></thead><tbody>
             <tr><td><b>"Extra Owner"</b>" "<span class="chip">"OWNER"</span>" "<span class="chip">"IMMUNITY"</span></td><td><button class="ghost" title="Edit Permit" on:click=move |_| start(-1)>"Edit"</button></td></tr>
             <tr><td><b>"Trusted Admin"</b>" "<span class="chip">"IMMUNITY"</span></td><td><button class="ghost" title="Edit Permit" on:click=move |_| start(-2)>"Edit"</button></td></tr>
             {move || (0..cfg.get()["custom"].as_array().map_or(0, Vec::len)).map(|i| view! {
                 <tr><td>{format!("{} ", cfg.get()["custom"][i]["rank"])}<b>{cfg.get()["custom"][i]["name"].as_str().unwrap_or("").to_string()}</b></td><td>
-                    <button class="danger" title="Delete Permit" on:click=move |_| { open.set(Some(1000 + i as i32)); }>"Delete"</button>
+                    <button class="danger" title="Delete Permit" on:click=move |_| { deleting.set(Some(i)); }>"Delete"</button>
                     <button class="ghost" title="Edit Permit" on:click=move |_| start(i as i32)>"Edit"</button></td></tr>
             }).collect_view()}
         </tbody></table>
-        {move || open.get().map(|i| if i >= 1000 {
-            let n = (i - 1000) as usize;
-            view! { <div class="modal"><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
-                <div class="row"><button class="ghost" on:click=move |_| open.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); open.set(None) }>"Delete"</button></div></div></div> }.into_any()
-        } else { dialog(i).into_any() })}
+        {move || deleting.get().map(|n| view! { <div class="modal"><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
+            <div class="row"><button class="ghost" on:click=move |_| deleting.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); deleting.set(None) }>"Delete"</button></div></div></div> })}
+        {move || open.get().map(|i| dialog(i))}
         <Show when=move || cfg.get() != orig.get()>
             <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| set_cfg.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
         </Show>
