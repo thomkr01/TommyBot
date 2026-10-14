@@ -54,6 +54,8 @@ pub enum ModCmd {
     Purge {
         count: usize,
         user: Option<u64>,
+        /// Start at this message id (message context menu) instead of the newest.
+        from: Option<u64>,
     },
     Slowmode {
         secs: u16,
@@ -72,12 +74,26 @@ pub enum ModCmd {
     Sanitize {
         user: u64,
     },
+    NoteAdd {
+        user: u64,
+        text: String,
+    },
+    NoteList {
+        user: u64,
+    },
+    NoteRemove {
+        id: i64,
+    },
+    NoteSweep {
+        user: u64,
+    },
 }
 
 /// Numbers below this are case numbers / counts, not snowflakes.
 const SMALL: u64 = 1_000_000;
 const MAX_SLOWMODE: u64 = 21_600;
-const PURGE_MAX: usize = 100;
+pub(crate) const PURGE_MAX: usize = 100;
+const NOTE_MAX: usize = 500;
 /// Discord refuses bulk deletes of messages older than 14 days (a minute of margin).
 const BULK_AGE_S: i64 = 14 * 86_400 - 60;
 
@@ -90,6 +106,10 @@ impl ModCmd {
             Self::Unwarn { .. } => "warn",
             Self::Quarantine { .. } | Self::Unquarantine { .. } => "quarantine",
             Self::Purge { .. } => "purge",
+            Self::NoteList { .. } => "notes_view",
+            Self::NoteAdd { .. } | Self::NoteRemove { .. } | Self::NoteSweep { .. } => {
+                "notes_manage"
+            }
             Self::Slowmode { .. } => "slowmode",
             Self::CasesView { .. } | Self::CasesEdit { .. } => "cases",
             Self::Verify { .. } => "verify",
@@ -135,6 +155,7 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                 .filter(|n| (1..=PURGE_MAX as u64).contains(n))
                 .ok_or("Give a message count from 1 to 100")? as usize,
             user,
+            from: None,
         },
         "slowmode" => {
             let off = p.names.iter().any(|n| n == "off");
@@ -148,6 +169,18 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                     .filter(|s| *s <= MAX_SLOWMODE)
                     .ok_or("Give a delay up to 6h (e.g. 10s) or `off`")?
                     as u16,
+            }
+        }
+        "note" | "notes" => {
+            let (sub, text) = (p.names.first().map(String::as_str), p.reason.clone());
+            match sub {
+                Some("add") => ModCmd::NoteAdd {
+                    user: need_user()?,
+                    text: text.ok_or("Give the note with ?r")?,
+                },
+                Some("remove") => ModCmd::NoteRemove { id: case()? as i64 },
+                Some("sweep") => ModCmd::NoteSweep { user: need_user()? },
+                _ => ModCmd::NoteList { user: need_user()? },
             }
         }
         "cases" | "case" if p.names.first().is_some_and(|n| n == "edit") => ModCmd::CasesEdit {
@@ -171,10 +204,12 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
         return Ok(());
     };
     let mut resolved = None;
-    let name = p
-        .names
-        .iter()
-        .find(|n| !matches!(n.as_str(), "edit" | "view" | "off"));
+    let name = p.names.iter().find(|n| {
+        !matches!(
+            n.as_str(),
+            "edit" | "view" | "off" | "add" | "remove" | "sweep" | "list"
+        )
+    });
     if let (Some(n), true) = (name, p.targets.iter().all(|t| *t < SMALL)) {
         match targets::resolve(app, gid, n).await? {
             Ok(id) => resolved = Some(id.get()),
@@ -236,6 +271,41 @@ pub async fn run(
     let (kind, uid, inverse, note, reply): (&str, u64, Option<Value>, Option<String>, String) =
         match cmd {
             ModCmd::CasesView { case, user } => return view_cases(app, g, case, user).await,
+            ModCmd::NoteAdd { user, text } => {
+                let text: String = text.chars().take(NOTE_MAX).collect();
+                let (id,): (i64,) = sqlx::query_as(
+                    "INSERT INTO notes (guild_id, user_id, author_id, text) VALUES ($1,$2,$3,$4) RETURNING id",
+                )
+                .bind(g)
+                .bind(user as i64)
+                .bind(actor_id.get() as i64)
+                .bind(text)
+                .fetch_one(&app.pool)
+                .await?;
+                return Ok(format!("Note #{id} added for <@{user}>"));
+            }
+            ModCmd::NoteList { user } => return view_notes(app, g, user).await,
+            ModCmd::NoteRemove { id } => {
+                let n = sqlx::query("DELETE FROM notes WHERE guild_id=$1 AND id=$2")
+                    .bind(g)
+                    .bind(id)
+                    .execute(&app.pool)
+                    .await?
+                    .rows_affected();
+                return Ok(match n {
+                    0 => format!("No note #{id}"),
+                    _ => format!("Removed note #{id}"),
+                });
+            }
+            ModCmd::NoteSweep { user } => {
+                let n = sqlx::query("DELETE FROM notes WHERE guild_id=$1 AND user_id=$2")
+                    .bind(g)
+                    .bind(user as i64)
+                    .execute(&app.pool)
+                    .await?
+                    .rows_affected();
+                return Ok(format!("Removed {n} notes of <@{user}>"));
+            }
             ModCmd::CasesEdit { case, reason } => {
                 let done =
                     sqlx::query("UPDATE cases SET reason=$3 WHERE guild_id=$1 AND case_no=$2")
@@ -342,8 +412,8 @@ pub async fn run(
                 let text = format!("Renamed <@{user}> to `{clean}`");
                 ("sanitize", user, None, Some(note), text)
             }
-            ModCmd::Purge { count, user } => {
-                let n = purge(app, channel, count, user).await?;
+            ModCmd::Purge { count, user, from } => {
+                let n = purge(app, channel, count, user, from).await?;
                 if n == 0 {
                     return Ok("No deletable messages found (over 14 days old are skipped)".into());
                 }
@@ -421,12 +491,24 @@ fn purge_ids(msgs: &[Msg], count: usize, user: Option<u64>, now: i64) -> Vec<u64
 }
 
 /// Scans the last 100 messages (so a user filter may find fewer than `count`); returns how many were deleted.
-async fn purge(app: &App, ch: Id<ChannelMarker>, count: usize, user: Option<u64>) -> Result<usize> {
-    let msgs: Vec<Msg> = app
-        .http
-        .channel_messages(ch)
-        .limit(PURGE_MAX as u16)
-        .await?
+async fn purge(
+    app: &App,
+    ch: Id<ChannelMarker>,
+    count: usize,
+    user: Option<u64>,
+    from: Option<u64>,
+) -> Result<usize> {
+    let req = app.http.channel_messages(ch);
+    let page = match from {
+        // `after` is exclusive, so start one id earlier to include the clicked message.
+        Some(m) => {
+            req.after(Id::new(m.max(2) - 1))
+                .limit(PURGE_MAX as u16)
+                .await?
+        }
+        None => req.limit(PURGE_MAX as u16).await?,
+    };
+    let msgs: Vec<Msg> = page
         .models()
         .await?
         .iter()
@@ -477,6 +559,25 @@ async fn view_cases(app: &App, g: i64, case: Option<i32>, user: Option<u64>) -> 
     })
 }
 
+async fn view_notes(app: &App, g: i64, user: u64) -> Result<String> {
+    let rows: Vec<(i64, i64, String, i64)> = sqlx::query_as(
+        "SELECT id, author_id, text, EXTRACT(EPOCH FROM created_at)::bigint FROM notes
+         WHERE guild_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 10",
+    )
+    .bind(g)
+    .bind(user as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    Ok(if rows.is_empty() {
+        format!("No notes for <@{user}>")
+    } else {
+        rows.iter()
+            .map(|(id, by, text, at)| format!("`#{id}` by <@{by}> <t:{at}:R>: {text}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 /// Slash options -> command plus the optional `reason`.
 pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option<String>), String> {
     let u = || user(o, "user").map(|u| u.get()).ok_or("missing user");
@@ -500,12 +601,35 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                 .ok_or("missing count")?
                 .clamp(1, PURGE_MAX as i64) as usize,
             user: user(o, "user").map(|u| u.get()),
+            from: None,
         },
         "slowmode" => ModCmd::Slowmode {
             secs: int(o, "seconds")
                 .ok_or("missing seconds")?
                 .clamp(0, MAX_SLOWMODE as i64) as u16,
         },
+        "note" => {
+            let Some(CommandDataOption {
+                name,
+                value: CommandOptionValue::SubCommand(s),
+            }) = o.first()
+            else {
+                return Err("Pick a subcommand".into());
+            };
+            let u = || user(s, "user").map(|u| u.get()).ok_or("missing user");
+            match name.as_str() {
+                "add" => ModCmd::NoteAdd {
+                    user: u()?,
+                    text: string(s, "text").ok_or("missing text")?.into(),
+                },
+                "list" => ModCmd::NoteList { user: u()? },
+                "remove" => ModCmd::NoteRemove {
+                    id: int(s, "id").ok_or("missing id")?,
+                },
+                "sweep" => ModCmd::NoteSweep { user: u()? },
+                _ => return Err("Unknown subcommand".into()),
+            }
+        }
         "cases" => {
             let Some(CommandDataOption {
                 name,
@@ -594,6 +718,28 @@ pub fn definitions() -> Vec<Command> {
             )
             .option(reason())
             .build(),
+        chat("note", "Staff notes about members")
+            .option(
+                SubCommandBuilder::new("add", "Add a note")
+                    .option(user("Member"))
+                    .option(StringBuilder::new("text", "The note").required(true)),
+            )
+            .option(
+                SubCommandBuilder::new("list", "Show a member's latest notes")
+                    .option(user("Member")),
+            )
+            .option(
+                SubCommandBuilder::new("remove", "Remove one note").option(
+                    IntegerBuilder::new("id", "Note number")
+                        .min_value(1)
+                        .required(true),
+                ),
+            )
+            .option(
+                SubCommandBuilder::new("sweep", "Remove all notes of a member")
+                    .option(user("Member")),
+            )
+            .build(),
         chat("cases", "View or edit cases")
             .option(
                 SubCommandBuilder::new("view", "Show a case, or the latest cases of a user")
@@ -635,7 +781,8 @@ mod tests {
             pf(&format!("purge 50 {big}"), None),
             Ok(ModCmd::Purge {
                 count: 50,
-                user: Some(big)
+                user: Some(big),
+                from: None
             })
         );
         assert!(pf("purge 500", None).is_err());
@@ -657,6 +804,25 @@ mod tests {
             })
         );
         assert!(pf("cases", None).is_err());
+    }
+
+    #[test]
+    fn note_prefix() {
+        let big = 123_456_789_012_345_678u64;
+        assert_eq!(
+            pf(&format!("note add {big} ?r rude in vc"), None),
+            Ok(ModCmd::NoteAdd {
+                user: big,
+                text: "rude in vc".into()
+            })
+        );
+        assert!(pf(&format!("note add {big}"), None).is_err()); // text required
+        assert_eq!(pf("note remove 4", None), Ok(ModCmd::NoteRemove { id: 4 }));
+        assert_eq!(
+            pf(&format!("note {big}"), None),
+            Ok(ModCmd::NoteList { user: big })
+        );
+        assert_eq!(ModCmd::NoteList { user: 1 }.perm(), "notes_view");
     }
 
     #[test]

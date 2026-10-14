@@ -210,12 +210,7 @@ async fn list(
 }
 
 async fn reviewer(st: &AppState, s: &Sess, guild: i64) -> Result<(), ApiError> {
-    let l = api::require(st, s, guild, Level::Viewer, false).await?;
-    if l >= Level::Admin || has_perm(st, s, guild, "appeals").await? {
-        Ok(())
-    } else {
-        Err(ApiError::Forbidden("needs the Review Appeals permit"))
-    }
+    api::staff(st, s, guild, &["appeals"]).await
 }
 
 async fn has_perm(st: &AppState, s: &Sess, guild: i64, perm: &str) -> Result<bool, ApiError> {

@@ -74,6 +74,7 @@ fn implied_by(perm: &str) -> &'static [&'static str] {
         "quarantine" => &["kick", "ban"],
         "purge" | "slowmode" => &["timeout", "kick", "ban"],
         "cases" => &["warn", "timeout", "kick", "ban"],
+        "notes_view" => &["notes_manage"],
         _ => &[],
     }
 }
@@ -114,7 +115,7 @@ const fn flag(key: &'static str, label: &'static str, help: &'static str) -> Per
     }
 }
 
-/// Shown locked until the bot has the feature behind it (reports, mod notes, lock-updates channel).
+/// Shown locked until the bot has the feature behind it (lock-updates channel).
 const fn planned(
     key: &'static str,
     label: &'static str,
@@ -163,11 +164,10 @@ pub const CATALOG: &[PermSection] = &[
                 "Dashboard Edit",
                 "Change settings on this server's dashboard",
             ),
-            planned(
+            flag(
                 "reports",
                 "Report Immunity",
                 "Safe from being reported by server members",
-                true,
             ),
         ],
     },
@@ -189,14 +189,13 @@ pub const CATALOG: &[PermSection] = &[
             perm("purge", "Purge Command", ""),
             perm("verify", "Verify Command", "Manually verify members"),
             perm("sanitize", "Sanitize Command", "Sanitize/Dehoist"),
-            planned("reports", "Manage Reports", "", false),
+            perm("reports", "Manage Reports", "View and act on reports"),
             perm("backups", "Backups", "Take/Load/Delete backups"),
-            planned("notes_view", "View Notes", "", false),
-            planned(
+            perm("notes_view", "View Notes", ""),
+            perm(
                 "notes_manage",
                 "Manage Notes",
                 "View/edit/remove/sweep notes",
-                false,
             ),
             perm("appeals", "Review Appeals", ""),
             perm("revert", "Revert Center", "Undo anti-nuke actions"),

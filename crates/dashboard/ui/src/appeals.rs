@@ -57,19 +57,20 @@ pub fn AppealList(guild: String) -> impl IntoView {
     }
 }
 
+/// Blocklist of one feature (`base` is "appeals" or "reports"); only appeals can purge it.
 #[component]
-pub fn AppealBlacklist(guild: String) -> impl IntoView {
+pub fn Blacklist(guild: String, base: &'static str, #[prop(optional)] purge: bool) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let (user, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()));
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{}/appeals/blacklist", g.get_value()), None).await {
+        if let Ok(v) = api("GET", &format!("/api/guilds/{}/{base}/blacklist", g.get_value()), None).await {
             set_rows.set(v.as_array().cloned().unwrap_or_default());
         }
     });
     load();
     let post = move |path: String, body: Option<Value>| spawn_local(async move {
-        match api("POST", &format!("/api/guilds/{}/appeals/blacklist{path}", g.get_value()), body).await {
+        match api("POST", &format!("/api/guilds/{}/{base}/blacklist{path}", g.get_value()), body).await {
             Ok(_) => { msg.set(String::new()); load() }
             Err(e) => msg.set(e),
         }
@@ -78,7 +79,7 @@ pub fn AppealBlacklist(guild: String) -> impl IntoView {
         <div class="card row">
             <input placeholder="User ID" prop:value=user on:input=move |e| user.set(event_target_value(&e)) />
             <button on:click=move |_| post(String::new(), Some(json!({"user_id": user.get_untracked()})))>"Blacklist user"</button>
-            <button class="ghost" on:click=move |_| if web_sys::window().is_some_and(|w| w.confirm_with_message("Remove every user from the appeals blacklist?").unwrap_or(false)) { post("/purge".into(), None) }>"Purge all"</button>
+            <Show when=move || purge><button class="ghost" on:click=move |_| if web_sys::window().is_some_and(|w| w.confirm_with_message("Remove every user from the appeals blacklist?").unwrap_or(false)) { post("/purge".into(), None) }>"Purge all"</button></Show>
             <span class="err">{move || msg.get()}</span>
         </div>
         <Show when=move || rows.get().is_empty()><div class="banner">"No blacklisted users.."</div></Show>

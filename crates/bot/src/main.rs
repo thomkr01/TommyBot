@@ -12,6 +12,7 @@ mod modcmds;
 mod panic;
 mod prefix;
 mod reply;
+mod reports;
 mod scheduler;
 mod slash;
 mod targets;
