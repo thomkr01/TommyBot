@@ -121,10 +121,24 @@ pub struct MsgFacts<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct UserHistory {
     recent: VecDeque<String>,
+    /// (channel, message) ids of the latest messages, for the purge after a strike.
+    msgs: VecDeque<(u64, u64)>,
 }
 
 impl UserHistory {
     const KEEP: usize = 5;
+    const KEEP_MSGS: usize = 50;
+
+    pub fn track(&mut self, channel: u64, msg: u64) {
+        if self.msgs.len() == Self::KEEP_MSGS {
+            self.msgs.pop_front();
+        }
+        self.msgs.push_back((channel, msg));
+    }
+
+    pub fn take_msgs(&mut self) -> Vec<(u64, u64)> {
+        self.msgs.drain(..).collect()
+    }
 
     pub fn remember(&mut self, content: &str) {
         if self.recent.len() == Self::KEEP {
@@ -299,6 +313,15 @@ mod tests {
             content,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn history_hands_out_tracked_messages_once() {
+        let mut h = UserHistory::default();
+        (0..60).for_each(|i| h.track(1, i));
+        let got = h.take_msgs();
+        assert_eq!((got.len(), got[0].1), (UserHistory::KEEP_MSGS, 10));
+        assert!(h.take_msgs().is_empty());
     }
 
     #[test]
