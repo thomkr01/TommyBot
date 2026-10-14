@@ -14,6 +14,11 @@ use crate::app::App;
 /// Only a join in the last two minutes counts, so the GuildCreate burst at startup stays quiet.
 const FRESH_SECS: i64 = 120;
 
+/// The dashboard routes by URL hash, so a path like `/guilds/<id>` would 404.
+fn wizard_url(base: &str, guild: impl std::fmt::Display) -> String {
+    format!("{}/#/{guild}/wizard", base.trim_end_matches('/'))
+}
+
 fn link(label: &str, url: String) -> Component {
     Component::Button(Button {
         id: None,
@@ -60,15 +65,15 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
         .filter(|u| !u.is_empty());
     let mut links = vec![];
     if let Some(url) = &dashboard {
-        links.push(link("Setup Wizard", format!("{url}/guilds/{}", g.id)));
+        links.push(link("Setup Wizard", wizard_url(url, g.id)));
     }
     if let Some(url) = std::env::var("SUPPORT_URL").ok().filter(|u| !u.is_empty()) {
         links.push(link("Support", url));
     }
     let wizard = match &dashboard {
         Some(url) => format!(
-            "You can set the bot up in the [dashboard]({url}/guilds/{}).",
-            g.id
+            "You can set the bot up in the [dashboard]({}).",
+            wizard_url(url, g.id)
         ),
         None => "Ask the bot owner for the dashboard link to set it up.".into(),
     };
@@ -95,4 +100,15 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
         .components(&rows)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wizard_link_uses_hash_route() {
+        assert_eq!(
+            super::wizard_url("https://d.example/", 5),
+            "https://d.example/#/5/wizard"
+        );
+    }
 }
