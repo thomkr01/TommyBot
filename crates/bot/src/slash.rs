@@ -138,7 +138,7 @@ pub fn parse(
         "unlock" => return Ok(Cmd::Unlock),
         "backup" => return backup(o),
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
-        | "slowmode" | "cases" => {
+        | "slowmode" | "cases" | "verify" | "sanitize" => {
             return modcmds::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
         }
         "revert" => {

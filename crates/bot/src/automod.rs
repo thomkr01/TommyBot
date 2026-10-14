@@ -22,12 +22,15 @@ use twilight_model::{
         AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
     },
     guild::auto_moderation::AutoModerationActionType,
-    id::{marker::GuildMarker, Id},
+    id::{
+        marker::{GuildMarker, UserMarker},
+        Id,
+    },
 };
 
 use crate::{
     app::{now_secs, App, GuildCfg},
-    commands::timeout,
+    commands::{self, timeout},
     events::{send_log, send_log_pinging},
     lockdown, reply, verify,
 };
@@ -83,7 +86,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
                 .is_some_and(|t| t.starts_with("image/"))
         })
         .count();
-    let facts = MsgFacts {
+    let mut facts = MsgFacts {
         content,
         // shortcut: custom emoji only, unicode emoji are not counted.
         emojis: content.matches("<:").count() + content.matches("<a:").count(),
@@ -127,6 +130,12 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         },
         ..Default::default()
     };
+    if facts.blacklisted_words > 0 && app.whitelisted(gid, m.author.id, "words").await? {
+        facts.blacklisted_words = 0;
+    }
+    if facts.blacklisted_link && app.whitelisted(gid, m.author.id, "links").await? {
+        facts.blacklisted_link = false;
+    }
     let pings = facts.user_mentions + facts.everyone_mentions + facts.role_mentions;
     let lock = &am.auto_lockdown;
     let mention_lock = lock.enabled
@@ -168,7 +177,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !triggered && !mention_lock {
         return Ok(());
     }
-    if app.is_immune(gid, m.author.id).await? {
+    if app.whitelisted(gid, m.author.id, "automod").await? {
         return Ok(());
     }
     if mention_lock && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await? {
@@ -349,6 +358,7 @@ async fn filter_action(
                 },
             )
             .await?;
+            warn_actions(app, cfg, gid, uid).await?;
         }
         FilterAction::Timeout => timeout(&app.http, gid, uid, secs).await?,
         FilterAction::Kick => {
@@ -508,6 +518,19 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
     Ok(())
 }
 
+async fn warn_actions(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    uid: Id<UserMarker>,
+) -> Result<()> {
+    let added = cfg.misc.warn_base_points;
+    if let Some(text) = commands::apply_warn_actions(app, &cfg.misc, gid, uid, added).await? {
+        send_log(app, gid.get(), LogKind::AutoMod, &text).await?;
+    }
+    Ok(())
+}
+
 async fn native_action(
     app: &App,
     cfg: &GuildCfg,
@@ -536,6 +559,7 @@ async fn native_action(
                 },
             )
             .await?;
+            warn_actions(app, cfg, gid, uid).await?;
         }
         BotAction::Timeout => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
         BotAction::Kick => punish(app, cfg, gid, uid.get(), Action::Kick, WHY).await?,
@@ -612,6 +636,7 @@ async fn punish(
                 },
             )
             .await?;
+            warn_actions(app, cfg, gid, uid).await?;
         }
         Action::Timeout(0) => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
         Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000).await?,

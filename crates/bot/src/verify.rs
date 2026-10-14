@@ -179,7 +179,7 @@ fn ephemeral(kind: InteractionResponseType, content: Option<&str>) -> Interactio
 }
 
 /// Hands out the verification roles; a member quarantined on join leaves quarantine.
-async fn grant(
+pub(crate) async fn grant(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,

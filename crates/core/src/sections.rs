@@ -386,8 +386,9 @@ pub struct MiscCfg {
     /// Only owners, trusted admins and permit holders count as staff.
     pub staff_only_permitted: bool,
     pub warn_base_points: i32,
-    /// Apply the warn-threshold actions.
+    /// Apply `warn_actions` once a member's warn points reach them.
     pub auto_warn_actions: bool,
+    pub warn_actions: Vec<crate::warn::Threshold>,
 }
 
 impl Default for MiscCfg {
@@ -410,6 +411,7 @@ impl Default for MiscCfg {
             staff_only_permitted: true,
             warn_base_points: 1,
             auto_warn_actions: true,
+            warn_actions: vec![],
         }
     }
 }

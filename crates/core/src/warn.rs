@@ -1,11 +1,16 @@
 //! Warn points (spec 4.9): thresholds map accumulated points to a punishment; harshest crossed wins.
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::Deserialize;
+
+/// Stored as `{"points": 5, "action": "timeout", "secs": 600}` in the misc config's `warn_actions`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Threshold {
     pub points: i32,
+    #[serde(flatten)]
     pub action: Action,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
 pub enum Action {
     Timeout { secs: i64 },
     Kick,
@@ -58,5 +63,15 @@ mod tests {
         );
         assert_eq!(crossed(&ts, 2, 7).unwrap().action, Action::Kick);
         assert_eq!(crossed(&ts, 7, 7), None);
+    }
+
+    #[test]
+    fn parses_stored_rows() {
+        let ts: Vec<Threshold> = serde_json::from_str(
+            r#"[{"points":3,"action":"timeout","secs":600},{"points":6,"action":"ban"}]"#,
+        )
+        .unwrap();
+        assert_eq!(ts[0].action, Action::Timeout { secs: 600 });
+        assert_eq!(ts[1].action, Action::Ban);
     }
 }
