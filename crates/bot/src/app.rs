@@ -109,6 +109,8 @@ pub struct App {
     pub panic_heat: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
+    /// Prefix commands waiting for a Confirm click, by the command message id.
+    pub pending: Mutex<HashMap<u64, crate::commands::Pending>>,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -146,6 +148,7 @@ impl App {
             panic_heat: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
             panic_runs: Default::default(),
             guilds: Default::default(),
+            pending: Default::default(),
         }
     }
 

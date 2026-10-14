@@ -128,7 +128,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::MemberUpdate(m) => automod::on_member_update(app, m).await?,
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
         Event::InteractionCreate(i) => {
-            if !verify::handle(app, &i.0).await? {
+            if !verify::handle(app, &i.0).await? && !commands::handle_confirm(app, &i.0).await? {
                 slash::handle(app, &i.0).await?
             }
         }
