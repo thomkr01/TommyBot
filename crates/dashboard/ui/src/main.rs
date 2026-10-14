@@ -2,6 +2,7 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
 mod appeals;
+mod records;
 mod common;
 mod form;
 mod lockdown;
@@ -9,7 +10,8 @@ mod pages;
 mod permits;
 mod recovery;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
-use appeals::{AppealBlacklist, AppealForm, AppealList};
+use appeals::{AppealForm, AppealList, Blacklist};
+use records::{CaseList, NoteList, ReportList};
 use common::*;
 use form::Section;
 use permits::Permits;
@@ -22,11 +24,13 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
     ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
+    ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
     ("Raw JSON", &[("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
+const REPORT_TABS: &[(&str, &str)] = &[("report_list", "List"), ("report_blacklist", "Blacklist")];
 const WL_TABS: &[(&str, &str)] = &[("whitelist", "Spam"), ("whitelist/invites", "Invite Links"), ("whitelist/mentions", "Mentions"), ("whitelist/everyone", "@everyone")];
 const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
 /// (sub page, title, description) for the Filters index.
@@ -42,6 +46,7 @@ const FILTER_PAGES: &[(&str, &str, &str)] = &[
 fn title(p: &str) -> String {
     match p {
         _ if p.starts_with("appeal") => "Appeals".into(),
+        _ if p.starts_with("report") => "Reports".into(),
         _ if p.starts_with("lockdown") => "Lockdown".into(),
         "discord_automod" => "Discord AutoMod".into(),
         "antinuke" | "antinuke_filters" => format!("Anti Nuke {}", if p == "antinuke" { "General" } else { "Filters" }),
@@ -177,7 +182,7 @@ fn App() -> impl IntoView {
                         Some(g) => {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
-                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}</a> } };
+                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}</a> } };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -221,7 +226,11 @@ fn App() -> impl IntoView {
                                 ("lockdown_settings", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownSettings guild=g.clone() enrolled /> }.into_any(),
                                 ("discord_automod", _) => view! { <DiscordRules guild=g.clone() /> }.into_any(),
                                 ("appeal_list", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealList guild=g.clone() /> }.into_any(),
-                                ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealBlacklist guild=g.clone() /> }.into_any(),
+                                ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><Blacklist guild=g.clone() base="appeals" purge=true /> }.into_any(),
+                                ("cases", _) => view! { <CaseList guild=g.clone() /> }.into_any(),
+                                ("notes", _) => view! { <NoteList guild=g.clone() /> }.into_any(),
+                                ("report_list", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><ReportList guild=g.clone() /> }.into_any(),
+                                ("report_blacklist", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><Blacklist guild=g.clone() base="reports" /> }.into_any(),
                                 ("appeals", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() />{sec("appeals", "")} }.into_any(),
                                 ("filters", None) => view! { <div class="stack">{FILTER_PAGES.iter().map(|(sub, t, d)| view! { <a class="card link" href=format!("#/{g}/filters/{sub}")><span class="ico"></span><span><h3>{*t}</h3><span class="muted">{*d}</span></span><span class="sp"></span>"›"</a> }).collect_view()}</div> }.into_any(),
                                 ("filters", Some(sub)) => {

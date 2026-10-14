@@ -225,9 +225,8 @@ pub async fn run(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()> {
             return say(app, msg, &text).await;
         }
         "unban" | "hackban" | "untimeout" | "unmute" | "unwarn" | "quarantine" | "unquarantine"
-        | "purge" | "clear" | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "dehoist" => {
-            return modcmds::run_prefix(app, msg, p).await
-        }
+        | "purge" | "clear" | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "dehoist"
+        | "note" | "notes" => return modcmds::run_prefix(app, msg, p).await,
         _ => return Ok(()),
     };
     let owner = app.guild_info(gid).await?.owner;

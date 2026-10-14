@@ -157,6 +157,27 @@ fn checks(roles: &[Role], guild: i64, bot_pos: i64, config: &Value) -> Vec<Value
     out
 }
 
+/// Server settings Discord itself offers against raids and explicit media (Medium or higher; scan all members).
+fn server_checks(g: &Value) -> Vec<Value> {
+    let sev = |ok: bool| if ok { "ok" } else { "warn" };
+    vec![
+        row(
+            "verification_level",
+            sev(g["verification_level"].as_u64().unwrap_or(0) >= 2),
+            "Server verification level",
+            "Set it to at least Medium so brand new accounts cannot post at once.".into(),
+            None,
+        ),
+        row(
+            "content_filter",
+            sev(g["explicit_content_filter"].as_u64() == Some(2)),
+            "Explicit media content filter",
+            "Set it to scan media from all members.".into(),
+            None,
+        ),
+    ]
+}
+
 async fn roles_of(st: &AppState, guild: i64) -> Result<Vec<Role>, ApiError> {
     Ok(serde_json::from_value(
         st.discord
@@ -190,7 +211,13 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     require(&st, &s, guild, Level::Viewer, false).await?;
     let (_, config) = crate::store::current(&st.db, guild).await?;
     let (roles, bot_pos) = roles_and_bot_pos(&st, guild).await?;
-    Ok(Json(json!(checks(&roles, guild, bot_pos, &config))))
+    let mut rows = checks(&roles, guild, bot_pos, &config);
+    let info = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}"), None)
+        .await?;
+    rows.extend(server_checks(&info));
+    Ok(Json(json!(rows)))
 }
 
 #[derive(Deserialize)]
@@ -437,6 +464,24 @@ mod tests {
             managed,
             permissions: perms.to_string(),
         }
+    }
+
+    #[test]
+    fn server_settings_checks() {
+        let sev = |g: Value| -> Vec<String> {
+            server_checks(&g)
+                .iter()
+                .map(|r| r["severity"].as_str().unwrap().into())
+                .collect()
+        };
+        assert_eq!(
+            sev(json!({"verification_level": 1, "explicit_content_filter": 0})),
+            ["warn", "warn"]
+        );
+        assert_eq!(
+            sev(json!({"verification_level": 2, "explicit_content_filter": 2})),
+            ["ok", "ok"]
+        );
     }
 
     #[test]

@@ -73,6 +73,26 @@ pub(crate) async fn require(
     Ok(l)
 }
 
+/// Dashboard access plus one of the given permits (Admin and above skip the permit).
+pub(crate) async fn staff(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+    perms: &[&str],
+) -> Result<(), ApiError> {
+    let l = require(st, s, guild, Level::Viewer, false).await?;
+    if l >= Level::Admin
+        || permit_perms(st, s, guild)
+            .await?
+            .iter()
+            .any(|p| perms.contains(&p.as_str()))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("needs a permit for this page"))
+    }
+}
+
 /// The toggles of the permit editor, so the page never carries its own copy of the permission list.
 pub async fn permit_catalog(_: Sess) -> Json<Value> {
     Json(json!(tommybot_core::permits::CATALOG

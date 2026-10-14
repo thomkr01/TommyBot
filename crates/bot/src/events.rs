@@ -11,7 +11,7 @@ use twilight_model::{
     },
 };
 
-use crate::{antinuke, app::App, automod, commands, prefix, slash, verify};
+use crate::{antinuke, app::App, automod, commands, prefix, reports, slash, verify};
 
 fn guild_of(ev: &Event) -> Option<u64> {
     let g = match ev {
@@ -128,7 +128,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::MemberUpdate(m) => automod::on_member_update(app, m).await?,
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
         Event::InteractionCreate(i) => {
-            if !verify::handle(app, &i.0).await? {
+            if !verify::handle(app, &i.0).await? && !reports::handle(app, &i.0).await? {
                 slash::handle(app, &i.0).await?
             }
         }

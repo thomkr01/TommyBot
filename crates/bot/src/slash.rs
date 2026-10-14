@@ -25,6 +25,7 @@ use crate::{
     app::App,
     commands::{self, ModKind},
     modcmds::{self, ModCmd},
+    reports,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -137,8 +138,16 @@ pub fn parse(
         }
         "unlock" => return Ok(Cmd::Unlock),
         "backup" => return backup(o),
+        "Quarantine" | "Sanitize" => {
+            let user = target_id.ok_or("missing user")?.get();
+            let cmd = match name {
+                "Quarantine" => ModCmd::Quarantine { user },
+                _ => ModCmd::Sanitize { user },
+            };
+            return Ok(Cmd::Ext(cmd, None));
+        }
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
-        | "slowmode" | "cases" | "verify" | "sanitize" => {
+        | "slowmode" | "cases" | "verify" | "sanitize" | "note" => {
             return modcmds::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
         }
         "revert" => {
@@ -231,6 +240,14 @@ pub fn definitions() -> Vec<Command> {
         guild_only(menu("Ban")),
         guild_only(menu("Kick")),
         guild_only(menu("Timeout")),
+        guild_only(menu("Quarantine")),
+        guild_only(menu("Sanitize")),
+        guild_only(CommandBuilder::new("Report", "", CommandType::Message)),
+        guild_only(CommandBuilder::new(
+            "Purge from here",
+            "",
+            CommandType::Message,
+        )),
     ]);
     defs
 }
@@ -285,6 +302,9 @@ async fn run(
     let (Some(gid), Some(actor_id)) = (i.guild_id, i.author_id()) else {
         return Ok("Server only".into());
     };
+    if data.kind == CommandType::Message {
+        return reports::message_menu(app, data, gid, actor_id).await;
+    }
     let cmd = match parse(&data.name, &data.options, data.target_id) {
         Ok(c) => c,
         Err(e) => return Ok(e),
@@ -395,6 +415,11 @@ mod tests {
                 points: 1
             })
         );
+        assert_eq!(
+            parse("Quarantine", &[], Some(Id::new(9))),
+            Ok(Cmd::Ext(ModCmd::Quarantine { user: 9 }, None))
+        );
+        assert!(parse("Sanitize", &[], None).is_err());
         let r = [
             opt("actor", CommandOptionValue::User(u)),
             opt("since", CommandOptionValue::String("2h".into())),
