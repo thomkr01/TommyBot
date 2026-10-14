@@ -1,5 +1,5 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
-//! shortcut: web mode needs the web crate and says so; the other modes are handled here.
+//! Web and third-party modes hand the member to the dashboard's /verify page, which queues a `verify_grant` job.
 use anyhow::Result;
 use captcha::{
     filters::{Dots, Noise, Wave},
@@ -52,6 +52,7 @@ const CODE: &str = "verify:code:";
 enum Step {
     Say(&'static str),
     Grant,
+    Web,
     Captcha,
     Simple,
     Dm,
@@ -70,7 +71,7 @@ fn decide(cfg: &VerificationCfg, raid_active: bool, suspicious: bool, has_role: 
     }
     match effective_mode(&cfg.verify, raid_active) {
         VerifyMode::Button => Step::Grant,
-        VerifyMode::Web => Step::Say("Verification for this server happens on its web page."),
+        VerifyMode::Web | VerifyMode::ThirdParty => Step::Web,
         VerifyMode::SimpleCaptcha => Step::Simple,
         VerifyMode::Dm => Step::Dm,
         VerifyMode::Captcha => Step::Captcha,
@@ -142,6 +143,28 @@ pub async fn on_join(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, susp
     }
 }
 
+/// The dashboard page passed Turnstile and sign-in: hand out the roles if the server still asks for web verification.
+pub async fn web_grant(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
+    let cfg = app.cfg(gid.get()).await?;
+    let v = &cfg.verification;
+    if !v.enabled || !matches!(v.verify.mode, VerifyMode::Web | VerifyMode::ThirdParty) {
+        return Ok(());
+    }
+    let Ok(member) = app.http.guild_member(gid, user).await else {
+        return Ok(());
+    };
+    if member
+        .model()
+        .await?
+        .roles
+        .iter()
+        .any(|r| v.roles.contains(r))
+    {
+        return Ok(());
+    }
+    grant(app, gid, user, v).await
+}
+
 /// Applies the fail action to a member who never verified.
 pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
@@ -181,6 +204,28 @@ fn ephemeral(kind: InteractionResponseType, content: Option<&str>) -> Interactio
             ..Default::default()
         }),
     }
+}
+
+fn web_link(gid: Id<GuildMarker>) -> InteractionResponse {
+    let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
+    let mut r = ephemeral(
+        InteractionResponseType::ChannelMessageWithSource,
+        Some("The dashboard URL is not configured, ask the server staff."),
+    );
+    if let (Some(d), false) = (r.data.as_mut(), base.is_empty()) {
+        d.content = Some("Open the page to verify.".into());
+        d.components = Some(vec![row(Component::Button(Button {
+            id: None,
+            custom_id: None,
+            disabled: false,
+            emoji: None,
+            label: Some("Verify on the website".into()),
+            style: ButtonStyle::Link,
+            url: Some(format!("{}/verify/{gid}", base.trim_end_matches('/'))),
+            sku_id: None,
+        }))]);
+    }
+    r
 }
 
 /// Hands out the verification roles; a member quarantined on join leaves quarantine.
@@ -307,6 +352,11 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             match decide(&cfg.verification, raid, suspicious, has_role) {
                 Step::Say(t) => {
                     client.create_response(i.id, &i.token, &reply(t)).await?;
+                }
+                Step::Web => {
+                    client
+                        .create_response(i.id, &i.token, &web_link(gid))
+                        .await?;
                 }
                 Step::Grant => {
                     grant(app, gid, user, &cfg.verification).await?;
@@ -460,15 +510,12 @@ mod tests {
             decide(&VerificationCfg::default(), false, true, false),
             Step::Say(_)
         ));
-        assert!(matches!(
-            decide(
-                &cfg(VerifyMode::Web, VerifyTarget::Everyone),
-                false,
-                true,
-                false
-            ),
-            Step::Say(_)
-        ));
+        for mode in [VerifyMode::Web, VerifyMode::ThirdParty] {
+            assert_eq!(
+                decide(&cfg(mode, VerifyTarget::Everyone), false, true, false),
+                Step::Web
+            );
+        }
     }
 
     #[test]

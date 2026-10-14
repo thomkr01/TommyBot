@@ -10,6 +10,7 @@ mod recovery;
 mod schema;
 mod sections;
 mod store;
+mod verify;
 
 use axum::{
     http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
@@ -105,6 +106,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(lockdown::routes())
         .merge(recovery::routes())
         .merge(appeals::routes())
+        .merge(verify::routes())
         // Hash routing means the server never needs an index.html fallback; one would also hide
         // missing assets by answering a stale hashed .js/.wasm request with HTML.
         .fallback_service(ServeDir::new(dist).not_found_service(

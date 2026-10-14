@@ -82,6 +82,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
+        "verify_grant" => verify::web_grant(app, gid, user(&job.payload)?).await?,
         "raid_end" => send_log(app, gid.get(), LogKind::JoinRaid, "Raid ended").await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }

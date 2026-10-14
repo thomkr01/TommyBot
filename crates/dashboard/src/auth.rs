@@ -36,6 +36,7 @@ pub struct Sess {
     pub username: String,
     pub access_token: String,
     pub stepped_up: bool,
+    pub csrf: String,
 }
 
 impl FromRequestParts<AppState> for Sess {
@@ -67,17 +68,31 @@ impl FromRequestParts<AppState> for Sess {
             username,
             access_token,
             stepped_up: step_up.is_some_and(|t| t > Utc::now()),
+            csrf,
         })
     }
 }
 
-pub async fn login(State(st): State<AppState>, jar: CookieJar) -> impl IntoResponse {
+#[derive(Deserialize)]
+pub struct Login {
+    next: Option<String>,
+}
+
+pub async fn login(
+    State(st): State<AppState>,
+    jar: CookieJar,
+    Query(q): Query<Login>,
+) -> impl IntoResponse {
     let state = token();
     let url = st.discord.authorize_url(&state);
-    (
-        jar.add(cookie("oauth_state", state, st.secure)),
-        Redirect::to(&url),
-    )
+    let mut jar = jar.add(cookie("oauth_state", state, st.secure));
+    if let Some(n) = q
+        .next
+        .filter(|n| n.starts_with("/verify/") && !n.contains("//"))
+    {
+        jar = jar.add(cookie("login_next", n, st.secure));
+    }
+    (jar, Redirect::to(&url))
 }
 
 #[derive(Deserialize)]
@@ -100,10 +115,14 @@ pub async fn callback(
     sqlx::query("insert into dash_session (id, user_id, username, access_token, csrf, expires_at) values ($1,$2,$3,$4,$5,$6)")
         .bind(&sid).bind(me.id.parse::<i64>().map_err(anyhow::Error::from)?).bind(me.username).bind(tok).bind(csrf)
         .bind(Utc::now() + Duration::days(7)).execute(&st.db).await?;
+    let next = jar
+        .get("login_next")
+        .map_or("/".into(), |c| c.value().to_string());
     Ok((
         jar.remove(Cookie::from("oauth_state"))
+            .remove(Cookie::from("login_next"))
             .add(cookie("sid", sid, st.secure)),
-        Redirect::to("/"),
+        Redirect::to(&next),
     ))
 }
 
