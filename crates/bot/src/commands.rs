@@ -15,7 +15,7 @@ use twilight_model::{
     gateway::payload::incoming::MessageCreate,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
-        marker::{GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, UserMarker},
         Id,
     },
     util::Timestamp,
@@ -26,7 +26,8 @@ use crate::{
     app::{now_secs, App},
     appeals, backup,
     hierarchy::top_position,
-    lockdown, modcmds,
+    lockdown,
+    modcmds::{self, ModCmd},
     prefix::{Flags, Parsed},
     reply,
     slash::BackupCmd,
@@ -292,17 +293,18 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             Err(e) => say(app, msg, &e).await?,
         }
     }
-    let job = Pending {
+    let job = Pending::new(
         gid,
-        actor: msg.author.id,
-        kind,
-        targets,
-        reason: p.reason,
-        duration_s: p.duration_s,
-        flags: p.flags,
-        at: Instant::now(),
-    };
-    if cfg.misc.confirm && kind != ModKind::Warn && !job.targets.is_empty() {
+        msg.author.id,
+        Action::Mod {
+            kind,
+            targets,
+            reason: p.reason,
+            duration_s: p.duration_s,
+            flags: p.flags,
+        },
+    );
+    if cfg.misc.confirm && job.needs_confirm() {
         return ask_confirm(app, msg, job).await;
     }
     for text in job.run(app, owner, cfg.misc.warn_base_points).await? {
@@ -311,25 +313,105 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
     Ok(())
 }
 
-/// A prefix command waiting for its Confirm click. Lost on restart: the staff member just types it again.
+/// What a [`Pending`] does once confirmed.
+pub enum Action {
+    Mod {
+        kind: ModKind,
+        targets: Vec<Id<UserMarker>>,
+        reason: Option<String>,
+        duration_s: Option<i64>,
+        flags: Flags,
+    },
+    Ext {
+        cmd: ModCmd,
+        channel: Id<ChannelMarker>,
+        reason: Option<String>,
+    },
+}
+
+/// A command waiting for its Confirm click. Lost on restart: the staff member just types it again.
 pub struct Pending {
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
-    kind: ModKind,
-    targets: Vec<Id<UserMarker>>,
-    reason: Option<String>,
-    duration_s: Option<i64>,
-    flags: Flags,
+    action: Action,
     at: Instant,
 }
 
 const CONFIRM_TTL: Duration = Duration::from_secs(60);
 
 impl Pending {
+    pub fn new(gid: Id<GuildMarker>, actor: Id<UserMarker>, action: Action) -> Self {
+        Self {
+            gid,
+            actor,
+            action,
+            at: Instant::now(),
+        }
+    }
+
+    /// Warns and non-destructive commands run straight away.
+    pub fn needs_confirm(&self) -> bool {
+        match &self.action {
+            Action::Mod { kind, targets, .. } => *kind != ModKind::Warn && !targets.is_empty(),
+            Action::Ext { cmd, .. } => cmd.destructive(),
+        }
+    }
+
+    fn question(&self) -> String {
+        match &self.action {
+            Action::Mod {
+                kind,
+                targets,
+                flags,
+                ..
+            } => {
+                let what = if flags.soft && *kind == ModKind::Ban {
+                    "softban"
+                } else {
+                    kind.name()
+                };
+                let who: Vec<String> = targets.iter().map(|t| format!("<@{t}>")).collect();
+                format!("Really {what} {}?", who.join(", "))
+            }
+            Action::Ext { cmd, .. } => format!("Really {}?", cmd.describe()),
+        }
+    }
+
     /// One reply per target.
     async fn run(&self, app: &App, owner: Id<UserMarker>, points: i32) -> Result<Vec<String>> {
+        let (kind, targets, reason, duration_s, flags) = match &self.action {
+            Action::Mod {
+                kind,
+                targets,
+                reason,
+                duration_s,
+                flags,
+            } => (*kind, targets, reason, *duration_s, *flags),
+            Action::Ext {
+                cmd,
+                channel,
+                reason,
+            } => {
+                let actor = app.level(self.gid, owner, self.actor).await?;
+                let text = modcmds::run(
+                    app,
+                    self.gid,
+                    owner,
+                    (self.actor, &actor),
+                    *channel,
+                    cmd.clone(),
+                    reason.as_deref(),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(?e, "mod command failed");
+                    "Command failed, see logs".into()
+                });
+                return Ok(vec![text]);
+            }
+        };
         let mut out = vec![];
-        for &t in &self.targets {
+        for &t in targets {
             // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
             let actor = app.level(self.gid, owner, self.actor).await?;
             let text = match apply_dm(
@@ -337,19 +419,19 @@ impl Pending {
                 self.gid,
                 owner,
                 (self.actor, &actor),
-                self.kind,
+                kind,
                 t,
-                self.reason.as_deref(),
-                self.duration_s,
+                reason.as_deref(),
+                duration_s,
                 points,
-                self.flags,
+                flags,
             )
             .await
             {
                 Ok(text) => text,
                 Err(e) => {
                     tracing::warn!(?e, "mod command failed");
-                    format!("Failed to {} <@{t}>, see logs", self.kind.name())
+                    format!("Failed to {} <@{t}>, see logs", kind.name())
                 }
             };
             out.push(text);
@@ -371,15 +453,10 @@ fn confirm_button(label: &str, id: String, style: ButtonStyle) -> Component {
     })
 }
 
-async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()> {
-    let what = if job.flags.soft && job.kind == ModKind::Ban {
-        "softban"
-    } else {
-        job.kind.name()
-    };
-    let who: Vec<String> = job.targets.iter().map(|t| format!("<@{t}>")).collect();
-    let text = format!("Really {what} {}?", who.join(", "));
-    let nonce = msg.id.get();
+/// Keeps `job` for its buttons and returns the question with the Confirm / Cancel row.
+/// `nonce` is the command message or interaction id.
+pub fn stash_confirm(app: &App, nonce: u64, job: Pending) -> (String, Component) {
+    let text = job.question();
     let row = Component::ActionRow(ActionRow {
         id: None,
         components: vec![
@@ -395,11 +472,14 @@ async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()>
             ),
         ],
     });
-    {
-        let mut pending = app.pending.lock().unwrap();
-        pending.retain(|_, p| p.at.elapsed() < CONFIRM_TTL);
-        pending.insert(nonce, job);
-    }
+    let mut pending = app.pending.lock().unwrap();
+    pending.retain(|_, p| p.at.elapsed() < CONFIRM_TTL);
+    pending.insert(nonce, job);
+    (text, row)
+}
+
+pub async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()> {
+    let (text, row) = stash_confirm(app, msg.id.get(), job);
     app.http
         .create_message(msg.channel_id)
         .content(&text)

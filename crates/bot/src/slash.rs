@@ -11,7 +11,7 @@ use twilight_model::{
             Interaction, InteractionContextType, InteractionData,
         },
     },
-    channel::message::{AllowedMentions, MessageFlags},
+    channel::message::{AllowedMentions, Component, MessageFlags},
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
         marker::{GenericMarker, UserMarker},
@@ -24,8 +24,9 @@ use twilight_util::builder::command::{
 
 use crate::{
     app::App,
-    commands::{self, ModKind},
+    commands::{self, Action, ModKind, Pending},
     modcmds::{self, ModCmd},
+    prefix::Flags,
     reports,
 };
 
@@ -37,6 +38,7 @@ pub enum Cmd {
         reason: Option<String>,
         duration_s: Option<i64>,
         points: i32,
+        flags: Flags,
     },
     Lock {
         kind: Option<LockKind>,
@@ -129,7 +131,7 @@ pub fn parse(
     target_id: Option<Id<GenericMarker>>,
 ) -> Result<Cmd, String> {
     let kind = match name {
-        "ban" | "Ban" => ModKind::Ban,
+        "ban" | "Ban" | "softban" => ModKind::Ban,
         "kick" | "Kick" => ModKind::Kick,
         "timeout" | "Timeout" => ModKind::Timeout,
         "warn" => ModKind::Warn,
@@ -183,6 +185,10 @@ pub fn parse(
         reason: string(o, "reason").map(String::from),
         duration_s,
         points: int(o, "points").unwrap_or(1) as i32,
+        flags: Flags {
+            soft: name == "softban",
+            ..Default::default()
+        },
     })
 }
 
@@ -199,6 +205,14 @@ pub fn definitions() -> Vec<Command> {
                 .option(user())
                 .option(reason())
                 .option(StringBuilder::new("duration", "Length, e.g. 7d")),
+        ),
+        guild_only(
+            chat(
+                "softban",
+                "Ban and unban a member to delete their recent messages",
+            )
+            .option(user())
+            .option(reason()),
         ),
         guild_only(
             chat("kick", "Kick a member")
@@ -290,7 +304,8 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<()> {
             },
         )
         .await?;
-    let text = match run(app, i, data).await {
+    let mut confirm = None;
+    let text = match run(app, i, data, &mut confirm).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(?e, command = %data.name, "slash command failed");
@@ -300,15 +315,18 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<()> {
     client
         .update_response(&i.token)
         .content(Some(&text))
+        .components(confirm.as_ref().map(std::slice::from_ref))
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?;
     Ok(())
 }
 
+/// `confirm` receives the Confirm / Cancel row when the reply is a question instead of a result.
 async fn run(
     app: &App,
     i: &Interaction,
     data: &twilight_model::application::interaction::application_command::CommandData,
+    confirm: &mut Option<Component>,
 ) -> Result<String> {
     let (Some(gid), Some(actor_id)) = (i.guild_id, i.author_id()) else {
         return Ok("Server only".into());
@@ -327,6 +345,16 @@ async fn run(
     {
         return Ok("Slash commands are disabled on this server".into());
     }
+    let cfg_confirm = app.cfg(gid.get()).await?.misc.confirm;
+    // Asks for a Confirm click when the server wants one; the buttons are handled in `commands`.
+    let mut ask = |action| {
+        let job = Pending::new(gid, actor_id, action);
+        (cfg_confirm && job.needs_confirm()).then(|| {
+            let (text, row) = commands::stash_confirm(app, i.id.get(), job);
+            *confirm = Some(row);
+            text
+        })
+    };
     match cmd {
         Cmd::Mod {
             kind,
@@ -334,8 +362,19 @@ async fn run(
             reason,
             duration_s,
             points,
+            flags,
         } => {
-            commands::apply(
+            let action = Action::Mod {
+                kind,
+                targets: vec![target],
+                reason: reason.clone(),
+                duration_s,
+                flags,
+            };
+            if let Some(q) = ask(action) {
+                return Ok(q);
+            }
+            commands::apply_dm(
                 app,
                 gid,
                 owner,
@@ -345,6 +384,7 @@ async fn run(
                 reason.as_deref(),
                 duration_s,
                 points,
+                flags,
             )
             .await
         }
@@ -362,6 +402,14 @@ async fn run(
                 .as_ref()
                 .map(|c| c.id)
                 .ok_or(anyhow::anyhow!("no channel"))?;
+            let action = Action::Ext {
+                cmd: c.clone(),
+                channel: ch,
+                reason: reason.clone(),
+            };
+            if let Some(q) = ask(action) {
+                return Ok(q);
+            }
             modcmds::run(
                 app,
                 gid,
@@ -402,7 +450,8 @@ mod tests {
                 target: u,
                 reason: Some("spam".into()),
                 duration_s: Some(7200),
-                points: 1
+                points: 1,
+                flags: Flags::default()
             })
         );
         assert!(parse("timeout", &o[..1], None).is_err()); // duration required
@@ -423,7 +472,8 @@ mod tests {
                 target: Id::new(9),
                 reason: None,
                 duration_s: Some(600),
-                points: 1
+                points: 1,
+                flags: Flags::default()
             })
         );
         assert_eq!(
@@ -431,6 +481,21 @@ mod tests {
             Ok(Cmd::Ext(ModCmd::Quarantine { user: 9 }, None))
         );
         assert!(parse("Sanitize", &[], None).is_err());
+        assert!(matches!(
+            parse("softban", &o[..1], None),
+            Ok(Cmd::Mod {
+                kind: ModKind::Ban,
+                flags: Flags { soft: true, .. },
+                ..
+            })
+        ));
+        assert!(ModCmd::Purge {
+            count: 5,
+            user: None,
+            from: None
+        }
+        .destructive());
+        assert!(!ModCmd::Unban { user: 1 }.destructive());
         let r = [
             opt("actor", CommandOptionValue::User(u)),
             opt("since", CommandOptionValue::String("2h".into())),

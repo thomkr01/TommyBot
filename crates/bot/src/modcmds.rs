@@ -25,13 +25,13 @@ use twilight_util::builder::command::{
 use crate::{
     antinuke,
     app::{now_secs, App},
-    commands::{self, gated, target_above_bot},
+    commands::{self, gated, target_above_bot, Action, Pending},
     prefix::Parsed,
     slash::{int, string, user},
     targets,
 };
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModCmd {
     Unban {
         user: u64,
@@ -114,6 +114,29 @@ impl ModCmd {
             Self::CasesView { .. } | Self::CasesEdit { .. } => "cases",
             Self::Verify { .. } => "verify",
             Self::Sanitize { .. } => "sanitize",
+        }
+    }
+
+    /// Commands that lose data or are hard to undo ask for a Confirm click first (`MiscCfg.confirm`).
+    pub fn destructive(&self) -> bool {
+        matches!(
+            self,
+            Self::Purge { .. } | Self::Hackban { .. } | Self::NoteSweep { .. }
+        )
+    }
+
+    /// Completes "Really ...?" for the confirm prompt.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Purge {
+                count,
+                user: Some(u),
+                ..
+            } => format!("purge {count} messages of <@{u}>"),
+            Self::Purge { count, .. } => format!("purge {count} messages"),
+            Self::Hackban { user } => format!("ban <@{user}>"),
+            Self::NoteSweep { user } => format!("remove all notes of <@{user}>"),
+            _ => self.perm().into(),
         }
     }
 
@@ -203,6 +226,11 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     let Some(gid) = msg.guild_id else {
         return Ok(());
     };
+    let owner = app.guild_info(gid).await?.owner;
+    let level = app.level(gid, owner, msg.author.id).await?;
+    if level == permits::Level::None && app.cfg(gid.get()).await?.misc.ignore_no_permit {
+        return Ok(());
+    }
     let mut resolved = None;
     let name = p.names.iter().find(|n| {
         !matches!(
@@ -219,14 +247,20 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     let text = match from_prefix(&p, resolved) {
         Err(e) => e,
         Ok(cmd) => {
-            let owner = app.guild_info(gid).await?.owner;
-            let actor = app.level(gid, owner, msg.author.id).await?;
-            let actor = (msg.author.id, &actor);
+            if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
+                let action = Action::Ext {
+                    cmd,
+                    channel: msg.channel_id,
+                    reason: p.reason,
+                };
+                return commands::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action))
+                    .await;
+            }
             run(
                 app,
                 gid,
                 owner,
-                actor,
+                (msg.author.id, &level),
                 msg.channel_id,
                 cmd,
                 p.reason.as_deref(),
