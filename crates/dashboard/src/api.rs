@@ -285,6 +285,21 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, LockdownCfg, MiscCfg, PanicCfg,
         WhitelistCfg,
     };
+    if section == "logging" {
+        for (i, c) in v["custom"].as_array().into_iter().flatten().enumerate() {
+            let n = i + 1;
+            if c["channel"].is_null() {
+                return Err(ApiError::BadRequest(format!(
+                    "logging type {n} needs a channel"
+                )));
+            }
+            if c["events"].as_array().is_none_or(Vec::is_empty) {
+                return Err(ApiError::BadRequest(format!(
+                    "logging type {n} needs at least one event"
+                )));
+            }
+        }
+    }
     let v = v.clone();
     let r = match section {
         "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),
@@ -307,4 +322,18 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         _ => Ok(()),
     };
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
+}
+
+#[cfg(test)]
+mod logging_validate_tests {
+    use super::validate;
+    use serde_json::json;
+
+    #[test]
+    fn custom_type_needs_channel_and_events() {
+        let bad = |c| validate("logging", &json!({"custom": [c]})).is_err();
+        assert!(bad(json!({"events": ["member_kick"], "channel": null})));
+        assert!(bad(json!({"events": [], "channel": "5"})));
+        assert!(!bad(json!({"events": ["member_kick"], "channel": "5"})));
+    }
 }
