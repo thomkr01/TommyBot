@@ -65,6 +65,14 @@ struct HeldDelete {
     cached: Option<CachedMessage>,
 }
 
+/// A member leave waiting to see whether a staff kick or ban audit entry explains it.
+struct HeldLeave {
+    at: Instant,
+    log: Id<ChannelMarker>,
+    user: Id<UserMarker>,
+    text: String,
+}
+
 pub struct Logger {
     /// The bot's own user id. Its kicks and bans show only as member leaves.
     me: Id<UserMarker>,
@@ -73,6 +81,7 @@ pub struct Logger {
     /// Users removed by a staff kick or ban, from the audit log.
     removals: VecDeque<(Instant, Id<UserMarker>)>,
     held: VecDeque<HeldDelete>,
+    leaves: VecDeque<HeldLeave>,
 }
 
 impl Logger {
@@ -83,6 +92,7 @@ impl Logger {
             deletes: VecDeque::new(),
             removals: VecDeque::new(),
             held: VecDeque::new(),
+            leaves: VecDeque::new(),
         }
     }
 
@@ -105,6 +115,21 @@ impl Logger {
                         channel: m.channel_id,
                         cached,
                     });
+                }
+            }
+            return out;
+        }
+        if let Event::MemberRemove(m) = event {
+            if !self.removed_by_audit(m.user.id, now) {
+                if let Some(log) = cfg.target(LogKind::Member, None) {
+                    if !ignored(cfg, None, Some(m.user.id)) {
+                        self.leaves.push_back(HeldLeave {
+                            at: now,
+                            log,
+                            user: m.user.id,
+                            text: render::member_remove(&m.user),
+                        });
+                    }
                 }
             }
             return out;
@@ -150,6 +175,27 @@ impl Logger {
                     deleter,
                 )),
             });
+        }
+        // The audit entry of a kick or ban can arrive after the leave; if it did, the leave is dropped.
+        while self
+            .leaves
+            .front()
+            .is_some_and(|h| now.duration_since(h.at) >= HOLD)
+        {
+            let Some(h) = self.leaves.pop_front() else {
+                break;
+            };
+            if !self
+                .removals
+                .iter()
+                .any(|(at, u)| *u == h.user && *at >= h.at)
+            {
+                out.push(LogMessage {
+                    channel_id: h.log,
+                    kind: LogKind::Member,
+                    content: clamp(h.text),
+                });
+            }
         }
         out
     }
@@ -198,18 +244,6 @@ impl Logger {
                 user: Some(m.member.user.id),
                 text: render::member_add(&m.member.user),
             }),
-            Event::MemberRemove(m) => {
-                if self.removed_by_audit(m.user.id, now) {
-                    return None;
-                }
-                Some(Entry {
-                    kind: LogKind::Member,
-                    event: None,
-                    channel: None,
-                    user: Some(m.user.id),
-                    text: render::member_remove(&m.user),
-                })
-            }
             Event::GuildAuditLogEntryCreate(e) => self.audit(&e.0, now),
             _ => None,
         }
@@ -222,7 +256,6 @@ impl Logger {
             {
                 None
             }
-            // shortcut: if Discord sends the member leave before this entry, a staff kick or ban logs twice. Needs a live check.
             AuditLogEventType::MemberKick | AuditLogEventType::MemberBanAdd => {
                 if let Some(user) = e.target_id {
                     while self
@@ -418,11 +451,41 @@ mod tests {
         let now = Instant::now();
         let mut logger = Logger::new(Id::new(1));
         assert_eq!(logger.handle(&cfg, &audit_event(20, 10), now).len(), 1);
-        let leave = Event::MemberRemove(twilight_model::gateway::payload::incoming::MemberRemove {
+        assert!(logger.handle(&cfg, &leave(), now).is_empty());
+        assert!(logger.flush(now + HOLD).is_empty());
+    }
+
+    fn leave() -> Event {
+        Event::MemberRemove(twilight_model::gateway::payload::incoming::MemberRemove {
             guild_id: Id::new(9),
             user: user(20),
-        });
-        assert!(logger.handle(&cfg, &leave, now).is_empty());
+        })
+    }
+
+    #[test]
+    fn leave_before_audit_entry_logs_once() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(5)),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut logger = Logger::new(Id::new(1));
+        assert!(logger.handle(&cfg, &leave(), t0).is_empty());
+        let late = t0 + Duration::from_secs(2);
+        assert_eq!(logger.handle(&cfg, &audit_event(20, 10), late).len(), 1);
+        assert!(logger.flush(t0 + HOLD).is_empty());
+    }
+
+    #[test]
+    fn plain_leave_logs_after_hold() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(5)),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut logger = Logger::new(Id::new(1));
+        assert!(logger.handle(&cfg, &leave(), t0).is_empty());
+        assert_eq!(logger.flush(t0 + HOLD).len(), 1);
     }
 
     #[test]
