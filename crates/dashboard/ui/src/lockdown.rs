@@ -95,18 +95,14 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
         }
     });
     check();
-    let fix = move |id: String| run_act(async move { api("POST", &format!("/api/guilds/{}/lockdown/fix", g.get_value()), Some(json!({"id": id}))).await }, msg, need, move |_| check());
+    let fix = move || run_act(async move { api("POST", &format!("/api/guilds/{}/lockdown/fix", g.get_value()), None).await }, msg, need, move |_| check());
     view! {
         <div class="card">
-            <h2>"Compatibility check"</h2>
-            <p class="muted">"Finds roles that would keep talking through a lock."</p>
-            <Show when=move || problems.get().is_some_and(|p| p.is_empty())><p class="ok">"No problems found."</p></Show>
-            {move || problems.get().unwrap_or_default().into_iter().map(|p| {
-                let id = s(&p["id"]);
-                let fixable = !p["fix"].is_null();
-                view! { <div class="row"><span class="warn">{s(&p["text"]).replace("<@&", "role ").replace('>', "")}</span>
-                    {fixable.then(|| view! { <button on:click=move |_| fix(id.clone())>"Apply fix"</button> })}</div> }
-            }).collect_view()}
+            <div class="row"><h2>"Compatibility check"</h2>
+                <button on:click=move |_| fix() disabled=move || !problems.get().is_some_and(|p| p.iter().any(|p| !p["fix"].is_null()))>"Apply Fix"</button></div>
+            <p class="muted">"Checks that only the main roles can view and send, so a lockdown works in a few calls. Apply Fix corrects the role and channel permissions."</p>
+            <Show when=move || problems.get().is_some_and(|p| p.is_empty())><p class="ok">"No lockdown compatibility issues found."</p></Show>
+            {move || problems.get().unwrap_or_default().into_iter().map(|p| view! { <div class="row"><span class="warn">{s(&p["text"]).replace("<@&", "role ").replace("<#", "channel ").replace('>', "")}</span></div> }).collect_view()}
             <button class="ghost" on:click=move |_| check()>"Check again"</button>
             <p class="err">{move || msg.get()}</p>
         </div>

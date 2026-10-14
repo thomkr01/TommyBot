@@ -219,17 +219,33 @@ pub fn kind_from(name: &str, channel: Option<u64>) -> Option<LockKind> {
     })
 }
 
+/// A role-type permission overwrite on a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Overwrite {
+    pub channel: u64,
+    pub role: u64,
+    pub allow: u64,
+    pub deny: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Fix {
+    SetRolePerms { role: u64, perms: u64 },
+    SetOverwrite(Overwrite),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Problem {
     pub id: String,
     pub text: String,
-    pub fix: Option<Op>,
+    pub fix: Option<Fix>,
 }
 
 pub fn tshoot(
     guild_id: u64,
     main_roles: &[u64],
     roles: &[RoleInfo],
+    overwrites: &[Overwrite],
     bot_position: i32,
 ) -> Vec<Problem> {
     let main: Vec<u64> = if main_roles.is_empty() {
@@ -268,12 +284,31 @@ pub fn tshoot(
             out.push(Problem {
                 id: format!("bypass_{}", r.id),
                 text: format!("Role <@&{}> grants Send Messages, so members with it can still talk during a lock.", r.id),
-                fix: fixable.then_some(Op::SetRolePerms {
+                fix: fixable.then_some(Fix::SetRolePerms {
                     role: r.id,
                     perms: r.perms & !SEND_MESSAGES,
                 }),
             });
         }
+    }
+    // An explicit allow on a main role beats the stripped role perm, so the lock would not hold there.
+    for o in overwrites
+        .iter()
+        .filter(|o| main.contains(&o.role) && o.allow & SEND_MESSAGES != 0)
+    {
+        out.push(Problem {
+            id: format!("overwrite_{}_{}", o.channel, o.role),
+            text: format!(
+                "Channel <#{}> explicitly allows Send Messages for <@&{}>, so a lock does not apply there.",
+                o.channel, o.role
+            ),
+            fix: Some(Fix::SetOverwrite(Overwrite {
+                channel: o.channel,
+                role: o.role,
+                allow: o.allow & !SEND_MESSAGES,
+                deny: o.deny,
+            })),
+        });
     }
     out
 }
@@ -422,17 +457,32 @@ mod tests {
 
     #[test]
     fn tshoot_flags_bypass_roles_and_unlockable_main_roles() {
-        let p = tshoot(G, &[10], &roles(), 5);
+        let ow = [Overwrite {
+            channel: 7,
+            role: 10,
+            allow: SEND_MESSAGES | VIEW_CHANNEL,
+            deny: 0,
+        }];
+        let p = tshoot(G, &[10], &roles(), &ow, 5);
         let ids: Vec<&str> = p.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["bypass_1", "admin_12"]);
+        assert_eq!(ids, vec!["bypass_1", "admin_12", "overwrite_7_10"]);
         assert_eq!(
             p[0].fix,
-            Some(Op::SetRolePerms {
+            Some(Fix::SetRolePerms {
                 role: 1,
                 perms: VIEW_CHANNEL
             })
         );
-        assert!(tshoot(G, &[12], &roles(), 5)[0]
+        assert_eq!(
+            p[2].fix,
+            Some(Fix::SetOverwrite(Overwrite {
+                channel: 7,
+                role: 10,
+                allow: VIEW_CHANNEL,
+                deny: 0
+            }))
+        );
+        assert!(tshoot(G, &[12], &roles(), &[], 5)[0]
             .id
             .starts_with("main_above_bot"));
         assert_eq!(kind_from("channel", None), None);

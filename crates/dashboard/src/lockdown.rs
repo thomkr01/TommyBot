@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tommybot_automod::{
     discord_api::{rule_body, BotAction, DiscordAutomodCfg, RuleSpec},
-    lockdown::{kind_from, tshoot, LockKind, Op, RoleInfo, Snapshot},
+    lockdown::{kind_from, tshoot, Fix, LockKind, Overwrite, Problem, RoleInfo, Snapshot},
 };
 use tommybot_core::jobs;
 
@@ -135,10 +135,7 @@ async fn roles(st: &AppState, guild: i64) -> Result<(Vec<RoleInfo>, i32), ApiErr
     Ok((info, bot_pos as i32))
 }
 
-async fn problems(
-    st: &AppState,
-    guild: i64,
-) -> Result<Vec<tommybot_automod::lockdown::Problem>, ApiError> {
+async fn problems(st: &AppState, guild: i64) -> Result<Vec<Problem>, ApiError> {
     let (_, c) = crate::store::current(&st.db, guild).await?;
     let main: Vec<u64> = c["lockdown"]["main_roles"]
         .as_array()
@@ -147,7 +144,30 @@ async fn problems(
         .filter_map(|r| r.as_str()?.parse().ok())
         .collect();
     let (info, bot_pos) = roles(st, guild).await?;
-    Ok(tshoot(guild as u64, &main, &info, bot_pos))
+    let channels = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+        .await?;
+    let num = |v: &Value| v.as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let overwrites: Vec<Overwrite> = channels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|c| {
+            c["permission_overwrites"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|o| o["type"] == 0)
+                .map(|o| Overwrite {
+                    channel: num(&c["id"]),
+                    role: num(&o["id"]),
+                    allow: num(&o["allow"]),
+                    deny: num(&o["deny"]),
+                })
+        })
+        .collect();
+    Ok(tshoot(guild as u64, &main, &info, &overwrites, bot_pos))
 }
 
 async fn check(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -155,43 +175,40 @@ async fn check(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     Ok(Json(json!(problems(&st, guild).await?)))
 }
 
-#[derive(Deserialize)]
-struct FixBody {
-    id: String,
-}
-
-async fn fix(
-    State(st): State<AppState>,
-    s: Sess,
-    Path(guild): Path<i64>,
-    Json(b): Json<FixBody>,
-) -> Res {
+/// Wick's single Apply Fix button: applies every automatic fix the check found.
+async fn fix(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
-    let p = problems(&st, guild)
+    let fixes: Vec<Fix> = problems(&st, guild)
         .await?
-        .into_iter()
-        .find(|p| p.id == b.id)
-        .ok_or(ApiError::NotFound)?;
-    let Some(Op::SetRolePerms { role, perms }) = p.fix else {
-        return Err(ApiError::BadRequest(
-            "this problem has no automatic fix".into(),
-        ));
-    };
-    st.discord
-        .call(
-            Method::PATCH,
-            &format!("/guilds/{guild}/roles/{role}"),
-            Some(json!({"permissions": perms.to_string()})),
-        )
-        .await?;
+        .iter()
+        .filter_map(|p| p.fix)
+        .collect();
+    for f in &fixes {
+        let (path, body) = match *f {
+            Fix::SetRolePerms { role, perms } => (
+                format!("/guilds/{guild}/roles/{role}"),
+                json!({"permissions": perms.to_string()}),
+            ),
+            Fix::SetOverwrite(o) => (
+                format!("/channels/{}/permissions/{}", o.channel, o.role),
+                json!({"type": 0, "allow": o.allow.to_string(), "deny": o.deny.to_string()}),
+            ),
+        };
+        let method = if matches!(f, Fix::SetOverwrite(_)) {
+            Method::PUT
+        } else {
+            Method::PATCH
+        };
+        st.discord.call(method, &path, Some(body)).await?;
+    }
     audit(
         &st,
         &s,
         guild,
-        format!("applied the lockdown fix `{}`", b.id),
+        format!("applied {} lockdown compatibility fix(es)", fixes.len()),
     )
     .await?;
-    Ok(Json(json!({"ok": true})))
+    Ok(Json(json!({"ok": true, "fixed": fixes.len()})))
 }
 
 async fn rules(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
