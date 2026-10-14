@@ -591,7 +591,7 @@ async fn native_action(
     Ok(())
 }
 
-/// Custom emoji plus unicode emoji (pictograph blocks and regional-indicator flags; a flag pair or ZWJ sequence counts per symbol).
+/// Custom plus unicode emoji; a ZWJ sequence counts per symbol.
 fn count_emojis(s: &str) -> usize {
     let unicode = s
         .chars()
@@ -639,23 +639,25 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     else {
         return Ok(());
     };
-    // A timeout fires another update, so it must not loop.
     let timed_out = m
         .communication_disabled_until
         .is_some_and(|t| t.as_secs() > now_secs());
     let names = [Some(m.user.name.as_str()), m.nick.as_deref()];
-    if timed_out
-        || !names
-            .into_iter()
-            .flatten()
-            .any(|n| g.name_matches(&cure(n)))
-    {
-        return Ok(());
-    }
-    // A role change or other update keeps the same name, so act once per name pair.
-    let seen = format!("{}\0{}", m.user.name, m.nick.as_deref().unwrap_or_default());
     let key = (m.guild_id.get(), m.user.id.get());
-    if app.punished_names.lock().unwrap().insert(key, seen.clone()) == Some(seen) {
+    let bad = names
+        .into_iter()
+        .flatten()
+        .any(|n| g.name_matches(&cure(n)));
+    let skip = {
+        let mut seen = app.punished_names.lock().unwrap();
+        if !bad {
+            seen.remove(&key);
+        }
+        let names = format!("{}\0{}", m.user.name, m.nick.as_deref().unwrap_or_default());
+        // A timeout fires another update and a role change keeps the name: act once per bad name pair.
+        timed_out || !bad || seen.insert(key, names.clone()) == Some(names)
+    };
+    if skip {
         return Ok(());
     }
     punish(
