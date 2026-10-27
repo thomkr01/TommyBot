@@ -16,7 +16,8 @@ cargo test --workspace
 [ -f $DASHBOARD_DIST/index.html ] || (cd crates/dashboard/ui && trunk build --release)
 
 python3 tests/e2e/mock_discord.py & mock=$!
-cargo run -q --release -p tommybot-dashboard & dash=$!
+cargo build -q --release -p tommybot-dashboard
+target/release/tommybot-dashboard & dash=$!
 trap 'kill $mock $dash 2>/dev/null' EXIT
 for _ in $(seq 600); do curl -s $DASHBOARD_URL/api/me -o /dev/null -w "%{http_code}" | grep -q 401 && break; sleep 1; done
 
