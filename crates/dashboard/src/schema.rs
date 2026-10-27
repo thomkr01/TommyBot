@@ -597,7 +597,25 @@ pub fn schema() -> Vec<Value> {
         f("string_patterns", "list"),
         f("flag_younger_than_ms", "int"),
         f("flag_no_avatar", "bool"),
-        f("id_flag_min", "int"),
+        ti(
+            fg("ID flag", "id_flag_min", "int"),
+            "Minimum matches (empty turns it off)",
+        ),
+        ti(
+            dv(
+                choice(
+                    "ID flag",
+                    "id_granularity",
+                    &["Adaptive", "Hour", "Day", "Month"],
+                ),
+                "Adaptive",
+            ),
+            "Granularity",
+        ),
+        ti(
+            fg("ID flag", "id_margin", "int"),
+            "Margin (neighbouring buckets)",
+        ),
         dv(
             choice(
                 "Response",

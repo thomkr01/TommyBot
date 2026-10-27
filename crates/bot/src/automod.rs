@@ -6,7 +6,7 @@ use tommybot_automod::{
     discord_api::BotAction,
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
-    join::{gate, harshest, is_suspicious, Action, Filter, Joiner},
+    join::{gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
     lockdown::JoinLock,
     store,
     strike::strike,
@@ -493,60 +493,97 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         punish(app, &cfg, gid, j.id, action, "join gate").await?;
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
-        let out = app
-            .raids
-            .lock()
-            .unwrap()
-            .entry(gid.get())
-            .or_default()
-            .on_join(&j, suspicious, raid, now);
-        if out.triggered {
-            jobs::replace(
-                &app.pool,
-                gid.get() as i64,
-                "raid_end",
-                serde_json::json!({ "until_ms": now + raid.active_ms }),
-                (now / 1000) + raid.active_ms / 1000,
-            )
-            .await?;
-            let warned: Vec<_> = raid
-                .warned_roles
-                .iter()
-                .filter_map(|r| r.parse().ok().map(Id::new))
-                .collect();
-            send_log_pinging(
-                app,
-                gid.get(),
-                LogKind::JoinRaid,
-                Log::new("Join Raid Trigger!", ALERT)
-                    .text(&format!("{YES} A weird join pattern has been identified."))
-                    .text(&format!(
-                        "{ARROW} Flagged accounts joining for the next `{}` will be **{:?}**.",
-                        duration(raid.active_ms / 1000),
-                        raid.action
-                    ))
-                    .field(
-                        "Initial Flags:",
-                        &out.flagged
-                            .iter()
-                            .map(|u| format!("`{u}`"))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    ),
-                &warned,
-            )
-            .await?;
+        join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
+    }
+    Ok(())
+}
+
+async fn join_raid(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    raid: &RaidCfg,
+    j: &Joiner<'_>,
+    suspicious: bool,
+    now: i64,
+) -> Result<()> {
+    let (out, started, names) = {
+        let mut raids = app.raids.lock().unwrap();
+        let d = raids.entry(gid.get()).or_default();
+        let out = d.on_join(j, suspicious, raid, now);
+        let names: Vec<String> = out
+            .flagged
+            .iter()
+            .map(|id| d.name_of(*id).unwrap_or_default().to_string())
+            .collect();
+        (out, d.started, names)
+    };
+    if !out.flagged.is_empty() {
+        let ids: Vec<i64> = out.flagged.iter().map(|&id| id as i64).collect();
+        let logged = sqlx::query(
+            "insert into raid_log (guild_id, raid_ms, user_id, name)
+             select $1, $2, * from unnest($3::bigint[], $4::text[]) on conflict do nothing",
+        )
+        .bind(gid.get() as i64)
+        .bind(started)
+        .bind(&ids)
+        .bind(&names)
+        .execute(&app.pool)
+        .await;
+        if let Err(e) = logged {
+            tracing::warn!(?e, "saving the raid log failed");
         }
-        let auto_lock = cfg.automod.auto_lockdown.enabled;
-        if let Some(kind) = (out.triggered && auto_lock)
-            .then(|| raid.lock.clone())
-            .flatten()
-        {
-            lockdown::lock(app, gid, kind).await?;
+    }
+    if out.triggered {
+        jobs::replace(
+            &app.pool,
+            gid.get() as i64,
+            "raid_end",
+            serde_json::json!({ "until_ms": now + raid.active_ms, "started_ms": started }),
+            (now / 1000) + raid.active_ms / 1000,
+        )
+        .await?;
+        let warned: Vec<_> = raid
+            .warned_roles
+            .iter()
+            .filter_map(|r| r.parse().ok().map(Id::new))
+            .collect();
+        let mut log = Log::new("Join Raid Trigger!", ALERT)
+            .text(&format!("{YES} A weird join pattern has been identified."))
+            .text(&format!(
+                "{ARROW} Flagged accounts joining for the next `{}` will be **{:?}**.",
+                duration(raid.active_ms / 1000),
+                raid.action
+            ))
+            .field(
+                "Initial Flags:",
+                // 40 IDs stay under Discord's 1024-character field limit; the page lists all
+                &(out.flagged.iter().take(40).map(|u| format!("`{u}`")))
+                    .chain(
+                        (out.flagged.len() > 40)
+                            .then(|| format!("+{} more", out.flagged.len() - 40)),
+                    )
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
+        if !base.is_empty() {
+            log = log.text(&format!(
+                "{ARROW} [Every caught account]({}/#/{gid}/raid_log)",
+                base.trim_end_matches('/')
+            ));
         }
-        for id in out.flagged {
-            punish(app, &cfg, gid, id, raid.action, "join raid").await?;
-        }
+        send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
+    }
+    let auto_lock = cfg.automod.auto_lockdown.enabled;
+    if let Some(kind) = (out.triggered && auto_lock)
+        .then(|| raid.lock.clone())
+        .flatten()
+    {
+        lockdown::lock(app, gid, kind).await?;
+    }
+    for id in out.flagged {
+        punish(app, cfg, gid, id, raid.action, "join raid").await?;
     }
     Ok(())
 }
