@@ -5,6 +5,7 @@ mod auth;
 mod channels;
 mod diff;
 mod discord;
+mod embeds;
 mod lockdown;
 mod ops;
 mod records;
@@ -111,6 +112,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(appeals::routes())
         .merge(records::routes())
         .merge(verify::routes())
+        .merge(embeds::routes())
         // Hash routing means the server never needs an index.html fallback; one would also hide
         // missing assets by answering a stale hashed .js/.wasm request with HTML.
         .fallback_service(ServeDir::new(dist).not_found_service(
