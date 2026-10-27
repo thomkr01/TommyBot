@@ -4,7 +4,7 @@ use std::{
     sync::{atomic::Ordering::Relaxed, Arc},
     time::Instant,
 };
-use tommybot_logging::{Log, LogKind};
+use tommybot_logging::{Log, LogKind, LogMessage};
 use twilight_gateway::Event;
 use twilight_model::{
     channel::message::{
@@ -71,6 +71,11 @@ async fn send(
     Ok(())
 }
 
+async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
+    let mentions = AllowedMentions::default();
+    send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await
+}
+
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
     match app.cfg(guild).await?.logging.target(kind, None) {
         Some(ch) => {
@@ -115,16 +120,7 @@ pub async fn flush_logs(app: Arc<App>) {
         tick.tick().await;
         let due = app.logger.lock().unwrap().flush(Instant::now());
         for m in due {
-            if let Err(e) = send(
-                &app,
-                m.channel_id,
-                "",
-                &m.embed,
-                m.link.as_ref(),
-                &AllowedMentions::default(),
-            )
-            .await
-            {
+            if let Err(e) = send_entry(&app, &m).await {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
             }
         }
@@ -156,16 +152,7 @@ pub async fn shutdown(app: &App) {
         .unwrap()
         .flush(Instant::now() + std::time::Duration::from_secs(3600));
     for m in held {
-        if let Err(e) = send(
-            app,
-            m.channel_id,
-            "",
-            &m.embed,
-            m.link.as_ref(),
-            &AllowedMentions::default(),
-        )
-        .await
-        {
+        if let Err(e) = send_entry(app, &m).await {
             tracing::warn!(?e, "log send failed during shutdown");
         }
     }
@@ -181,16 +168,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             .unwrap()
             .handle(&cfg.logging, ev, Instant::now());
         for m in msgs {
-            if let Err(e) = send(
-                app,
-                m.channel_id,
-                "",
-                &m.embed,
-                m.link.as_ref(),
-                &AllowedMentions::default(),
-            )
-            .await
-            {
+            if let Err(e) = send_entry(app, &m).await {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
             }
         }

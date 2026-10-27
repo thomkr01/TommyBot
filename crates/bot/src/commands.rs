@@ -580,7 +580,6 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
     Ok(true)
 }
 
-/// "softban" to "Softban".
 fn case_title(kind: &str) -> String {
     let mut c = kind.chars();
     c.next()

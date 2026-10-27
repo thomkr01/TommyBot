@@ -7,7 +7,7 @@ use serde_json::Value;
 use twilight_model::{
     channel::{message::Embed, Message},
     guild::{
-        audit_log::{AuditLogEntry, AuditLogEventType as A},
+        audit_log::{AuditLogEntry, AuditLogEventType as A, AuditLogOptionalEntryInfo},
         Permissions,
     },
     id::{
@@ -170,6 +170,30 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         log = log.line("Reason", reason);
     }
 
+    log = changes(log, e, created, deleted);
+    log = additional_info(log, opts);
+
+    // Wick links the channel of channel and thread logs, except when it is gone.
+    let link = match (kind, e.guild_id, channel.or(e.target_id.map(Id::get))) {
+        (LogKind::Channel | LogKind::Thread, Some(g), Some(c)) if !deleted => Some((
+            "Go to Channel",
+            format!("https://discord.com/channels/{g}/{c}"),
+        )),
+        _ => None,
+    };
+
+    Some(Entry {
+        kind,
+        event: LogEvent::from_action(a),
+        channel: None,
+        user: None,
+        embed: log.build(),
+        link,
+    })
+}
+
+/// Wick's "Settings" (created), "Previous Settings" (deleted) or "Changes" (updated) section.
+fn changes(mut log: Log, e: &AuditLogEntry, created: bool, deleted: bool) -> Log {
     if !e.changes.is_empty() {
         log = log.section(if created {
             "Settings"
@@ -212,6 +236,11 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         };
     }
 
+    log
+}
+
+/// The audit entry's options, as Wick's "Additional Information" section.
+fn additional_info(mut log: Log, opts: Option<&AuditLogOptionalEntryInfo>) -> Log {
     let info: Vec<(&str, String)> = opts
         .map(|o| {
             [
@@ -240,23 +269,7 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         }
     }
 
-    // Wick links the channel of channel and thread logs, except when it is gone.
-    let link = match (kind, e.guild_id, channel.or(e.target_id.map(Id::get))) {
-        (LogKind::Channel | LogKind::Thread, Some(g), Some(c)) if !deleted => Some((
-            "Go to Channel",
-            format!("https://discord.com/channels/{g}/{c}"),
-        )),
-        _ => None,
-    };
-
-    Some(Entry {
-        kind,
-        event: LogEvent::from_action(a),
-        channel: None,
-        user: None,
-        embed: log.build(),
-        link,
-    })
+    log
 }
 
 /// Green for things added, red for things removed, orange for changes.
@@ -385,6 +398,22 @@ mod tests {
         );
         assert_eq!(added, "Send Messages");
         assert_eq!(removed, "");
+    }
+
+    #[test]
+    fn overwrite_shows_channel_and_role_target_with_denied_names() {
+        let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
+            "action_type": 13, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
+            "options": { "id": "40", "type": "0", "role_name": "Quarantine" },
+            "changes": [{ "key": "deny", "new_value": "2048" }]
+        }))
+        .unwrap();
+        let entry = audit(&e).unwrap();
+        let d = entry.embed.description.unwrap();
+        assert!(d.contains("▸ **Channel:** <#30> *`30`*\n▸ **Target:** <@&40> *`40`*"));
+        assert!(d.contains("**Settings**\n❌ **Denied:**\n▸ **Additions:** Send Messages"));
+        assert!(d.ends_with("**Additional Information**\n▸ **Id:** `40`\n▸ **Role Name:** `Quarantine`\n▸ **Type:** `Role`"));
+        assert_eq!(entry.link.unwrap().1, "https://discord.com/channels/9/30");
     }
 
     #[test]

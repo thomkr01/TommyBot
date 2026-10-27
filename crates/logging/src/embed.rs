@@ -27,19 +27,25 @@ const DESCRIPTION: usize = 4096;
 const FIELD_NAME: usize = 256;
 const FIELD_VALUE: usize = 1024;
 const FIELDS: usize = 25;
+/// Discord rejects an embed whose title, description, fields and footer add up to more.
+const TOTAL: usize = 6000;
 
 pub struct Log {
     embed: EmbedBuilder,
+    title: String,
     lines: Vec<String>,
-    fields: usize,
+    fields: Vec<(String, String, bool)>,
+    footer: Option<String>,
 }
 
 impl Log {
     pub fn new(title: &str, color: u32) -> Self {
         Self {
-            embed: EmbedBuilder::new().title(clip(title, TITLE)).color(color),
+            embed: EmbedBuilder::new().color(color),
+            title: clip(title, TITLE),
             lines: Vec::new(),
-            fields: 0,
+            fields: Vec::new(),
+            footer: None,
         }
     }
 
@@ -101,15 +107,14 @@ impl Log {
     }
 
     /// A field below the description, for Wick's columns ("Initial Flags:", "Roles:").
-    pub fn field(self, name: &str, value: &str) -> Self {
-        self.push(EmbedFieldBuilder::new(
-            clip(name, FIELD_NAME),
-            value_of(value),
-        ))
+    pub fn field(mut self, name: &str, value: &str) -> Self {
+        self.fields.push((name.into(), value.into(), false));
+        self
     }
 
-    pub fn inline(self, name: &str, value: &str) -> Self {
-        self.push(EmbedFieldBuilder::new(clip(name, FIELD_NAME), value_of(value)).inline())
+    pub fn inline(mut self, name: &str, value: &str) -> Self {
+        self.fields.push((name.into(), value.into(), true));
+        self
     }
 
     pub fn thumbnail(mut self, u: &User) -> Self {
@@ -120,24 +125,36 @@ impl Log {
     }
 
     pub fn footer(mut self, text: &str) -> Self {
-        self.embed = self.embed.footer(EmbedFooterBuilder::new(clip(text, 2048)));
+        self.footer = Some(clip(text, 2048));
         self
     }
 
+    /// Cuts the parts to Discord's limits, description first, so a long log is shortened
+    /// instead of rejected.
     pub fn build(self) -> Embed {
-        let mut embed = self.embed;
+        let mut left = TOTAL - self.title.chars().count();
+        let mut embed = self.embed.title(self.title);
+        if let Some(f) = self.footer {
+            left -= f.chars().count();
+            embed = embed.footer(EmbedFooterBuilder::new(f));
+        }
         if !self.lines.is_empty() {
-            embed = embed.description(clip(&self.lines.join("\n"), DESCRIPTION));
+            let d = clip(&self.lines.join("\n"), DESCRIPTION.min(left));
+            left -= d.chars().count();
+            embed = embed.description(d);
+        }
+        for (name, value, inline) in self.fields.into_iter().take(FIELDS) {
+            let name = clip(&name, FIELD_NAME);
+            let room = left.saturating_sub(name.chars().count()).min(FIELD_VALUE);
+            if room < 2 {
+                break;
+            }
+            let value = value_of(&value, room);
+            left -= name.chars().count() + value.chars().count();
+            let f = EmbedFieldBuilder::new(name, value);
+            embed = embed.field(if inline { f.inline() } else { f });
         }
         embed.build()
-    }
-
-    fn push(mut self, f: EmbedFieldBuilder) -> Self {
-        if self.fields < FIELDS {
-            self.embed = self.embed.field(f);
-            self.fields += 1;
-        }
-        self
     }
 }
 
@@ -176,11 +193,11 @@ pub fn duration(secs: i64) -> String {
 }
 
 /// Discord rejects empty field values.
-fn value_of(v: &str) -> String {
+fn value_of(v: &str, max: usize) -> String {
     if v.trim().is_empty() {
         return "None".into();
     }
-    clip(v, FIELD_VALUE)
+    clip(v, max)
 }
 
 /// Keeps the first `max` characters, ending in "…" when cut.
@@ -226,6 +243,22 @@ mod tests {
             e.description.unwrap(),
             "▸ **Responsible:** <@7> *`7`*\n**Changes**\n```diff\n- a\n```\n```diff\n+ b\n+ c\n```"
         );
+    }
+
+    #[test]
+    fn long_logs_fit_discords_total_limit() {
+        let mut log = Log::new("t", RED).text(&"d".repeat(5000));
+        for _ in 0..6 {
+            log = log.field("f", &"v".repeat(1024));
+        }
+        let e = log.build();
+        let fields: usize = e
+            .fields
+            .iter()
+            .map(|f| f.name.len() + f.value.chars().count())
+            .sum();
+        assert!(1 + e.description.unwrap().chars().count() + fields <= TOTAL);
+        assert_eq!(e.fields[0].value.chars().count(), 1024);
     }
 
     #[test]
