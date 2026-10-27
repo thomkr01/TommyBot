@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::form::{name_of, Section};
+use crate::form::{name_of, strs, Section};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
@@ -7,22 +7,41 @@ fn s(v: &Value) -> String {
     v.as_str().map(String::from).unwrap_or_else(|| v.to_string())
 }
 
+/// Log channels the wizard's Custom choice can add to the essentials: (channel name, label).
+const OPTIONAL_LOGS: [(&str, &str); 10] = [
+    ("reports", "Reports"),
+    ("appeals", "Appeals"),
+    ("automod-logs", "Automod"),
+    ("antinuke-logs", "Antinuke"),
+    ("verification-logs", "Verification"),
+    ("joingate-logs", "Joingate"),
+    ("joinraid-logs", "Joinraid"),
+    ("panic-logs", "Panic Mode"),
+    ("server-logs", "Server"),
+    ("discord-logs", "Discord events"),
+];
+
 #[component]
 pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     const STEPS: [&str; 9] = ["Auto Setup", "Miscellaneous", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue Key"];
     let step = RwSignal::new(0usize);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
-    let g2 = guild.clone();
-    let auto = move |_| {
-        let (g, g2) = (g.clone(), g2.clone());
+    let custom = RwSignal::new(false);
+    let picks = RwSignal::new(OPTIONAL_LOGS.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>());
+    let auto = move |logs: Option<Vec<String>>| {
+        let (g, g2) = (g.clone(), g.clone());
         run_act(async move {
             let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
-            api("POST", &format!("/api/guilds/{g}/wizard/auto-setup"), Some(json!({"expected_version": c["version"]}))).await
-        }, msg, need, move |v| { let (g, c) = (g2.clone(), v["created"].clone()); spawn_local(async move {
+            api("POST", &format!("/api/guilds/{g}/wizard/auto-setup"), Some(json!({"expected_version": c["version"], "logs": logs}))).await
+        }, msg, need, move |v| { let (g, c, failed) = (g2.clone(), v["created"].clone(), v["quarantine_failed"].clone()); spawn_local(async move {
             let dc = api("GET", &format!("/api/guilds/{g}/discord"), None).await.unwrap_or(Value::Null);
-            let n = |k: &str, key: &str| name_of(&dc, key, c[k].as_str().unwrap_or(""));
-            msg.set(format!("Created: quarantine role {}, log channel {}, mod log channel {}", n("quarantine_role", "roles"), n("logs", "channels"), n("modlogs", "channels")));
+            let role = |k: &str| name_of(&dc, "roles", c[k].as_str().unwrap_or(""));
+            let logs = strs(&c["logs"]).join(", #");
+            let logs = if logs.is_empty() { "the log channels were already set".into() } else { format!("Logs category with #{logs}") };
+            let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
+            let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
+            msg.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine}", role("quarantine_role")));
         }) });
     };
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
@@ -45,7 +64,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <div class="chips"><span class="chip blue">"You can choose a certain step if you want."</span><span class="chip orange">"The full setup could take around 3 minutes of your time."</span></div>
         </div>
         <p class="muted">{move || [
-            "Creates the quarantine role and log channels for you.",
+            "Creates the quarantine role (and sets it in every channel), a Member main role if you have none, and the log channels, and sets them in your settings.",
             "General bot behavior: moderation commands, replies and the default timeout.",
             "Turn Auto Mod on and set its strike and heat basics. Filters have their own pages.",
             "Turn Anti Nuke on and pick the quarantine role. Per-action limits are under Filters.",
@@ -56,7 +75,19 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             "Your rescue key for locked-out recovery.",
         ][step.get()]}</p>
         {move || match step.get() {
-            0 => view! { <div class="card"><button on:click=auto.clone()>"Run auto setup"</button><p class="info">{move || msg.get()}</p></div> }.into_any(),
+            0 => {
+                let (all, run) = (auto.clone(), auto.clone());
+                view! { <div class="card">
+                    <p>"The essential logs (TommyBot logs and Mod logs) are always created."</p>
+                    <button on:click=move |_| all(None)>"All log channels"</button>
+                    <button on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
+                    <Show when=move || custom.get()>
+                        {OPTIONAL_LOGS.iter().map(|(name, label)| view! { <label><input type="checkbox" prop:checked=move || picks.get().iter().any(|p| p == name) on:change=move |e| picks.update(|l| if event_target_checked(&e) { l.push(name.to_string()) } else { l.retain(|p| p != name) }) /> {*label}</label> }).collect_view()}
+                        <button on:click={let run = run.clone(); move |_| run(Some(picks.get()))}>"Run with selected"</button>
+                    </Show>
+                    <p class="info">{move || msg.get()}</p>
+                </div> }.into_any()
+            }
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
             i => view! { <Section guild=g.clone() name=["", "misc", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() part=if (2..=4).contains(&i) { "general" } else { "" } enrolled /> }.into_any(),
         }}

@@ -65,7 +65,12 @@ async fn discord_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
 #[derive(Deserialize)]
 struct Setup {
     expected_version: i32,
+    /// Log channels to create besides the essential two; absent means all of them.
+    logs: Option<Vec<String>>,
 }
+
+/// Wick's quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
+const QUARANTINE_DENY: &str = "1051712";
 
 async fn auto_setup(
     State(st): State<AppState>,
@@ -86,28 +91,23 @@ async fn auto_setup(
         json!({"name": "Quarantine", "permissions": "0"}),
     )
     .await?;
-    let logs = create(
-        &st,
-        guild,
-        own(&config["logging"]["fallback"]),
-        "channels",
-        json!({"name": "logs", "type": 0}),
-    )
-    .await?;
-    let modlogs = create(
-        &st,
-        guild,
-        own(&config["logging"]["routes"]["mod_command"]),
-        "channels",
-        json!({"name": "modlogs", "type": 0}),
-    )
-    .await?;
     config["antinuke"]["quarantine_role"] = json!(role);
-    config["logging"]["fallback"] = json!(logs);
-    config["logging"]["routes"]["mod_command"] = json!(modlogs);
+    // Lockdown and verification need a main role; members get "Member" when they verify.
+    let empty = |v: &Value| v.as_array().is_none_or(Vec::is_empty);
+    let mut member = None;
+    if empty(&config["lockdown"]["main_roles"]) {
+        let id = create(&st, guild, None, "roles", json!({"name": "Member"})).await?;
+        config["lockdown"]["main_roles"] = json!([id]);
+        if empty(&config["verification"]["roles"]) {
+            config["verification"]["roles"] = json!([id]);
+        }
+        member = Some(id);
+    }
+    let logs = log_channels(&st, guild, &mut config, b.logs.as_deref()).await?;
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
+    let quarantine_failed = quarantine_channels(&st, guild, &role).await;
     api::log_change(
         &st,
         &config,
@@ -118,7 +118,7 @@ async fn auto_setup(
     )
     .await;
     Ok(Json(
-        json!({"version": version, "created": {"quarantine_role": role, "logs": logs, "modlogs": modlogs}}),
+        json!({"version": version, "created": {"quarantine_role": role, "member_role": member, "logs": logs}, "quarantine_failed": quarantine_failed}),
     ))
 }
 
@@ -179,46 +179,11 @@ async fn log_setup(
     if cur != b.expected_version {
         return Err(ApiError::Conflict(cur)); // before any Discord side effect
     }
-    let unset: Vec<String> = LogEvent::ALL
-        .iter()
-        .filter_map(|e| serde_json::to_value(e).ok()?.as_str().map(String::from))
-        .filter(|e| config["logging"]["events"][e].is_null())
-        .collect();
-    if unset.is_empty() && LOG_CHANNELS.iter().all(|(p, _)| !at(&config, p).is_null()) {
+    let created = log_channels(&st, guild, &mut config, None).await?;
+    if created.is_empty() {
         return Err(ApiError::BadRequest(
             "every log type already has a channel".into(),
         ));
-    }
-    // Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
-    // keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
-    let category = create(
-        &st,
-        guild,
-        None,
-        "channels",
-        json!({"name": "Logs", "type": 4, "permission_overwrites": [
-            {"id": guild.to_string(), "type": 0, "deny": "1024"},
-            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
-        ]}),
-    )
-    .await?;
-    let channel = |name: &str| json!({"name": name, "type": 0, "parent_id": category});
-    let mut created = vec![];
-    for (path, name) in LOG_CHANNELS {
-        if at(&config, path).is_null() {
-            let id = create(&st, guild, None, "channels", channel(name)).await?;
-            let (last, parents) = path.split_last().expect("paths are not empty");
-            let slot = parents.iter().fold(&mut config, |v, k| &mut v[*k]);
-            slot[*last] = json!(id);
-            created.push(name);
-        }
-    }
-    if !unset.is_empty() {
-        let id = create(&st, guild, None, "channels", channel("discord-logs")).await?;
-        for e in &unset {
-            config["logging"]["events"][e] = json!(id);
-        }
-        created.push("discord-logs");
     }
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
@@ -233,6 +198,104 @@ async fn log_setup(
     )
     .await;
     Ok(Json(json!({"version": version, "created": created})))
+}
+
+/// Sets the quarantine overwrite on every channel and returns how many it could not set (the
+/// bot lacks Manage Roles there); `None` when the channels could not be listed. Runs after the
+/// commit, so a failure here loses no setup.
+async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<usize> {
+    let channels = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+        .await
+        .ok()?;
+    let body = json!({"type": 0, "deny": QUARANTINE_DENY});
+    // shortcut: no 429 retry, so a rate-limited channel counts as failed; running it again fixes it.
+    let mut failed = 0;
+    for id in channels.as_array()?.iter().filter_map(|c| c["id"].as_str()) {
+        let path = format!("/channels/{id}/permissions/{role}");
+        if st
+            .discord
+            .call(Method::PUT, &path, Some(body.clone()))
+            .await
+            .is_err()
+        {
+            failed += 1;
+        }
+    }
+    Some(failed)
+}
+
+/// Wick's essential logs, always created: the main log channel and the mod log.
+const ESSENTIAL: [&str; 2] = ["tommybot-logs", "mod-logs"];
+
+/// Creates the "Logs" category and the missing log channels, and sets them in `config`.
+/// `only` limits it to the essentials plus the named channels ("discord-logs" for the Discord
+/// events). Returns the names of the channels it created; nothing when all have one.
+async fn log_channels(
+    st: &AppState,
+    guild: i64,
+    config: &mut Value,
+    only: Option<&[String]>,
+) -> Result<Vec<&'static str>, ApiError> {
+    let wanted =
+        |name: &str| ESSENTIAL.contains(&name) || only.is_none_or(|l| l.iter().any(|n| n == name));
+    let missing: Vec<_> = LOG_CHANNELS
+        .into_iter()
+        .filter(|(p, name)| at(config, p).is_null() && wanted(name))
+        .collect();
+    let unset: Vec<String> = if wanted("discord-logs") {
+        LogEvent::ALL
+            .iter()
+            .filter_map(|e| serde_json::to_value(e).ok()?.as_str().map(String::from))
+            .filter(|e| config["logging"]["events"][e].is_null())
+            .collect()
+    } else {
+        vec![]
+    };
+    if unset.is_empty() && missing.is_empty() {
+        return Ok(vec![]);
+    }
+    // A later run adds to the existing category instead of making a second one.
+    let channels = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+        .await?;
+    let existing = channels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|c| (c["type"] == 4 && c["name"] == "Logs").then(|| own(&c["id"]))?);
+    // Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
+    // keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
+    let category = create(
+        st,
+        guild,
+        existing,
+        "channels",
+        json!({"name": "Logs", "type": 4, "permission_overwrites": [
+            {"id": guild.to_string(), "type": 0, "deny": "1024"},
+            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
+        ]}),
+    )
+    .await?;
+    let channel = |name: &str| json!({"name": name, "type": 0, "parent_id": category});
+    let mut created = vec![];
+    for (path, name) in missing {
+        let id = create(st, guild, None, "channels", channel(name)).await?;
+        let (last, parents) = path.split_last().expect("paths are not empty");
+        let slot = parents.iter().fold(&mut *config, |v, k| &mut v[*k]);
+        slot[*last] = json!(id);
+        created.push(name);
+    }
+    if !unset.is_empty() {
+        let id = create(st, guild, None, "channels", channel("discord-logs")).await?;
+        for e in &unset {
+            config["logging"]["events"][e] = json!(id);
+        }
+        created.push("discord-logs");
+    }
+    Ok(created)
 }
 
 #[cfg(test)]
