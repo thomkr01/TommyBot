@@ -26,6 +26,8 @@ h2 { font-size:18px; text-transform:uppercase; margin:0 0 12px; font-weight:700;
 button, input, textarea, select { font:inherit; color:inherit; background:var(--b3); border:1px solid var(--line); border-radius:8px; padding:6px 12px; transition:transform .25s, background-color .2s; }
 button { cursor:pointer; background:var(--primary); color:#fff; border-color:var(--primary); font-weight:600; text-transform:uppercase; } button:active { transform:scale(.95); }
 button.ghost { background:none; color:var(--fg); border-color:var(--line); }
+.io { display:flex; gap:8px; margin-top:4px; }
+a.ghost, label.ghost { color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 12px; text-decoration:none; cursor:pointer; }
 button.go { background:var(--ok); border-color:var(--ok); color:#000; } button.danger { background:var(--bad); border-color:var(--bad); }
 :focus-visible { outline:2px solid var(--info); outline-offset:2px; }
 textarea { width:100%; min-height:320px; font-family:ui-monospace, monospace; font-size:13px; }

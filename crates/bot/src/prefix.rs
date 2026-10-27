@@ -12,7 +12,7 @@ pub struct Parsed {
 
 /// `?dm` tell the target, `?s` softban (ban + unban to purge messages), `?p` short reply.
 /// `?h` (hackban) is accepted but needs no code: bans already work on ids that left the server.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Flags {
     pub dm: bool,
     pub soft: bool,

@@ -445,6 +445,16 @@ pub fn schema() -> Vec<Value> {
             "words",
         ),
         pg(
+            hp(
+                ti(
+                    fg("Word blacklist", "filters.words.regex", "lines"),
+                    "Regex patterns",
+                ),
+                "One pattern per line, case-insensitive. Each matching pattern counts as one word.",
+            ),
+            "words",
+        ),
+        pg(
             ti(
                 fg("Word blacklist", "filters.words.premade_profane", "bool"),
                 "Use premade list of profane words",
@@ -649,6 +659,7 @@ pub fn schema() -> Vec<Value> {
         ti(fg("General", "delete_replies_secs", "int"), "Delete TommyBot's auto messages after few seconds"),
         ti(fg("General", "enforce_quarantine_perms", "bool"), "Always enforce the proper permissions of Quarantine role in channels"),
         ti(fg("General", "ignore_no_permit", "bool"), "Always ignore commands issued by members without any permits"),
+        ti(fg("General", "enforce_permits", "bool"), "Remove roles with dangerous permissions from members without any permits"),
         sx(
             "logging",
             hp(

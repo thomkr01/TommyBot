@@ -2,18 +2,25 @@
 //! and enforce the quarantine hold.
 use anyhow::Result;
 use serde_json::json;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tommybot_antinuke::{
     gained_dangerous, has_dangerous, hold_violation, plan_revert, Action, Inverse, LogEntry,
     NukeCase, Verdict,
 };
 use tommybot_automod::heat::{Breakdown, HeatCfg};
-use tommybot_core::cases::{self, NewCase};
+use tommybot_core::{
+    cases::{self, NewCase},
+    permits,
+};
 use tommybot_logging::{
     embed::{ALERT, NO, YES},
     Log, LogKind,
 };
 use twilight_model::{
+    gateway::payload::incoming::MemberUpdate,
     guild::{
         audit_log::{AuditLogChange, AuditLogEntry, AuditLogEventType as A},
         Permissions,
@@ -277,6 +284,56 @@ async fn guard_perms(
         _ => return Ok(()),
     };
     quarantine_and_revert(app, gid, actor, why).await
+}
+
+/// Roles of `member` that carry dangerous permissions and sit below the bot, so it can take them.
+fn dangerous_below_bot(
+    member: &[Id<RoleMarker>],
+    perms: &HashMap<Id<RoleMarker>, u64>,
+    positions: &HashMap<Id<RoleMarker>, i64>,
+    bot_top: i64,
+) -> Vec<Id<RoleMarker>> {
+    member
+        .iter()
+        .copied()
+        .filter(|r| perms.get(r).is_some_and(|p| has_dangerous(*p)))
+        .filter(|r| positions.get(r).is_some_and(|p| *p < bot_top))
+        .collect()
+}
+
+/// Misc "enforce permits": a member with no permit loses the roles that give them dangerous permissions.
+pub async fn enforce_permits(app: &App, m: &MemberUpdate) -> Result<()> {
+    let gid = m.guild_id;
+    if m.user.bot || !app.cfg(gid.get()).await?.misc.enforce_permits {
+        return Ok(());
+    }
+    let info = app.guild_info(gid).await?;
+    let bad = dangerous_below_bot(&m.roles, &info.role_perms, &info.roles, info.bot_top);
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let roles: Vec<i64> = m.roles.iter().map(|r| r.get() as i64).collect();
+    let level = permits::resolve(
+        &app.pool,
+        gid.get() as i64,
+        info.owner.get() as i64,
+        m.user.id.get() as i64,
+        &roles,
+    )
+    .await?;
+    if level != permits::Level::None {
+        return Ok(());
+    }
+    for &r in &bad {
+        app.http.remove_guild_member_role(gid, m.user.id, r).await?;
+    }
+    let names: Vec<String> = bad.iter().map(|r| format!("<@&{r}>")).collect();
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Member", m.user.id.get())
+        .text(&format!("{YES} **Dangerous roles removed**"))
+        .line("Roles", &names.join(", "))
+        .line("Reason", "holds dangerous permissions without a permit");
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await
 }
 
 /// Strips the member's roles (saving them) so their permissions are gone.
@@ -618,6 +675,15 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_dangerous_roles_below_the_bot_are_taken() {
+        let id = |n| Id::<RoleMarker>::new(n);
+        let perms = HashMap::from([(id(1), 1 << 3), (id(2), 1 << 10), (id(3), 1 << 3)]);
+        let positions = HashMap::from([(id(1), 2), (id(2), 3), (id(3), 9)]);
+        let got = dangerous_below_bot(&[id(1), id(2), id(3), id(4)], &perms, &positions, 5);
+        assert_eq!(got, vec![id(1)]);
+    }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres.
     #[tokio::test]

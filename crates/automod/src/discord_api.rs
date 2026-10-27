@@ -9,6 +9,9 @@ const KEYWORD_RULE: &str = "TommyBot keywords";
 /// Discord caps one keyword rule at 1000 keywords of at most 60 chars.
 const MAX_KEYWORDS: usize = 1000;
 const MAX_KEYWORD_LEN: usize = 60;
+/// Discord allows 10 regex patterns of up to 260 characters per keyword rule.
+const MAX_REGEX: usize = 10;
+const MAX_REGEX_LEN: usize = 260;
 /// Discord pauses invites for at most 24 hours.
 pub const MAX_INVITE_PAUSE_MS: i64 = 24 * 3_600_000;
 
@@ -99,9 +102,14 @@ impl Api {
     }
 
     /// Create or update our keyword rule so it blocks exactly `words`. An empty list disables it.
-    pub async fn sync_keyword_rule(&self, guild: u64, words: &[String]) -> Result<()> {
+    pub async fn sync_keyword_rule(
+        &self,
+        guild: u64,
+        words: &[String],
+        regex: &[String],
+    ) -> Result<()> {
         let rules = self.list_rules(guild).await?;
-        let body = keyword_rule_body(words);
+        let body = keyword_rule_body(words, regex);
         match rules.iter().find(|r| r.name == KEYWORD_RULE) {
             Some(r) => {
                 self.send(
@@ -113,7 +121,7 @@ impl Api {
                 )
                 .await?
             }
-            None if words.is_empty() => return Ok(()),
+            None if words.is_empty() && regex.is_empty() => return Ok(()),
             None => {
                 self.send(
                     self.http
@@ -298,19 +306,23 @@ fn invites_body(until: Option<(i64, i64)>) -> Value {
     json!({ "invites_disabled_until": until.flatten() })
 }
 
-fn keyword_rule_body(words: &[String]) -> Value {
-    let words: Vec<&String> = words
-        .iter()
-        .filter(|w| !w.is_empty() && w.chars().count() <= MAX_KEYWORD_LEN)
-        .take(MAX_KEYWORDS)
-        .collect();
+fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
+    let fit = |list: &[String], len: usize, max: usize| -> Vec<String> {
+        list.iter()
+            .filter(|w| !w.is_empty() && w.chars().count() <= len)
+            .take(max)
+            .cloned()
+            .collect()
+    };
+    let words = fit(words, MAX_KEYWORD_LEN, MAX_KEYWORDS);
+    let regex = fit(regex, MAX_REGEX_LEN, MAX_REGEX);
     json!({
         "name": KEYWORD_RULE,
         "event_type": 1,
         "trigger_type": 1,
-        "trigger_metadata": { "keyword_filter": words },
+        "trigger_metadata": { "keyword_filter": words, "regex_patterns": regex },
         "actions": [{ "type": 1 }],
-        "enabled": !words.is_empty(),
+        "enabled": !words.is_empty() || !regex.is_empty(),
     })
 }
 
@@ -374,9 +386,12 @@ mod tests {
     #[test]
     fn keyword_rule_drops_bad_keywords_and_disables_when_empty() {
         let long = "x".repeat(61);
-        let v = keyword_rule_body(&["bad".into(), "".into(), long]);
+        let v = keyword_rule_body(&["bad".into(), "".into(), long], &[]);
         assert_eq!(v["trigger_metadata"]["keyword_filter"], json!(["bad"]));
         assert_eq!(v["enabled"], true);
-        assert_eq!(keyword_rule_body(&[])["enabled"], false);
+        assert_eq!(keyword_rule_body(&[], &[])["enabled"], false);
+        let r = keyword_rule_body(&[], &["b[a4]d".into()]);
+        assert_eq!(r["trigger_metadata"]["regex_patterns"], json!(["b[a4]d"]));
+        assert_eq!(r["enabled"], true);
     }
 }
