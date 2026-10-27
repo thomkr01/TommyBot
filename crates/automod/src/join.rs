@@ -274,6 +274,11 @@ pub struct RaidCfg {
     pub flag_no_avatar: bool,
     /// Minimum accounts in one creation-time bucket to call it a bot farm; None disables.
     pub id_flag_min: Option<usize>,
+    #[serde(default)]
+    pub id_granularity: IdGranularity,
+    /// Neighbouring buckets on each side that count toward a bucket's matches.
+    #[serde(default)]
+    pub id_margin: u32,
     /// What happens to flagged raiders.
     #[serde(default = "default_raid_action")]
     pub action: Action,
@@ -282,6 +287,17 @@ pub struct RaidCfg {
     pub lock: Option<crate::lockdown::LockKind>,
     #[serde(default)]
     pub warned_roles: Vec<String>,
+}
+
+/// Bucket size for the ID flag. Adaptive starts at a day and narrows to an hour when one day
+/// holds over half the window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IdGranularity {
+    #[default]
+    Adaptive,
+    Hour,
+    Day,
+    Month,
 }
 
 fn default_raid_action() -> Action {
@@ -300,6 +316,8 @@ impl Default for RaidCfg {
             flag_younger_than_ms: None,
             flag_no_avatar: false,
             id_flag_min: None,
+            id_granularity: IdGranularity::Adaptive,
+            id_margin: 0,
             action: Action::Kick,
             lock: None,
             warned_roles: vec![],
@@ -320,6 +338,8 @@ struct JoinRec {
 pub struct RaidDetector {
     joins: Vec<JoinRec>,
     active_until: i64,
+    /// When the current (or last) raid started; it names the raid in the raid log.
+    pub started: i64,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -333,8 +353,9 @@ pub struct RaidOutcome {
 impl RaidDetector {
     /// A raid that was still running at restart; the joins that started it are gone but the
     /// algorithms keep flagging until `until_ms`.
-    pub fn restored(until_ms: i64) -> Self {
+    pub fn restored(started_ms: i64, until_ms: i64) -> Self {
         Self {
+            started: started_ms,
             active_until: until_ms,
             ..Self::default()
         }
@@ -367,6 +388,7 @@ impl RaidDetector {
         let was_active = self.active(now);
         if !was_active && counted >= cfg.count {
             self.active_until = now + cfg.active_ms;
+            self.started = now;
             return RaidOutcome {
                 triggered: true,
                 flagged: self.flagged(cfg, now),
@@ -382,9 +404,19 @@ impl RaidDetector {
         RaidOutcome::default()
     }
 
+    /// The (cured, lowercased) name of a joiner still in the window.
+    pub fn name_of(&self, id: u64) -> Option<&str> {
+        self.joins
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.name.as_str())
+    }
+
     /// Accounts in the window that any enabled algorithm flags.
     fn flagged(&self, cfg: &RaidCfg, now: i64) -> Vec<u64> {
-        let farm = cfg.id_flag_min.map(|min| self.farm_ids(min));
+        let farm = cfg
+            .id_flag_min
+            .map(|min| self.farm_ids(min, cfg.id_granularity, cfg.id_margin as i64));
         self.joins
             .iter()
             .filter(|r| {
@@ -399,25 +431,39 @@ impl RaidDetector {
             .collect()
     }
 
-    /// ID flag: bucket joiners by account creation time (days; hours when one day holds over half the window).
-    fn farm_ids(&self, min: usize) -> Vec<u64> {
-        let bucket_by = |size: i64| {
-            let mut m: HashMap<i64, Vec<u64>> = HashMap::new();
-            for r in &self.joins {
-                m.entry(account_created_ms(r.id) / size)
-                    .or_default()
-                    .push(r.id);
+    /// ID flag: bucket joiners by account creation time; a bucket plus `margin` neighbours on each
+    /// side holding at least `min` accounts is a bot farm.
+    fn farm_ids(&self, min: usize, by: IdGranularity, margin: i64) -> Vec<u64> {
+        let size = match by {
+            IdGranularity::Hour => HOUR_MS,
+            IdGranularity::Day => DAY_MS,
+            IdGranularity::Month => 30 * DAY_MS,
+            IdGranularity::Adaptive => {
+                let mut per_day: HashMap<i64, usize> = HashMap::new();
+                for r in &self.joins {
+                    *per_day
+                        .entry(account_created_ms(r.id) / DAY_MS)
+                        .or_default() += 1;
+                }
+                if per_day.values().any(|n| n * 2 > self.joins.len()) {
+                    HOUR_MS
+                } else {
+                    DAY_MS
+                }
             }
-            m
         };
-        let mut buckets = bucket_by(DAY_MS);
-        if buckets.values().any(|v| v.len() * 2 > self.joins.len()) {
-            buckets = bucket_by(HOUR_MS);
-        }
-        buckets
-            .into_values()
-            .filter(|v| v.len() >= min)
-            .flatten()
+        let bucket = |id| account_created_ms(id) / size;
+        self.joins
+            .iter()
+            .filter(|r| {
+                let b = bucket(r.id);
+                self.joins
+                    .iter()
+                    .filter(|o| (bucket(o.id) - b).abs() <= margin)
+                    .count()
+                    >= min
+            })
+            .map(|r| r.id)
             .collect()
     }
 }
@@ -727,7 +773,7 @@ mod tests {
             flag_no_avatar: true,
             ..raid_cfg()
         };
-        let mut d = RaidDetector::restored(NOW + 5000);
+        let mut d = RaidDetector::restored(NOW - 1000, NOW + 5000);
         let out = d.on_join(&joiner(9, "z", false), false, &cfg, NOW);
         assert_eq!((out.triggered, out.flagged), (false, vec![9]));
         assert!(!d.active(NOW + 5000));
@@ -780,6 +826,20 @@ mod tests {
             }
         }
         panic!("raid never triggered");
+    }
+
+    #[test]
+    fn id_flag_granularity_and_margin() {
+        // two accounts made a day apart: separate day buckets, joined by a margin of one
+        let ids = [id_aged(50 * DAY_MS, 1), id_aged(49 * DAY_MS, 2)];
+        let mut d = RaidDetector::default();
+        for (i, id) in ids.iter().enumerate() {
+            d.on_join(&joiner(*id, "x", true), false, &raid_cfg(), NOW + i as i64);
+        }
+        assert!(d.farm_ids(2, IdGranularity::Day, 0).is_empty());
+        assert_eq!(d.farm_ids(2, IdGranularity::Day, 1).len(), 2);
+        assert!(d.farm_ids(2, IdGranularity::Hour, 0).is_empty());
+        assert_eq!(d.name_of(ids[0]), Some("x"));
     }
 
     #[test]

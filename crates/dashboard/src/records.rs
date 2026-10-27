@@ -34,6 +34,7 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{g}/cases"), get(cases))
         .route(&format!("{g}/cases/{{no}}"), post(case_edit))
         .route(&format!("{g}/cases/{{no}}/delete"), post(case_delete))
+        .route(&format!("{g}/raid_log"), get(raid_log))
         .route(&format!("{g}/notes"), get(notes).post(note_add))
         .route(&format!("{g}/notes/sweep"), post(note_sweep))
         .route(&format!("{g}/notes/{{id}}"), post(note_edit))
@@ -65,6 +66,31 @@ fn clip(text: &str, max: usize) -> Result<String, ApiError> {
         ))),
         _ => Ok(t.into()),
     }
+}
+
+/// The last 20 join raids, newest first, with every account each one caught.
+async fn raid_log(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    api::staff(&st, &s, guild, &["cases"]).await?;
+    let rows: Vec<(i64, String, String, At)> = sqlx::query_as(
+        "select raid_ms, user_id::text, name, created_at from raid_log
+         where guild_id = $1 and raid_ms in
+           (select distinct raid_ms from raid_log where guild_id = $1 order by raid_ms desc limit 20)
+         order by raid_ms desc, created_at",
+    )
+    .bind(guild)
+    .fetch_all(&st.db)
+    .await?;
+    let mut raids: Vec<Value> = vec![];
+    for (raid, user, name, at) in rows {
+        if raids.last().is_none_or(|r| r["raid_ms"] != raid) {
+            raids.push(json!({"raid_ms": raid, "accounts": []}));
+        }
+        let accounts = raids.last_mut().unwrap()["accounts"]
+            .as_array_mut()
+            .unwrap();
+        accounts.push(json!({"user_id": user, "name": name, "at": at}));
+    }
+    Ok(Json(json!(raids)))
 }
 
 #[derive(Deserialize)]
