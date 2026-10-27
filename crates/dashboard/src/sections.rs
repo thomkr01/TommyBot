@@ -313,13 +313,7 @@ async fn tickets_setup(
         return Err(ApiError::Conflict(cur));
     }
     // Staff are the roles of permits with Manage Tickets; they get View Channel and Read History.
-    let staff: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id
-         WHERE p.guild_id = $1 AND 'tickets' = ANY(p.perms)",
-    )
-    .bind(guild)
-    .fetch_all(&st.db)
-    .await?;
+    let staff = tommybot_core::permits::roles_with(&st.db, guild, "tickets").await?;
     // The bot also needs Attach Files in #ticket-logs for the transcripts.
     let bot = json!({"id": st.discord.client_id, "type": 1, "allow": "19456"});
     let mut hidden = vec![

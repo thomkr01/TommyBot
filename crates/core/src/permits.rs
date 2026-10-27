@@ -330,6 +330,18 @@ pub fn command_allowed(
     }
 }
 
+/// Roles of the guild's permits that hold `perm` (staff for tickets).
+pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx::Result<Vec<i64>> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id
+         WHERE p.guild_id = $1 AND $2 = ANY(p.perms)",
+    )
+    .bind(guild_id)
+    .bind(perm)
+    .fetch_all(pool)
+    .await
+}
+
 /// Resolves a member's level from the DB. `roles` are the member's role ids.
 pub async fn resolve(
     pool: &sqlx::PgPool,

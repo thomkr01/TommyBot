@@ -1,6 +1,7 @@
 //! Tickets: the panel's button opens a private channel in the ticket category for the member and
 //! the staff whose permit has Manage Tickets. Closing saves a transcript to the ticket log.
 use anyhow::Result;
+use tommybot_core::permits;
 use tommybot_logging::{embed::BLUE, Log};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
@@ -27,17 +28,15 @@ const CLOSE: &str = "ticket:close";
 /// Transcripts keep the last 500 messages (5 pages).
 const PAGES: usize = 5;
 
-fn member_perms() -> Permissions {
-    Permissions::VIEW_CHANNEL
-        | Permissions::SEND_MESSAGES
-        | Permissions::READ_MESSAGE_HISTORY
-        | Permissions::ATTACH_FILES
-        | Permissions::EMBED_LINKS
-}
+const MEMBER: Permissions = Permissions::VIEW_CHANNEL
+    .union(Permissions::SEND_MESSAGES)
+    .union(Permissions::READ_MESSAGE_HISTORY)
+    .union(Permissions::ATTACH_FILES)
+    .union(Permissions::EMBED_LINKS);
 
 fn allow(id: u64, kind: PermissionOverwriteType) -> PermissionOverwrite {
     PermissionOverwrite {
-        allow: member_perms(),
+        allow: MEMBER,
         deny: Permissions::empty(),
         id: Id::new(id),
         kind,
@@ -69,17 +68,6 @@ fn overwrites(
     v
 }
 
-/// Roles of the permits that hold Manage Tickets.
-async fn staff_roles(app: &App, gid: Id<GuildMarker>) -> Result<Vec<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT DISTINCT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id
-         WHERE p.guild_id = $1 AND 'tickets' = ANY(p.perms)",
-    )
-    .bind(gid.get() as i64)
-    .fetch_all(&app.pool)
-    .await?)
-}
-
 async fn open(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<String> {
     let cfg = app.cfg(gid.get()).await?;
     let t = &cfg.tickets;
@@ -102,7 +90,7 @@ async fn open(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<S
             .collect::<String>();
         return Ok(format!("You already have an open ticket:{at}"));
     }
-    // shortcut: two members opening at the same instant can collide on the number; the loser just presses again.
+    // shortcut: two opens at the same instant can collide on the number (the loser presses again) or pass max_open together; fine for button clicks.
     let number: i32 = sqlx::query_scalar(
         "INSERT INTO tickets (guild_id, number, user_id)
          SELECT $1, COALESCE(MAX(number), 0) + 1, $2 FROM tickets WHERE guild_id = $1 RETURNING number",
@@ -111,7 +99,7 @@ async fn open(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<S
     .bind(user.get() as i64)
     .fetch_one(&app.pool)
     .await?;
-    let staff = staff_roles(app, gid).await?;
+    let staff = permits::roles_with(&app.pool, g, "tickets").await?;
     let name = format!("ticket-{number:04}");
     let ows = overwrites(gid, user.get(), app.me.get(), &staff);
     let created = async {
@@ -198,11 +186,6 @@ async fn transcript(app: &App, ch: Id<ChannelMarker>) -> Result<(usize, String)>
     Ok((all.len(), text))
 }
 
-/// Who may close: the member who opened the ticket, or staff with Manage Tickets.
-fn may_close(opener: u64, clicker: u64, staff: bool) -> bool {
-    opener == clicker || staff
-}
-
 async fn close(
     app: &App,
     i: &Interaction,
@@ -226,7 +209,7 @@ async fn close(
     };
     let owner = app.guild_info(gid).await?.owner;
     let staff = app.level(gid, owner, user).await?.has("tickets");
-    if !may_close(opener as u64, user.get(), staff) {
+    if opener as u64 != user.get() && !staff {
         let no = say(
             "Only the member who opened it and staff with Manage Tickets can close this ticket.",
         );
@@ -251,27 +234,51 @@ async fn close(
         d.flags = None;
     }
     client.create_response(i.id, &i.token, &r).await?;
-    let cfg = app.cfg(gid.get()).await?;
-    if let Some(log) = cfg.tickets.log_channel {
-        let (count, text) = transcript(app, ch).await?;
-        let embed = Log::new(&format!("Ticket #{number:04} closed"), BLUE)
-            .user("Opened by", opener as u64)
-            .user("Closed by", user.get())
-            .line("Messages", &count.to_string())
-            .time()
-            .build();
-        let file = [Attachment::from_bytes(
-            format!("ticket-{number:04}.txt"),
-            text.into_bytes(),
-            1,
-        )];
-        app.http
-            .create_message(log)
-            .embeds(&[embed])
-            .attachments(&file)
+    if let Err(e) = save_transcript(app, gid, ch, number, opener as u64, user).await {
+        // The channel holds the only copy, so it stays until a transcript is saved.
+        sqlx::query("UPDATE tickets SET closed_at = NULL, closed_by = NULL WHERE channel_id = $1")
+            .bind(ch.get() as i64)
+            .execute(&app.pool)
             .await?;
+        app.http
+            .create_message(ch)
+            .content("Could not save the transcript, so the ticket stays open. Check that the bot can send files in the ticket log.")
+            .await?;
+        return Err(e);
     }
     app.http.delete_channel(ch).await?;
+    Ok(())
+}
+
+/// Posts the log and transcript of a closing ticket, when a ticket log is set.
+async fn save_transcript(
+    app: &App,
+    gid: Id<GuildMarker>,
+    ch: Id<ChannelMarker>,
+    number: i32,
+    opener: u64,
+    closer: Id<UserMarker>,
+) -> Result<()> {
+    let Some(log) = app.cfg(gid.get()).await?.tickets.log_channel else {
+        return Ok(());
+    };
+    let (count, text) = transcript(app, ch).await?;
+    let embed = Log::new(&format!("Ticket #{number:04} closed"), BLUE)
+        .user("Opened by", opener)
+        .user("Closed by", closer.get())
+        .line("Messages", &count.to_string())
+        .time()
+        .build();
+    let file = [Attachment::from_bytes(
+        format!("ticket-{number:04}.txt"),
+        text.into_bytes(),
+        1,
+    )];
+    app.http
+        .create_message(log)
+        .embeds(&[embed])
+        .attachments(&file)
+        .await?;
     Ok(())
 }
 
@@ -288,6 +295,12 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
     match c.custom_id.as_str() {
         OPEN => {
             let client = app.http.interaction(Id::new(app.me.get()));
+            // Creating the channel can take longer than Discord's 3 seconds to answer.
+            let wait = ephemeral(
+                InteractionResponseType::DeferredChannelMessageWithSource,
+                None,
+            );
+            client.create_response(i.id, &i.token, &wait).await?;
             let text = match open(app, gid, user).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -296,11 +309,10 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                         .into()
                 }
             };
-            let r = ephemeral(
-                InteractionResponseType::ChannelMessageWithSource,
-                Some(&text),
-            );
-            client.create_response(i.id, &i.token, &r).await?;
+            client
+                .update_response(&i.token)
+                .content(Some(&text))
+                .await?;
         }
         CLOSE => close(app, i, gid, ch, user).await?,
         _ => return Ok(false),
@@ -311,13 +323,6 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn opener_or_staff_closes() {
-        assert!(may_close(1, 1, false));
-        assert!(may_close(1, 2, true));
-        assert!(!may_close(1, 2, false));
-    }
 
     #[test]
     fn ticket_is_hidden_from_everyone_but_member_bot_and_staff() {
