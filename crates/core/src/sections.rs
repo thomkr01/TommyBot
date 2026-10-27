@@ -275,11 +275,45 @@ pub struct WordsCfg {
     pub strict: Vec<String>,
     /// Matched anywhere in a word.
     pub wildcard: Vec<String>,
+    /// Regular expressions, case-insensitive, matched anywhere in the message.
+    pub regex: Patterns,
     pub premade_profane: bool,
     pub premade_vulgar: bool,
     pub premade_racist: bool,
     /// Keep the words in a native Discord AutoMod rule instead.
     pub use_discord_automod: bool,
+}
+
+/// Regex word patterns, compiled once when the config loads, so a bad one fails the dashboard save.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(try_from = "Vec<String>")]
+pub struct Patterns {
+    list: Vec<String>,
+    set: regex::RegexSet,
+}
+
+impl TryFrom<Vec<String>> for Patterns {
+    type Error = regex::Error;
+
+    fn try_from(list: Vec<String>) -> Result<Self, Self::Error> {
+        let set = regex::RegexSetBuilder::new(&list)
+            .case_insensitive(true)
+            // Admin-supplied patterns: cap the compiled size (matching is linear time already).
+            .size_limit(1 << 20)
+            .build()?;
+        Ok(Self { list, set })
+    }
+}
+
+impl Patterns {
+    /// Number of patterns that match `text`.
+    pub fn hits(&self, text: &str) -> usize {
+        self.set.matches(text).iter().count()
+    }
+
+    pub fn as_slice(&self) -> &[String] {
+        &self.list
+    }
 }
 
 /// Automod whitelists, one per tab. The top-level lists are the Spam tab, which skips automod entirely.
@@ -376,6 +410,8 @@ pub struct MiscCfg {
     pub enforce_quarantine_perms: bool,
     /// Ignore commands from members without a permit.
     pub ignore_no_permit: bool,
+    /// Take dangerous-permission roles from members who have no permit.
+    pub enforce_permits: bool,
     pub confirm: bool,
     pub always_dm: bool,
     /// Delete the staff member's prefix command message.
@@ -403,6 +439,7 @@ impl Default for MiscCfg {
             delete_replies_secs: None,
             enforce_quarantine_perms: false,
             ignore_no_permit: false,
+            enforce_permits: false,
             confirm: false,
             always_dm: false,
             delete_invocation: false,
@@ -493,6 +530,16 @@ impl Default for BackupsCfg {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn regex_words_match_and_bad_ones_are_refused() {
+        let w: WordsCfg =
+            serde_json::from_value(json!({"regex": ["fr[e3]+ n[i1]tro", "a{1,3}b"]})).unwrap();
+        assert_eq!(w.regex.hits("FREE NITRO here, aab"), 2);
+        assert_eq!(w.regex.hits("hello"), 0);
+        assert_eq!(WordsCfg::default().regex.hits("anything"), 0);
+        assert!(serde_json::from_value::<WordsCfg>(json!({"regex": ["(unclosed"]})).is_err());
+    }
 
     #[test]
     fn antinuke_is_enabled_unless_saved_off() {

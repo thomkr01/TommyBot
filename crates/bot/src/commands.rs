@@ -1,7 +1,8 @@
 //! Prefix mod commands: permit check -> action -> case (+ undo data). ban/kick/timeout/warn.
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
@@ -39,7 +40,7 @@ use crate::{
     targets,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ModKind {
     Ban,
     Kick,
@@ -334,6 +335,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
 }
 
 /// What a [`Pending`] does once confirmed.
+#[derive(Serialize, Deserialize)]
 pub enum Action {
     Mod {
         kind: ModKind,
@@ -349,24 +351,18 @@ pub enum Action {
     },
 }
 
-/// A command waiting for its Confirm click. Lost on restart: the staff member just types it again.
+/// A command waiting for its Confirm click, stored in `pending_confirms` so it survives a restart.
 pub struct Pending {
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     action: Action,
-    at: Instant,
 }
 
 const CONFIRM_TTL: Duration = Duration::from_secs(60);
 
 impl Pending {
     pub fn new(gid: Id<GuildMarker>, actor: Id<UserMarker>, action: Action) -> Self {
-        Self {
-            gid,
-            actor,
-            action,
-            at: Instant::now(),
-        }
+        Self { gid, actor, action }
     }
 
     /// Warns and non-destructive commands run straight away.
@@ -473,10 +469,9 @@ fn confirm_button(label: &str, id: String, style: ButtonStyle) -> Component {
     })
 }
 
-/// Keeps `job` for its buttons and returns the question with the Confirm / Cancel row.
+/// Stores `job` for its buttons and returns the question with the Confirm / Cancel row.
 /// `nonce` is the command message or interaction id.
-pub fn stash_confirm(app: &App, nonce: u64, job: Pending) -> (String, Component) {
-    let text = job.question();
+pub async fn stash_confirm(app: &App, nonce: u64, job: Pending) -> Result<(String, Component)> {
     let row = Component::ActionRow(ActionRow {
         id: None,
         components: vec![
@@ -492,14 +487,23 @@ pub fn stash_confirm(app: &App, nonce: u64, job: Pending) -> (String, Component)
             ),
         ],
     });
-    let mut pending = app.pending.lock().unwrap();
-    pending.retain(|_, p| p.at.elapsed() < CONFIRM_TTL);
-    pending.insert(nonce, job);
-    (text, row)
+    // Expired rows are dropped on the way in, so the table stays small without a sweeper.
+    sqlx::query(
+        "WITH gone AS (DELETE FROM pending_confirms WHERE created_at < now() - make_interval(secs => $5))
+         INSERT INTO pending_confirms (nonce, guild_id, actor_id, action) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(nonce as i64)
+    .bind(job.gid.get() as i64)
+    .bind(job.actor.get() as i64)
+    .bind(serde_json::to_value(&job.action)?)
+    .bind(CONFIRM_TTL.as_secs_f64())
+    .execute(&app.pool)
+    .await?;
+    Ok((job.question(), row))
 }
 
 pub async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()> {
-    let (text, row) = stash_confirm(app, msg.id.get(), job);
+    let (text, row) = stash_confirm(app, msg.id.get(), job).await?;
     app.http
         .create_message(msg.channel_id)
         .content(&text)
@@ -533,18 +537,36 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
             ..Default::default()
         }),
     };
-    let taken = {
-        let mut pending = app.pending.lock().unwrap();
-        match pending.get(&nonce) {
-            Some(p) if Some(p.actor) != i.author_id() => {
-                Err("Only the staff member who typed the command can answer.")
-            }
-            Some(p) if p.at.elapsed() >= CONFIRM_TTL => {
-                pending.remove(&nonce);
-                Err("This confirmation expired, type the command again.")
-            }
-            Some(_) => Ok(pending.remove(&nonce).unwrap()),
-            None => Err("This confirmation expired, type the command again."),
+    const EXPIRED: &str = "This confirmation expired, type the command again.";
+    let actor = i.author_id().map_or(0, |a| a.get() as i64);
+    let row: Option<(i64, serde_json::Value, bool)> = sqlx::query_as(
+        "DELETE FROM pending_confirms WHERE nonce = $1 AND actor_id = $2
+         RETURNING guild_id, action, created_at < now() - make_interval(secs => $3)",
+    )
+    .bind(nonce as i64)
+    .bind(actor)
+    .bind(CONFIRM_TTL.as_secs_f64())
+    .fetch_optional(&app.pool)
+    .await?;
+    let taken = match row {
+        Some((_, _, true)) => Err(EXPIRED),
+        Some((gid, action, false)) => Ok(Pending::new(
+            Id::new(gid as u64),
+            Id::new(actor as u64),
+            serde_json::from_value(action)?,
+        )),
+        None => {
+            let other: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pending_confirms WHERE nonce = $1)",
+            )
+            .bind(nonce as i64)
+            .fetch_one(&app.pool)
+            .await?;
+            Err(if other {
+                "Only the staff member who typed the command can answer."
+            } else {
+                EXPIRED
+            })
         }
     };
     let job = match taken {

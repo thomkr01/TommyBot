@@ -193,7 +193,12 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::GuildUpdate(g) => app.invalidate_guild(g.id),
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),
-        Event::MemberUpdate(m) => automod::on_member_update(app, m).await?,
+        Event::MemberUpdate(m) => {
+            if let Err(e) = antinuke::enforce_permits(app, m).await {
+                tracing::warn!(?e, "enforcing permits failed");
+            }
+            automod::on_member_update(app, m).await?
+        }
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?

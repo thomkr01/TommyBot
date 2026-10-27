@@ -123,8 +123,8 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         nsfw_link: f.nsfw_links.enabled && app.sites.nsfw(&checked),
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
-        blacklisted_words: if f.words.filter.enabled {
-            filters::word_hits(content, &words)
+        blacklisted_words: if f.words.filter.enabled && !f.words.use_discord_automod {
+            filters::word_hits(content, &words) + f.words.regex.hits(content)
         } else {
             0
         },
@@ -424,7 +424,7 @@ pub async fn sync_discord_rule(app: std::sync::Arc<App>, guild: u64) {
         let f = &cfg.automod.filters;
         if f.words.use_discord_automod {
             app.api
-                .sync_keyword_rule(guild, &blacklist_words(f))
+                .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice())
                 .await?;
         }
         anyhow::Ok(())
