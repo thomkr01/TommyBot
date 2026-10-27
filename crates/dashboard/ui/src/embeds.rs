@@ -15,6 +15,8 @@ fn set_at(e: &mut Value, path: &str, v: String) {
     if let Some(p) = parent { if e[p].as_object().is_some_and(|m| m.is_empty()) { e.as_object_mut().map(|o| o.remove(p)); } }
 }
 
+fn edit(cur: RwSignal<Value>, f: impl FnOnce(&mut Value)) { cur.update(|c| f(&mut c["embed"])) }
+
 fn blank() -> Value { json!({"id": null, "name": "", "channel": null, "embed": {}}) }
 
 #[component]
@@ -36,10 +38,9 @@ pub fn Embeds(guild: String) -> impl IntoView {
                 .map(|c| (c["id"].as_str().unwrap_or("").to_string(), format!("#{}", c["name"].as_str().unwrap_or("?")))).collect());
         }
     });
-    let edit = move |f: Box<dyn FnOnce(&mut Value)>| cur.update(|c| f(&mut c["embed"]));
     let text = move |label: &'static str, path: &'static str, max: u32| view! {
         <div class="row"><label>{label}</label><input maxlength=max prop:value=move || cur.with(|c| get_at(&c["embed"], path))
-            on:input=move |e| { let v = event_target_value(&e); edit(Box::new(move |em| set_at(em, path, v))) } /></div>
+            on:input=move |e| { let v = event_target_value(&e); edit(cur, move |em| set_at(em, path, v)) } /></div>
     };
     // Saves the draft, then optionally has the bot post it (`Some(repost)`).
     let save = move |post: Option<bool>| spawn_local(async move {
@@ -52,12 +53,12 @@ pub fn Embeds(guild: String) -> impl IntoView {
                 Some(repost) => {
                     let v = api("POST", &format!("{base}/{id}/post"), Some(json!({"repost": repost}))).await?;
                     cur.update(|c| { c["message"] = v["message"].clone(); c["message_channel"] = v["message_channel"].clone(); });
-                    Ok::<_, String>(if repost || c["message"].is_null() { "Posted." } else { "Message updated." })
+                    Ok::<_, String>(format!("Embed {}.", v["done"].as_str().unwrap_or("posted")))
                 }
-                None => Ok("Draft saved."),
+                None => Ok("Draft saved.".into()),
             }
         }.await;
-        msg.set(r.map_or_else(|e| e, String::from));
+        msg.set(r.unwrap_or_else(|e| e));
         load();
     });
     let remove = move |_| {
@@ -93,25 +94,25 @@ pub fn Embeds(guild: String) -> impl IntoView {
                 {text("Title", "title", 256)}
                 {text("Title link", "url", 2048)}
                 <div class="row"><label>"Description"</label><textarea class="short" maxlength="4096" prop:value=move || cur.with(|c| get_at(&c["embed"], "description"))
-                    on:input=move |e| { let v = event_target_value(&e); edit(Box::new(move |em| set_at(em, "description", v))) }></textarea></div>
+                    on:input=move |e| { let v = event_target_value(&e); edit(cur, move |em| set_at(em, "description", v)) }></textarea></div>
                 <div class="row"><label>"Colour"</label><input type="color" prop:value=color
-                    on:input=move |e| { let v = u32::from_str_radix(event_target_value(&e).trim_start_matches('#'), 16).unwrap_or(0); edit(Box::new(move |em| em["color"] = json!(v))) } /></div>
+                    on:input=move |e| { let v = u32::from_str_radix(event_target_value(&e).trim_start_matches('#'), 16).unwrap_or(0); edit(cur, move |em| em["color"] = json!(v)) } /></div>
                 {text("Thumbnail URL", "thumbnail.url", 2048)}
                 {text("Image URL", "image.url", 2048)}
                 {text("Footer", "footer.text", 2048)}
                 <div class="row tog"><input type="checkbox" id="embed-ts" prop:checked=move || cur.with(|c| c["embed"]["timestamp"].is_string())
-                    on:change=move |e| { let on = event_target_checked(&e); edit(Box::new(move |em| set_at(em, "timestamp", if on { js_sys::Date::new_0().to_iso_string().into() } else { String::new() }))) } />
-                    <label for="embed-ts">"Timestamp (time of saving)"</label></div>
+                    on:change=move |e| { let on = event_target_checked(&e); edit(cur, move |em| set_at(em, "timestamp", if on { js_sys::Date::new_0().to_iso_string().into() } else { String::new() })) } />
+                    <label for="embed-ts">"Timestamp (now)"</label></div>
                 <div class="row"><label>"Fields"</label></div>
                 {move || (0..cur.with(|c| c["embed"]["fields"].as_array().map_or(0, Vec::len))).map(|i| view! {
                     <div class="row">
-                        <input placeholder="Name" maxlength="256" prop:value=move || cur.with(|c| get_at(&c["embed"]["fields"][i], "name")) on:input=move |e| { let v = event_target_value(&e); edit(Box::new(move |em| em["fields"][i]["name"] = json!(v))) } />
-                        <input placeholder="Value" maxlength="1024" prop:value=move || cur.with(|c| get_at(&c["embed"]["fields"][i], "value")) on:input=move |e| { let v = event_target_value(&e); edit(Box::new(move |em| em["fields"][i]["value"] = json!(v))) } />
-                        <span><input type="checkbox" aria-label="inline" prop:checked=move || cur.with(|c| c["embed"]["fields"][i]["inline"] == true) on:change=move |e| { let v = event_target_checked(&e); edit(Box::new(move |em| em["fields"][i]["inline"] = json!(v))) } />" inline"</span>
-                        <button class="ghost" on:click=move |_| edit(Box::new(move |em| { if let Some(a) = em["fields"].as_array_mut() { a.remove(i); if a.is_empty() { em.as_object_mut().map(|o| o.remove("fields")); } } }))>"✕"</button>
+                        <input placeholder="Name" maxlength="256" prop:value=move || cur.with(|c| get_at(&c["embed"]["fields"][i], "name")) on:input=move |e| { let v = event_target_value(&e); edit(cur, move |em| em["fields"][i]["name"] = json!(v)) } />
+                        <input placeholder="Value" maxlength="1024" prop:value=move || cur.with(|c| get_at(&c["embed"]["fields"][i], "value")) on:input=move |e| { let v = event_target_value(&e); edit(cur, move |em| em["fields"][i]["value"] = json!(v)) } />
+                        <span><input type="checkbox" aria-label="inline" prop:checked=move || cur.with(|c| c["embed"]["fields"][i]["inline"] == true) on:change=move |e| { let v = event_target_checked(&e); edit(cur, move |em| em["fields"][i]["inline"] = json!(v)) } />" inline"</span>
+                        <button class="ghost" on:click=move |_| edit(cur, move |em| { if let Some(a) = em["fields"].as_array_mut() { a.remove(i); if a.is_empty() { em.as_object_mut().map(|o| o.remove("fields")); } } })>"✕"</button>
                     </div> }).collect_view()}
                 <button class="ghost" disabled=move || cur.with(|c| c["embed"]["fields"].as_array().is_some_and(|a| a.len() >= 25))
-                    on:click=move |_| edit(Box::new(|em| { let f = json!({"name": "", "value": "", "inline": false}); match em["fields"].as_array_mut() { Some(a) => a.push(f), None => em["fields"] = json!([f]) } }))>"Add field"</button>
+                    on:click=move |_| edit(cur, |em| { let f = json!({"name": "", "value": "", "inline": false}); match em["fields"].as_array_mut() { Some(a) => a.push(f), None => em["fields"] = json!([f]) } })>"Add field"</button>
             </div>
             <div class="card">
                 // shortcut: plain text preview, Discord renders the markdown itself; add a renderer if people ask.

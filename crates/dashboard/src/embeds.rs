@@ -219,15 +219,6 @@ async fn publish(
             (m, "edited")
         }
         _ => {
-            if let (Some(c), Some(m)) = (old_channel, old_msg) {
-                discord(
-                    &st,
-                    Method::DELETE,
-                    &format!("/channels/{c}/messages/{m}"),
-                    None,
-                )
-                .await?;
-            }
             let v = discord(
                 &st,
                 Method::POST,
@@ -246,6 +237,12 @@ async fn publish(
                 .bind(id)
                 .execute(&st.db)
                 .await?;
+            if let (Some(c), Some(old)) = (old_channel, old_msg) {
+                let path = format!("/channels/{c}/messages/{old}");
+                if let Err(e) = discord(&st, Method::DELETE, &path, None).await {
+                    tracing::warn!("old embed message not deleted: {e:?}");
+                }
+            }
             (m, "posted")
         }
     };
@@ -257,19 +254,20 @@ async fn publish(
     )
     .await?;
     Ok(Json(
-        json!({"message_channel": channel.to_string(), "message": message.to_string()}),
+        json!({"message_channel": channel.to_string(), "message": message.to_string(), "done": verb}),
     ))
 }
 
 /// Deletes the embed and the bot's message (already gone on Discord is fine).
 async fn delete(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i64, i64)>) -> Res {
     api::require(&st, &s, guild, Level::Editor, false).await?;
+    let mut tx = st.db.begin().await?;
     let (name, c, m): (String, Option<i64>, Option<i64>) = sqlx::query_as(
         "delete from embeds where id = $1 and guild_id = $2 returning name, message_channel, message_id",
     )
     .bind(id)
     .bind(guild)
-    .fetch_optional(&st.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(ApiError::NotFound)?;
     if let (Some(c), Some(m)) = (c, m) {
@@ -281,6 +279,7 @@ async fn delete(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i6
         )
         .await?;
     }
+    tx.commit().await?;
     audit(&st, &s, guild, format!("deleted embed **{name}**")).await?;
     Ok(Json(json!({"ok": true})))
 }
