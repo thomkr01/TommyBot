@@ -25,6 +25,7 @@ pub fn routes() -> Router<AppState> {
             "/api/guilds/{guild}/wizard/verify-channel",
             post(verify_channel),
         )
+        .route("/api/guilds/{guild}/catch/setup", post(catch_channel))
 }
 
 async fn schema_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -301,6 +302,72 @@ async fn verify_channel(
             })),
         )
         .await?;
+    Ok(Json(json!({"version": version, "channel": channel})))
+}
+
+const CATCH_WARNING: &str =
+    "Do not write here. Writing = instant ban. Account hacked? Change your password.";
+
+/// The catch channel: on top of the list (uncategorized channels sit above every category),
+/// @everyone may only read and write plain text. Turns the catch channel on; an already set
+/// channel is reused.
+async fn catch_channel(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Json(b): Json<Setup>,
+) -> Res {
+    api::require(&st, &s, guild, Level::Admin, true).await?;
+    let (cur, mut config) = store::current(&st.db, guild).await?;
+    if cur != b.expected_version {
+        return Err(ApiError::Conflict(cur));
+    }
+    let existing = own(&config["catch"]["channel"]);
+    let fresh = existing.is_none();
+    // @everyone: View, Send, History; no reactions, embeds or files. The bot also deletes and pins.
+    let overwrites = json!([
+        {"id": guild.to_string(), "type": 0, "allow": "68608", "deny": "49216"},
+        {"id": st.discord.client_id, "type": 1, "allow": "93184"}
+    ]);
+    let channel = create(
+        &st,
+        guild,
+        existing,
+        "channels",
+        json!({"name": "do-not-write", "type": 0, "position": 0, "topic": CATCH_WARNING, "permission_overwrites": overwrites}),
+    )
+    .await?;
+    config["catch"]["channel"] = json!(channel);
+    config["catch"]["enabled"] = json!(true);
+    if fresh {
+        config["catch"]["keep_top"] = json!(true);
+    }
+    let mut tx = st.db.begin().await?;
+    let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
+    tx.commit().await?;
+    api::log_change(
+        &st,
+        &config,
+        format!(
+            "{} (<@{}>) set up the catch channel -> config v{version}",
+            s.username, s.user_id
+        ),
+    )
+    .await;
+    if fresh {
+        let m = st
+            .discord
+            .call(
+                Method::POST,
+                &format!("/channels/{channel}/messages"),
+                Some(json!({"embeds": [{"title": "Do not write here", "color": 0xE71B1B, "description": CATCH_WARNING}]})),
+            )
+            .await?;
+        if let Some(id) = m["id"].as_str() {
+            let pin = format!("/channels/{channel}/messages/pins/{id}");
+            st.discord.call(Method::PUT, &pin, None).await?;
+        }
+    }
     Ok(Json(json!({"version": version, "channel": channel})))
 }
 

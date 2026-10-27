@@ -100,3 +100,7 @@ pre.blur { filter:blur(6px); user-select:none; }
 textarea.short { min-height:100px; font-family:inherit; }
 .embed { border-left:4px solid; background:var(--b3); border-radius:4px; padding:10px 14px; display:flex; flex-direction:column; gap:6px; overflow-wrap:anywhere; } .embed p { margin:0; white-space:pre-wrap; } .embed img { max-width:100%; border-radius:4px; } .embed .thumb { float:right; max-width:80px; }
 .embed .fields { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; } .embed .fields .wide { grid-column:1/-1; }
+header .search { position:relative; } header .search input { width:240px; max-width:40vw; }
+header .search .results { position:absolute; left:0; top:48px; width:max(100%, 320px); max-height:60vh; overflow:auto; background:var(--b2); border-radius:8px; padding:6px; box-shadow:0 4px 16px #0008; z-index:40; }
+header .search .results a { display:flex; flex-direction:column; padding:6px 10px; border-radius:6px; text-decoration:none; } header .search .results a:hover { background:color-mix(in srgb, var(--b3) 50%, transparent); }
+.chip.hits { margin-left:6px; font-size:10px; }

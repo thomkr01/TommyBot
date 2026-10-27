@@ -18,7 +18,7 @@ use tommybot_automod::{
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
     sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, LockdownCfg, MiscCfg, PanicCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
         WhitelistCfg,
     },
 };
@@ -45,6 +45,7 @@ pub struct GuildCfg {
     pub appeals: AppealsCfg,
     pub whitelist: WhitelistCfg,
     pub verification: VerificationCfg,
+    pub catch: CatchCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -76,6 +77,7 @@ impl GuildCfg {
             appeals: section(cfg, "appeals"),
             whitelist: section(cfg, "whitelist"),
             verification: section(cfg, "verification"),
+            catch: section(cfg, "catch"),
         }
     }
 }
