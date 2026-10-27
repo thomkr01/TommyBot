@@ -40,7 +40,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             let dc = api("GET", &format!("/api/guilds/{g}/discord"), None).await.unwrap_or(Value::Null);
             let role = |k: &str| name_of(&dc, "roles", c[k].as_str().unwrap_or(""));
             let logs = strs(&c["logs"]).join(", #");
-            let logs = if logs.is_empty() { "the log channels were already set".into() } else { format!("Logs category with #{logs}") };
+            let logs = if logs.is_empty() { "the log channels were already set".into() } else { format!("log channels #{logs} (reports and appeals in a Staff category)") };
             let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
             let member = if c["staff"] == true { format!("{member}, Admins and Moderators roles with their permits") } else { member };
             let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
@@ -298,7 +298,7 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
     let part = format!("{tab}_{sub}");
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
-    // One click: a private "Logs" category with a channel per log type that has none yet.
+    // One click: private "Logs" and "Staff" categories with a channel per log type that has none yet.
     let setup = move |_| {
         let g = g.clone();
         run_act(async move {

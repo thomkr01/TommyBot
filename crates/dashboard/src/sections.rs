@@ -268,10 +268,18 @@ async fn verify_channel(
     {
         overwrites.push(json!({"id": r, "type": 0, "deny": "1024"}));
     }
+    let existing = own(&config["verification"]["channel"]);
+    if existing.is_none() {
+        let channels = st
+            .discord
+            .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+            .await?;
+        drop_named(&st, &channels, &config, "verify-here").await?;
+    }
     let channel = create(
         &st,
         guild,
-        own(&config["verification"]["channel"]),
+        existing,
         "channels",
         json!({"name": "verify-here", "type": 0, "permission_overwrites": overwrites}),
     )
@@ -302,6 +310,34 @@ fn at<'a>(config: &'a Value, path: &[&str]) -> &'a Value {
 
 fn own(v: &Value) -> Option<String> {
     v.as_str().map(String::from)
+}
+
+/// Deletes the text channels named `name` that `config` does not use, so a fresh setup
+/// replaces a leftover channel instead of adding a second one with the same name.
+async fn drop_named(
+    st: &AppState,
+    channels: &Value,
+    config: &Value,
+    name: &str,
+) -> Result<(), ApiError> {
+    for id in stale(channels, config, name) {
+        st.discord
+            .call(Method::DELETE, &format!("/channels/{id}"), None)
+            .await?;
+    }
+    Ok(())
+}
+
+fn stale<'a>(channels: &'a Value, config: &Value, name: &str) -> Vec<&'a str> {
+    let used = config.to_string();
+    channels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["type"] == 0 && c["name"] == name)
+        .filter_map(|c| c["id"].as_str())
+        .filter(|id| !used.contains(&format!("\"{id}\"")))
+        .collect()
 }
 
 /// Returns `existing`, or creates the role or channel on Discord and returns its id.
@@ -340,8 +376,8 @@ const LOG_CHANNELS: [(&[&str], &str); 11] = [
     (&["logging", "routes", "server"], "server-logs"),
 ];
 
-/// One click: a private "Logs" category with a channel per log type that has none yet, plus
-/// "discord-logs" for every Discord event without a channel. Existing channels are kept.
+/// One click: a channel per log type that has none yet, plus "discord-logs" for every Discord
+/// event without a channel, in private "Logs" and "Staff" categories. Set channels are kept.
 async fn log_setup(
     State(st): State<AppState>,
     s: Sess,
@@ -403,7 +439,38 @@ async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<us
 /// Wick's essential logs, always created: the main log channel and the mod log.
 const ESSENTIAL: [&str; 2] = ["tommybot-logs", "mod-logs"];
 
-/// Creates the "Logs" category and the missing log channels, and sets them in `config`.
+/// Staff-facing channels, kept in their own "Staff" category instead of "Logs".
+const STAFF_CHANNELS: [&str; 2] = ["reports", "appeals"];
+
+/// The private category `name`: the existing one, so a later run adds to it, or a new one.
+/// Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
+/// keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
+async fn category(
+    st: &AppState,
+    guild: i64,
+    channels: &Value,
+    name: &str,
+) -> Result<String, ApiError> {
+    let existing = channels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|c| (c["type"] == 4 && c["name"] == name).then(|| own(&c["id"]))?);
+    create(
+        st,
+        guild,
+        existing,
+        "channels",
+        json!({"name": name, "type": 4, "permission_overwrites": [
+            {"id": guild.to_string(), "type": 0, "deny": "1024"},
+            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
+        ]}),
+    )
+    .await
+}
+
+/// Creates the missing log channels under "Logs" (reports and appeals under "Staff"), and
+/// sets them in `config`.
 /// `only` limits it to the essentials plus the named channels ("discord-logs" for the Discord
 /// events). Returns the names of the channels it created; nothing when all have one.
 async fn log_channels(
@@ -430,44 +497,49 @@ async fn log_channels(
     if unset.is_empty() && missing.is_empty() {
         return Ok(vec![]);
     }
-    // A later run adds to the existing category instead of making a second one.
     let channels = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
         .await?;
-    let existing = channels
-        .as_array()
+    // `None` is the shared discord-logs channel for every unset Discord event.
+    let todo: Vec<(Option<&[&str]>, &str)> = missing
         .into_iter()
-        .flatten()
-        .find_map(|c| (c["type"] == 4 && c["name"] == "Logs").then(|| own(&c["id"]))?);
-    // Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
-    // keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
-    let category = create(
-        st,
-        guild,
-        existing,
-        "channels",
-        json!({"name": "Logs", "type": 4, "permission_overwrites": [
-            {"id": guild.to_string(), "type": 0, "deny": "1024"},
-            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
-        ]}),
-    )
-    .await?;
-    let channel = |name: &str| json!({"name": name, "type": 0, "parent_id": category});
-    let mut created = vec![];
-    for (path, name) in missing {
-        let id = create(st, guild, None, "channels", channel(name)).await?;
-        let (last, parents) = path.split_last().expect("paths are not empty");
-        let slot = parents.iter().fold(&mut *config, |v, k| &mut v[*k]);
-        slot[*last] = json!(id);
-        created.push(name);
-    }
-    if !unset.is_empty() {
-        let id = create(st, guild, None, "channels", channel("discord-logs")).await?;
-        for e in &unset {
-            config["logging"]["events"][e] = json!(id);
+        .map(|(path, name)| (Some(path), name))
+        .chain((!unset.is_empty()).then_some((None, "discord-logs")))
+        .collect();
+    let category_of = |name: &str| {
+        if STAFF_CHANNELS.contains(&name) {
+            "Staff"
+        } else {
+            "Logs"
         }
-        created.push("discord-logs");
+    };
+    let mut parents = vec![];
+    for cat in ["Logs", "Staff"] {
+        if todo.iter().any(|(_, name)| category_of(name) == cat) {
+            parents.push((cat, category(st, guild, &channels, cat).await?));
+        }
+    }
+    let mut created = vec![];
+    for (path, name) in todo {
+        let parent = parents
+            .iter()
+            .find(|(c, _)| *c == category_of(name))
+            .map(|(_, id)| id);
+        drop_named(st, &channels, config, name).await?;
+        let body = json!({"name": name, "type": 0, "parent_id": parent});
+        let id = create(st, guild, None, "channels", body).await?;
+        match path.and_then(|p| p.split_last()) {
+            Some((last, parents)) => {
+                parents.iter().fold(&mut *config, |v, k| &mut v[*k])[*last] = json!(id)
+            }
+            None => {
+                for e in &unset {
+                    config["logging"]["events"][e] = json!(id);
+                }
+            }
+        }
+        created.push(name);
     }
     Ok(created)
 }
@@ -488,5 +560,17 @@ mod tests {
         assert!(log.fallback.is_some());
         assert_eq!(log.routes.len(), 9);
         assert!(at(&config, &["appeals", "channel"]).is_string());
+    }
+
+    #[test]
+    fn stale_skips_used_and_other_channels() {
+        let channels = json!([
+            {"id": "1", "name": "reports", "type": 0},
+            {"id": "2", "name": "reports", "type": 0},
+            {"id": "3", "name": "reports", "type": 4},
+            {"id": "4", "name": "appeals", "type": 0}
+        ]);
+        let config = json!({"logging": {"events": {"ban": "2"}}});
+        assert_eq!(stale(&channels, &config, "reports"), ["1"]);
     }
 }
