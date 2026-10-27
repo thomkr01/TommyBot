@@ -266,7 +266,19 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
     let tab = if tab == "discord" { "discord" } else { "wick" };
     let sub = if sub == "customize" { "customize" } else { "essential" };
     let part = format!("{tab}_{sub}");
+    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let g = guild.clone();
+    // One click: a private "Logs" category with a channel per log type that has none yet.
+    let setup = move |_| {
+        let g = g.clone();
+        run_act(async move {
+            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+            api("POST", &format!("/api/guilds/{g}/logging/setup"), Some(json!({"expected_version": c["version"]}))).await
+        }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
+    };
     view! {
+        <div class="row"><button on:click=setup>"Create log channels"</button><span>{move || msg.get()}</span></div>
+        <StepUp need enrolled />
         <div class="tabs">
             <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"tommybot"<span class="chip new">"new"</span></a>
             <a class:on=tab == "discord" href=format!("#/{guild}/logging/discord/{sub}")>"discord"<span class="chip new">"new"</span></a>

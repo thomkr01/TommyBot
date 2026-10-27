@@ -10,6 +10,10 @@ use tommybot_automod::join::{
     effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
 };
 use tommybot_core::jobs;
+use tommybot_logging::{
+    embed::{ALERT, NO},
+    Log, LogKind,
+};
 use twilight_model::{
     application::interaction::{modal::ModalInteractionComponent, Interaction, InteractionData},
     channel::message::{
@@ -189,8 +193,20 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
     send_log(
         app,
         gid.get(),
-        tommybot_logging::LogKind::JoinGate,
-        &format!("<@{user}> did not verify in time: {:?}", v.verify.on_fail),
+        LogKind::Verification,
+        Log::new(
+            &format!("{}'s Verification Result:", member.user.name),
+            ALERT,
+        )
+        .thumbnail(&member.user)
+        .line("Member", &format!("{} [{user}]", member.user.name))
+        .field(
+            "Status:",
+            &format!(
+                "{NO} `{}` did not verify in time: **{:?}**",
+                member.user.name, v.verify.on_fail
+            ),
+        ),
     )
     .await
 }

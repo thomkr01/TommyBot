@@ -5,6 +5,10 @@ use anyhow::Result;
 use serde_json::json;
 use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
+use tommybot_logging::{
+    embed::{duration, ORANGE, RED},
+    Log, LogKind,
+};
 use twilight_http::Client;
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
@@ -25,6 +29,7 @@ use crate::{
     antinuke,
     app::{now_secs, App},
     appeals, backup,
+    events::send_log,
     hierarchy::top_position,
     lockdown,
     modcmds::{self, ModCmd},
@@ -222,6 +227,21 @@ pub async fn apply_dm(
         },
     )
     .await?;
+    let name = if soft { "softban" } else { perm };
+    let mut log = Log::new(
+        &format!("Case #{case_no} | {}", case_title(name)),
+        case_color(name),
+    )
+    .user("Target", t)
+    .user("Moderator", actor_id.get())
+    .time();
+    if let Some(d) = duration_s {
+        log = log.line("Duration", &format!("`{}`", duration(d)));
+    }
+    let log = log.line("Reason", reason.unwrap_or("No reason provided"));
+    if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
+        tracing::warn!(?e, "mod log failed");
+    }
     let mut text = reply::case_text(
         cfg.misc.compact_replies || flags.compact,
         (case_no.into(), if soft { "softban" } else { perm }, t),
@@ -558,6 +578,20 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?;
     Ok(true)
+}
+
+fn case_title(kind: &str) -> String {
+    let mut c = kind.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
+fn case_color(kind: &str) -> u32 {
+    match kind {
+        "ban" | "softban" => RED,
+        _ => ORANGE,
+    }
 }
 
 pub(crate) async fn apply_warn_actions(

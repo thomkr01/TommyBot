@@ -16,7 +16,10 @@ use tommybot_core::{
     jobs,
     sections::{AutomodCfg, FilterAction, FilterCfg, FiltersCfg, WhitelistList},
 };
-use tommybot_logging::LogKind;
+use tommybot_logging::{
+    embed::{channel, duration, ALERT, ARROW, ORANGE, RED, YES},
+    Log, LogKind,
+};
 use twilight_model::{
     gateway::payload::incoming::{
         AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
@@ -196,7 +199,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             app,
             gid.get(),
             LogKind::Panic,
-            &format!("Mention spam from <@{}>: server locked", m.author.id),
+            Log::new("Server Locked", ALERT)
+                .text(&format!("{YES} **The server has been locked down.**"))
+                .user("Member", m.author.id.get())
+                .line("Reason", "Mention spam"),
         )
         .await?;
     }
@@ -244,14 +250,25 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         }
         timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
     }
-    let text = format!(
-        "<@{}> strike {} ({}s timeout{})",
-        m.author.id,
-        act.strike,
-        act.timeout_ms / 1000,
-        if act.purge { ", cap" } else { "" }
+    let title = format!(
+        "{} has been silenced for {}!",
+        m.author.name,
+        duration(act.timeout_ms / 1000)
     );
-    send_log(app, gid.get(), LogKind::AutoMod, &text).await?;
+    let log = Log::new(&title, ALERT)
+        .thumbnail(&m.author)
+        .user("Member", m.author.id.get())
+        .line("Channel", &channel(m.channel_id.get()))
+        .line("Strike", &format!("`{}`", act.strike))
+        .field(
+            "REASON:",
+            if act.purge {
+                "Message Spam (strike cap)"
+            } else {
+                "Message Spam"
+            },
+        );
+    send_log(app, gid.get(), LogKind::AutoMod, log).await?;
     if lock.enabled
         && lock.strikes.is_some_and(|n| act.strike >= n)
         && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?
@@ -260,10 +277,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             app,
             gid.get(),
             LogKind::Panic,
-            &format!(
-                "<@{}> reached strike {}: server locked",
-                m.author.id, act.strike
-            ),
+            Log::new("Server Locked", ALERT)
+                .text(&format!("{YES} **The server has been locked down.**"))
+                .user("Member", m.author.id.get())
+                .line("Reason", &format!("Reached strike `{}`", act.strike)),
         )
         .await?;
     }
@@ -391,7 +408,10 @@ async fn filter_action(
         app,
         gid.get(),
         LogKind::AutoMod,
-        &format!("<@{uid}>: {action:?} (filter)"),
+        Log::new("Auto Mod Action", ORANGE)
+            .user("Member", uid.get())
+            .line("Action", &format!("`{action:?}`"))
+            .line("Reason", "Filter"),
     )
     .await
 }
@@ -444,8 +464,10 @@ async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     for id in &doomed {
         app.http.delete_webhook(Id::new(*id)).await.ok();
     }
-    let text = format!("Deleted {} new webhook(s) after webhook spam", doomed.len());
-    send_log(app, gid.get(), LogKind::AutoMod, &text).await
+    let log = Log::new("Webhooks Deleted", RED)
+        .line("Count", &format!("`{}`", doomed.len()))
+        .line("Reason", "Webhook spam");
+    send_log(app, gid.get(), LogKind::AutoMod, log).await
 }
 
 pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
@@ -501,7 +523,21 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
                 app,
                 gid.get(),
                 LogKind::JoinRaid,
-                &format!("Raid detected, {} accounts flagged", out.flagged.len()),
+                Log::new("Join Raid Trigger!", ALERT)
+                    .text(&format!("{YES} A weird join pattern has been identified."))
+                    .text(&format!(
+                        "{ARROW} Flagged accounts joining for the next `{}` will be **{:?}**.",
+                        duration(raid.active_ms / 1000),
+                        raid.action
+                    ))
+                    .field(
+                        "Initial Flags:",
+                        &out.flagged
+                            .iter()
+                            .map(|u| format!("`{u}`"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                 &warned,
             )
             .await?;
@@ -546,7 +582,10 @@ async fn warn_actions(
 ) -> Result<()> {
     let added = cfg.misc.warn_base_points;
     if let Some(text) = commands::apply_warn_actions(app, &cfg.misc, gid, uid, added).await? {
-        send_log(app, gid.get(), LogKind::AutoMod, &text).await?;
+        let log = Log::new("Warn Action", ORANGE)
+            .user("Member", uid.get())
+            .line("Result", &text);
+        send_log(app, gid.get(), LogKind::AutoMod, log).await?;
     }
     Ok(())
 }
@@ -561,8 +600,12 @@ async fn native_action(
     let (gid, uid) = (e.guild_id, e.user_id);
     match action {
         BotAction::Report => {
-            let text = format!("<@{uid}> broke a Discord AutoMod rule: {}", e.content);
-            send_log(app, gid.get(), LogKind::AutoMod, &text).await?;
+            let log = Log::new("Discord AutoMod Report", ORANGE)
+                .user("Member", uid.get())
+                .line("Rule", &format!("`{}`", e.rule_id))
+                .text(&format!("{ARROW} **Content:**"))
+                .diff(Some(&e.content), None);
+            send_log(app, gid.get(), LogKind::AutoMod, log).await?;
         }
         BotAction::Warn => {
             cases::create(
@@ -713,7 +756,10 @@ async fn punish(
         app,
         gid.get(),
         LogKind::JoinGate,
-        &format!("<@{user}>: {action:?} ({why})"),
+        Log::new("Join Gate", ORANGE)
+            .user("Member", user)
+            .line("Action", &format!("`{action:?}`"))
+            .line("Reason", why),
     )
     .await
 }

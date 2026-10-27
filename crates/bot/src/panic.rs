@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 use tommybot_antinuke::{panic_end_plan, panic_plan, PanicStep};
 use tommybot_automod::lockdown::LockKind;
 use tommybot_core::{jobs, sections::PanicCfg};
-use tommybot_logging::LogKind;
+use tommybot_logging::{
+    embed::{ALERT, ARROW, DONE, NO, YES},
+    Log, LogKind,
+};
 use twilight_model::{
     channel::permission_overwrite::PermissionOverwriteType as ModelOverwriteType,
     guild::Permissions,
@@ -142,24 +145,47 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
                 lockdown::lock(app, gid, LockKind::Server).await?;
             }
             PanicStep::PingWarnedRoles => {
-                let text = "**Panic mode** started: several accounts were quarantined at once.";
-                send_log_pinging(app, gid.get(), LogKind::Panic, text, &cfg.warned_roles).await?;
+                let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
+                    .text(&format!("{NO} **An abnormal behaviour has been detected!**"))
+                    .text(&format!(
+                        "{ARROW} Several accounts were quarantined at once, the server will be locked down."
+                    ));
+                send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
             }
             // Mod commands are gated by `panic_runs`, and the involved accounts were quarantined
             // by the verdicts that tripped panic mode.
             PanicStep::LockModCommands | PanicStep::QuarantineInvolved => {}
             PanicStep::LoadLatestBackup => {
-                let text = match backup::restore_latest(app, gid).await {
-                    Ok(Some(n)) => format!("Panic mode: restored latest backup ({n} changes)"),
-                    Ok(None) => "Panic mode: no backup to restore".to_string(),
-                    Err(e) => format!("Panic mode: backup restore failed: {e}"),
+                let log = match backup::restore_latest(app, gid).await {
+                    Ok(Some(n)) => Log::new("Panic Mode Report:", DONE)
+                        .section("Backup System Report:")
+                        .text(&format!(
+                            "{YES} **Backup System loaded the recent backup successfully!**"
+                        ))
+                        .line("Changes", &format!("`{n}`")),
+                    Ok(None) => Log::new("Panic Mode Report:", ALERT)
+                        .section("Backup System Report:")
+                        .text(&format!("{NO} **There is no backup to load.**")),
+                    Err(e) => Log::new("Panic Mode Report:", ALERT)
+                        .section("Backup System Report:")
+                        .text(&format!(
+                            "{NO} **Backup System failed to load the recent backup!**"
+                        ))
+                        .line("Error", &e.to_string()),
                 };
-                send_log(app, gid.get(), LogKind::Panic, &text).await?;
+                send_log(app, gid.get(), LogKind::Panic, log).await?;
             }
             PanicStep::UnlockServer => {}
         }
     }
-    send_log(app, gid.get(), LogKind::Panic, "Panic mode: server locked").await
+    send_log(
+        app,
+        gid.get(),
+        LogKind::Panic,
+        Log::new("Panic Mode Lockdown", ALERT)
+            .text(&format!("{YES} **The server has been locked down.**")),
+    )
+    .await
 }
 
 /// Ends panic mode for a guild; runs from the `panic_end` job, whose payload says what to put back.
@@ -175,7 +201,13 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
             lockdown::unlock(app, gid).await?;
         }
     }
-    send_log(app, gid.get(), LogKind::Panic, "Panic mode ended").await
+    send_log(
+        app,
+        gid.get(),
+        LogKind::Panic,
+        Log::new("Panic Mode Ended", DONE).text(&format!("{YES} **Panic mode has ended.**")),
+    )
+    .await
 }
 
 /// Re-arms panic mode and join raids after a restart: the pending `panic_end` and `raid_end` jobs
