@@ -86,25 +86,8 @@ async fn auto_setup(
         json!({"name": "Quarantine", "permissions": "0"}),
     )
     .await?;
-    let logs = create(
-        &st,
-        guild,
-        own(&config["logging"]["fallback"]),
-        "channels",
-        json!({"name": "logs", "type": 0}),
-    )
-    .await?;
-    let modlogs = create(
-        &st,
-        guild,
-        own(&config["logging"]["routes"]["mod_command"]),
-        "channels",
-        json!({"name": "modlogs", "type": 0}),
-    )
-    .await?;
+    let logs = log_channels(&st, guild, &mut config).await?;
     config["antinuke"]["quarantine_role"] = json!(role);
-    config["logging"]["fallback"] = json!(logs);
-    config["logging"]["routes"]["mod_command"] = json!(modlogs);
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
@@ -118,7 +101,7 @@ async fn auto_setup(
     )
     .await;
     Ok(Json(
-        json!({"version": version, "created": {"quarantine_role": role, "logs": logs, "modlogs": modlogs}}),
+        json!({"version": version, "created": {"quarantine_role": role, "logs": logs}}),
     ))
 }
 
@@ -179,46 +162,11 @@ async fn log_setup(
     if cur != b.expected_version {
         return Err(ApiError::Conflict(cur)); // before any Discord side effect
     }
-    let unset: Vec<String> = LogEvent::ALL
-        .iter()
-        .filter_map(|e| serde_json::to_value(e).ok()?.as_str().map(String::from))
-        .filter(|e| config["logging"]["events"][e].is_null())
-        .collect();
-    if unset.is_empty() && LOG_CHANNELS.iter().all(|(p, _)| !at(&config, p).is_null()) {
+    let created = log_channels(&st, guild, &mut config).await?;
+    if created.is_empty() {
         return Err(ApiError::BadRequest(
             "every log type already has a channel".into(),
         ));
-    }
-    // Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
-    // keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
-    let category = create(
-        &st,
-        guild,
-        None,
-        "channels",
-        json!({"name": "Logs", "type": 4, "permission_overwrites": [
-            {"id": guild.to_string(), "type": 0, "deny": "1024"},
-            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
-        ]}),
-    )
-    .await?;
-    let channel = |name: &str| json!({"name": name, "type": 0, "parent_id": category});
-    let mut created = vec![];
-    for (path, name) in LOG_CHANNELS {
-        if at(&config, path).is_null() {
-            let id = create(&st, guild, None, "channels", channel(name)).await?;
-            let (last, parents) = path.split_last().expect("paths are not empty");
-            let slot = parents.iter().fold(&mut config, |v, k| &mut v[*k]);
-            slot[*last] = json!(id);
-            created.push(name);
-        }
-    }
-    if !unset.is_empty() {
-        let id = create(&st, guild, None, "channels", channel("discord-logs")).await?;
-        for e in &unset {
-            config["logging"]["events"][e] = json!(id);
-        }
-        created.push("discord-logs");
     }
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
@@ -233,6 +181,55 @@ async fn log_setup(
     )
     .await;
     Ok(Json(json!({"version": version, "created": created})))
+}
+
+/// Creates the "Logs" category and the missing log channels, and sets them in `config`.
+/// Returns the names of the channels it created; nothing when every log type has one.
+async fn log_channels(
+    st: &AppState,
+    guild: i64,
+    config: &mut Value,
+) -> Result<Vec<&'static str>, ApiError> {
+    let unset: Vec<String> = LogEvent::ALL
+        .iter()
+        .filter_map(|e| serde_json::to_value(e).ok()?.as_str().map(String::from))
+        .filter(|e| config["logging"]["events"][e].is_null())
+        .collect();
+    if unset.is_empty() && LOG_CHANNELS.iter().all(|(p, _)| !at(config, p).is_null()) {
+        return Ok(vec![]);
+    }
+    // Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
+    // keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
+    let category = create(
+        st,
+        guild,
+        None,
+        "channels",
+        json!({"name": "Logs", "type": 4, "permission_overwrites": [
+            {"id": guild.to_string(), "type": 0, "deny": "1024"},
+            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
+        ]}),
+    )
+    .await?;
+    let channel = |name: &str| json!({"name": name, "type": 0, "parent_id": category});
+    let mut created = vec![];
+    for (path, name) in LOG_CHANNELS {
+        if at(config, path).is_null() {
+            let id = create(st, guild, None, "channels", channel(name)).await?;
+            let (last, parents) = path.split_last().expect("paths are not empty");
+            let slot = parents.iter().fold(&mut *config, |v, k| &mut v[*k]);
+            slot[*last] = json!(id);
+            created.push(name);
+        }
+    }
+    if !unset.is_empty() {
+        let id = create(st, guild, None, "channels", channel("discord-logs")).await?;
+        for e in &unset {
+            config["logging"]["events"][e] = json!(id);
+        }
+        created.push("discord-logs");
+    }
+    Ok(created)
 }
 
 #[cfg(test)]

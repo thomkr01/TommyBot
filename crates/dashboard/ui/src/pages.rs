@@ -1,5 +1,5 @@
 use crate::common::*;
-use crate::form::{name_of, Section};
+use crate::form::{name_of, strs, Section};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
@@ -21,8 +21,9 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             api("POST", &format!("/api/guilds/{g}/wizard/auto-setup"), Some(json!({"expected_version": c["version"]}))).await
         }, msg, need, move |v| { let (g, c) = (g2.clone(), v["created"].clone()); spawn_local(async move {
             let dc = api("GET", &format!("/api/guilds/{g}/discord"), None).await.unwrap_or(Value::Null);
-            let n = |k: &str, key: &str| name_of(&dc, key, c[k].as_str().unwrap_or(""));
-            msg.set(format!("Created: quarantine role {}, log channel {}, mod log channel {}", n("quarantine_role", "roles"), n("logs", "channels"), n("modlogs", "channels")));
+            let logs = strs(&c["logs"]).join(", #");
+            let logs = if logs.is_empty() { "every log type already had a channel".into() } else { format!("Logs category with #{logs}") };
+            msg.set(format!("Done: quarantine role {}, {logs}. Find them on the Logging and Antinuke pages.", name_of(&dc, "roles", c["quarantine_role"].as_str().unwrap_or(""))));
         }) });
     };
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
@@ -45,7 +46,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <div class="chips"><span class="chip blue">"You can choose a certain step if you want."</span><span class="chip orange">"The full setup could take around 3 minutes of your time."</span></div>
         </div>
         <p class="muted">{move || [
-            "Creates the quarantine role and log channels for you.",
+            "Creates the quarantine role and a Logs category with a channel for every log type, and sets them in your settings.",
             "General bot behavior: moderation commands, replies and the default timeout.",
             "Turn Auto Mod on and set its strike and heat basics. Filters have their own pages.",
             "Turn Anti Nuke on and pick the quarantine role. Per-action limits are under Filters.",
