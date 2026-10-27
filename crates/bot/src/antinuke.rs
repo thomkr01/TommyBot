@@ -681,7 +681,6 @@ mod tests {
         let id = |n| Id::<RoleMarker>::new(n);
         let perms = HashMap::from([(id(1), 1 << 3), (id(2), 1 << 10), (id(3), 1 << 3)]);
         let positions = HashMap::from([(id(1), 2), (id(2), 3), (id(3), 9)]);
-        // 1: admin below the bot, 2: harmless, 3: admin above the bot, 4: unknown.
         let got = dangerous_below_bot(&[id(1), id(2), id(3), id(4)], &perms, &positions, 5);
         assert_eq!(got, vec![id(1)]);
     }

@@ -347,9 +347,14 @@ async fn run(
     }
     let cfg_confirm = app.cfg(gid.get()).await?.misc.confirm;
     // Asks for a Confirm click when the server wants one; the buttons are handled in `commands`.
-    let ask = |action| {
+    let mut ask = async |action| -> Result<Option<String>> {
         let job = Pending::new(gid, actor_id, action);
-        (cfg_confirm && job.needs_confirm()).then_some(job)
+        if !(cfg_confirm && job.needs_confirm()) {
+            return Ok(None);
+        }
+        let (text, row) = commands::stash_confirm(app, i.id.get(), job).await?;
+        *confirm = Some(row);
+        Ok(Some(text))
     };
     match cmd {
         Cmd::Mod {
@@ -367,10 +372,8 @@ async fn run(
                 duration_s,
                 flags,
             };
-            if let Some(job) = ask(action) {
-                let (text, row) = commands::stash_confirm(app, i.id.get(), job).await?;
-                *confirm = Some(row);
-                return Ok(text);
+            if let Some(q) = ask(action).await? {
+                return Ok(q);
             }
             commands::apply_dm(
                 app,
@@ -405,10 +408,8 @@ async fn run(
                 channel: ch,
                 reason: reason.clone(),
             };
-            if let Some(job) = ask(action) {
-                let (text, row) = commands::stash_confirm(app, i.id.get(), job).await?;
-                *confirm = Some(row);
-                return Ok(text);
+            if let Some(q) = ask(action).await? {
+                return Ok(q);
             }
             modcmds::run(
                 app,
