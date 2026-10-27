@@ -91,6 +91,10 @@ Settings are environment variables in `.env`; `.env.example` lists all of them w
 
 Everything else is optional. Per-server settings live in the dashboard. Dashboard access rules are in `crates/dashboard/README.md`.
 
+## Testing without Discord credentials
+
+`tests/e2e/run.sh` runs the workspace tests against a local Postgres, starts the dashboard against `tests/e2e/mock_discord.py` (a fake Discord REST API) and lets headless Chromium log in and open every dashboard page, failing on console errors, HTTP 5xx or blank pages. Screenshots land in `/tmp/e2e`. Needs postgresql-16, trunk, node with playwright (`NODE_PATH` set to the global modules). The bot itself needs a real token, so gateway behaviour is not covered.
+
 ## Legal
 
 See [PRIVACY.md](PRIVACY.md) and [TERMS.md](TERMS.md).

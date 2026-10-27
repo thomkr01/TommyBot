@@ -1,8 +1,6 @@
 use anyhow::Result;
 use serde::Deserialize;
 
-const API: &str = "https://discord.com/api/v10";
-
 #[derive(Clone)]
 pub struct Discord {
     pub http: reqwest::Client,
@@ -10,6 +8,8 @@ pub struct Discord {
     pub client_secret: String,
     pub bot_token: String,
     pub redirect_uri: String,
+    /// Overridable (`DISCORD_API_BASE`) so the e2e script can point it at a mock.
+    pub api: String,
 }
 
 #[derive(Deserialize)]
@@ -41,7 +41,7 @@ impl Discord {
         }
         let t: T = self
             .http
-            .post(format!("{API}/oauth2/token"))
+            .post(format!("{}/oauth2/token", self.api))
             .form(&[
                 ("client_id", &self.client_id[..]),
                 ("client_secret", &self.client_secret),
@@ -60,7 +60,7 @@ impl Discord {
     pub async fn me(&self, token: &str) -> Result<User> {
         Ok(self
             .http
-            .get(format!("{API}/users/@me"))
+            .get(format!("{}/users/@me", self.api))
             .bearer_auth(token)
             .send()
             .await?
@@ -72,7 +72,7 @@ impl Discord {
     pub async fn user_guilds(&self, token: &str) -> Result<Vec<Guild>> {
         Ok(self
             .http
-            .get(format!("{API}/users/@me/guilds"))
+            .get(format!("{}/users/@me/guilds", self.api))
             .bearer_auth(token)
             .send()
             .await?
@@ -105,7 +105,7 @@ impl Discord {
 
     fn bot(&self, path: String) -> reqwest::RequestBuilder {
         self.http
-            .get(format!("{API}{path}"))
+            .get(format!("{}{path}", self.api))
             .header("Authorization", format!("Bot {}", self.bot_token))
     }
 
@@ -148,7 +148,7 @@ impl Discord {
     ) -> Result<serde_json::Value> {
         let mut r = self
             .http
-            .request(method, format!("{API}{path}"))
+            .request(method, format!("{}{path}", self.api))
             .header("Authorization", format!("Bot {}", self.bot_token));
         if let Some(b) = body {
             r = r.json(&b);
@@ -159,7 +159,7 @@ impl Discord {
 
     pub async fn post_message(&self, channel: &str, content: &str) -> Result<()> {
         self.http
-            .post(format!("{API}/channels/{channel}/messages"))
+            .post(format!("{}/channels/{channel}/messages", self.api))
             .header("Authorization", format!("Bot {}", self.bot_token))
             .json(&serde_json::json!({"content": content, "allowed_mentions": {"parse": []}}))
             .send()

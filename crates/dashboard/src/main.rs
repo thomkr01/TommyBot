@@ -147,6 +147,8 @@ async fn main() -> anyhow::Result<()> {
             client_secret: env("DISCORD_CLIENT_SECRET")?,
             bot_token: env("DISCORD_TOKEN")?,
             redirect_uri: format!("{}/auth/callback", base.trim_end_matches('/')),
+            api: std::env::var("DISCORD_API_BASE")
+                .unwrap_or_else(|_| "https://discord.com/api/v10".into()),
         },
     };
     let dist =
