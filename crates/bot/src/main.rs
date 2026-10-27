@@ -16,6 +16,7 @@ mod reports;
 mod scheduler;
 mod slash;
 mod targets;
+mod tickets;
 mod verify;
 mod welcome;
 

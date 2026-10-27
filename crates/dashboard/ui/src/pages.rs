@@ -320,3 +320,22 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
         <Section guild=guild.clone() name="logging".to_string() part enrolled />
     }
 }
+
+/// Tickets settings with a one-click setup that creates the channels and posts the panel.
+#[component]
+pub fn Tickets(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let g = guild.clone();
+    let setup = move |_| {
+        let g = g.clone();
+        run_act(async move {
+            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+            api("POST", &format!("/api/guilds/{g}/tickets/setup"), Some(json!({"expected_version": c["version"]}))).await
+        }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
+    };
+    view! {
+        <div class="row"><button on:click=setup>"Set up tickets and post the panel"</button><span>{move || msg.get()}</span></div>
+        <StepUp need enrolled />
+        <Section guild name="tickets".to_string() part=String::new() enrolled />
+    }
+}

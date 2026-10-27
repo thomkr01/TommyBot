@@ -33,6 +33,8 @@ pub struct AntinukeCfg {
     pub monitor_channel_perms: bool,
     /// May change a quarantined member's roles.
     pub quarantine_whitelist: Vec<Id<UserMarker>>,
+    /// Channels created or deleted in these categories never count (ticket bots).
+    pub ticket_categories: Vec<Id<ChannelMarker>>,
 }
 
 impl Default for AntinukeCfg {
@@ -49,6 +51,7 @@ impl Default for AntinukeCfg {
             monitor_public_roles: false,
             monitor_channel_perms: false,
             quarantine_whitelist: vec![],
+            ticket_categories: vec![],
         }
     }
 }
@@ -371,6 +374,32 @@ pub struct AppealField {
 
 fn yes() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct TicketsCfg {
+    pub enabled: bool,
+    /// Where ticket channels are created.
+    pub category: Option<Id<ChannelMarker>>,
+    /// Holds the "Open a ticket" button.
+    pub panel_channel: Option<Id<ChannelMarker>>,
+    /// Gets a log and the transcript of every closed ticket.
+    pub log_channel: Option<Id<ChannelMarker>>,
+    /// Open tickets one member may have at once.
+    pub max_open: u32,
+}
+
+impl Default for TicketsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            category: None,
+            panel_channel: None,
+            log_channel: None,
+            max_open: 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

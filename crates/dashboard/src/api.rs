@@ -296,7 +296,7 @@ pub async fn rollback(
 pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{
         AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, LockdownCfg, MiscCfg, PanicCfg,
-        WhitelistCfg,
+        TicketsCfg, WhitelistCfg,
     };
     if section == "logging" {
         for (i, c) in v["custom"].as_array().into_iter().flatten().enumerate() {
@@ -332,6 +332,7 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "misc" => serde_json::from_value::<MiscCfg>(v).map(drop),
         "appeals" => serde_json::from_value::<AppealsCfg>(v).map(drop),
         "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
+        "tickets" => serde_json::from_value::<TicketsCfg>(v).map(drop),
         _ => Ok(()),
     };
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))

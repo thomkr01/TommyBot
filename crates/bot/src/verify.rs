@@ -83,7 +83,7 @@ fn decide(cfg: &VerificationCfg, raid_active: bool, suspicious: bool, has_role: 
     }
 }
 
-fn button(label: &str, id: &str) -> Component {
+pub(crate) fn button(label: &str, id: &str) -> Component {
     Component::Button(Button {
         id: None,
         custom_id: Some(id.into()),
@@ -96,7 +96,7 @@ fn button(label: &str, id: &str) -> Component {
     })
 }
 
-fn row(c: Component) -> Component {
+pub(crate) fn row(c: Component) -> Component {
     Component::ActionRow(ActionRow {
         id: None,
         components: vec![c],
@@ -212,7 +212,10 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
     .await
 }
 
-fn ephemeral(kind: InteractionResponseType, content: Option<&str>) -> InteractionResponse {
+pub(crate) fn ephemeral(
+    kind: InteractionResponseType,
+    content: Option<&str>,
+) -> InteractionResponse {
     InteractionResponse {
         kind,
         data: Some(InteractionResponseData {

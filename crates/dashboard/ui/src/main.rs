@@ -16,7 +16,7 @@ use records::{CaseList, NoteList, RaidLog, ReportList};
 use common::*;
 use form::Section;
 use permits::Permits;
-use pages::{Logging, Rescue, Revert, Score, Wizard};
+use pages::{Logging, Rescue, Revert, Score, Tickets, Wizard};
 use recovery::{Backups, Panic};
 
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
@@ -25,7 +25,7 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
     ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
-    ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports")]),
+    ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports"), ("tickets", "Tickets")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
     ("Raw JSON", &[("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
@@ -235,6 +235,7 @@ fn App() -> impl IntoView {
                                 ("backups", _) => view! { <Backups guild=g.clone() enrolled /> }.into_any(),
                                 ("automod_panic", _) => view! { <Panic guild=g.clone() part="heat,general" enrolled /> }.into_any(),
                                 ("antinuke_panic", _) => view! { <Panic guild=g.clone() part="nuke,general" enrolled /> }.into_any(),
+                                ("tickets", _) => view! { <Tickets guild=g.clone() enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                                 ("lockdown", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownManage guild=g.clone() /> }.into_any(),
                                 ("lockdown_settings", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownSettings guild=g.clone() enrolled /> }.into_any(),

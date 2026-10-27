@@ -35,6 +35,7 @@ pub const SECTIONS: &[&str] = &[
     "joingate",
     "joinraid",
     "verification",
+    "tickets",
     "lockdown",
     "moderation",
     "warn_points",

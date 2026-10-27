@@ -261,8 +261,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); } if let Some(a) = cur.as_array_mut() { a.push(json!({"events": [], "channel": null})); } set(cur) }>"Add a new logging type"</button>
             </div> }.into_any()
         }
-        "channel" | "role" => {
-            let key = if kind == "channel" { "channels" } else { "roles" };
+        "channel" | "role" | "category" => {
+            let key = match kind.as_str() { "channel" => "channels", "category" => "categories", _ => "roles" };
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
                 <option value="" selected=move || get().is_null()>"none"</option>
                 {move || items(&dc.get(), key).into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || get().as_str() == Some(id.as_str())>{l}</option> }).collect_view()}

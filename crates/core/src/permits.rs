@@ -199,6 +199,7 @@ pub const CATALOG: &[PermSection] = &[
             ),
             perm("appeals", "Review Appeals", ""),
             perm("revert", "Revert Center", "Undo anti-nuke actions"),
+            perm("tickets", "Manage Tickets", "See and close every ticket"),
         ],
     },
     PermSection {

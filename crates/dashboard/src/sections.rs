@@ -25,6 +25,7 @@ pub fn routes() -> Router<AppState> {
             "/api/guilds/{guild}/wizard/verify-channel",
             post(verify_channel),
         )
+        .route("/api/guilds/{guild}/tickets/setup", post(tickets_setup))
 }
 
 async fn schema_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -154,6 +155,7 @@ const STAFF: [(&str, i32, &[&str], &[&str]); 2] = [
             "sanitize",
             "reports",
             "lock_channels",
+            "tickets",
             "lock_joins",
         ],
         &["automod", "reports", "words"],
@@ -171,6 +173,7 @@ const STAFF: [(&str, i32, &[&str], &[&str]); 2] = [
             "sanitize",
             "reports",
             "lock_channels",
+            "tickets",
         ],
         &["automod", "reports", "words"],
     ),
@@ -294,6 +297,99 @@ async fn verify_channel(
         )
         .await?;
     Ok(Json(json!({"version": version, "channel": channel})))
+}
+
+/// One click: a private "Tickets" category with #ticket-logs, and #open-a-ticket holding the
+/// panel. Channels already set are reused; the panel is posted again on every run.
+async fn tickets_setup(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Json(b): Json<Setup>,
+) -> Res {
+    api::require(&st, &s, guild, Level::Admin, true).await?;
+    let (cur, mut config) = store::current(&st.db, guild).await?;
+    if cur != b.expected_version {
+        return Err(ApiError::Conflict(cur));
+    }
+    // Staff are the roles of permits with Manage Tickets; they get View Channel and Read History.
+    let staff: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id
+         WHERE p.guild_id = $1 AND 'tickets' = ANY(p.perms)",
+    )
+    .bind(guild)
+    .fetch_all(&st.db)
+    .await?;
+    // The bot also needs Attach Files in #ticket-logs for the transcripts.
+    let bot = json!({"id": st.discord.client_id, "type": 1, "allow": "19456"});
+    let mut hidden = vec![
+        json!({"id": guild.to_string(), "type": 0, "deny": "1024"}),
+        json!({"id": st.discord.client_id, "type": 1, "allow": "52224"}),
+    ];
+    hidden.extend(
+        staff
+            .iter()
+            .map(|r| json!({"id": r.to_string(), "type": 0, "allow": "66560"})),
+    );
+    let t = config["tickets"].clone();
+    let category = create(
+        &st,
+        guild,
+        own(&t["category"]),
+        "channels",
+        json!({"name": "Tickets", "type": 4, "permission_overwrites": hidden}),
+    )
+    .await?;
+    let log = create(
+        &st,
+        guild,
+        own(&t["log_channel"]),
+        "channels",
+        json!({"name": "ticket-logs", "type": 0, "parent_id": category, "permission_overwrites": hidden}),
+    )
+    .await?;
+    // @everyone reads the panel but cannot write there.
+    let panel = create(
+        &st,
+        guild,
+        own(&t["panel_channel"]),
+        "channels",
+        json!({"name": "open-a-ticket", "type": 0, "permission_overwrites": [
+            {"id": guild.to_string(), "type": 0, "allow": "66560", "deny": "2048"}, bot
+        ]}),
+    )
+    .await?;
+    let tickets = &mut config["tickets"];
+    tickets["enabled"] = json!(true);
+    tickets["category"] = json!(category);
+    tickets["log_channel"] = json!(log);
+    tickets["panel_channel"] = json!(panel);
+    let mut tx = st.db.begin().await?;
+    let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
+    tx.commit().await?;
+    st.discord
+        .call(
+            Method::POST,
+            &format!("/channels/{panel}/messages"),
+            Some(json!({
+                "embeds": [{"title": "Need help?", "color": 0x0D9DF8,
+                    "description": "Press the button to open a private ticket with the staff team."}],
+                "components": [{"type": 1, "components": [
+                    {"type": 2, "style": 1, "label": "Open a ticket", "custom_id": "ticket:open"}
+                ]}]
+            })),
+        )
+        .await?;
+    api::log_change(
+        &st,
+        &config,
+        format!(
+            "{} (<@{}>) set up tickets -> config v{version}",
+            s.username, s.user_id
+        ),
+    )
+    .await;
+    Ok(Json(json!({"version": version, "channel": panel})))
 }
 
 fn at<'a>(config: &'a Value, path: &[&str]) -> &'a Value {

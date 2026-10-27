@@ -249,6 +249,10 @@ pub fn schema() -> Vec<Value> {
             ti(fg("Auto quarantine", "quarantine_whitelist", "users"), "Quarantine whitelist"),
             "Members that may change the roles of quarantined members.",
         ),
+        hp(
+            ti(fg("Ticket categories", "ticket_categories", "categories"), "Ticket categories"),
+            "Channels a ticket bot creates or deletes in these categories never count.",
+        ),
     ];
     for (a, title) in NUKE_CARDS {
         let (m, h, heat) = NukeAction::ALL
@@ -836,6 +840,22 @@ pub fn schema() -> Vec<Value> {
             "Decoy color",
         ),
     ];
+    let tickets = vec![
+        ti(fg("General", "enabled", "bool"), "Use the ticket system"),
+        ti(fg("General", "category", "category"), "Ticket category"),
+        ti(fg("General", "panel_channel", "channel"), "Panel channel"),
+        ti(
+            fg("General", "log_channel", "channel"),
+            "Transcript log channel",
+        ),
+        hp(
+            ti(
+                dv(fg("General", "max_open", "int"), 1),
+                "Open tickets per member",
+            ),
+            "Staff with the Manage Tickets permit see and close every ticket.",
+        ),
+    ];
     let appeals = vec![
         ti(fg("General", "enabled", "bool"), "Appeals System Status"),
         ti(fg("General", "channel", "channel"), "Appeals channel"),
@@ -871,6 +891,7 @@ pub fn schema() -> Vec<Value> {
         ("backups", "Backups", vec![dv(f("auto", "bool"), true)]),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),
+        ("tickets", "Tickets", tickets),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
     ]
@@ -922,7 +943,7 @@ mod tests {
                         .find(|o| o.as_str() != Some(""))
                         .unwrap()
                         .clone(),
-                    "channel" | "role" => json!("1"),
+                    "channel" | "role" | "category" => json!("1"),
                     "form" => json!([{"label": "x"}]),
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
                     "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
