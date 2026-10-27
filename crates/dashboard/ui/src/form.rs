@@ -262,7 +262,6 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             </div> }.into_any()
         }
         "profiles" => {
-            // Each profile reuses the normal pickers through an indexed path (`profiles.0.roles`).
             let perms = strs(&f["options"]);
             let count = move || get().as_array().map_or(0, Vec::len);
             let upd = move |i: usize, k: &'static str, x: Value| { let mut cur = get(); cur[i][k] = x; set(cur) };

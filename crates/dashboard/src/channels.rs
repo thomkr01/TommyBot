@@ -14,9 +14,9 @@ use axum::{
 };
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
-use tommybot_antinuke::ChannelImg;
+use tommybot_antinuke::{ChannelImg, Image};
 
 /// (key, Discord permission bit) a profile can allow or deny.
 pub const PERMS: &[(&str, u64)] = &[
@@ -93,15 +93,16 @@ pub fn plan(guild: u64, profiles: &[Profile], channels: &[ChannelImg]) -> Vec<Ch
     for p in profiles {
         let (picked, cats, skip) = (ids(&p.channels), ids(&p.categories), ids(&p.exclude));
         let (allow, deny) = (bits(p, Perm::Allow), bits(p, Perm::Deny));
-        let mut targets = vec![];
-        for c in channels.iter().filter(|c| !skip.contains(&c.id)) {
-            if picked.contains(&c.id)
-                || cats.contains(&c.id)
-                || c.parent.is_some_and(|x| cats.contains(&x))
-            {
-                targets.push(c.id);
-            }
-        }
+        let targets: Vec<u64> = channels
+            .iter()
+            .filter(|c| !skip.contains(&c.id))
+            .filter(|c| {
+                picked.contains(&c.id)
+                    || cats.contains(&c.id)
+                    || c.parent.is_some_and(|x| cats.contains(&x))
+            })
+            .map(|c| c.id)
+            .collect();
         let mut add = |channel, role, a, d| {
             let e = want.entry((channel, role)).or_default();
             e.0 |= a;
@@ -153,14 +154,20 @@ fn names(bits: u64) -> String {
     }
 }
 
-fn line(c: &Change, chan: &HashMap<u64, String>, role: &HashMap<u64, String>) -> String {
+fn line(c: &Change, img: &Image) -> String {
     let was = c.before.map_or("none".into(), |(a, d)| {
         format!("allow {}, deny {}", names(a), names(d))
     });
     format!(
         "#{} @{} [{}]: allow {}, deny {} (was {was})",
-        chan.get(&c.channel).map_or("?", String::as_str),
-        role.get(&c.role).map_or("?", String::as_str),
+        img.channels
+            .iter()
+            .find(|x| x.id == c.channel)
+            .map_or("?", |x| &x.name),
+        img.roles
+            .iter()
+            .find(|x| x.id == c.role)
+            .map_or("?", |x| &x.name),
         c.profiles.join(", "),
         names(c.allow),
         names(c.deny),
@@ -173,15 +180,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/guilds/{guild}/channel-setup/apply", post(apply))
 }
 
-struct Live {
-    roles: Value,
-    channels: Value,
-    changes: Vec<Change>,
-    chan: HashMap<u64, String>,
-    role: HashMap<u64, String>,
-}
-
-async fn live(st: &AppState, guild: i64) -> Result<Live, ApiError> {
+async fn live(st: &AppState, guild: i64) -> Result<(Image, Vec<Change>), ApiError> {
     let (_, config) = store::current(&st.db, guild).await?;
     let cfg: ProfilesCfg =
         serde_json::from_value(config["channel_profiles"].clone()).unwrap_or_default();
@@ -195,29 +194,13 @@ async fn live(st: &AppState, guild: i64) -> Result<Live, ApiError> {
         .await?;
     let img = live_image(guild, &roles, &channels);
     let changes = plan(guild as u64, &cfg.profiles, &img.channels);
-    let chan = img
-        .channels
-        .iter()
-        .map(|c| (c.id, c.name.clone()))
-        .collect();
-    let role = img.roles.iter().map(|r| (r.id, r.name.clone())).collect();
-    Ok(Live {
-        roles,
-        channels,
-        changes,
-        chan,
-        role,
-    })
+    Ok((img, changes))
 }
 
 async fn preview(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
-    let l = live(&st, guild).await?;
-    let lines: Vec<String> = l
-        .changes
-        .iter()
-        .map(|c| line(c, &l.chan, &l.role))
-        .collect();
+    let (img, changes) = live(&st, guild).await?;
+    let lines: Vec<String> = changes.iter().map(|c| line(c, &img)).collect();
     Ok(Json(json!({"lines": lines})))
 }
 
@@ -225,24 +208,24 @@ async fn preview(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) ->
 /// Already-correct overwrites are skipped, so running it again resumes after a failure.
 async fn apply(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
-    let l = live(&st, guild).await?;
-    if l.changes.is_empty() {
+    let (img, changes) = live(&st, guild).await?;
+    if changes.is_empty() {
         return Ok(Json(json!({"applied": 0, "failed": [], "backup": null})));
     }
-    let image = live_image(guild, &l.roles, &l.channels);
     let backup: i64 =
         sqlx::query_scalar("INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id")
             .bind(guild)
-            .bind(sqlx::types::Json(&image))
+            .bind(sqlx::types::Json(&img))
             .fetch_one(&st.db)
             .await?;
     let (mut applied, mut failed) = (0, vec![]);
-    for c in &l.changes {
+    // shortcut: no 429 retry here, so a big server can see rate-limit failures; Apply again resumes.
+    for c in &changes {
         let path = format!("/channels/{}/permissions/{}", c.channel, c.role);
         let body = json!({"type": 0, "allow": c.allow.to_string(), "deny": c.deny.to_string()});
         match st.discord.call(Method::PUT, &path, Some(body)).await {
             Ok(_) => applied += 1,
-            Err(e) => failed.push(format!("{}: {e}", line(c, &l.chan, &l.role))),
+            Err(e) => failed.push(format!("{}: {e}", line(c, &img))),
         }
     }
     let (_, config) = store::current(&st.db, guild).await?;
