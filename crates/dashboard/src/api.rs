@@ -331,8 +331,8 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         }
         "misc" => serde_json::from_value::<MiscCfg>(v).map(drop),
         "appeals" => serde_json::from_value::<AppealsCfg>(v).map(drop),
-        "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
         "tickets" => serde_json::from_value::<TicketsCfg>(v).map(drop),
+        "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
         _ => Ok(()),
     };
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))

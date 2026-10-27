@@ -121,7 +121,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
     let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
     let tail = path.rsplit('.').next().unwrap_or("").to_string();
     let dur = kind == "int" && (tail.ends_with("_secs") || tail.ends_with("_ms"));
-    let input = match kind.as_str() {
+    // A single category picker is the channel picker listing categories.
+    let input = match if kind == "category" { "channel" } else { kind.as_str() } {
         "bool" => view! { <input type="checkbox" class="sw" prop:checked=move || get().as_bool().unwrap_or(false) on:change=move |e| set(json!(event_target_checked(&e))) /> }.into_any(),
         "int" if dur => {
             let per = if tail.ends_with("_ms") { 0.001 } else { 1.0 }; // seconds per stored unit
@@ -261,7 +262,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); } if let Some(a) = cur.as_array_mut() { a.push(json!({"events": [], "channel": null})); } set(cur) }>"Add a new logging type"</button>
             </div> }.into_any()
         }
-        "channel" | "role" | "category" => {
+        "channel" | "role" => {
             let key = match kind.as_str() { "channel" => "channels", "category" => "categories", _ => "roles" };
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
                 <option value="" selected=move || get().is_null()>"none"</option>
