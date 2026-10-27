@@ -3,6 +3,7 @@ mod app;
 mod appeals;
 mod automod;
 mod backup;
+mod catch;
 mod commands;
 mod events;
 mod hierarchy;

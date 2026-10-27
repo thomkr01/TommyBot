@@ -176,6 +176,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
     match ev {
         // Webhook posts count as bots but still carry heat, so they reach automod (never commands).
         Event::MessageCreate(m) if !m.author.bot || m.webhook_id.is_some() => {
+            if crate::catch::on_message(app, m).await? {
+                return Ok(());
+            }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
                 if let Some(parsed) = m.content.strip_prefix(&pfx).and_then(prefix::parse) {
@@ -188,7 +191,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::RoleUpdate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
         Event::ChannelCreate(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
-        Event::ChannelUpdate(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
+        Event::ChannelUpdate(c) => {
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::catch::keep_top(app, c).await?;
+        }
         Event::ChannelDelete(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
         Event::GuildUpdate(g) => app.invalidate_guild(g.id),
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,

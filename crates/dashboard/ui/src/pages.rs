@@ -320,3 +320,24 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
         <Section guild=guild.clone() name="logging".to_string() part enrolled />
     }
 }
+
+/// Catch channel: one click makes the honeypot channel and turns it on, then the settings form.
+#[component]
+pub fn Catch(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let g = guild.clone();
+    let setup = move |_| {
+        let sure = "This creates #do-not-write at the top of the server and turns the catch channel on: anyone without a permit who writes there gets the action below. Continue?";
+        if !web_sys::window().unwrap().confirm_with_message(sure).unwrap_or(false) { return; }
+        let g = g.clone();
+        run_act(async move {
+            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+            api("POST", &format!("/api/guilds/{g}/catch/setup"), Some(json!({"expected_version": c["version"]}))).await
+        }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
+    };
+    view! {
+        <div class="row"><button on:click=setup>"Set up channel"</button><span>{move || msg.get()}</span></div>
+        <StepUp need enrolled />
+        <Section guild=guild.clone() name="catch".to_string() enrolled />
+    }
+}
