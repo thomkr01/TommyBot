@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 mod appeals;
 mod records;
 mod common;
+mod embeds;
 mod form;
 mod lockdown;
 mod pages;
@@ -14,6 +15,7 @@ use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealForm, AppealList, Blacklist};
 use records::{CaseList, NoteList, RaidLog, ReportList};
 use common::*;
+use embeds::Embeds;
 use form::Section;
 use permits::Permits;
 use pages::{Logging, Rescue, Revert, Score, Wizard};
@@ -26,7 +28,7 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
     ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports")]),
-    ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
+    ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("embeds", "Embed Builder"), ("rescue", "Rescue Key")]),
     ("Raw JSON", &[("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 /// Groups Wick has; the rest are TommyBot extras that stay folded until visited.
@@ -228,6 +230,7 @@ fn App() -> impl IntoView {
                             let page = match (p.as_str(), rest.first()) {
                                 ("permits", _) => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
                                 ("logging", _) => view! { <Logging guild=g.clone() tab=rest.first().cloned().unwrap_or_default() sub=rest.get(1).cloned().unwrap_or_default() enrolled /> }.into_any(),
+                                ("embeds", _) => view! { <Embeds guild=g.clone() /> }.into_any(),
                                 ("history", _) => view! { <History guild=g.clone() enrolled /> }.into_any(),
                                 ("overview", _) => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),

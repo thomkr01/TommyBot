@@ -146,6 +146,22 @@ impl Discord {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
+        let text = self
+            .send(method, path, body)
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(serde_json::from_str(&text).unwrap_or_default())
+    }
+
+    /// Like `call` but hands back the raw response, for callers that branch on the status.
+    pub async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<reqwest::Response> {
         let mut r = self
             .http
             .request(method, format!("{}{path}", self.api))
@@ -153,8 +169,7 @@ impl Discord {
         if let Some(b) = body {
             r = r.json(&b);
         }
-        let text = r.send().await?.error_for_status()?.text().await?;
-        Ok(serde_json::from_str(&text).unwrap_or_default())
+        Ok(r.send().await?)
     }
 
     /// Posts a log embed with mentions disabled.

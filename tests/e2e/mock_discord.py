@@ -27,6 +27,8 @@ class H(BaseHTTPRequestHandler):
             self.reply(sent)
         elif p == f"/guilds/{GUILD['id']}":
             self.reply({**GUILD, "owner_id": USER["id"], "approximate_member_count": 1})
+        elif p.startswith("/channels/") and p.count("/") == 2:
+            self.reply({"id": p.split("/")[2], "guild_id": GUILD["id"], "type": 0})
         elif p.endswith("/channels"):
             self.reply([{"id": "300000000000000001", "name": "general", "type": 0, "position": 0}])
         elif p.endswith("/roles"):
@@ -47,7 +49,12 @@ class H(BaseHTTPRequestHandler):
             sent.append({"path": self.path, "body": body.decode()})
             self.reply({"id": "1"})
 
-    do_PUT = do_POST
+    do_PUT = do_PATCH = do_POST
+
+    def do_DELETE(self):
+        sent.append({"path": self.path, "method": "DELETE"})
+        self.send_response(204)
+        self.end_headers()
 
     def log_message(self, *a):
         pass

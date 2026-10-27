@@ -97,3 +97,6 @@ details.notes { margin:8px 0 0; } details.notes summary { cursor:pointer; list-s
 .checks.warn li { color:var(--warn); } .checks.warn li::before { content:"⚠ "; }
 pre.blur { filter:blur(6px); user-select:none; }
 .ring.small { width:56px; height:56px; } .ring.small b { width:40px; height:40px; font-size:13px; }
+textarea.short { min-height:100px; font-family:inherit; }
+.embed { border-left:4px solid; background:var(--b3); border-radius:4px; padding:10px 14px; display:flex; flex-direction:column; gap:6px; overflow-wrap:anywhere; } .embed p { margin:0; white-space:pre-wrap; } .embed img { max-width:100%; border-radius:4px; } .embed .thumb { float:right; max-width:80px; }
+.embed .fields { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; } .embed .fields .wide { grid-column:1/-1; }
