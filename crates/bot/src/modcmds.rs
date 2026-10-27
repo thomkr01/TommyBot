@@ -31,7 +31,7 @@ use crate::{
     targets,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModCmd {
     Unban {
         user: u64,

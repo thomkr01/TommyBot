@@ -124,7 +124,30 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 } />
                 <button class="ghost" on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div> }.into_any()
         }
-        "list" => view! { <input prop:value=move || csv(&get()) on:change=move |e| set(from_csv(&event_target_value(&e))) /> }.into_any(),
+        "list" | "lines" => {
+            let box_ = if kind == "lines" {
+                view! { <textarea style="min-height:80px" prop:value=move || strs(&get()).join("\n") on:change=move |e| set(json!(event_target_value(&e).lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>())) /> }.into_any()
+            } else {
+                view! { <input prop:value=move || csv(&get()) on:change=move |e| set(from_csv(&event_target_value(&e))) /> }.into_any()
+            };
+            let export = move || format!("data:text/plain;charset=utf-8,{}", js_sys::encode_uri_component(&strs(&get()).join("\n")));
+            // Merges a text file (one entry per line, `#` comments skipped) into the list.
+            let import = move |e: leptos::ev::Event| {
+                let Some(file) = event_target::<web_sys::HtmlInputElement>(&e).files().and_then(|l| l.get(0)) else { return };
+                spawn_local(async move {
+                    let Ok(text) = wasm_bindgen_futures::JsFuture::from(file.text()).await else { return };
+                    let mut cur = strs(&get());
+                    for l in text.as_string().unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                        if !cur.iter().any(|c| c == l) { cur.push(l.to_string()) }
+                    }
+                    set(json!(cur));
+                });
+            };
+            view! { <div style="flex:1">{box_}<div class="io">
+                <a class="ghost" download=format!("{tail}.txt") href=export>"Export"</a>
+                <label class="ghost">"Import"<input type="file" accept=".txt,text/plain" hidden=true on:change=import /></label>
+            </div></div> }.into_any()
+        }
         "color" => view! { <input type="color" prop:value=move || show(&get()) on:change=move |e| set(json!(event_target_value(&e))) /> }.into_any(),
         "choice" => {
             let opts = f["options"].as_array().cloned().unwrap_or_default();

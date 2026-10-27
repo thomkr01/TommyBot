@@ -1,7 +1,8 @@
 //! Prefix mod commands: permit check -> action -> case (+ undo data). ban/kick/timeout/warn.
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
@@ -39,7 +40,7 @@ use crate::{
     targets,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ModKind {
     Ban,
     Kick,
@@ -334,6 +335,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
 }
 
 /// What a [`Pending`] does once confirmed.
+#[derive(Serialize, Deserialize)]
 pub enum Action {
     Mod {
         kind: ModKind,
@@ -349,24 +351,18 @@ pub enum Action {
     },
 }
 
-/// A command waiting for its Confirm click. Lost on restart: the staff member just types it again.
+/// A command waiting for its Confirm click, stored in `pending_confirms` so it survives a restart.
 pub struct Pending {
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     action: Action,
-    at: Instant,
 }
 
 const CONFIRM_TTL: Duration = Duration::from_secs(60);
 
 impl Pending {
     pub fn new(gid: Id<GuildMarker>, actor: Id<UserMarker>, action: Action) -> Self {
-        Self {
-            gid,
-            actor,
-            action,
-            at: Instant::now(),
-        }
+        Self { gid, actor, action }
     }
 
     /// Warns and non-destructive commands run straight away.
@@ -473,33 +469,40 @@ fn confirm_button(label: &str, id: String, style: ButtonStyle) -> Component {
     })
 }
 
-/// Keeps `job` for its buttons and returns the question with the Confirm / Cancel row.
+/// Stores `job` for its buttons and returns the question with the Confirm / Cancel row.
 /// `nonce` is the command message or interaction id.
-pub fn stash_confirm(app: &App, nonce: u64, job: Pending) -> (String, Component) {
-    let text = job.question();
+pub async fn stash_confirm(app: &App, nonce: u64, job: Pending) -> Result<(String, Component)> {
     let row = Component::ActionRow(ActionRow {
         id: None,
         components: vec![
             confirm_button(
                 "Confirm",
-                format!("{CONFIRM}{nonce}:y"),
+                format!("{CONFIRM}{nonce}:{}:y", job.actor),
                 ButtonStyle::Danger,
             ),
             confirm_button(
                 "Cancel",
-                format!("{CONFIRM}{nonce}:n"),
+                format!("{CONFIRM}{nonce}:{}:n", job.actor),
                 ButtonStyle::Secondary,
             ),
         ],
     });
-    let mut pending = app.pending.lock().unwrap();
-    pending.retain(|_, p| p.at.elapsed() < CONFIRM_TTL);
-    pending.insert(nonce, job);
-    (text, row)
+    // Expired rows are dropped on the way in, so the table stays small without a sweeper.
+    sqlx::query(
+        "WITH gone AS (DELETE FROM pending_confirms WHERE created_at < now() - make_interval(secs => $4))
+         INSERT INTO pending_confirms (nonce, guild_id, action) VALUES ($1, $2, $3)",
+    )
+    .bind(nonce as i64)
+    .bind(job.gid.get() as i64)
+    .bind(serde_json::to_value(&job.action)?)
+    .bind(CONFIRM_TTL.as_secs_f64())
+    .execute(&app.pool)
+    .await?;
+    Ok((job.question(), row))
 }
 
 pub async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()> {
-    let (text, row) = stash_confirm(app, msg.id.get(), job);
+    let (text, row) = stash_confirm(app, msg.id.get(), job).await?;
     app.http
         .create_message(msg.channel_id)
         .content(&text)
@@ -516,12 +519,11 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
     let Some(InteractionData::MessageComponent(c)) = &i.data else {
         return Ok(false);
     };
-    let Some((nonce, yes)) = c
-        .custom_id
-        .strip_prefix(CONFIRM)
-        .and_then(|r| r.split_once(':'))
-        .and_then(|(n, a)| Some((n.parse::<u64>().ok()?, a == "y")))
-    else {
+    let Some((nonce, actor, yes)) = c.custom_id.strip_prefix(CONFIRM).and_then(|r| {
+        let mut it = r.splitn(3, ':');
+        let (n, actor, a) = (it.next()?, it.next()?, it.next()?);
+        Some((n.parse::<i64>().ok()?, actor.parse::<u64>().ok()?, a == "y"))
+    }) else {
         return Ok(false);
     };
     let client = app.http.interaction(Id::new(app.me.get()));
@@ -533,18 +535,25 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
             ..Default::default()
         }),
     };
-    let taken = {
-        let mut pending = app.pending.lock().unwrap();
-        match pending.get(&nonce) {
-            Some(p) if Some(p.actor) != i.author_id() => {
-                Err("Only the staff member who typed the command can answer.")
-            }
-            Some(p) if p.at.elapsed() >= CONFIRM_TTL => {
-                pending.remove(&nonce);
-                Err("This confirmation expired, type the command again.")
-            }
-            Some(_) => Ok(pending.remove(&nonce).unwrap()),
-            None => Err("This confirmation expired, type the command again."),
+    const EXPIRED: &str = "This confirmation expired, type the command again.";
+    let taken = if i.author_id().map(Id::get) != Some(actor) {
+        Err("Only the staff member who typed the command can answer.")
+    } else {
+        let row: Option<(i64, serde_json::Value, bool)> = sqlx::query_as(
+            "DELETE FROM pending_confirms WHERE nonce = $1
+             RETURNING guild_id, action, created_at < now() - make_interval(secs => $2)",
+        )
+        .bind(nonce)
+        .bind(CONFIRM_TTL.as_secs_f64())
+        .fetch_optional(&app.pool)
+        .await?;
+        match row {
+            Some((gid, action, false)) => Ok(Pending::new(
+                Id::new(gid as u64),
+                Id::new(actor),
+                serde_json::from_value(action)?,
+            )),
+            _ => Err(EXPIRED),
         }
     };
     let job = match taken {
@@ -803,7 +812,45 @@ pub async fn revert_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::{above_bot, timeout_chunk, MAX_TIMEOUT_S};
+    use super::{above_bot, timeout_chunk, Action, Flags, Id, ModCmd, ModKind, MAX_TIMEOUT_S};
+
+    #[test]
+    fn pending_action_survives_the_database_round_trip() {
+        let flags = Flags {
+            dm: true,
+            soft: true,
+            compact: false,
+        };
+        let a = Action::Mod {
+            kind: ModKind::Ban,
+            targets: vec![Id::new(42)],
+            reason: Some("spam".into()),
+            duration_s: Some(60),
+            flags,
+        };
+        let Action::Mod { kind, targets, .. } =
+            serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap()
+        else {
+            panic!("variant changed")
+        };
+        assert_eq!((kind, targets), (ModKind::Ban, vec![Id::new(42)]));
+        let purge = ModCmd::Purge {
+            count: 5,
+            user: None,
+            from: Some(9),
+        };
+        let e = Action::Ext {
+            cmd: purge.clone(),
+            channel: Id::new(7),
+            reason: None,
+        };
+        let Action::Ext { cmd, channel, .. } =
+            serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap()
+        else {
+            panic!("variant changed")
+        };
+        assert_eq!((cmd, channel), (purge, Id::new(7)));
+    }
 
     #[test]
     fn timeout_chunking() {
