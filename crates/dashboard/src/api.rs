@@ -145,7 +145,11 @@ pub(crate) async fn log_change(st: &AppState, config: &Value, text: String) {
     {
         let d = st.discord.clone();
         tokio::spawn(async move {
-            if let Err(e) = d.post_message(&ch, &text).await {
+            let log =
+                tommybot_logging::Log::new("Configuration Changed", tommybot_logging::embed::BLUE)
+                    .text(&text)
+                    .time();
+            if let Err(e) = d.post_log(&ch, log).await {
                 tracing::warn!("config-changes log failed: {e:#}");
             }
         });

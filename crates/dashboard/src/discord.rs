@@ -157,11 +157,12 @@ impl Discord {
         Ok(serde_json::from_str(&text).unwrap_or_default())
     }
 
-    pub async fn post_message(&self, channel: &str, content: &str) -> Result<()> {
+    /// Posts a log embed with mentions disabled.
+    pub async fn post_log(&self, channel: &str, log: tommybot_logging::Log) -> Result<()> {
         self.http
             .post(format!("{}/channels/{channel}/messages", self.api))
             .header("Authorization", format!("Bot {}", self.bot_token))
-            .json(&serde_json::json!({"content": content, "allowed_mentions": {"parse": []}}))
+            .json(&serde_json::json!({"embeds": [log.build()], "allowed_mentions": {"parse": []}}))
             .send()
             .await?
             .error_for_status()?;

@@ -2693,6 +2693,7 @@ dependencies = [
  "serde",
  "serde_json",
  "twilight-model",
+ "twilight-util",
 ]
 
 [[package]]

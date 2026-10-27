@@ -7,3 +7,4 @@ edition.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 twilight-model.workspace = true
+twilight-util.workspace = true

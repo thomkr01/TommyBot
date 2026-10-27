@@ -9,7 +9,10 @@ use tommybot_antinuke::{
 };
 use tommybot_automod::heat::{Breakdown, HeatCfg};
 use tommybot_core::cases::{self, NewCase};
-use tommybot_logging::LogKind;
+use tommybot_logging::{
+    embed::{ALERT, NO, YES},
+    Log, LogKind,
+};
 use twilight_model::{
     guild::{
         audit_log::{AuditLogChange, AuditLogEntry, AuditLogEventType as A},
@@ -323,8 +326,12 @@ pub(crate) async fn quarantine_actor(
 ) -> Result<()> {
     quarantine(app, gid, actor).await?;
     let case = open_case(app, gid, actor, why).await?;
-    let text = format!("**Anti-nuke** case #{case}: <@{actor}> quarantined, {why}.");
-    send_log(app, gid.get(), LogKind::AntiNuke, &text).await
+    let log = Log::new("Anti Nuke", ALERT)
+        .line("CASE", &format!("`{case}`"))
+        .user("Responsible", actor.get())
+        .text(&format!("{YES} **Quarantined**"))
+        .line("Reason", why);
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await
 }
 
 async fn open_case(
@@ -456,21 +463,31 @@ async fn quarantine_and_revert(
     let case = open_case(app, gid, actor, why).await?;
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
     let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
-    let text = format!(
-        "**Anti-nuke** case #{case} (nuke `{nuke}`): <@{actor}> {}, {why}. Reverted {}/{} actions, recreated {} deleted. Kicked, re-invite: {}",
-        if quarantined {
-            "quarantined (bots are kicked)"
-        } else if auto {
-            "NOT quarantined (check that the bot's role is on top)"
-        } else {
-            "not quarantined (auto quarantine is off)"
-        },
-        sum.ops - sum.failed,
-        sum.ops,
-        sum.recreated,
-        if reinvite.is_empty() { "none".into() } else { reinvite.join(" ") }
-    );
-    send_log(app, gid.get(), LogKind::AntiNuke, &text).await?;
+    let action = if quarantined {
+        format!("{YES} **Quarantined** (bots are kicked)")
+    } else if auto {
+        format!("{NO} **NOT quarantined** (check that the bot's role is on top)")
+    } else {
+        format!("{NO} **Not quarantined** (auto quarantine is off)")
+    };
+    let reinvite = if reinvite.is_empty() {
+        "None".into()
+    } else {
+        reinvite.join(" ")
+    };
+    let log = Log::new("Anti Nuke Report:", ALERT)
+        .line("CASE", &format!("`{case}` (nuke `{nuke}`)"))
+        .user("Responsible", actor.get())
+        .text(&action)
+        .line("Reason", why)
+        .section("Revert Report:")
+        .line(
+            "Reverted",
+            &format!("`{}/{}`", sum.ops - sum.failed, sum.ops),
+        )
+        .line("Recreated", &format!("`{}`", sum.recreated))
+        .line("Kicked, re-invite", &reinvite);
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
     if !auto {
         return Ok(());
     }

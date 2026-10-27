@@ -7,7 +7,10 @@ use std::{
 };
 use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
-use tommybot_logging::LogKind;
+use tommybot_logging::{
+    embed::{DONE, YES},
+    Log, LogKind,
+};
 use twilight_model::id::{marker::UserMarker, Id};
 
 use crate::{
@@ -72,7 +75,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 app,
                 gid.get(),
                 LogKind::Server,
-                &format!("Backup #{id} created"),
+                Log::new("Backup Created", DONE).line("Id", &format!("`{id}`")),
             )
             .await?;
         }
@@ -81,12 +84,24 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 .as_i64()
                 .context("job payload has no id")?;
             let text = backup::load(app, gid, id, true).await?;
-            send_log(app, gid.get(), LogKind::Server, &text).await?;
+            let log = Log::new("Backup Loaded", DONE)
+                .line("Id", &format!("`{id}`"))
+                .text(&format!("{YES} **{text}**"));
+            send_log(app, gid.get(), LogKind::Server, log).await?;
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_grant" => verify::web_grant(app, gid, user(&job.payload)?).await?,
-        "raid_end" => send_log(app, gid.get(), LogKind::JoinRaid, "Raid ended").await?,
+        "raid_end" => {
+            send_log(
+                app,
+                gid.get(),
+                LogKind::JoinRaid,
+                Log::new("Join Raid Report!", DONE)
+                    .text(&format!("{YES} **The join raid has ended.**")),
+            )
+            .await?
+        }
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())

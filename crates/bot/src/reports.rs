@@ -1,12 +1,16 @@
 //! Message context menus: Report (anyone) and Purge from here (staff). A report is logged with
 //! action buttons; the staff who press them need the Manage Reports permit plus the permit of the action.
 use anyhow::Result;
-use tommybot_logging::LogKind;
+use tommybot_logging::{
+    embed::{HANDLED, ORANGE},
+    Log, LogKind,
+};
 use twilight_model::{
     application::interaction::{application_command::CommandData, Interaction, InteractionData},
     channel::{
         message::{
             component::{ActionRow, Button, ButtonStyle, Component},
+            embed::EmbedField,
             AllowedMentions, MessageFlags,
         },
         Message,
@@ -25,6 +29,7 @@ use crate::{
 };
 
 const SNIPPET: usize = 300;
+const ACTION_LOG: &str = "Action Log";
 
 pub async fn message_menu(
     app: &App,
@@ -61,14 +66,14 @@ pub async fn message_menu(
     .await
 }
 
-fn button(label: &str, id: i64, action: &str) -> Component {
+fn button(label: &str, id: i64, action: &str, style: ButtonStyle) -> Component {
     Component::Button(Button {
         id: None,
         custom_id: Some(format!("report:{id}:{action}")),
         disabled: false,
         emoji: None,
         label: Some(label.into()),
-        style: ButtonStyle::Secondary,
+        style,
         url: None,
         sku_id: None,
     })
@@ -86,7 +91,7 @@ fn rows(id: i64, jump: String) -> Vec<Component> {
         custom_id: None,
         disabled: false,
         emoji: None,
-        label: Some("Jump".into()),
+        label: Some("View Message".into()),
         style: ButtonStyle::Link,
         url: Some(jump),
         sku_id: None,
@@ -94,15 +99,15 @@ fn rows(id: i64, jump: String) -> Vec<Component> {
     vec![
         row(vec![
             link,
-            button("Delete", id, "delete"),
-            button("Dismiss", id, "dismiss"),
+            button("Delete Message", id, "delete", ButtonStyle::Success),
+            button("Dismiss Report", id, "dismiss", ButtonStyle::Danger),
         ]),
         row(vec![
-            button("Warn", id, "warn"),
-            button("Timeout", id, "timeout"),
-            button("Kick", id, "kick"),
-            button("Ban", id, "ban"),
-            button("Cases", id, "cases"),
+            button("User Info", id, "cases", ButtonStyle::Secondary),
+            button("Warn", id, "warn", ButtonStyle::Secondary),
+            button("Timeout", id, "timeout", ButtonStyle::Secondary),
+            button("Kick", id, "kick", ButtonStyle::Secondary),
+            button("Ban", id, "ban", ButtonStyle::Secondary),
         ]),
     ]
 }
@@ -154,27 +159,42 @@ async fn report(
     let Some(id) = id else {
         return Ok("You already reported this message".into());
     };
-    let quote = if content.is_empty() {
-        "> (no text)".to_string()
-    } else {
-        content
-            .lines()
-            .map(|l| format!("> {l}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let text = format!(
-        "**Report #{id}** by <@{reporter}> against <@{}> in <#{}>\n{quote}",
-        msg.author.id, msg.channel_id
-    );
     let jump = format!(
         "https://discord.com/channels/{gid}/{}/{}",
         msg.channel_id, msg.id
     );
+    let created = ((msg.author.id.get() >> 22) + 1_420_070_400_000) / 1000;
+    let embed = Log::new(
+        &format!("A message by {} has been reported!", msg.author.name),
+        ORANGE,
+    )
+    .thumbnail(&msg.author)
+    .text(&format!(
+        "<@{}>'s [message]({jump}) has been reported by <@{reporter}>",
+        msg.author.id
+    ))
+    .text(&format!(
+        "**Member:** {} [{}]",
+        msg.author.name, msg.author.id
+    ))
+    .text(&format!("**Creation:** <t:{created}:F>"))
+    .field(
+        "Reported Message:",
+        if content.is_empty() {
+            "(no text)"
+        } else {
+            &content
+        },
+    )
+    .footer(&format!(
+        "Reported by {reporter} | TARGET: {}",
+        msg.author.id
+    ))
+    .build();
     let sent = app
         .http
         .create_message(log)
-        .content(&text)
+        .embeds(&[embed])
         .components(&rows(id, jump))
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await;
@@ -308,11 +328,24 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         .bind(actor_id.get() as i64)
         .execute(&app.pool)
         .await?;
-        let old = i.message.as_ref().map_or("", |m| m.content.as_str());
-        let new = format!("{old}\n- <@{actor_id}> {verb}");
-        // Discord caps content at 2000; a report with a very long history just stops growing.
-        if new.chars().count() <= 2000 {
-            let u = client.update_response(&i.token).content(Some(&new));
+        // Wick keeps the report's history in an "Action Log" field and turns the log green.
+        if let Some(mut embed) = i.message.as_ref().and_then(|m| m.embeds.first().cloned()) {
+            let line = format!("- <@{actor_id}> {verb}");
+            match embed.fields.iter_mut().find(|f| f.name == ACTION_LOG) {
+                // A field holds 1024 characters; a very long history just stops growing.
+                Some(f) if f.value.len() + line.len() < 1024 => {
+                    f.value = format!("{}\n{line}", f.value)
+                }
+                Some(_) => {}
+                None => embed.fields.push(EmbedField {
+                    inline: false,
+                    name: ACTION_LOG.into(),
+                    value: line,
+                }),
+            }
+            embed.color = Some(HANDLED);
+            let embeds = [embed];
+            let u = client.update_response(&i.token).embeds(Some(&embeds));
             if action == "dismiss" {
                 u.components(Some(&[])).await?;
             } else {

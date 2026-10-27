@@ -4,10 +4,13 @@ use std::{
     sync::{atomic::Ordering::Relaxed, Arc},
     time::Instant,
 };
-use tommybot_logging::LogKind;
+use tommybot_logging::{Log, LogKind};
 use twilight_gateway::Event;
 use twilight_model::{
-    channel::message::AllowedMentions,
+    channel::message::{
+        component::{ActionRow, Button, ButtonStyle, Component},
+        AllowedMentions, Embed,
+    },
     id::{
         marker::{ChannelMarker, RoleMarker},
         Id,
@@ -35,20 +38,52 @@ fn guild_of(ev: &Event) -> Option<u64> {
 async fn send(
     app: &App,
     channel: Id<ChannelMarker>,
-    text: &str,
+    pings: &str,
+    embed: &Embed,
+    link: Option<&(&str, String)>,
     mentions: &AllowedMentions,
 ) -> Result<()> {
+    let rows: Vec<Component> = link
+        .map(|(label, url)| {
+            Component::ActionRow(ActionRow {
+                id: None,
+                components: vec![Component::Button(Button {
+                    id: None,
+                    custom_id: None,
+                    disabled: false,
+                    emoji: None,
+                    label: Some((*label).into()),
+                    style: ButtonStyle::Link,
+                    url: Some(url.clone()),
+                    sku_id: None,
+                })],
+            })
+        })
+        .into_iter()
+        .collect();
     app.http
         .create_message(channel)
-        .content(text)
+        .content(pings)
+        .embeds(std::slice::from_ref(embed))
+        .components(&rows)
         .allowed_mentions(Some(mentions))
         .await?;
     Ok(())
 }
 
-pub async fn send_log(app: &App, guild: u64, kind: LogKind, text: &str) -> Result<()> {
+pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
     match app.cfg(guild).await?.logging.target(kind, None) {
-        Some(ch) => send(app, ch, text, &AllowedMentions::default()).await,
+        Some(ch) => {
+            send(
+                app,
+                ch,
+                "",
+                &embed.build(),
+                None,
+                &AllowedMentions::default(),
+            )
+            .await
+        }
         None => Ok(()),
     }
 }
@@ -58,7 +93,7 @@ pub async fn send_log_pinging(
     app: &App,
     guild: u64,
     kind: LogKind,
-    text: &str,
+    embed: Log,
     roles: &[Id<RoleMarker>],
 ) -> Result<()> {
     let Some(ch) = app.cfg(guild).await?.logging.target(kind, None) else {
@@ -69,7 +104,7 @@ pub async fn send_log_pinging(
         roles: roles.to_vec(),
         ..Default::default()
     };
-    send(app, ch, &format!("{pings}{text}"), &mentions).await
+    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions).await
 }
 
 /// Sends held delete logs once their wait is over. `handle` only flushes when an event arrives,
@@ -80,7 +115,15 @@ pub async fn flush_logs(app: Arc<App>) {
         tick.tick().await;
         let due = app.logger.lock().unwrap().flush(Instant::now());
         for m in due {
-            if let Err(e) = send(&app, m.channel_id, &m.content, &AllowedMentions::default()).await
+            if let Err(e) = send(
+                &app,
+                m.channel_id,
+                "",
+                &m.embed,
+                m.link.as_ref(),
+                &AllowedMentions::default(),
+            )
+            .await
             {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
             }
@@ -113,7 +156,16 @@ pub async fn shutdown(app: &App) {
         .unwrap()
         .flush(Instant::now() + std::time::Duration::from_secs(3600));
     for m in held {
-        if let Err(e) = send(app, m.channel_id, &m.content, &AllowedMentions::default()).await {
+        if let Err(e) = send(
+            app,
+            m.channel_id,
+            "",
+            &m.embed,
+            m.link.as_ref(),
+            &AllowedMentions::default(),
+        )
+        .await
+        {
             tracing::warn!(?e, "log send failed during shutdown");
         }
     }
@@ -129,7 +181,16 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             .unwrap()
             .handle(&cfg.logging, ev, Instant::now());
         for m in msgs {
-            if let Err(e) = send(app, m.channel_id, &m.content, &AllowedMentions::default()).await {
+            if let Err(e) = send(
+                app,
+                m.channel_id,
+                "",
+                &m.embed,
+                m.link.as_ref(),
+                &AllowedMentions::default(),
+            )
+            .await
+            {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
             }
         }

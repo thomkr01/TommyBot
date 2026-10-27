@@ -4,16 +4,19 @@
 
 mod cache;
 mod config;
+pub mod embed;
 mod render;
 
 use cache::{CachedMessage, MessageCache};
 pub use config::{CustomLog, LogConfig, LogEvent, LogKind};
+pub use embed::Log;
 
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };
 use twilight_model::{
+    channel::message::Embed,
     gateway::event::Event,
     guild::audit_log::{AuditLogEntry, AuditLogEventType},
     id::{
@@ -22,8 +25,6 @@ use twilight_model::{
     },
 };
 
-/// Discord rejects message content longer than this.
-const MAX_CHARS: usize = 2000;
 /// How long a moderator's message delete is kept to name the deleter of a gateway delete.
 const DELETER_WINDOW: Duration = Duration::from_secs(60);
 /// Caps the audit delete and removal lists.
@@ -33,11 +34,13 @@ const HOLD: Duration = Duration::from_secs(10);
 /// A kick or ban audit entry suppresses the member leave for the same user within this window.
 const REMOVAL_WINDOW: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogMessage {
     pub channel_id: Id<ChannelMarker>,
     pub kind: LogKind,
-    pub content: String,
+    pub embed: Embed,
+    /// Wick's link button under the log ("Go to Message").
+    pub link: Option<render::Link>,
 }
 
 pub(crate) struct Entry {
@@ -45,7 +48,8 @@ pub(crate) struct Entry {
     event: Option<LogEvent>,
     channel: Option<Id<ChannelMarker>>,
     user: Option<Id<UserMarker>>,
-    text: String,
+    embed: Embed,
+    link: Option<render::Link>,
 }
 
 /// One audit log message delete: `executor` deleted a message by `target` in `channel`.
@@ -70,7 +74,7 @@ struct HeldLeave {
     at: Instant,
     log: Id<ChannelMarker>,
     user: Id<UserMarker>,
-    text: String,
+    embed: Embed,
 }
 
 pub struct Logger {
@@ -138,7 +142,7 @@ impl Logger {
                             at: now,
                             log,
                             user: m.user.id,
-                            text: render::member_remove(&m.user),
+                            embed: render::member_remove(&m.user),
                         });
                     }
                 }
@@ -153,7 +157,8 @@ impl Logger {
                 out.push(LogMessage {
                     channel_id,
                     kind: entry.kind,
-                    content: clamp(entry.text),
+                    embed: entry.embed,
+                    link: entry.link,
                 });
             }
         }
@@ -191,7 +196,8 @@ impl Logger {
                 out.push(LogMessage {
                     channel_id: h.log,
                     kind: LogKind::Member,
-                    content: clamp(h.text),
+                    embed: h.embed,
+                    link: None,
                 });
             }
         }
@@ -206,12 +212,8 @@ impl Logger {
         LogMessage {
             channel_id: h.log,
             kind: LogKind::Message,
-            content: clamp(render::message_delete(
-                h.id,
-                h.channel,
-                h.cached.as_ref(),
-                deleter,
-            )),
+            embed: render::message_delete(h.id, h.channel, h.cached.as_ref(), deleter),
+            link: None,
         }
     }
 
@@ -237,12 +239,14 @@ impl Logger {
                 if old.as_deref() == Some(msg.content.as_str()) {
                     return None;
                 }
+                let (embed, link) = render::message_edit(old.as_deref(), msg);
                 Some(Entry {
                     kind: LogKind::Message,
                     event: Some(LogEvent::MessageUpdate),
                     channel: Some(msg.channel_id),
                     user: Some(msg.author.id),
-                    text: render::message_edit(old.as_deref(), msg),
+                    embed,
+                    link,
                 })
             }
             Event::MessageDeleteBulk(m) => Some(Entry {
@@ -250,14 +254,16 @@ impl Logger {
                 event: Some(LogEvent::MessageDeleteBulk),
                 channel: Some(m.channel_id),
                 user: None,
-                text: render::bulk_delete(m.channel_id, m.ids.len()),
+                embed: render::bulk_delete(m.channel_id, m.ids.len()),
+                link: None,
             }),
             Event::MemberAdd(m) => Some(Entry {
                 kind: LogKind::Member,
                 event: None,
                 channel: None,
                 user: Some(m.member.user.id),
-                text: render::member_add(&m.member.user),
+                embed: render::member_add(&m.member.user),
+                link: None,
             }),
             Event::GuildAuditLogEntryCreate(e) => self.audit(&e.0, now),
             _ => None,
@@ -353,14 +359,6 @@ fn ignored(
         || user.is_some_and(|u| cfg.ignored_users.contains(&u))
 }
 
-/// Keeps the first `MAX_CHARS` characters.
-fn clamp(s: String) -> String {
-    if s.chars().count() <= MAX_CHARS {
-        return s;
-    }
-    s.chars().take(MAX_CHARS).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,8 +387,13 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].channel_id, Id::new(5));
         assert_eq!(out[0].kind, LogKind::Role);
-        assert!(out[0].content.contains("- name: mods → staff"));
-        assert!(out[0].content.contains("Reason: cleanup"));
+        let e = &out[0].embed;
+        assert_eq!(e.title.as_deref(), Some("Role Update"));
+        let d = e.description.as_deref().unwrap();
+        assert!(
+            d.starts_with("▸ **Responsible:** <@10> *`10`*\n▸ **Target:** <@&20> *`20`*\n▸ <t:")
+        );
+        assert!(d.contains("▸ **Reason:** cleanup\n**Changes**\n▸ **Name:**\n```diff\n- mods\n```\n```diff\n+ staff\n```"));
     }
 
     #[test]
@@ -546,7 +549,9 @@ mod tests {
         assert!(logger.handle(&cfg, &audit_event(72, 10), late).is_empty());
         let out = logger.flush(t0 + HOLD);
         assert_eq!(out.len(), 1);
-        assert!(out[0].content.contains("**Message deleted** by <@10>"));
+        let d = out[0].embed.description.as_deref().unwrap();
+        assert!(d.starts_with("▸ **Responsible:** <@10> *`10`*"));
+        assert!(d.ends_with("```diff\n- hi\n```\n▸ **Author:** <@20> *`20`*"));
         assert!(logger.flush(t0 + HOLD).is_empty());
     }
 
@@ -563,10 +568,5 @@ mod tests {
         let out = Logger::new(Id::new(1)).handle(&cfg, &audit_event(20, 10), Instant::now());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].channel_id, Id::new(6));
-    }
-
-    #[test]
-    fn clamp_limits_characters() {
-        assert_eq!(clamp("é".repeat(MAX_CHARS + 5)).chars().count(), MAX_CHARS);
     }
 }

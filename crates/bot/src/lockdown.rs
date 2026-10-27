@@ -15,7 +15,10 @@ use crate::{
     app::{now_secs, App},
     events::send_log,
 };
-use tommybot_logging::LogKind;
+use tommybot_logging::{
+    embed::{ALERT, DONE, YES},
+    Log, LogKind,
+};
 
 async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
     match op {
@@ -93,7 +96,13 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
     for op in &plan.ops {
         exec(app, gid, op).await?;
     }
-    announce(app, gid, "Server locked").await;
+    announce(
+        app,
+        gid,
+        Log::new("Server Locked", ALERT)
+            .text(&format!("{YES} **The server has been locked down.**")),
+    )
+    .await;
     Ok(true)
 }
 
@@ -115,13 +124,13 @@ fn join_lock_of(kind: &LockKind) -> Option<JoinLock> {
     kind.covers().2
 }
 
-async fn announce(app: &App, gid: Id<GuildMarker>, text: &str) {
+async fn announce(app: &App, gid: Id<GuildMarker>, log: Log) {
     let on = app
         .cfg(gid.get())
         .await
         .is_ok_and(|c| c.lockdown_prefs.updates);
     if on {
-        if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, text).await {
+        if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
             tracing::warn!(?e, "lockdown update log failed");
         }
     }
@@ -143,7 +152,12 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>) -> Result<()> {
             .role(Id::new(*role))
             .await?;
     }
-    announce(app, gid, "Server unlocked").await;
+    announce(
+        app,
+        gid,
+        Log::new("Server Unlocked", DONE).text(&format!("{YES} **The server has been unlocked.**")),
+    )
+    .await;
     Ok(())
 }
 

@@ -169,11 +169,18 @@ async fn submit(
         .bind(guild).bind(s.user_id).bind(&s.username).bind(kind).bind(Value::Array(answers)).fetch_optional(&st.db).await?;
     let id = id.ok_or(ApiError::Forbidden("you already have an open appeal"))?;
     if let Some(ch) = c.channel {
-        let text = format!(
-            "New {kind} appeal #{id} from {} (`{}`). Review it on the dashboard.",
-            s.username, s.user_id
-        );
-        if let Err(e) = st.discord.post_message(&ch.to_string(), &text).await {
+        use tommybot_logging::{embed, Log};
+        let mut log = Log::new(
+            &format!("A {kind} appeal by {} has been sent!", s.username),
+            embed::ORANGE,
+        )
+        .line("Member", &format!("{} [{}]", s.username, s.user_id))
+        .line("Appeal", &format!("`#{id}`"))
+        .text(&format!("{} Review it on the dashboard.", embed::ARROW));
+        for (f, a) in fields.iter().zip(&b.answers) {
+            log = log.field(&format!("{}:", f.label), a);
+        }
+        if let Err(e) = st.discord.post_log(&ch.to_string(), log).await {
             tracing::warn!(?e, "appeal notice failed");
         }
     }
