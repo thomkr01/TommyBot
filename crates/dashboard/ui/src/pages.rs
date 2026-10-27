@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::form::{name_of, strs, Section};
+use crate::wizard::{Card, ANTINUKE, AUTOMOD, JOINGATE, JOINRAID, MISC, VERIFICATION, WHITELIST};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
@@ -23,7 +24,8 @@ const OPTIONAL_LOGS: [(&str, &str); 10] = [
 
 #[component]
 pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    const STEPS: [&str; 9] = ["Auto Setup", "Miscellaneous", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue Key"];
+    const STEPS: [&str; 10] = ["Auto Setup", "Misc", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue", "Wrap"];
+    const CARDS: [(&str, &[Card]); 7] = [("misc", MISC), ("automod", AUTOMOD), ("antinuke", ANTINUKE), ("whitelist", WHITELIST), ("joingate", JOINGATE), ("joinraid", JOINRAID), ("verification", VERIFICATION)];
     let step = RwSignal::new(0usize);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
@@ -40,6 +42,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             let logs = strs(&c["logs"]).join(", #");
             let logs = if logs.is_empty() { "the log channels were already set".into() } else { format!("Logs category with #{logs}") };
             let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
+            let member = if c["staff"] == true { format!("{member}, Admins and Moderators roles with their permits") } else { member };
             let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
             msg.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine}", role("quarantine_role")));
         }) });
@@ -63,21 +66,13 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             </div>
             <div class="chips"><span class="chip blue">"You can choose a certain step if you want."</span><span class="chip orange">"The full setup could take around 3 minutes of your time."</span></div>
         </div>
-        <p class="muted">{move || [
-            "Creates the quarantine role (and sets it in every channel), a Member main role if you have none, and the log channels, and sets them in your settings.",
-            "General bot behavior: moderation commands, replies and the default timeout.",
-            "Turn Auto Mod on and set its strike and heat basics. Filters have their own pages.",
-            "Turn Anti Nuke on and pick the quarantine role. Per-action limits are under Filters.",
-            "Members and roles the automatic systems should ignore.",
-            "Instant filters for new members and bots.",
-            "Reaction to a burst of joins.",
-            "The gate new members must pass to get access.",
-            "Your rescue key for locked-out recovery.",
-        ][step.get()]}</p>
         {move || match step.get() {
             0 => {
                 let (all, run) = (auto.clone(), auto.clone());
                 view! { <div class="card">
+                    <h2>"Initial Setup"</h2>
+                    <p>"TommyBot needs to do some magic in your server: it creates its log channels, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
+                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring log channels"].map(|t| view! { <li class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
                     <p>"The essential logs (TommyBot logs and Mod logs) are always created."</p>
                     <button on:click=move |_| all(None)>"All log channels"</button>
                     <button on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
@@ -89,19 +84,20 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 </div> }.into_any()
             }
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
-            i => view! { <Section guild=g.clone() name=["", "misc", "automod", "antinuke", "whitelist", "joingate", "joinraid", "verification"][i].into() part=if (2..=4).contains(&i) { "general" } else { "" } enrolled /> }.into_any(),
+            9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a href=format!("#/{}/overview", g)><button class="go">"Go to Overview"</button></a></div> }.into_any(),
+            i => { let (name, cards) = CARDS[i - 1]; view! { <Section guild=g.clone() name=name.to_string() cards next=Callback::new(move |_| step.update(|i| *i += 1)) enrolled /> }.into_any() }
         }}
-        <p><Show when=move || step.get() < STEPS.len() - 1><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
+        <p><Show when=move || matches!(step.get(), 0 | 8)><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
         <StepUp need enrolled />
     }
 }
 
 /// Progress ring: `pct` filled, number in the middle.
 #[component]
-pub fn Ring(pct: Signal<usize>, #[prop(default = None)] color: Option<&'static str>) -> impl IntoView {
+pub fn Ring(pct: Signal<usize>, #[prop(default = None)] color: Option<&'static str>, #[prop(default = false)] small: bool) -> impl IntoView {
     // Without a fixed colour the ring is red under 50, orange under 80 and green above.
     let c = move || color.unwrap_or(match pct.get() { 0..50 => "var(--bad)", 50..80 => "var(--warn)", _ => "var(--ok)" });
-    view! { <div class="ring" style=move || format!("--p:{};--c:{}", pct.get(), c())><b>{move || format!("{}%", pct.get())}</b></div> }
+    view! { <div class="ring" class:small=small style=move || format!("--p:{};--c:{}", pct.get(), c())><b>{move || format!("{}%", pct.get())}</b></div> }
 }
 
 /// (section, title, description, has a master switch, switch default when the key is missing).
@@ -154,7 +150,6 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     load();
     let pct = Signal::derive(move || { let r = rows.get(); if r.is_empty() { 0 } else { r.iter().filter(|x| x["severity"] == "ok").count() * 100 / r.len() } });
     let (id, g2) = (guild.clone(), guild.clone());
-    let notes = RwSignal::new(false);
     view! {
         <div class="card"><div class="split">
             <div>
@@ -167,9 +162,9 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     <span class="stat"><span>"Type"</span><b class="chip">"STANDARD"</b></span> })}
                 {move || (!members.get().is_null()).then(|| view! { <Stat label="Members" value=s(&members.get()) /> })}
             </div>
-            <div><h2>"Security"</h2><Ring pct /><p><button class="ghost" on:click=move |_| notes.update(|n| *n = !*n)>"Notes"</button></p></div>
-        </div>
-        <For each=move || if notes.get() { rows.get() } else { vec![] } key=|r| s(&r["id"]) let:r>
+        </div></div>
+        <div class="card"><div class="row"><h2>"Security score"</h2><Ring pct small=true /></div>
+        <For each=move || rows.get() key=|r| s(&r["id"]) let:r>
             {
                 let (g, load) = (guild.clone(), load.clone());
                 let class = match r["severity"].as_str() { Some("ok") => "ok", Some("warn") => "warn", _ => "err" };
@@ -179,7 +174,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     view! { <button on:click=move |_| { let (g, role, load) = (g.clone(), role.clone(), load.clone());
                         run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(json!({"role_id": role}))).await }, msg, need, move |_| load()) }>{l}</button> }
                 });
-                view! { <div class="row"><b class=class>{s(&r["title"])}</b><span class="muted">{s(&r["detail"])}</span>{fix}</div> }
+                view! { <div class="row note"><b class=class>{if class == "ok" { "✓" } else { "!" }}" "{s(&r["title"])}</b><span class="muted">{s(&r["detail"])}</span>{fix}</div> }
             }
         </For></div>
         <h2 style="text-align:center">"Quick Systems Overview"</h2>
@@ -255,6 +250,7 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let has_key = RwSignal::new(false);
     let key = RwSignal::new(String::new());
+    let shown = RwSignal::new(false);
     let claim = RwSignal::new(String::new());
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
@@ -278,8 +274,11 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <p class="muted">{move || if has_key.get() { "A rescue key exists. Regenerating invalidates the old one." } else { "No rescue key yet." }}</p>
             <button on:click=regen>"Regenerate key (owner)"</button>
             <Show when=move || !key.get().is_empty()>
-                <p><b>"Shown once. Store it somewhere safe:"</b></p>
-                <pre>{move || key.get()}</pre>
+                <p><b>"Rescue Key (shown once, store it somewhere safe):"</b></p>
+                <div class="row"><pre class:blur=move || !shown.get()>{move || key.get()}</pre>
+                    <button class="danger" on:click=move |_| shown.update(|v| *v = !*v)>{move || if shown.get() { "Hide" } else { "Show" }}</button>
+                    <button class="ghost" on:click=move |_| { if let Some(w) = web_sys::window() { let _ = w.navigator().clipboard().write_text(&key.get_untracked()); } }>"Copy"</button></div>
+                <ul class="checks warn"><li>"View this rescue key alone!"</li><li>"Anyone with this rescue key can get dangerous TommyBot permissions."</li><li>"This rescue key is used ONLY when you lose physical owner account access."</li><li>"It grants TommyBot owner permissions, not Discord ownership."</li></ul>
             </Show>
         </div>
         <div class="card">

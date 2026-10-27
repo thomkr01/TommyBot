@@ -269,7 +269,16 @@ fn raw_editor(val: RwSignal<Value>, name: String, msg: RwSignal<String>) -> impl
 /// Schema-driven form for the sections the backend describes; raw JSON stays available underneath.
 /// Fields of other sections (`"section"` in the schema) are shown and saved alongside.
 #[component]
-pub fn Section(guild: String, name: String, #[prop(into, default = String::new())] part: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+pub fn Section(
+    guild: String,
+    name: String,
+    #[prop(into, default = String::new())] part: String,
+    enrolled: ReadSignal<bool>,
+    /// Wizard mode: these cards one at a time instead of the grouped form.
+    #[prop(optional)] cards: Option<&'static [crate::wizard::Card]>,
+    /// Called by the forward arrow on the last card.
+    #[prop(optional)] next: Option<Callback<()>>,
+) -> impl IntoView {
     // The whole config, so fields of other sections share one form and one save.
     let val = RwSignal::new(json!({}));
     let version = RwSignal::new(0i64);
@@ -304,6 +313,37 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
         }
     });
     let n = StoredValue::new(name);
+    let reload = {
+        let g = guild.clone();
+        move |v: i64| { let g = g.clone(); version.set(v); spawn_local(async move {
+            if let Ok(c) = api("GET", &format!("/api/guilds/{g}/config"), None).await { val.set(c["config"].clone()); orig.set(c["config"].clone()); }
+        }) }
+    };
+    let card_view = cards.map(|cs| {
+        let at = RwSignal::new(0usize);
+        let g = guild.clone();
+        let act = move |path: &'static str| {
+            let (g, v, reload) = (g.clone(), version.get_untracked(), reload.clone());
+            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.set("Done".into()); reload(r["version"].as_i64().unwrap_or(0)) });
+        };
+        view! { <div class="card wiz">
+            <button class="nav back" aria-label="previous" disabled=move || at.get() == 0 on:click=move |_| at.update(|i| *i = i.saturating_sub(1))>"‹"</button>
+            <div class="wizbody">
+                {move || { let c = &cs[at.get()]; let all = fields.get();
+                    let fs: Vec<Value> = c.fields.iter().filter_map(|(p, l)| all.iter().find(|f| f["path"] == *p).map(|f| { let mut f = f.clone(); if !l.is_empty() { f["title"] = json!(l); } f })).collect();
+                    let act = act.clone();
+                    view! {
+                        <h2>{c.title}</h2><p class="muted">{c.desc}</p>
+                        {c.notes.iter().map(|t| view! { <p class="note">{*t}</p> }).collect_view()}
+                        <div class="split"><div>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}
+                            {c.action.map(|(label, path)| view! { <button class="go" disabled=move || val.get() != orig.get() on:click=move |_| act(path)>{label}</button> })}</div>
+                            <div class="preview">{move || (cs[at.get_untracked()].preview)(&val.get(), &dc.get())}</div></div>
+                    } }}
+                <p class="muted">{move || format!("{} / {}", at.get() + 1, cs.len())}</p>
+            </div>
+            <button class="nav" aria-label="next" on:click=move |_| if at.get() + 1 < cs.len() { at.update(|i| *i += 1) } else if let Some(n) = next { n.run(()) }>"›"</button>
+        </div> }
+    });
     let save = move |_| {
         let (g, cur, before) = (guild.clone(), val.get_untracked(), orig.get_untracked());
         orig.set(cur.clone());
@@ -321,7 +361,8 @@ pub fn Section(guild: String, name: String, #[prop(into, default = String::new()
         }, version, msg, need);
     };
     view! {
-        <Show when=move || !fields.get().is_empty() fallback=move || raw_editor(val, n.get_value(), msg)>
+        {card_view}
+        <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| raw_editor(val, n.get_value(), msg))>
             <div class="cards">
                 {move || {
                     // One card per path prefix ("limits.ban" -> "limits ban"); unprefixed fields go under "General".

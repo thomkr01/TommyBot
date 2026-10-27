@@ -80,3 +80,18 @@ table.permits { width:100%; max-width:900px; margin:0 auto; border-collapse:coll
 details.notes { margin:8px 0 0; } details.notes summary { cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; } details.notes .bell { float:none; } details.notes p { margin:6px 0 0; color:var(--warn); }
 .bell { width:28px; height:28px; border-radius:50%; background:var(--bad); display:grid; place-items:center; font-size:14px; }
 .stack.narrow { max-width:36rem; }
+/* Wizard cards: arrows on the sides, settings left, Discord-like preview right. */
+.card.wiz { display:flex; gap:12px; align-items:stretch; }
+.wiz .wizbody { flex:1; min-width:0; }
+.wiz .nav { width:32px; flex:none; font-size:22px; padding:0; background:var(--ok); border-color:var(--ok); }
+.wiz .nav.back { background:var(--bad); border-color:var(--bad); }
+.wiz .nav:disabled { opacity:.3; }
+.wiz .preview { background:var(--b3); border-radius:6px; padding:8px 12px; min-width:220px; }
+.note { background:var(--b3); border:1px solid var(--line); border-radius:6px; padding:4px 10px; margin:4px 0; font-size:13px; }
+.dmsg { margin:6px 0; } .dmsg > div { margin-top:2px; }
+.dembed { border-left:4px solid var(--primary); background:var(--b2); border-radius:4px; padding:6px 10px; margin-top:4px; font-size:13px; }
+.dinput { background:var(--b1); border-radius:6px; padding:6px 10px; margin-top:8px; font-family:monospace; }
+.checks { list-style:none; padding:0; } .checks li::before { content:"○ "; } .checks li.ok { color:var(--ok); } .checks li.ok::before { content:"✓ "; }
+.checks.warn li { color:var(--warn); } .checks.warn li::before { content:"⚠ "; }
+pre.blur { filter:blur(6px); user-select:none; }
+.ring.small { width:56px; height:56px; } .ring.small b { width:40px; height:40px; font-size:13px; }
