@@ -1,88 +1,96 @@
 # TommyBot
 
-Rust Discord moderation bot modelled on Wick and Sapphire. Two binaries:
+A Discord moderation bot written in Rust, modelled on Wick and Sapphire. It protects a server from raids, nukes and spam, and comes with a web dashboard so every setting can be changed without commands. All features are free.
 
-- `tommybot` (`crates/bot`): the gateway bot.
-- `tommybot-dashboard` (`crates/dashboard`): web dashboard, axum API plus a Leptos UI.
+## Features
 
-Both need the same Postgres. Migrations run on startup.
+- **Anti-nuke**: limits on mass bans, kicks and channel or role deletion, with automatic revert and panic mode
+- **Automod**: spam and link filters with strikes and punishments
+- **Join gate and lockdown**: screen new members, lock channels during a raid
+- **Verification**: web-based member verification (Cloudflare Turnstile optional)
+- **Logging**: message, member, role, channel and moderation logs
+- **Appeals and cases**: ban appeals, notes, reports and a full case history
+- **Permits**: staff get no Discord permissions; the bot does the moderation, so a compromised staff account is limited and revertible
+- **Web dashboard**: configure everything in the browser after logging in with Discord
 
-## 1. Create the Discord app
+## Installation
 
-1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and click **New Application**.
-2. **General Information**: copy the **Application ID**. This is `DISCORD_CLIENT_ID`.
-3. **OAuth2**: copy the **Client Secret**. This is `DISCORD_CLIENT_SECRET`. Under **Redirects**, add `<DASHBOARD_URL>/auth/callback`, for example `http://localhost:8080/auth/callback`.
-4. **Bot**: click **Reset Token** and copy it. This is `DISCORD_TOKEN`. Under **Privileged Gateway Intents**, turn on **Server Members Intent** and **Message Content Intent**. The bot will not connect without them. Discord requires approval for these once the bot is in more than 100 servers.
-5. Invite the bot to your server with this URL, replacing `CLIENT_ID`:
+You need Docker with the Compose plugin and a Discord application.
 
-   `https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=8`
+**1. Create the Discord app.** In the [Developer Portal](https://discord.com/developers/applications):
 
-   Permission `8` is Administrator. That matches the design: staff get no Discord permissions, and the bot does the moderation. After the invite, drag the bot's role to the top of the role list. Discord rejects actions on roles above the bot.
+- Create a **New Application** and copy the Application ID and Client Secret.
+- Under **OAuth2 > Redirects**, add `<DASHBOARD_URL>/auth/callback`, for example `http://localhost:8080/auth/callback`.
+- Under **Bot**, reset and copy the token, and enable **Server Members Intent** and **Message Content Intent**.
+- Invite the bot with this URL, replacing `CLIENT_ID`, then move the bot's role to the top of the role list:
 
-## 2. Configure
+```text
+https://discord.com/oauth2/authorize?client_id=CLIENT_ID&scope=bot+applications.commands&permissions=8
+```
+
+**2. Get the code and configure it.** Windows users run `git` in MSYS2 UCRT64.
 
 ```sh
+git clone https://github.com/thomkr01/tommybot.git
+cd tommybot
 cp .env.example .env
 ```
 
-Fill in the values. `.env` is ignored by git.
+Fill in `.env` (see [Configuration](#configuration)).
 
-## 3. Run with Docker (local or server)
-
-You need Docker Engine with the Compose plugin. Nothing else is installed on the host.
+**3. Start everything.** Windows users run `docker` in PowerShell, from the repo folder.
 
 ```sh
 docker compose up -d --build
-docker compose logs -f bot        # bot output
-docker compose ps                 # all three services should be up
 ```
 
-Open `DASHBOARD_URL` (default `http://localhost:8080`) and log in with Discord.
+Open `http://localhost:8080` and log in with Discord.
 
-Compose starts Postgres, the bot and the dashboard. Postgres is not exposed to the host. Its data lives in the `pgdata` volume. Stop with `docker compose down`. Add `-v` only if you want to delete the data.
+## Usage
 
-**On a server:** run the same commands on a Linux host. The bot makes outbound connections only. For HTTPS, put a reverse proxy in front of the dashboard, such as Caddy or nginx, that forwards to `127.0.0.1:8080`. Set `DASHBOARD_URL` to the https address, and add the matching `/auth/callback` redirect in the Discord portal. Then restart with `docker compose up -d`.
-
-## 4. Run without Docker
-
-You need a recent stable Rust toolchain, Postgres 16, and `psql` for creating the database.
+Run these in PowerShell on Windows, in a normal shell elsewhere:
 
 ```sh
-createdb tommybot                 # or create a role and database with psql
-cp .env.example .env              # set DATABASE_URL, for example postgres://user:pass@localhost:5432/tommybot
-set -a; . ./.env; set +a          # the binaries read the environment, not .env
+docker compose logs -f bot     # follow bot output
+docker compose ps              # check the services are up
+docker compose down            # stop (add -v to also delete the database)
+```
 
-# Bot
+Day-to-day setup happens in the dashboard. The bot also answers slash commands in Discord; type `/` to see them.
+
+To run in production, use a Linux host and put a reverse proxy such as Caddy or nginx in front of the dashboard. Set `DASHBOARD_URL` to the https address and add the matching redirect in the Developer Portal.
+
+### Without Docker
+
+Needs a recent stable Rust toolchain and Postgres 16.
+
+```sh
+set -a; . ./.env; set +a       # the binaries read the environment, not .env
 cargo run --release -p tommybot
 
-# Dashboard: build the UI once, then run the API
+# in a second terminal: build the dashboard UI once, then run it
 rustup target add wasm32-unknown-unknown
-cargo install trunk --version 0.21.14 --locked
+cargo install trunk --locked
 (cd crates/dashboard/ui && trunk build --release)
 cargo run --release -p tommybot-dashboard
 ```
 
-The dashboard serves the UI from `crates/dashboard/ui/dist` by default. Override with `DASHBOARD_DIST`.
+Run the tests with `cargo test --workspace`. Set `DATABASE_URL` to include the database tests.
 
-Tests run against a real database when `DATABASE_URL` is set, and skip otherwise:
+## Configuration
 
-```sh
-DATABASE_URL=postgres://... cargo test --workspace
-```
+Settings are environment variables in `.env`; `.env.example` lists all of them with comments. The ones you must set:
 
-## Environment reference
+| Variable | Purpose |
+|---|---|
+| `DISCORD_TOKEN` | Bot token |
+| `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | Dashboard login |
+| `DASHBOARD_URL` | Public address of the dashboard |
+| `POSTGRES_PASSWORD` | Database password (Docker) |
+| `DATABASE_URL` | Database connection (without Docker) |
 
-| Variable | Used by | Required | Purpose |
-|---|---|---|---|
-| `DISCORD_TOKEN` | bot, dashboard | yes | Bot token |
-| `DATABASE_URL` | bot, dashboard | yes | Postgres connection string |
-| `DISCORD_CLIENT_ID` | dashboard | yes | OAuth2 login |
-| `DISCORD_CLIENT_SECRET` | dashboard | yes | OAuth2 login |
-| `DASHBOARD_URL` | dashboard, bot | yes | Public base URL, used for the OAuth redirect |
-| `SUPPORT_URL` | bot, dashboard | no | Link behind the Support buttons in the welcome message and the dashboard wizard |
-| `BIND` | dashboard | no | Listen address, default `0.0.0.0:8080` |
-| `DASHBOARD_DIST` | dashboard | no | Built UI folder |
-| `METRICS_ADDR` | bot | no | Serves Prometheus metrics on this address, e.g. `127.0.0.1:9100`. Off when unset. No auth, so keep it private |
-| `RUST_LOG` | both | no | Log level, default `info` in Docker |
+Everything else is optional. Per-server settings live in the dashboard. Dashboard access rules are in `crates/dashboard/README.md`.
 
-Dashboard access rules are in `crates/dashboard/README.md`.
+## Legal
+
+See [PRIVACY.md](PRIVACY.md) and [TERMS.md](TERMS.md).
