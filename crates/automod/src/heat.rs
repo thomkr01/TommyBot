@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 #[serde(default)]
 pub struct HeatCfg {
     pub max: f64,
-    /// Fraction of total heat lost per second (0.1 = 10%/s).
+    /// Fraction of total heat lost per second (0.05 = 5%/s, Wick's default).
     pub decay_per_sec: f64,
     pub base: f64,
     pub per_char: f64,
@@ -47,7 +47,7 @@ impl Default for HeatCfg {
     fn default() -> Self {
         Self {
             max: 100.0,
-            decay_per_sec: 0.1,
+            decay_per_sec: 0.05,
             base: 18.0,
             per_char: 0.05,
             free_chars: 200,
@@ -344,7 +344,7 @@ mod tests {
             value: 100.0,
             at_ms: 0,
         };
-        assert!((s.decayed(2000, &cfg) - 81.0).abs() < 1e-9);
+        assert!((s.decayed(2000, &cfg) - 90.25).abs() < 1e-9);
         assert_eq!(s.decayed(-5, &cfg), 100.0);
     }
 

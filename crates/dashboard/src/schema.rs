@@ -1,7 +1,11 @@
 //! Typed form fields per config section, served to the dashboard UI.
 use serde_json::{json, Value};
 use tommybot_antinuke::Action as NukeAction;
-use tommybot_automod::{heat::HeatCfg, strike::StrikeCfg};
+use tommybot_automod::{
+    heat::HeatCfg,
+    join::{Action as GateAction, Filter as GateFilter},
+    strike::StrikeCfg,
+};
 use tommybot_logging::LogEvent;
 
 const LOG_KINDS: &[&str] = &[
@@ -166,10 +170,9 @@ const SUBS: &[(&str, &str, &str, &str, &str)] = &[
 ];
 /// "" leaves the decision to the strike system.
 const FILTER_ACTIONS: &[&str] = &["delete", "warn", "timeout", "kick", "ban", ""];
-/// Anti-nuke filter cards: (action, card title).
+/// Anti-nuke filter cards: (action, card title). Kicks count on the Ban card.
 const NUKE_CARDS: &[(&str, &str)] = &[
-    ("Kick", "Kicks"),
-    ("Ban", "Bans"),
+    ("Ban", "Kicks & Bans"),
     ("RoleCreate", "Role creations"),
     ("RoleDelete", "Role deletions"),
     ("ChannelCreate", "Channel creations"),
@@ -177,7 +180,7 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("WebhookCreate", "Webhook creations"),
     ("WebhookDelete", "Webhook deletions"),
 ];
-const GATE_ACTIONS: &[&str] = &["", "Log", "Warn", "Timeout", "Kick", "Ban"];
+const GATE_ACTIONS: &[&str] = &["Log", "Warn", "Timeout", "Kick", "Ban"];
 
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
 pub fn schema() -> Vec<Value> {
@@ -243,8 +246,8 @@ pub fn schema() -> Vec<Value> {
         ti(fg("Auto quarantine", "monitor_public_roles", "bool"), "Monitor public roles: protect @everyone and main roles from getting dangerous permissions"),
         ti(fg("Auto quarantine", "monitor_channel_perms", "bool"), "Monitor channel permissions: protect @everyone and main roles from getting dangerous CHANNEL permissions"),
         hp(
-            ti(fg("Auto quarantine", "quarantine_whitelist", "list"), "Quarantine whitelist"),
-            "User IDs that may change the roles of quarantined members.",
+            ti(fg("Auto quarantine", "quarantine_whitelist", "users"), "Quarantine whitelist"),
+            "Members that may change the roles of quarantined members.",
         ),
     ];
     for (a, title) in NUKE_CARDS {
@@ -261,7 +264,7 @@ pub fn schema() -> Vec<Value> {
             )
         };
         let mut first = dv(at("enabled", "bool", "Monitor this action"), true);
-        if *a == "Kick" {
+        if *a == "Ban" {
             first = hp(first, "We absolutely recommend not giving your staff members native Discord Ban/Kick permissions, force them to use the bot's kick and ban commands that are supervised by the antinuke.");
         }
         if *a == "WebhookCreate" {
@@ -295,10 +298,10 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), true), "Multiply timeouts"),
         ti(dv(fg("Auto timeouts", "strike.multiplier_pct", "int"), 200), "Multiplier percentage"),
         ti(dv(fg("Heat settings", "heat.max", "float"), 100.0), "Max heat"),
-        ti(dv(fg("Heat settings", "heat.decay_per_sec", "float"), 0.1), "Heat degradation (every second)"),
+        ti(dv(fg("Heat settings", "heat.decay_per_sec", "float"), 0.05), "Heat degradation (every second)"),
         dv(fg("Heat settings", "heat.webhook_multiplier", "float"), 1.5),
         hp(
-            ti(dv(fg("Heat settings", "strike.reset_heat_on_timeout", "bool"), true), "Set current heat to 0 after punishment"),
+            ti(dv(fg("Heat settings", "strike.reset_heat_on_timeout", "bool"), false), "Set current heat to 0 after punishment"),
             "The filter that generated the most heat is picked as the reason, and its action is used.",
         ),
         ti(fg("Auto lockdown", "auto_lockdown.enabled", "bool"), "Use the auto lockdown module"),
@@ -505,48 +508,67 @@ pub fn schema() -> Vec<Value> {
             "Act only when every enabled filter matches",
         ),
     ];
-    // "off" in the action select turns a gate filter off.
-    for (k, card, help) in [
+    // (key, card, status label, filter whose Wick default action the select shows).
+    for (k, card, status, filter) in [
         (
             "unauthorized_bot",
             "Bot additions",
             "Target bots added by unauthorized members",
+            GateFilter::UnauthorizedBot,
         ),
         (
             "unverified_bot",
             "Unverified bot additions",
             "Target Discord unverified bots added by anyone",
+            GateFilter::UnverifiedBot,
         ),
         (
             "no_avatar",
             "No avatar",
             "Target accounts that have no profile pictures",
+            GateFilter::NoAvatar,
         ),
         (
             "suspicious",
             "Suspicious account",
             "Target accounts TommyBot deems suspicious",
+            GateFilter::Suspicious,
         ),
         (
             "invite_in_name",
             "Advertising name",
             "Target accounts with invite links in usernames",
+            GateFilter::InviteInName,
         ),
         (
             "account_age",
             "Account age",
             "Target accounts younger than the minimum account age",
+            GateFilter::AccountAge,
         ),
         (
             "username_filter",
             "Username",
             "Target accounts whose username matches your list",
+            GateFilter::UsernameFilter,
         ),
     ] {
-        gate.push(hp(
-            ti(choice(card, k, GATE_ACTIONS), "Trigger action"),
-            help,
-        ));
+        gate.extend([
+            ti(fg(card, &format!("{k}.enabled"), "bool"), status),
+            hp(
+                ti(
+                    dv(
+                        choice(card, &format!("{k}.action"), GATE_ACTIONS),
+                        match filter.default_action() {
+                            GateAction::Timeout(_) => "Timeout".to_string(),
+                            a => format!("{a:?}"),
+                        },
+                    ),
+                    "Trigger action",
+                ),
+                "Kick is Discord's native kick feature, Timeout its native timeout.",
+            ),
+        ]);
     }
     gate.extend([
         ti(
@@ -628,7 +650,7 @@ pub fn schema() -> Vec<Value> {
         fg("Response", "lock_mod_commands", "bool"),
         fg("Response", "unlock_when_ending", "bool"),
         fg("Response", "warned_roles", "roles"),
-        fg("Response", "whitelisted_categories", "channels"),
+        fg("Response", "whitelisted_categories", "categories"),
     ];
     let mut whitelist = vec![];
     for (tab, prefix) in [
@@ -638,10 +660,10 @@ pub fn schema() -> Vec<Value> {
         ("everyone", "everyone."),
     ] {
         for (key, card, kind) in [
-            ("users", "Members", "list"),
+            ("users", "Members", "users"),
             ("roles", "Roles", "roles"),
             ("channels", "Channels", "channels"),
-            ("categories", "Categories", "channels"),
+            ("categories", "Categories", "categories"),
             ("webhooks", "Webhooks", "list"),
         ] {
             let v = ti(fg(card, &format!("{prefix}{key}"), kind), card);
@@ -687,7 +709,7 @@ pub fn schema() -> Vec<Value> {
                 "The roles your members have; lockdown and verification use them.",
             ),
         ),
-        ti(fg("Moderation commands", "confirm", "bool"), "Display a confirmation message before executing the moderation action a moderator wants"),
+        ti(dv(fg("Moderation commands", "confirm", "bool"), true), "Display a confirmation message before executing the moderation action a moderator wants"),
         ti(fg("Moderation commands", "always_dm", "bool"), "Always DM the members punished regardless of the presence of a ?dm parameter"),
         ti(fg("Moderation commands", "delete_invocation", "bool"), "Always delete the moderation execution messages for regular prefix commands"),
         ti(fg("Moderation commands", "hide_staff_in_dms", "bool"), "Hide the staff member responsible when DMing the punished member"),
@@ -698,12 +720,12 @@ pub fn schema() -> Vec<Value> {
             ),
             "0 means 28 days",
         ),
-        ti(dv(fg("Moderation commands", "ban_purge_days", "int"), 0), "Days purged on bans"),
+        ti(dv(fg("Moderation commands", "ban_purge_days", "int"), 7), "Days purged on bans"),
         ti(dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true), "Display the reason behind the auto punishment in the message TommyBot sends"),
         ti(fg("Auto moderation", "purge_last_100", "bool"), "Always purge the messages sent by the punished member found in the recent 100 messages"),
-        ti(dv(fg("Auto moderation", "staff_only_permitted", "bool"), true), "Consider only owners, trusted admins and any member with the flags (IMMUNITY|AUTOMOD IMMUNITY) to be considered staff members. Punish anyone else triggering the auto mod"),
+        ti(fg("Auto moderation", "staff_only_permitted", "bool"), "Consider only owners, trusted admins and any member with the flags (IMMUNITY|AUTOMOD IMMUNITY) to be considered staff members. Punish anyone else triggering the auto mod"),
         ti(dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true), "Issue an action once a member reaches certain points"),
-        ti(dv(fg("Auto warn actions", "warn_base_points", "int"), 1), "Base points"),
+        ti(dv(fg("Auto warn actions", "warn_base_points", "int"), 5), "Base points"),
         ti(fg("Auto warn actions", "warn_actions", "warn_actions"), "Custom actions"),
     ];
     let verification = vec![
@@ -786,6 +808,10 @@ pub fn schema() -> Vec<Value> {
             "Captcha width",
         ),
         ti(
+            dv(fg("Captcha", "captcha.font_size", "int"), 40),
+            "Font size",
+        ),
+        ti(
             dv(fg("Captcha", "captcha.font_color", "color"), "#000000"),
             "Font color",
         ),
@@ -804,6 +830,10 @@ pub fn schema() -> Vec<Value> {
         ti(
             dv(fg("Captcha", "captcha.spread", "bool"), true),
             "Show small spread-around dots to trick scripts",
+        ),
+        ti(
+            dv(fg("Captcha", "captcha.decoy_color", "color"), "#000000"),
+            "Decoy color",
         ),
     ];
     let appeals = vec![
@@ -853,6 +883,26 @@ pub fn schema() -> Vec<Value> {
 mod tests {
     use super::*;
     use crate::api;
+
+    #[test]
+    fn gate_actions_show_wick_defaults() {
+        let gate = schema()
+            .into_iter()
+            .find(|s| s["name"] == "joingate")
+            .unwrap();
+        let default = |p: &str| {
+            gate["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == p)
+                .unwrap()["default"]
+                .clone()
+        };
+        assert_eq!(default("username_filter.action"), "Ban");
+        assert_eq!(default("invite_in_name.action"), "Timeout");
+        assert_eq!(default("no_avatar.action"), "Kick");
+    }
 
     #[test]
     fn every_schema_path_deserializes() {

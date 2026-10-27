@@ -5,7 +5,7 @@ use crate::{
     schema, store, ApiError, AppState,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -18,6 +18,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/guilds/{guild}/schema", get(schema_route))
         .route("/api/guilds/{guild}/discord", get(discord_route))
+        .route("/api/guilds/{guild}/members", get(members_route))
         .route("/api/guilds/{guild}/wizard/auto-setup", post(auto_setup))
         .route("/api/guilds/{guild}/logging/setup", post(log_setup))
         .route(
@@ -64,6 +65,69 @@ async fn discord_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
     Ok(Json(
         json!({"channels": channels, "roles": roles, "members": info["approximate_member_count"]}),
     ))
+}
+
+#[derive(Deserialize)]
+struct MemberQ {
+    /// Name to search for.
+    #[serde(default)]
+    q: String,
+    /// Or: comma-separated user ids to show by name.
+    #[serde(default)]
+    ids: String,
+}
+
+/// The user picker: members matching `q`, or the members behind `ids` (at most 25, unknown ids left out).
+async fn members_route(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Query(m): Query<MemberQ>,
+) -> Res {
+    api::require(&st, &s, guild, Level::Viewer, false).await?;
+    let found = if m.q.trim().is_empty() {
+        let mut found = vec![];
+        // Digits only: the id becomes part of the Discord path.
+        let ids = m
+            .ids
+            .split(',')
+            .filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()));
+        for id in ids.take(25) {
+            if let Ok(x) = st
+                .discord
+                .call(Method::GET, &format!("/guilds/{guild}/members/{id}"), None)
+                .await
+            {
+                found.push(x);
+            }
+        }
+        found
+    } else {
+        let q = crate::discord::urlencode(m.q.trim());
+        st.discord
+            .call(
+                Method::GET,
+                &format!("/guilds/{guild}/members/search?limit=10&query={q}"),
+                None,
+            )
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let list = found
+        .iter()
+        .filter(|m| m["user"]["id"].is_string())
+        .map(|m| {
+            let u = &m["user"];
+            let name = m["nick"]
+                .as_str()
+                .or(u["global_name"].as_str())
+                .or(u["username"].as_str());
+            json!({"id": u["id"], "name": name.unwrap_or_default()})
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!(list)))
 }
 
 #[derive(Deserialize)]

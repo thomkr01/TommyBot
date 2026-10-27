@@ -96,7 +96,7 @@ fn toggle_theme() {
     let _ = root.set_attribute("data-theme", next);
 }
 
-fn hash() -> Vec<String> {
+pub(crate) fn hash() -> Vec<String> {
     let h = web_sys::window().unwrap().location().hash().unwrap_or_default();
     h.trim_start_matches('#').split('/').filter(|s| !s.is_empty()).map(String::from).collect()
 }

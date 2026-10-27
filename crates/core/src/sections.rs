@@ -81,7 +81,7 @@ impl AntinukeCfg {
         if a == NukeAction::Prune && !self.prune {
             return None;
         }
-        let c = self.limits.get(&a).copied().unwrap_or_default();
+        let c = self.limits.get(&a.card()).copied().unwrap_or_default();
         let d = a.default_limit();
         let limit = Limit {
             per_minute: c.per_minute.or(d.map(|d| d.0))?,
@@ -440,16 +440,16 @@ impl Default for MiscCfg {
             enforce_quarantine_perms: false,
             ignore_no_permit: false,
             enforce_permits: false,
-            confirm: false,
+            confirm: true,
             always_dm: false,
             delete_invocation: false,
             hide_staff_in_dms: false,
             default_timeout_secs: 600,
-            ban_purge_days: 0,
+            ban_purge_days: 7,
             show_reason_on_auto: true,
             purge_last_100: false,
-            staff_only_permitted: true,
-            warn_base_points: 1,
+            staff_only_permitted: false,
+            warn_base_points: 5,
             auto_warn_actions: true,
             warn_actions: vec![],
         }
