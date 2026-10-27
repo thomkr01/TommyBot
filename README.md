@@ -7,7 +7,7 @@ A Discord moderation bot written in Rust, modelled on Wick and Sapphire. It prot
 - **Anti-nuke**: limits on mass bans, kicks and channel or role deletion, with automatic revert and panic mode
 - **Automod**: spam and link filters with strikes and punishments
 - **Join gate and lockdown**: screen new members, lock channels during a raid
-- **Verification**: web-based member verification (Cloudflare Turnstile optional)
+- **Verification**: captcha and web-based member verification
 - **Logging**: message, member, role, channel and moderation logs
 - **Appeals and cases**: ban appeals, notes, reports and a full case history
 - **Permits**: staff get no Discord permissions; the bot does the moderation, so a compromised staff account is limited and revertible
