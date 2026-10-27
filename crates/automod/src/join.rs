@@ -68,6 +68,17 @@ pub enum Filter {
     UsernameFilter,
 }
 
+impl Filter {
+    /// Wick's trigger action for the card when none is saved.
+    pub fn default_action(self) -> Action {
+        match self {
+            Filter::InviteInName => Action::Timeout(0),
+            Filter::UsernameFilter => Action::Ban,
+            _ => Action::Kick,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GateCfg {
@@ -104,6 +115,7 @@ pub struct GateFilter {
 }
 
 impl GateFilter {
+    #[cfg(test)]
     pub fn on(action: Action) -> Self {
         Self {
             enabled: true,
@@ -239,45 +251,35 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
     let age = now - account_created_ms(j.id);
     let mut enabled = 0;
     let mut hits = vec![];
-    let mut check = |on: Option<Action>, f: Filter, hit: bool| {
-        if let Some(a) = on {
+    let mut check = |on: GateFilter, f: Filter, hit: bool| {
+        if let Some(a) = on.get(f.default_action()) {
             enabled += 1;
             if hit {
                 hits.push((f, a));
             }
         }
     };
-    // Each card falls back to Wick's default action.
-    use Action::{Kick, Timeout};
-    check(cfg.no_avatar.get(Kick), Filter::NoAvatar, !j.has_avatar);
+    check(cfg.no_avatar, Filter::NoAvatar, !j.has_avatar);
     let min = cfg.min_age_ms();
+    check(cfg.account_age, Filter::AccountAge, age < min.max(5_000));
     check(
-        cfg.account_age.get(Kick),
-        Filter::AccountAge,
-        age < min.max(5_000),
-    );
-    check(
-        cfg.unauthorized_bot.get(Kick),
+        cfg.unauthorized_bot,
         Filter::UnauthorizedBot,
         j.is_bot && !j.added_by_authorized,
     );
     check(
-        cfg.unverified_bot.get(Kick),
+        cfg.unverified_bot,
         Filter::UnverifiedBot,
         j.is_bot && !j.bot_verified,
     );
+    check(cfg.invite_in_name, Filter::InviteInName, has_invite(j.name));
     check(
-        cfg.invite_in_name.get(Timeout(0)),
-        Filter::InviteInName,
-        has_invite(j.name),
-    );
-    check(
-        cfg.suspicious.get(Kick),
+        cfg.suspicious,
         Filter::Suspicious,
         is_suspicious(j, cfg, min, now),
     );
     check(
-        cfg.username_filter.get(USERNAME_DEFAULT),
+        cfg.username_filter,
         Filter::UsernameFilter,
         cfg.name_matches(j.name),
     );
@@ -292,9 +294,6 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
     }
     hits
 }
-
-/// The username card's default, shared with the post-join re-check.
-pub const USERNAME_DEFAULT: Action = Action::Ban;
 
 pub fn harshest(hits: &[(Filter, Action)]) -> Option<Action> {
     hits.iter().map(|h| h.1).max()
@@ -565,7 +564,7 @@ pub struct CaptchaCfg {
     pub mixed: bool,
     /// Small spread-around dots to trick scripts.
     pub spread: bool,
-    /// `#rrggbb` of the trace, noise and dots.
+    /// `#rrggbb` of the noise and dots.
     pub decoy_color: String,
 }
 
@@ -718,7 +717,11 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.no_avatar.get(Action::Kick), Some(Action::Ban));
         assert_eq!(cfg.account_age.get(Action::Kick), None);
-        assert_eq!(cfg.username_filter.get(USERNAME_DEFAULT), Some(Action::Ban));
+        assert_eq!(
+            cfg.username_filter
+                .get(Filter::UsernameFilter.default_action()),
+            Some(Action::Ban)
+        );
         assert_eq!(cfg.invite_in_name.get(Action::Timeout(0)), None);
     }
 

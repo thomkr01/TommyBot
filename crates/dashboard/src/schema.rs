@@ -1,7 +1,11 @@
 //! Typed form fields per config section, served to the dashboard UI.
 use serde_json::{json, Value};
 use tommybot_antinuke::Action as NukeAction;
-use tommybot_automod::{heat::HeatCfg, strike::StrikeCfg};
+use tommybot_automod::{
+    heat::HeatCfg,
+    join::{Action as GateAction, Filter as GateFilter},
+    strike::StrikeCfg,
+};
 use tommybot_logging::LogEvent;
 
 const LOG_KINDS: &[&str] = &[
@@ -494,56 +498,62 @@ pub fn schema() -> Vec<Value> {
             "Act only when every enabled filter matches",
         ),
     ];
-    // (key, card, status label, Wick's default action; `join::gate` falls back to the same).
-    for (k, card, status, action) in [
+    // (key, card, status label, filter whose Wick default action the select shows).
+    for (k, card, status, filter) in [
         (
             "unauthorized_bot",
             "Bot additions",
             "Target bots added by unauthorized members",
-            "Kick",
+            GateFilter::UnauthorizedBot,
         ),
         (
             "unverified_bot",
             "Unverified bot additions",
             "Target Discord unverified bots added by anyone",
-            "Kick",
+            GateFilter::UnverifiedBot,
         ),
         (
             "no_avatar",
             "No avatar",
             "Target accounts that have no profile pictures",
-            "Kick",
+            GateFilter::NoAvatar,
         ),
         (
             "suspicious",
             "Suspicious account",
             "Target accounts TommyBot deems suspicious",
-            "Kick",
+            GateFilter::Suspicious,
         ),
         (
             "invite_in_name",
             "Advertising name",
             "Target accounts with invite links in usernames",
-            "Timeout",
+            GateFilter::InviteInName,
         ),
         (
             "account_age",
             "Account age",
             "Target accounts younger than the minimum account age",
-            "Kick",
+            GateFilter::AccountAge,
         ),
         (
             "username_filter",
             "Username",
             "Target accounts whose username matches your list",
-            "Ban",
+            GateFilter::UsernameFilter,
         ),
     ] {
         gate.extend([
             ti(fg(card, &format!("{k}.enabled"), "bool"), status),
             hp(
                 ti(
-                    dv(choice(card, &format!("{k}.action"), GATE_ACTIONS), action),
+                    dv(
+                        choice(card, &format!("{k}.action"), GATE_ACTIONS),
+                        match filter.default_action() {
+                            GateAction::Timeout(_) => "Timeout".to_string(),
+                            a => format!("{a:?}"),
+                        },
+                    ),
                     "Trigger action",
                 ),
                 "Kick is Discord's native kick feature, Timeout its native timeout.",
@@ -844,6 +854,26 @@ pub fn schema() -> Vec<Value> {
 mod tests {
     use super::*;
     use crate::api;
+
+    #[test]
+    fn gate_actions_show_wick_defaults() {
+        let gate = schema()
+            .into_iter()
+            .find(|s| s["name"] == "joingate")
+            .unwrap();
+        let default = |p: &str| {
+            gate["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["path"] == p)
+                .unwrap()["default"]
+                .clone()
+        };
+        assert_eq!(default("username_filter.action"), "Ban");
+        assert_eq!(default("invite_in_name.action"), "Timeout");
+        assert_eq!(default("no_avatar.action"), "Kick");
+    }
 
     #[test]
     fn every_schema_path_deserializes() {
