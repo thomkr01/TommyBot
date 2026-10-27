@@ -2,6 +2,7 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
 mod appeals;
+mod channels;
 mod records;
 mod common;
 mod form;
@@ -18,9 +19,10 @@ use form::Section;
 use permits::Permits;
 use pages::{Logging, Rescue, Revert, Score, Wizard};
 use recovery::{Backups, Panic};
+use channels::ChannelSetup;
 
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
-const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("channel_setup", "Channel Setup"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
     ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
@@ -233,6 +235,7 @@ fn App() -> impl IntoView {
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 ("revert", _) => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
                                 ("backups", _) => view! { <Backups guild=g.clone() enrolled /> }.into_any(),
+                                ("channel_setup", _) => view! { <ChannelSetup guild=g.clone() enrolled /> }.into_any(),
                                 ("automod_panic", _) => view! { <Panic guild=g.clone() part="heat,general" enrolled /> }.into_any(),
                                 ("antinuke_panic", _) => view! { <Panic guild=g.clone() part="nuke,general" enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
