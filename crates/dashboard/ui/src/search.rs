@@ -29,6 +29,7 @@ fn route(section: &str, page: Option<&str>) -> String {
 fn one_typo(a: &str, b: &str) -> bool {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if s == l { return true; }
     if l.len() - s.len() > 1 { return false; }
     let i = s.iter().zip(&l).take_while(|(x, y)| x == y).count();
     // Past the first difference the rest must match after one substitution, insertion or deletion.
@@ -142,6 +143,7 @@ mod tests {
         assert_eq!(score("Logging", "loggign"), 0); // two edits
         assert_eq!(score("Quarantine role", "quarantien"), 0);
         assert_eq!(score("Quarantine role", "quarntine"), 20);
+        assert!(one_typo("role", "role") && one_typo("rloe", "role") == false);
         let f = json!({"title": "Catch channel", "group": "General", "help": "hacked accounts"});
         assert!(field_score(&f, "catch") > field_score(&f, "hacked"));
         assert!(field_score(&f, "hacked catch") > 0);

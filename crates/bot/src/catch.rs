@@ -35,7 +35,6 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     if app.level(gid, owner, uid).await? != Level::None {
         return Ok(false);
     }
-    app.http.delete_message(m.channel_id, m.id).await.ok();
     let (kind, soft) = match c.action {
         CatchAction::Ban => (ModKind::Ban, false),
         CatchAction::Softban => (ModKind::Ban, true),
@@ -49,6 +48,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
             return Ok(true);
         }
     };
+    app.http.delete_message(m.channel_id, m.id).await.ok();
     let flags = Flags {
         dm: c.dm,
         soft,
