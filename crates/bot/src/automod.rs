@@ -6,7 +6,7 @@ use tommybot_automod::{
     discord_api::BotAction,
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
-    join::{gate, harshest, is_suspicious, Action, Joiner},
+    join::{gate, harshest, is_suspicious, Action, Joiner, USERNAME_DEFAULT},
     lockdown::JoinLock,
     store,
     strike::strike,
@@ -662,6 +662,7 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     let g = &cfg.joingate;
     let Some(action) = g
         .username_filter
+        .get(USERNAME_DEFAULT)
         .filter(|_| g.enabled && g.username_post_join)
     else {
         return Ok(());

@@ -155,7 +155,6 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
                     {[("keyword", "Keywords"), ("spam", "Spam"), ("mention", "Mention spam"), ("preset", "Keyword preset")].into_iter().map(|(k, t)| view! { <option value=k selected=move || trigger() == k>{t}</option> }).collect_view()}
                 </select></div>
             <Show when=move || trigger() == "keyword"><h3>"1 Words"</h3>{fld("keywords", "list", "Add Word")}</Show>
-            <Show when=move || matches!(trigger().as_str(), "keyword" | "preset")>{fld("allow", "list", "Add Keyword")}</Show>
             <Show when=move || trigger() == "mention">{fld("mention_limit", "int", "mentions per message")}</Show>
             <Show when=move || trigger() == "preset"><div class="row"><label>"Presets"</label>
                 {[(1, "Profanity"), (2, "Sexual content"), (3, "Slurs")].into_iter().map(|(n, t)| view! { <label><input type="checkbox" prop:checked=move || val.get()["presets"].as_array().is_some_and(|a| a.contains(&json!(n)))
@@ -169,7 +168,10 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
                 {["report", "warn", "timeout", "kick", "ban", "lock"].into_iter().map(|a| view! { <label><input type="checkbox" prop:checked=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!(a)))
                     on:change=move |e| val.update(|v| { let mut l: Vec<String> = v["bot_actions"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).filter(|x| x != a).collect()).unwrap_or_default(); if event_target_checked(&e) { l.push(a.into()); } v["bot_actions"] = json!(l); }) /> {a}</label> }).collect_view()}</div></Show>
             <h3>"3 Allowed Keywords"</h3>
+            <Show when=move || matches!(trigger().as_str(), "keyword" | "preset")>{fld("allow", "list", "Add Keyword")}</Show>
             {fld("exempt_roles", "roles", "Whitelisted Roles")}
+            // Discord takes categories in the same exempt list as channels.
+            {fld("exempt_channels", "categories", "Whitelisted Categories")}
             {fld("exempt_channels", "channels", "Whitelisted Channels")}
             <div class="row"><button on:click=save>{if creating { "Create" } else { "Save" }}</button><button class="ghost" on:click=move |_| rule.set(None)>"Cancel"</button><span class="err">{move || msg.get()}</span></div>
         </div>
@@ -200,7 +202,10 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
     });
     view! {
         <div class="card row">
-            <button on:click=move |_| load()>"Refresh"</button><span class="sp"></span>
+            <button on:click=move |_| load()>"Refresh"</button>
+            <button class="go" title="Turn on every rule that is off" disabled=move || rules.get().iter().all(|r| r["enabled"] == true)
+                on:click=move |_| for r in rules.get_untracked().iter().filter(|r| r["enabled"] != true) { call("POST", format!("/{}/enabled", s(&r["id"])), Some(json!({"enabled": true}))) }>"Activate"</button>
+            <span class="sp"></span>
             <button class="go" on:click=move |_| picking.set(true)>"+ Create"</button>
             <span class="err">{move || msg.get()}</span>
         </div>

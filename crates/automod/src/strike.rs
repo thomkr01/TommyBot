@@ -29,7 +29,7 @@ impl Default for StrikeCfg {
             cap_timeout_ms: 11 * 60_000,
             reoffend_window_ms: 60 * 60_000,
             strike_expiry_ms: 60 * 60_000,
-            reset_heat_on_timeout: true,
+            reset_heat_on_timeout: false,
             multiply: true,
             multiplier_pct: 200,
         }

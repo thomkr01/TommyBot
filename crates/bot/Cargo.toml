@@ -20,4 +20,6 @@ tommybot-antinuke.workspace = true
 tommybot-automod.workspace = true
 tommybot-logging.workspace = true
 captcha = "1"
+# Already pulled in by captcha; colors its text and decoys apart.
+image = { version = "0.24", default-features = false, features = ["png"] }
 decancer = "3"

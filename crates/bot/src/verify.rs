@@ -5,6 +5,7 @@ use captcha::{
     filters::{Dots, Noise, Wave},
     Captcha,
 };
+use image::{Rgb, RgbImage};
 use serde::Deserialize;
 use tommybot_automod::join::{
     effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
@@ -271,26 +272,63 @@ pub(crate) async fn grant(
     Ok(())
 }
 
+fn rgb(hex: &str) -> Option<Rgb<u8>> {
+    let hex = hex.trim_start_matches('#');
+    let n = u32::from_str_radix(hex, 16)
+        .ok()
+        .filter(|_| hex.len() == 6)?;
+    Some(Rgb([(n >> 16) as u8, (n >> 8) as u8, n as u8]))
+}
+
 /// The code and its PNG. Sync so the non-Send generator never crosses an await.
 fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
+    let (w, h) = (c.width.clamp(150, 300), c.height.clamp(60, 200));
+    // The library draws 40 px text on a fixed 400x300 canvas: crop a smaller or larger box and scale it to
+    // w x h. These bounds keep the crop inside the canvas and the text mostly inside the crop.
+    let size = c.font_size.clamp(30, 60);
+    let (cw, ch) = ((w * 40 / size).min(300), (h * 40 / size).min(200));
     let mut cap = Captcha::new();
-    let hex = c.font_color.trim_start_matches('#');
-    if let (6, Ok(rgb)) = (hex.len(), u32::from_str_radix(hex, 16)) {
-        cap.set_color([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
-    }
-    // The library draws on a fixed 400x300 canvas; these bounds keep the crop inside it.
     cap.add_chars(c.length.clamp(3, 7));
     if c.trace {
         cap.apply_filter(Wave::new(2.0, 8.0));
     }
+    cap.view(cw, ch);
+    // The text alone, so the decoys added next can be told apart and colored separately.
+    let text = cap.as_png();
     if c.mixed {
         cap.apply_filter(Noise::new(0.3));
     }
     if c.spread {
         cap.apply_filter(Dots::new(12).min_radius(2).max_radius(4));
     }
-    cap.view(c.width.clamp(150, 300), c.height.clamp(60, 200));
-    (cap.chars_as_string(), cap.as_png().unwrap_or_default())
+    let load = |png: Option<Vec<u8>>| Some(image::load_from_memory(&png?).ok()?.into_luma8());
+    let (Some(text), Some(all)) = (load(text), load(cap.as_png())) else {
+        return (cap.chars_as_string(), vec![]);
+    };
+    let black = Rgb([0, 0, 0]);
+    let (font, decoy) = (
+        rgb(&c.font_color).unwrap_or(black),
+        rgb(&c.decoy_color).unwrap_or(black),
+    );
+    let img = RgbImage::from_fn(all.width(), all.height(), |x, y| {
+        match (
+            text.get_pixel(x, y).0[0] < 128,
+            all.get_pixel(x, y).0[0] < 128,
+        ) {
+            (true, _) => font,
+            (false, true) => decoy,
+            _ => Rgb([255, 255, 255]),
+        }
+    });
+    let img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+    let mut png = std::io::Cursor::new(vec![]);
+    let ok = img
+        .write_to(&mut png, image::ImageOutputFormat::Png)
+        .is_ok();
+    (
+        cap.chars_as_string(),
+        if ok { png.into_inner() } else { vec![] },
+    )
 }
 
 /// A sum a member types; no image, so screen readers and slow connections cope. Returns (question, answer).
@@ -545,12 +583,31 @@ mod tests {
                     length,
                     width,
                     height,
+                    font_size: width,
                     font_color: "#ff0000".into(),
+                    decoy_color: "bad".into(),
                     ..Default::default()
                 };
                 assert!(!new_captcha(&c).1.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn captcha_colors_text_and_decoys_apart() {
+        let c = CaptchaCfg {
+            font_size: 50,
+            font_color: "#ff0000".into(),
+            decoy_color: "#0000ff".into(),
+            ..Default::default()
+        };
+        let img = image::load_from_memory(&new_captcha(&c).1)
+            .unwrap()
+            .into_rgb8();
+        assert_eq!(img.dimensions(), (300, 100));
+        let has = |f: fn(&Rgb<u8>) -> bool| img.pixels().any(f);
+        assert!(has(|p| p.0[0] > 200 && p.0[2] < 50), "red text");
+        assert!(has(|p| p.0[2] > 200 && p.0[0] < 50), "blue decoys");
     }
 
     #[test]

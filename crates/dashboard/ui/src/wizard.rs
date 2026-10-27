@@ -164,13 +164,13 @@ pub const WHITELIST: &[Card] = &[
 
 pub const JOINGATE: &[Card] = &[card("Join Gate status", "If you want to use instant detection filters for new members joining your server, this is the module to tweak.", &[
     ("joingate.enabled", "Enable Join Gate"),
-    ("joingate.unauthorized_bot", "Bots added by unauthorized members"),
-    ("joingate.account_age", "Accounts younger than the minimum age"),
-    ("joingate.no_avatar", "Accounts that have no profile picture"),
-    ("joingate.unverified_bot", "Discord unverified bots added by anyone"),
-    ("joingate.invite_in_name", "Accounts with invite links in usernames"),
-    ("joingate.suspicious", "Accounts TommyBot deems suspicious"),
-    ("joingate.username_filter", "Accounts that have certain names"),
+    ("joingate.unauthorized_bot.enabled", "Bots added by unauthorized members"),
+    ("joingate.account_age.enabled", "Accounts younger than the minimum age"),
+    ("joingate.no_avatar.enabled", "Accounts that have no profile picture"),
+    ("joingate.unverified_bot.enabled", "Discord unverified bots added by anyone"),
+    ("joingate.invite_in_name.enabled", "Accounts with invite links in usernames"),
+    ("joingate.suspicious.enabled", "Accounts TommyBot deems suspicious"),
+    ("joingate.username_filter.enabled", "Accounts that have certain names"),
 ], |c, _| text(if on(c, "joingate.enabled", true) { "New members are checked the moment they join." } else { "These don't matter now! Join Gate is off." }))];
 
 pub const JOINRAID: &[Card] = &[card("Anti raid status", "If you want to keep your server safe and secure from bad raids, this is your saviour.", &[

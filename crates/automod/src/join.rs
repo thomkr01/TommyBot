@@ -73,14 +73,14 @@ pub enum Filter {
 pub struct GateCfg {
     pub enabled: bool,
     pub dm_punished: bool,
-    pub no_avatar: Option<Action>,
-    pub account_age: Option<Action>,
+    pub no_avatar: GateFilter,
+    pub account_age: GateFilter,
     pub min_age_days: u32,
-    pub unauthorized_bot: Option<Action>,
-    pub unverified_bot: Option<Action>,
-    pub invite_in_name: Option<Action>,
-    pub suspicious: Option<Action>,
-    pub username_filter: Option<Action>,
+    pub unauthorized_bot: GateFilter,
+    pub unverified_bot: GateFilter,
+    pub invite_in_name: GateFilter,
+    pub suspicious: GateFilter,
+    pub username_filter: GateFilter,
     /// Wildcard words, checked against the sanitized name; `*` is a wildcard, no `*` means "contains".
     pub username_terms: Vec<String>,
     /// Strict words: the whole name, case-insensitive.
@@ -95,19 +95,66 @@ fn yes() -> bool {
     true
 }
 
+/// One Join Gate card: its status switch and trigger action (None: the card's Wick default).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "GateFilterRepr")]
+pub struct GateFilter {
+    pub enabled: bool,
+    pub action: Option<Action>,
+}
+
+impl GateFilter {
+    pub fn on(action: Action) -> Self {
+        Self {
+            enabled: true,
+            action: Some(action),
+        }
+    }
+
+    /// The action to take, None while the filter is off.
+    pub fn get(self, default: Action) -> Option<Action> {
+        self.enabled.then(|| self.action.unwrap_or(default))
+    }
+}
+
+/// Configs saved before the status switch stored the bare action, null meaning off.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GateFilterRepr {
+    Old(Option<Action>),
+    New {
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        action: Option<Action>,
+    },
+}
+
+impl From<GateFilterRepr> for GateFilter {
+    fn from(r: GateFilterRepr) -> Self {
+        match r {
+            GateFilterRepr::Old(action) => Self {
+                enabled: action.is_some(),
+                action,
+            },
+            GateFilterRepr::New { enabled, action } => Self { enabled, action },
+        }
+    }
+}
+
 impl Default for GateCfg {
     fn default() -> Self {
         Self {
             enabled: true,
             dm_punished: false,
-            no_avatar: None,
-            account_age: None,
+            no_avatar: GateFilter::default(),
+            account_age: GateFilter::default(),
             min_age_days: 7,
-            unauthorized_bot: None,
-            unverified_bot: None,
-            invite_in_name: None,
-            suspicious: None,
-            username_filter: None,
+            unauthorized_bot: GateFilter::default(),
+            unverified_bot: GateFilter::default(),
+            invite_in_name: GateFilter::default(),
+            suspicious: GateFilter::default(),
+            username_filter: GateFilter::default(),
             username_terms: vec![],
             username_strict: vec![],
             username_post_join: false,
@@ -119,8 +166,11 @@ impl Default for GateCfg {
 impl GateCfg {
     /// The account age filter's minimum, 0 while that filter is off.
     pub fn min_age_ms(&self) -> i64 {
-        self.account_age
-            .map_or(0, |_| i64::from(self.min_age_days) * DAY_MS)
+        if self.account_age.enabled {
+            i64::from(self.min_age_days) * DAY_MS
+        } else {
+            0
+        }
     }
 
     pub fn name_matches(&self, name: &str) -> bool {
@@ -197,27 +247,37 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
             }
         }
     };
-    check(cfg.no_avatar, Filter::NoAvatar, !j.has_avatar);
+    // Each card falls back to Wick's default action.
+    use Action::{Kick, Timeout};
+    check(cfg.no_avatar.get(Kick), Filter::NoAvatar, !j.has_avatar);
     let min = cfg.min_age_ms();
-    check(cfg.account_age, Filter::AccountAge, age < min.max(5_000));
     check(
-        cfg.unauthorized_bot,
+        cfg.account_age.get(Kick),
+        Filter::AccountAge,
+        age < min.max(5_000),
+    );
+    check(
+        cfg.unauthorized_bot.get(Kick),
         Filter::UnauthorizedBot,
         j.is_bot && !j.added_by_authorized,
     );
     check(
-        cfg.unverified_bot,
+        cfg.unverified_bot.get(Kick),
         Filter::UnverifiedBot,
         j.is_bot && !j.bot_verified,
     );
-    check(cfg.invite_in_name, Filter::InviteInName, has_invite(j.name));
     check(
-        cfg.suspicious,
+        cfg.invite_in_name.get(Timeout(0)),
+        Filter::InviteInName,
+        has_invite(j.name),
+    );
+    check(
+        cfg.suspicious.get(Kick),
         Filter::Suspicious,
         is_suspicious(j, cfg, min, now),
     );
     check(
-        cfg.username_filter,
+        cfg.username_filter.get(USERNAME_DEFAULT),
         Filter::UsernameFilter,
         cfg.name_matches(j.name),
     );
@@ -232,6 +292,9 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
     }
     hits
 }
+
+/// The username card's default, shared with the post-join re-check.
+pub const USERNAME_DEFAULT: Action = Action::Ban;
 
 pub fn harshest(hits: &[(Filter, Action)]) -> Option<Action> {
     hits.iter().map(|h| h.1).max()
@@ -485,12 +548,14 @@ pub struct VerifyCfg {
     pub captcha: CaptchaCfg,
 }
 
-/// The image captcha's look. The image library has one font size and fixed decoy colors.
+/// The image captcha's look.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptchaCfg {
     pub width: u32,
     pub height: u32,
+    /// Pixels; 40 is the image library's own size, others scale the text.
+    pub font_size: u32,
     /// `#rrggbb`.
     pub font_color: String,
     pub length: u32,
@@ -500,6 +565,8 @@ pub struct CaptchaCfg {
     pub mixed: bool,
     /// Small spread-around dots to trick scripts.
     pub spread: bool,
+    /// `#rrggbb` of the trace, noise and dots.
+    pub decoy_color: String,
 }
 
 impl Default for CaptchaCfg {
@@ -507,11 +574,13 @@ impl Default for CaptchaCfg {
         Self {
             width: 300,
             height: 100,
+            font_size: 40,
             font_color: "#000000".into(),
             length: 6,
             trace: true,
             mixed: true,
             spread: true,
+            decoy_color: "#000000".into(),
         }
     }
 }
@@ -581,10 +650,10 @@ mod tests {
     #[test]
     fn gate_picks_harshest_and_age_timeout_is_remaining() {
         let cfg = GateCfg {
-            no_avatar: Some(Action::Log),
-            account_age: Some(Action::Timeout(0)),
+            no_avatar: GateFilter::on(Action::Log),
+            account_age: GateFilter::on(Action::Timeout(0)),
             min_age_days: 1,
-            username_filter: Some(Action::Ban),
+            username_filter: GateFilter::on(Action::Ban),
             username_terms: vec!["nitro*".into()],
             ..Default::default()
         };
@@ -612,7 +681,7 @@ mod tests {
             ]
         );
         let cfg = GateCfg {
-            username_filter: Some(Action::Kick),
+            username_filter: GateFilter::on(Action::Kick),
             username_strict: vec!["Admin".into()],
             ..Default::default()
         };
@@ -627,7 +696,7 @@ mod tests {
     fn disabled_gate_matches_nothing() {
         let cfg = GateCfg {
             enabled: false,
-            no_avatar: Some(Action::Ban),
+            no_avatar: GateFilter::on(Action::Ban),
             ..Default::default()
         };
         assert!(gate(&joiner(id_aged(1000, 0), "a", false), &cfg, NOW).is_empty());
@@ -639,10 +708,25 @@ mod tests {
     }
 
     #[test]
+    fn gate_cards_have_a_switch_and_wick_default_actions() {
+        let cfg: GateCfg = serde_json::from_value(serde_json::json!({
+            "no_avatar": "Ban",
+            "account_age": null,
+            "username_filter": {"enabled": true},
+            "invite_in_name": {"enabled": false, "action": "Kick"},
+        }))
+        .unwrap();
+        assert_eq!(cfg.no_avatar.get(Action::Kick), Some(Action::Ban));
+        assert_eq!(cfg.account_age.get(Action::Kick), None);
+        assert_eq!(cfg.username_filter.get(USERNAME_DEFAULT), Some(Action::Ban));
+        assert_eq!(cfg.invite_in_name.get(Action::Timeout(0)), None);
+    }
+
+    #[test]
     fn require_all_needs_every_filter() {
         let mut cfg = GateCfg {
-            no_avatar: Some(Action::Kick),
-            account_age: Some(Action::Kick),
+            no_avatar: GateFilter::on(Action::Kick),
+            account_age: GateFilter::on(Action::Kick),
             min_age_days: 1,
             require_all: true,
             ..Default::default()
@@ -662,8 +746,8 @@ mod tests {
     #[test]
     fn bots_and_invite_names() {
         let cfg = GateCfg {
-            unauthorized_bot: Some(Action::Kick),
-            invite_in_name: Some(Action::Ban),
+            unauthorized_bot: GateFilter::on(Action::Kick),
+            invite_in_name: GateFilter::on(Action::Ban),
             ..Default::default()
         };
         let bot = Joiner {

@@ -56,6 +56,15 @@ impl Action {
             Action::BotAdd => return None,
         })
     }
+
+    /// Wick's "Kicks & Bans" card: kicks share the ban limit and counter.
+    pub fn card(self) -> Action {
+        if self == Action::Kick {
+            Action::Ban
+        } else {
+            self
+        }
+    }
 }
 
 /// Reaching either limit trips (spec: "Reaching either quarantines them").
@@ -108,6 +117,7 @@ impl AntiNuke {
         exempt: bool,
         now: Instant,
     ) -> Verdict {
+        let action = action.card();
         let Some(limit) = self.limits.get(&action).copied() else {
             return Verdict::Ignore;
         };
@@ -289,6 +299,19 @@ mod tests {
     }
 
     #[test]
+    fn kicks_and_bans_share_one_counter() {
+        let (mut a, t0) = (engine(2, 10), Instant::now());
+        assert!(matches!(
+            a.on_action(1, 2, Action::Kick, false, t0),
+            Verdict::Allow(_)
+        ));
+        assert!(matches!(
+            a.on_action(1, 2, Action::Ban, false, t0),
+            Verdict::Quarantine(Counts { minute: 2, .. })
+        ));
+    }
+
+    #[test]
     fn old_events_expire_after_an_hour() {
         let (mut a, t0) = (engine(10, 2), Instant::now());
         a.on_action(1, 2, Action::Ban, false, t0);
@@ -300,7 +323,10 @@ mod tests {
     fn exempt_unwatched_and_other_users_are_independent() {
         let (mut a, t0) = (engine(1, 1), Instant::now());
         assert_eq!(a.on_action(1, 2, Action::Ban, true, t0), Verdict::Ignore);
-        assert_eq!(a.on_action(1, 2, Action::Kick, false, t0), Verdict::Ignore);
+        assert_eq!(
+            a.on_action(1, 2, Action::RoleCreate, false, t0),
+            Verdict::Ignore
+        );
         assert!(matches!(
             a.on_action(1, 3, Action::Ban, false, t0),
             Verdict::Quarantine(_)

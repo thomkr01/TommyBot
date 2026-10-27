@@ -2,14 +2,18 @@ use crate::common::*;
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
+/// A number segment indexes an array (`custom.0.roles`).
 fn get_path(v: &Value, p: &str) -> Value {
-    p.split('.').fold(v, |c, k| &c[k]).clone()
+    p.split('.').fold(v, |c, k| match (c, k.parse::<usize>()) { (Value::Array(a), Ok(i)) => a.get(i).unwrap_or(&Value::Null), _ => &c[k] }).clone()
 }
 
 /// Writes `x` at the dotted path, creating (or replacing non-object) intermediate objects.
 fn set_path(v: &mut Value, p: &str, x: Value) {
     let mut c = v;
     for k in p.split('.') {
+        if let (Some(a), Ok(i)) = (c.as_array().map(Vec::len), k.parse::<usize>()) {
+            if i < a { c = &mut c[i]; continue; }
+        }
         if !c.is_object() { *c = json!({}); }
         let Some(o) = c.as_object_mut() else { return };
         c = o.entry(k).or_insert(Value::Null);
@@ -65,17 +69,46 @@ fn action_desc(a: &str) -> &'static str {
 }
 
 /// (anti-nuke action, verb, things, per-second noun) for the limit sentences.
-const NUKE_WORDS: [(&str, &str, &str, &str); 8] = [
-    ("Kick", "kick", "members", "removal"), ("Ban", "ban", "members", "removal"),
+const NUKE_WORDS: [(&str, &str, &str, &str); 7] = [
+    ("Ban", "kick/ban", "members", "removal"),
     ("RoleCreate", "create", "roles", "creation"), ("RoleDelete", "delete", "roles", "deletion"),
     ("ChannelCreate", "create", "channels", "creation"), ("ChannelDelete", "delete", "channels", "deletion"),
     ("WebhookCreate", "create", "webhooks", "creation"), ("WebhookDelete", "delete", "webhooks", "deletion"),
 ];
 
-/// (id, label) pairs from `/discord` for `key` ("channels" or "roles").
+/// (id, label) pairs from `/discord` for `key`: "channels" (no categories), "categories" or "roles".
 fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
-    let pre = if key == "channels" { "#" } else { "@" };
-    dc[key].as_array().map(|a| a.iter().map(|x| (x["id"].as_str().unwrap_or("").to_string(), format!("{pre}{}", x["name"].as_str().unwrap_or("?")))).collect()).unwrap_or_default()
+    let (list, pre) = match key { "roles" => ("roles", "@"), "categories" => ("channels", ""), _ => ("channels", "#") };
+    dc[list].as_array().map(|a| a.iter().filter(|x| list == "roles" || (x["kind"] == "category") == (key == "categories"))
+        .map(|x| (x["id"].as_str().unwrap_or("").to_string(), format!("{pre}{}", x["name"].as_str().unwrap_or("?")))).collect()).unwrap_or_default()
+}
+
+/// Wick's member select: chips of the picked users, a search box that also takes a pasted ID.
+#[component]
+fn UserPick(get: Signal<Value>, set: Callback<Value>) -> impl IntoView {
+    let g = StoredValue::new(crate::hash().into_iter().next().unwrap_or_default());
+    let names = RwSignal::new(std::collections::HashMap::<String, String>::new());
+    let found = RwSignal::new(Vec::<(String, String)>::new());
+    let learn = move |v: &Value| { let l: Vec<(String, String)> = v.as_array().into_iter().flatten().map(|m| (show(&m["id"]), show(&m["name"]))).collect(); names.update(|n| n.extend(l.clone())); l };
+    let ids = strs(&get.get_untracked());
+    if !ids.is_empty() {
+        spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{}/members?ids={}", g.get_value(), ids.join(",")), None).await { learn(&v); } });
+    }
+    let add = move |id: String| { let mut cur = strs(&get.get_untracked()); if !cur.contains(&id) { cur.push(id); } set.run(json!(cur)); found.set(vec![]); };
+    let search = move |q: String| {
+        let q = q.trim().to_string();
+        if q.len() >= 17 && q.bytes().all(|b| b.is_ascii_digit()) { return add(q); }
+        if q.is_empty() { return found.set(vec![]); }
+        spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{}/members?q={}", g.get_value(), js_sys::encode_uri_component(&q)), None).await { found.set(learn(&v)); } });
+    };
+    view! { <div class="pick">
+        {move || strs(&get.get()).into_iter().map(|id| {
+            let label = names.with(|n| n.get(&id).cloned()).unwrap_or_else(|| id.clone());
+            view! { <span class="chip">{label}" "<a aria-label="remove" on:click=move |_| { let mut cur = strs(&get.get_untracked()); cur.retain(|x| *x != id); set.run(json!(cur)) }>"×"</a></span> }
+        }).collect_view()}
+        <input placeholder="Search a member or paste an ID" on:change=move |e| search(event_target_value(&e)) />
+        {move || found.get().into_iter().map(|(id, name)| view! { <button class="ghost" on:click=move |_| add(id.clone())>{name}</button> }).collect_view()}
+    </div> }
 }
 
 #[component]
@@ -212,10 +245,11 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 {move || items(&dc.get(), key).into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || get().as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
             </select> }.into_any()
         }
-        "channels" | "roles" => {
-            let key = if kind == "channels" { "channels" } else { "roles" };
+        "users" => view! { <UserPick get=Signal::derive(get) set=Callback::new(set) /> }.into_any(),
+        "channels" | "categories" | "roles" => {
+            let key = StoredValue::new(kind.clone());
             view! { <div class="pick">
-                {move || items(&dc.get(), key).into_iter().map(|(id, l)| {
+                {move || items(&dc.get(), &key.get_value()).into_iter().map(|(id, l)| {
                     let id2 = id.clone();
                     view! { <label><input type="checkbox" prop:checked=move || strs(&get()).contains(&id) on:change=move |e| {
                         let mut cur = strs(&get());

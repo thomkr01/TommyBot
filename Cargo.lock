@@ -2607,6 +2607,7 @@ dependencies = [
  "anyhow",
  "captcha",
  "decancer",
+ "image",
  "serde",
  "serde_json",
  "sqlx",
