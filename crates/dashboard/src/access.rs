@@ -43,6 +43,7 @@ pub const SECTIONS: &[&str] = &[
     "misc",
     "logging",
     "utility",
+    "channel_profiles",
 ];
 
 pub struct Facts<'a> {

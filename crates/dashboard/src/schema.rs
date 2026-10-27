@@ -873,6 +873,18 @@ pub fn schema() -> Vec<Value> {
         ("verification", "Verification", verification),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
+        (
+            "channel_profiles",
+            "Channel setup",
+            vec![{
+                let mut v = fg("Role profiles", "profiles", "profiles");
+                v["options"] = json!(crate::channels::PERMS
+                    .iter()
+                    .map(|(k, _)| k)
+                    .collect::<Vec<_>>());
+                v
+            }],
+        ),
     ]
     .into_iter()
     .map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields}))
@@ -926,6 +938,9 @@ mod tests {
                     "form" => json!([{"label": "x"}]),
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
                     "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
+                    "profiles" => {
+                        json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
+                    }
                     _ => json!(["1"]),
                 };
                 let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();

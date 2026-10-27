@@ -2,6 +2,7 @@ mod access;
 mod api;
 mod appeals;
 mod auth;
+mod channels;
 mod diff;
 mod discord;
 mod lockdown;
@@ -106,6 +107,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(ops::routes())
         .merge(lockdown::routes())
         .merge(recovery::routes())
+        .merge(channels::routes())
         .merge(appeals::routes())
         .merge(records::routes())
         .merge(verify::routes())
