@@ -9,6 +9,7 @@ mod lockdown;
 mod pages;
 mod permits;
 mod recovery;
+mod wizard;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealForm, AppealList, Blacklist};
 use records::{CaseList, NoteList, ReportList};

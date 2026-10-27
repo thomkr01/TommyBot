@@ -20,6 +20,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/guilds/{guild}/discord", get(discord_route))
         .route("/api/guilds/{guild}/wizard/auto-setup", post(auto_setup))
         .route("/api/guilds/{guild}/logging/setup", post(log_setup))
+        .route(
+            "/api/guilds/{guild}/wizard/verify-channel",
+            post(verify_channel),
+        )
 }
 
 async fn schema_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -69,6 +73,45 @@ struct Setup {
     logs: Option<Vec<String>>,
 }
 
+/// Wick's default staff permits, made with a role each when a server has none:
+/// (name, rank, perms, whitelist). Admins are created first so they sit above Moderators.
+const STAFF: [(&str, i32, &[&str], &[&str]); 2] = [
+    (
+        "Admins",
+        2,
+        &[
+            "cases",
+            "ban",
+            "kick",
+            "timeout",
+            "warn",
+            "slowmode",
+            "purge",
+            "sanitize",
+            "reports",
+            "lock_channels",
+            "lock_joins",
+        ],
+        &["automod", "reports", "words"],
+    ),
+    (
+        "Moderators",
+        1,
+        &[
+            "cases",
+            "kick",
+            "timeout",
+            "warn",
+            "slowmode",
+            "purge",
+            "sanitize",
+            "reports",
+            "lock_channels",
+        ],
+        &["automod", "reports", "words"],
+    ),
+];
+
 /// Wick's quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
 const QUARANTINE_DENY: &str = "1051712";
 
@@ -103,8 +146,22 @@ async fn auto_setup(
         }
         member = Some(id);
     }
+    let mut permits = store::read_permits(&mut *st.db.acquire().await?, guild).await?;
+    let staff = empty(&permits["custom"]);
+    if staff {
+        let mut custom = vec![];
+        for (name, rank, perms, whitelist) in STAFF {
+            let id = create(&st, guild, None, "roles", json!({"name": name})).await?;
+            custom.push(json!({"name": name, "rank": rank, "perms": perms, "whitelist": whitelist, "roles": [id]}));
+        }
+        permits["custom"] = json!(custom);
+        config["permits"] = permits;
+    }
     let logs = log_channels(&st, guild, &mut config, b.logs.as_deref()).await?;
     let mut tx = st.db.begin().await?;
+    if staff {
+        store::write_permits(&mut tx, guild, &config["permits"]).await?;
+    }
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
     let quarantine_failed = quarantine_channels(&st, guild, &role).await;
@@ -118,8 +175,61 @@ async fn auto_setup(
     )
     .await;
     Ok(Json(
-        json!({"version": version, "created": {"quarantine_role": role, "member_role": member, "logs": logs}, "quarantine_failed": quarantine_failed}),
+        json!({"version": version, "created": {"quarantine_role": role, "member_role": member, "staff": staff, "logs": logs}, "quarantine_failed": quarantine_failed}),
     ))
+}
+
+/// Wick's "Setup channel": a #verify-here channel only unverified members see, holding the
+/// verify button. An already set verification channel is reused.
+async fn verify_channel(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Json(b): Json<Setup>,
+) -> Res {
+    api::require(&st, &s, guild, Level::Admin, true).await?;
+    let (cur, mut config) = store::current(&st.db, guild).await?;
+    if cur != b.expected_version {
+        return Err(ApiError::Conflict(cur));
+    }
+    // @everyone reads but cannot write; verified members (the verification roles) stop seeing it.
+    let mut overwrites = vec![
+        json!({"id": guild.to_string(), "type": 0, "allow": "66560", "deny": "2048"}),
+        json!({"id": st.discord.client_id, "type": 1, "allow": "19456"}),
+    ];
+    for r in config["verification"]["roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        overwrites.push(json!({"id": r, "type": 0, "deny": "1024"}));
+    }
+    let channel = create(
+        &st,
+        guild,
+        own(&config["verification"]["channel"]),
+        "channels",
+        json!({"name": "verify-here", "type": 0, "permission_overwrites": overwrites}),
+    )
+    .await?;
+    config["verification"]["channel"] = json!(channel);
+    let mut tx = st.db.begin().await?;
+    let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
+    tx.commit().await?;
+    st.discord
+        .call(
+            Method::POST,
+            &format!("/channels/{channel}/messages"),
+            Some(json!({
+                "embeds": [{"title": "Verification Required!", "color": 0x0D9DF8,
+                    "description": "To access the server, you need to pass the verification first."}],
+                "components": [{"type": 1, "components": [
+                    {"type": 2, "style": 3, "label": "Verify", "custom_id": "verify:start"}
+                ]}]
+            })),
+        )
+        .await?;
+    Ok(Json(json!({"version": version, "channel": channel})))
 }
 
 fn at<'a>(config: &'a Value, path: &[&str]) -> &'a Value {
