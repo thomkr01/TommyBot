@@ -47,6 +47,8 @@ class H(BaseHTTPRequestHandler):
             sent.append({"path": self.path, "body": body.decode()})
             self.reply({"id": "1"})
 
+    do_PUT = do_POST
+
     def log_message(self, *a):
         pass
 
