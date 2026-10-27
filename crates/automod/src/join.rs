@@ -434,35 +434,33 @@ impl RaidDetector {
     /// ID flag: bucket joiners by account creation time; a bucket plus `margin` neighbours on each
     /// side holding at least `min` accounts is a bot farm.
     fn farm_ids(&self, min: usize, by: IdGranularity, margin: i64) -> Vec<u64> {
-        let size = match by {
-            IdGranularity::Hour => HOUR_MS,
-            IdGranularity::Day => DAY_MS,
-            IdGranularity::Month => 30 * DAY_MS,
-            IdGranularity::Adaptive => {
-                let mut per_day: HashMap<i64, usize> = HashMap::new();
-                for r in &self.joins {
-                    *per_day
-                        .entry(account_created_ms(r.id) / DAY_MS)
-                        .or_default() += 1;
-                }
-                if per_day.values().any(|n| n * 2 > self.joins.len()) {
-                    HOUR_MS
-                } else {
-                    DAY_MS
-                }
+        let count_by = |size: i64| {
+            let mut counts: HashMap<i64, usize> = HashMap::new();
+            for r in &self.joins {
+                *counts.entry(account_created_ms(r.id) / size).or_default() += 1;
             }
+            counts
         };
-        let bucket = |id| account_created_ms(id) / size;
+        let mut size = match by {
+            IdGranularity::Hour => HOUR_MS,
+            IdGranularity::Day | IdGranularity::Adaptive => DAY_MS,
+            IdGranularity::Month => 30 * DAY_MS,
+        };
+        let mut counts = count_by(size);
+        if by == IdGranularity::Adaptive && counts.values().any(|n| n * 2 > self.joins.len()) {
+            size = HOUR_MS;
+            counts = count_by(size);
+        }
+        let near = |b: i64| -> usize {
+            counts
+                .iter()
+                .filter(|(k, _)| (*k - b).abs() <= margin)
+                .map(|(_, n)| n)
+                .sum()
+        };
         self.joins
             .iter()
-            .filter(|r| {
-                let b = bucket(r.id);
-                self.joins
-                    .iter()
-                    .filter(|o| (bucket(o.id) - b).abs() <= margin)
-                    .count()
-                    >= min
-            })
+            .filter(|r| near(account_created_ms(r.id) / size) >= min)
             .map(|r| r.id)
             .collect()
     }
@@ -830,7 +828,6 @@ mod tests {
 
     #[test]
     fn id_flag_granularity_and_margin() {
-        // two accounts made a day apart: separate day buckets, joined by a margin of one
         let ids = [id_aged(50 * DAY_MS, 1), id_aged(49 * DAY_MS, 2)];
         let mut d = RaidDetector::default();
         for (i, id) in ids.iter().enumerate() {
