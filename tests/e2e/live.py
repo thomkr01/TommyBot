@@ -98,12 +98,17 @@ def nuke():
             for i in range(6)]
     for c in filter(None, made):
         call("DELETE", f"/channels/{c['id']}", attacker, soft=True)
-    time.sleep(8)
-    after = sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}")
+    # The kick lands within seconds; the incident row only after the revert, which can take ~40s.
+    for _ in range(30):
+        time.sleep(3)
+        after = sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}")
+        if int(after) > int(before):
+            break
     # Restored channels come back under the same names; clean them up.
     for c in call("GET", f"/guilds/{GUILD}/channels"):
         if c["name"].startswith("nuke-"):
             call("DELETE", f"/channels/{c['id']}", soft=True)
+    # A bot cannot be quarantined (managed role), so the attacker gets kicked: re-invite it to rerun.
     return check(int(after) > int(before), f"nuke: incidents {before} -> {after}")
 
 

@@ -429,6 +429,16 @@ pub(crate) async fn revert_actor(
     })
 }
 
+/// Quarantines a nuking member; a nuking bot is kicked, as its managed role cannot be removed.
+async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Result<()> {
+    let member = app.http.guild_member(gid, actor).await?.model().await?;
+    if member.user.bot {
+        app.http.remove_guild_member(gid, actor).await?;
+        return Ok(());
+    }
+    quarantine(app, gid, actor).await
+}
+
 async fn quarantine_and_revert(
     app: &App,
     gid: Id<GuildMarker>,
@@ -436,16 +446,25 @@ async fn quarantine_and_revert(
     why: &str,
 ) -> Result<()> {
     let auto = app.cfg(gid.get()).await?.antinuke.auto_quarantine;
-    if auto {
-        quarantine(app, gid, actor).await?;
-    }
+    // A failed quarantine (bot role too low) must not stop the revert.
+    let quarantined = auto
+        && contain(app, gid, actor)
+            .await
+            .inspect_err(|e| tracing::warn!(?e, "quarantine failed"))
+            .is_ok();
     let sum = revert_actor(app, gid, actor, now_secs() - 3600).await?;
     let case = open_case(app, gid, actor, why).await?;
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
     let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     let text = format!(
         "**Anti-nuke** case #{case} (nuke `{nuke}`): <@{actor}> {}, {why}. Reverted {}/{} actions, recreated {} deleted. Kicked, re-invite: {}",
-        if auto { "quarantined" } else { "not quarantined (auto quarantine is off)" },
+        if quarantined {
+            "quarantined (bots are kicked)"
+        } else if auto {
+            "NOT quarantined (check that the bot's role is on top)"
+        } else {
+            "not quarantined (auto quarantine is off)"
+        },
         sum.ops - sum.failed,
         sum.ops,
         sum.recreated,
