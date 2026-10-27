@@ -83,6 +83,11 @@ DATABASE_URL=postgres://... cargo test --workspace
 | `BIND` | dashboard | no | Listen address, default `0.0.0.0:8080` |
 | `DASHBOARD_DIST` | dashboard | no | Built UI folder |
 | `METRICS_ADDR` | bot | no | Serves Prometheus metrics on this address, e.g. `127.0.0.1:9100`. Off when unset. No auth, so keep it private |
+| `DISCORD_API_BASE` | dashboard | no | Discord REST base URL, default `https://discord.com/api/v10`. Only the e2e run changes it |
 | `RUST_LOG` | both | no | Log level, default `info` in Docker |
 
 Dashboard access rules are in `crates/dashboard/README.md`.
+
+## Testing without Discord credentials
+
+`tests/e2e/run.sh` runs the workspace tests against a local Postgres, starts the dashboard against `tests/e2e/mock_discord.py` (a fake Discord REST API) and lets headless Chromium log in and open every dashboard page, failing on console errors, HTTP 5xx or blank pages. Screenshots land in `/tmp/e2e`. Needs postgresql-16, trunk, node with playwright (`NODE_PATH` set to the global modules). The bot itself needs a real token, so gateway behaviour is not covered.
