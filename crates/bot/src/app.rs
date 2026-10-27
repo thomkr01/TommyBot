@@ -18,8 +18,8 @@ use tommybot_automod::{
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
     sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg,
-        PanicCfg, WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
+        WhitelistCfg,
     },
 };
 use tommybot_logging::{LogConfig, Logger};

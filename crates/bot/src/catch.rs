@@ -4,9 +4,7 @@ use anyhow::Result;
 use tommybot_core::{permits::Level, sections::CatchAction};
 use tommybot_logging::{embed::RED, Log, LogKind};
 use twilight_model::{
-    channel::Channel,
-    gateway::payload::incoming::MessageCreate,
-    http::channel_position::Position,
+    channel::Channel, gateway::payload::incoming::MessageCreate, http::channel_position::Position,
 };
 
 use crate::{
@@ -20,7 +18,9 @@ const REASON: &str = "Wrote in the catch channel";
 
 /// True when the message was in the catch channel by someone it punishes; nothing else should run.
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
-    let Some(gid) = m.guild_id else { return Ok(false) };
+    let Some(gid) = m.guild_id else {
+        return Ok(false);
+    };
     let cfg = app.cfg(gid.get()).await?;
     let c = &cfg.catch;
     if !c.enabled || c.channel != Some(m.channel_id) || m.author.bot || m.webhook_id.is_some() {
@@ -49,10 +49,26 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
             return Ok(true);
         }
     };
-    let flags = Flags { dm: c.dm, soft, compact: true };
+    let flags = Flags {
+        dm: c.dm,
+        soft,
+        compact: true,
+    };
     // The bot acts with owner rights, so the usual permit and hierarchy checks still refuse
     // owners and members above the bot's role; that refusal is logged, never silent.
-    let done = apply_dm(app, gid, owner, (app.me, &Level::Owner), kind, uid, Some(REASON), None, 0, flags).await;
+    let done = apply_dm(
+        app,
+        gid,
+        owner,
+        (app.me, &Level::Owner),
+        kind,
+        uid,
+        Some(REASON),
+        None,
+        0,
+        flags,
+    )
+    .await;
     let text = match done {
         Ok(t) if t.starts_with("Cannot") => t,
         Ok(_) => return Ok(true),
@@ -67,14 +83,19 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
 
 /// Moves the catch channel back to the top when someone drags it down.
 pub async fn keep_top(app: &App, ch: &Channel) -> Result<()> {
-    let Some(gid) = ch.guild_id else { return Ok(()) };
+    let Some(gid) = ch.guild_id else {
+        return Ok(());
+    };
     let cfg = app.cfg(gid.get()).await?;
     let moved = ch.position.unwrap_or(0) != 0 || ch.parent_id.is_some();
     if !cfg.catch.keep_top || cfg.catch.channel != Some(ch.id) || !moved {
         return Ok(());
     }
     // Uncategorized channels sit above every category.
-    let pos = Position { parent_id: Some(None), ..Position::from((ch.id, 0)) };
+    let pos = Position {
+        parent_id: Some(None),
+        ..Position::from((ch.id, 0))
+    };
     app.http.update_guild_channel_positions(gid, &[pos]).await?;
     Ok(())
 }

@@ -424,7 +424,11 @@ pub fn Section(
                 {move || {
                     // One card per path prefix ("limits.ban" -> "limits ban"); unprefixed fields go under "General".
                     let mut groups: Vec<(String, Vec<Value>)> = vec![];
-                    for f in fields.get() {
+                    // While searching, only the matching fields show (all of them when none match here).
+                    let q = use_context::<crate::search::Search>().map(|s| s.q.get()).unwrap_or_default();
+                    let all = fields.get();
+                    let hits: Vec<Value> = all.iter().filter(|f| crate::search::field_score(f, &q) > 0).cloned().collect();
+                    for f in if hits.is_empty() { all } else { hits } {
                         let p = f["path"].as_str().unwrap_or("").split_once('.').map_or("", |(_, p)| p);
                         let g = f["group"].as_str().map_or_else(|| p.rsplit_once('.').map_or("General".to_string(), |(g, _)| g.replace(['.', '_'], " ")), String::from);
                         match groups.iter_mut().find(|(k, _)| *k == g) { Some((_, v)) => v.push(f), None => groups.push((g, vec![f])) }
