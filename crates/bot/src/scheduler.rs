@@ -93,12 +93,20 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_grant" => verify::web_grant(app, gid, user(&job.payload)?).await?,
         "raid_end" => {
+            let caught: i64 = sqlx::query_scalar(
+                "select count(*) from raid_log where guild_id = $1 and raid_ms = $2",
+            )
+            .bind(gid.get() as i64)
+            .bind(job.payload["started_ms"].as_i64().unwrap_or(0))
+            .fetch_one(&app.pool)
+            .await?;
             send_log(
                 app,
                 gid.get(),
                 LogKind::JoinRaid,
                 Log::new("Join Raid Report!", DONE)
-                    .text(&format!("{YES} **The join raid has ended.**")),
+                    .text(&format!("{YES} **The join raid has ended.**"))
+                    .line("Caught", &format!("`{caught}`")),
             )
             .await?
         }

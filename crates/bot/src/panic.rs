@@ -215,7 +215,8 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
 pub async fn restore(app: &App) -> Result<()> {
     for (guild, payload) in jobs::pending(&app.pool, "raid_end").await? {
         if let Some(until) = payload["until_ms"].as_i64() {
-            let d = tommybot_automod::join::RaidDetector::restored(until);
+            let started = payload["started_ms"].as_i64().unwrap_or(until);
+            let d = tommybot_automod::join::RaidDetector::restored(started, until);
             app.raids.lock().unwrap().insert(guild as u64, d);
         }
     }

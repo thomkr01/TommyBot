@@ -4,7 +4,7 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-fn when(secs: i64) -> String {
+pub(crate) fn when(secs: i64) -> String {
     let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(secs as f64 * 1000.0));
     d.to_locale_string("en-GB", &wasm_bindgen::JsValue::UNDEFINED).as_string().unwrap_or_default()
 }

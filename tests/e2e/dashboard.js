@@ -24,6 +24,8 @@ fs.mkdirSync(out, { recursive: true });
 
   const links = [...new Set(await page.$$eval('a[href^="#/"]', (as) => as.map((a) => a.getAttribute('href'))))]
     .filter((h) => /^#\/\d+\//.test(h));
+  // tabs that no sidebar link reaches
+  links.push(links[0].replace(/^(#\/\d+\/).*/, '$1raid_log'));
   console.log(`${links.length} pages`);
   const failed = [];
   for (const h of links) {

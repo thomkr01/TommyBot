@@ -158,3 +158,22 @@ pub fn ReportList(guild: String) -> impl IntoView {
         </For>
     }
 }
+
+/// Every account each join raid caught; the raid trigger log links here.
+#[component]
+pub fn RaidLog(guild: String) -> impl IntoView {
+    let (rows, set_rows) = signal(Vec::<Value>::new());
+    let msg = RwSignal::new(String::new());
+    fetch(format!("/api/guilds/{guild}/raid_log"), set_rows, msg);
+    view! {
+        <span class="err">{move || msg.get()}</span>
+        <Show when=move || rows.get().is_empty()><div class="banner">"No join raids caught yet."</div></Show>
+        {move || rows.get().into_iter().map(|r| {
+            let accounts = r["accounts"].as_array().cloned().unwrap_or_default();
+            view! { <div class="card">
+                <h3>{format!("Raid at {} ({} caught)", crate::recovery::when(r["raid_ms"].as_i64().unwrap_or(0) / 1000), accounts.len())}</h3>
+                {accounts.iter().map(|a| view! { <div class="row"><code>{s(&a["user_id"])}</code><span>{s(&a["name"])}</span></div> }).collect_view()}
+            </div> }
+        }).collect_view()}
+    }
+}

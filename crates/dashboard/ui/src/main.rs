@@ -12,7 +12,7 @@ mod recovery;
 mod wizard;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealForm, AppealList, Blacklist};
-use records::{CaseList, NoteList, ReportList};
+use records::{CaseList, NoteList, RaidLog, ReportList};
 use common::*;
 use form::Section;
 use permits::Permits;
@@ -33,6 +33,7 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
 const WICK_GROUPS: [&str; 3] = ["Auto Mod", "Anti Nuke", "Server Joins"];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
+const RAID_TABS: &[(&str, &str)] = &[("joinraid", "Settings"), ("raid_log", "Raid Log")];
 const REPORT_TABS: &[(&str, &str)] = &[("report_list", "List"), ("report_blacklist", "Blacklist")];
 const WL_TABS: &[(&str, &str)] = &[("whitelist", "Spam"), ("whitelist/invites", "Invite Links"), ("whitelist/mentions", "Mentions"), ("whitelist/everyone", "@everyone")];
 const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
@@ -63,6 +64,7 @@ fn title(p: &str) -> (String, Option<String>) {
         "antinuke" => two("Anti Nuke", "General Settings"),
         "antinuke_filters" => two("Anti Nuke", "Filters"),
         "joingate" => two("Join gate", "General Settings"),
+        "joinraid" | "raid_log" => ("Join Raid".into(), None),
         "verification" => two("Verification", "General Settings"),
         "automod_panic" => ("Auto Mod Panic Mode".into(), None),
         "antinuke_panic" => ("Anti Nuke Panic Mode".into(), None),
@@ -239,6 +241,8 @@ fn App() -> impl IntoView {
                                 ("discord_automod", _) => view! { <DiscordRules guild=g.clone() /> }.into_any(),
                                 ("appeal_list", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><AppealList guild=g.clone() /> }.into_any(),
                                 ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><Blacklist guild=g.clone() base="appeals" purge=true /> }.into_any(),
+                                ("joinraid", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() />{sec("joinraid", "")} }.into_any(),
+                                ("raid_log", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() /><RaidLog guild=g.clone() /> }.into_any(),
                                 ("cases", _) => view! { <CaseList guild=g.clone() /> }.into_any(),
                                 ("notes", _) => view! { <NoteList guild=g.clone() /> }.into_any(),
                                 ("report_list", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><ReportList guild=g.clone() /> }.into_any(),
