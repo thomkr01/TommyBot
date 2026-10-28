@@ -717,7 +717,7 @@ async fn native_action(
 }
 
 /// Custom plus unicode emoji; a ZWJ sequence counts per symbol.
-fn count_emojis(s: &str) -> usize {
+pub(crate) fn count_emojis(s: &str) -> usize {
     let unicode = s
         .chars()
         .filter(|c| matches!(*c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF | 0x2B50 | 0x2B55 | 0x231A..=0x231B | 0x23E9..=0x23F3))
@@ -726,7 +726,7 @@ fn count_emojis(s: &str) -> usize {
 }
 
 /// Names with fancy Unicode, lookalikes and leetspeak folded to plain letters, for the username filter.
-fn cure(name: &str) -> String {
+pub(crate) fn cure(name: &str) -> String {
     decancer::cure!(name).map_or_else(|_| name.to_string(), |c| c.to_string())
 }
 

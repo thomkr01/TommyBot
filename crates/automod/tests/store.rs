@@ -63,10 +63,16 @@ async fn lock_snapshot_round_trip_then_gone() {
         channel_denies: vec![(55, 3)],
         join_lock: true,
         invites_paused: false,
+        ..Default::default()
     };
     store::save_lock(&p, g as u64, &snap).await.unwrap();
-    assert_eq!(store::take_lock(&p, g as u64).await.unwrap(), Some(snap));
-    assert_eq!(store::take_lock(&p, g as u64).await.unwrap(), None);
+    assert_eq!(
+        store::locks(&p, g as u64).await.unwrap(),
+        vec![snap.clone()]
+    );
+    assert!(store::take_lock(&p, g as u64, &snap).await.unwrap());
+    assert!(!store::take_lock(&p, g as u64, &snap).await.unwrap());
+    assert!(store::locks(&p, g as u64).await.unwrap().is_empty());
     cleanup(&p, g).await;
 }
 

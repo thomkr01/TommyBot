@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tommybot_automod::lockdown::{kind_from, LockKind};
+use tommybot_automod::lockdown::kind_from;
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
 use tommybot_logging::{
     embed::{self, duration, ARROW, ORANGE, RED},
@@ -347,16 +347,32 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;
             // `lock role`, `lock server`, `lock channel`...: one-off type instead of the dashboard default.
-            let kind = match p.kind.as_ref().or(p.names.first()) {
-                Some(n) => match kind_from(n, Some(msg.channel_id.get())) {
-                    Some(k) => Some(k),
-                    None => return say(app, msg, LOCK_TYPES).await,
-                },
-                None => None,
+            // Channel mentions lock (or unlock) those channels instead of this one.
+            let channels = match p.channels.as_slice() {
+                [] => vec![msg.channel_id.get()],
+                c => c.to_vec(),
             };
+            let name = p.kind.as_ref().or(p.names.first()).map(String::as_str);
+            let name = name.or((!p.channels.is_empty()).then_some("c"));
+            let mut kinds = vec![];
+            for c in &channels {
+                match name.map(|n| kind_from(n, Some(*c))) {
+                    Some(Some(k)) if !kinds.contains(&k) => kinds.push(k),
+                    Some(Some(_)) => {}
+                    Some(None) => return say(app, msg, lockdown::LOCK_TYPES).await,
+                    None => {}
+                }
+            }
             let unlock = p.command == "unlock";
-            let text = lockdown_cmd(app, gid, &actor, unlock, kind, p.duration_s).await?;
-            return say(app, msg, &text).await;
+            let mut out = vec![];
+            for kind in kinds
+                .into_iter()
+                .map(Some)
+                .chain(name.is_none().then_some(None))
+            {
+                out.push(lockdown::command(app, gid, &actor, unlock, kind, p.duration_s).await?);
+            }
+            return say(app, msg, &out.join("\n")).await;
         }
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
         | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
@@ -795,50 +811,6 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
     Ok(())
 }
 
-pub const LOCK_TYPES: &str =
-    "Lock type: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s)";
-
-/// Lock or unlock the server; shared by the prefix and slash commands. `kind` overrides the dashboard's lock type.
-pub async fn lockdown_cmd(
-    app: &App,
-    gid: Id<GuildMarker>,
-    actor: &permits::Level,
-    unlock: bool,
-    kind: Option<LockKind>,
-    duration_s: Option<i64>,
-) -> Result<String> {
-    if !actor.has("lockdown") {
-        return Ok("Cannot lock: no permit".into());
-    }
-    if unlock {
-        lockdown::unlock(app, gid).await?;
-        return Ok("Server unlocked".into());
-    }
-    let kind = match kind {
-        Some(k) => k,
-        None => app.cfg(gid.get()).await?.lockdown_prefs.kind(),
-    };
-    let done = lockdown::lock(app, gid, kind).await?;
-    if done {
-        if let Some(d) = duration_s {
-            jobs::enqueue(
-                &app.pool,
-                gid.get() as i64,
-                "unlock",
-                json!({}),
-                now_secs() + d,
-            )
-            .await?;
-        }
-    }
-    Ok(if done {
-        "Server locked"
-    } else {
-        "Already locked"
-    }
-    .into())
-}
-
 /// `/backup create|list|load|delete`. `load` previews unless `confirm` is set.
 pub async fn backup_cmd(
     app: &App,
@@ -930,6 +902,7 @@ mod tests {
             count: 5,
             user: None,
             from: Some(crate::modcmds::Anchor::Until(9)),
+            filters: vec![],
         };
         let e = Action::Ext {
             cmd: purge.clone(),

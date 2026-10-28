@@ -42,23 +42,38 @@ pub async fn save_strikes(db: &PgPool, guild: u64, user: u64, s: &StrikeState) -
 pub async fn save_lock(db: &PgPool, guild: u64, snap: &Snapshot) -> Result<()> {
     sqlx::query(
         "INSERT INTO lock_snapshots (guild_id, kind, snapshot) VALUES ($1,$2,$3)
-         ON CONFLICT (guild_id) DO UPDATE SET kind=$2, snapshot=$3, created_at=now()",
+         ON CONFLICT (guild_id, kind) DO UPDATE SET snapshot=$3, created_at=now()",
     )
     .bind(guild as i64)
-    .bind(format!("{:?}", snap.kind))
+    .bind(lock_key(snap))
     .bind(sqlx::types::Json(snap))
     .execute(db)
     .await?;
     Ok(())
 }
 
-/// Remove and return the active lock snapshot (None when the guild isn't locked).
-pub async fn take_lock(db: &PgPool, guild: u64) -> Result<Option<Snapshot>> {
-    let row = sqlx::query("DELETE FROM lock_snapshots WHERE guild_id=$1 RETURNING snapshot")
+fn lock_key(snap: &Snapshot) -> String {
+    format!("{:?}", snap.kind)
+}
+
+/// Every active lock of the guild, oldest first.
+pub async fn locks(db: &PgPool, guild: u64) -> Result<Vec<Snapshot>> {
+    let rows: Vec<(sqlx::types::Json<Snapshot>,)> =
+        sqlx::query_as("SELECT snapshot FROM lock_snapshots WHERE guild_id=$1 ORDER BY created_at")
+            .bind(guild as i64)
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(|(s,)| s.0).collect())
+}
+
+/// Removes one active lock; false when another unlock got it first.
+pub async fn take_lock(db: &PgPool, guild: u64, snap: &Snapshot) -> Result<bool> {
+    let done = sqlx::query("DELETE FROM lock_snapshots WHERE guild_id=$1 AND kind=$2")
         .bind(guild as i64)
-        .fetch_optional(db)
+        .bind(lock_key(snap))
+        .execute(db)
         .await?;
-    Ok(row.map(|r| r.get::<sqlx::types::Json<Snapshot>, _>(0).0))
+    Ok(done.rows_affected() > 0)
 }
 
 /// Queue a restart-safe timer, e.g. kind `lock_expiry`, `raid_end`, `panic_end`.

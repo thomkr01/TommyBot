@@ -198,7 +198,7 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
     }
     for step in panic_end_plan(payload["unlock"].as_bool().unwrap_or(false)) {
         if step == PanicStep::UnlockServer {
-            lockdown::unlock(app, gid).await?;
+            lockdown::unlock(app, gid, Some(&LockKind::Role)).await?;
         }
     }
     send_log(

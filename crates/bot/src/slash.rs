@@ -44,7 +44,9 @@ pub enum Cmd {
         kind: Option<LockKind>,
         duration_s: Option<i64>,
     },
-    Unlock,
+    Unlock {
+        kind: Option<LockKind>,
+    },
     Revert {
         target: Id<UserMarker>,
         since_s: i64,
@@ -75,6 +77,15 @@ pub(crate) fn string<'a>(o: &'a [CommandDataOption], name: &str) -> Option<&'a s
         .find(|o| o.name == name)
         .and_then(|o| match &o.value {
             CommandOptionValue::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+}
+
+pub(crate) fn role(o: &[CommandDataOption], name: &str) -> Option<u64> {
+    o.iter()
+        .find(|o| o.name == name)
+        .and_then(|o| match o.value {
+            CommandOptionValue::Role(r) => Some(r.get()),
             _ => None,
         })
 }
@@ -138,7 +149,7 @@ pub fn parse(
         "warn" => ModKind::Warn,
         "lock" => {
             let kind = match string(o, "type") {
-                Some(n) => Some(kind_from(n, None).ok_or(commands::LOCK_TYPES)?),
+                Some(n) => Some(kind_from(n, None).ok_or(crate::lockdown::LOCK_TYPES)?),
                 None => None,
             };
             return Ok(Cmd::Lock {
@@ -146,7 +157,13 @@ pub fn parse(
                 duration_s: dur(o, "duration")?,
             });
         }
-        "unlock" => return Ok(Cmd::Unlock),
+        "unlock" => {
+            let kind = match string(o, "type") {
+                Some(n) => Some(kind_from(n, None).ok_or(crate::lockdown::LOCK_TYPES)?),
+                None => None,
+            };
+            return Ok(Cmd::Unlock { kind });
+        }
         "backups" => return backup(o),
         "Quarantine" | "Sanitize & Dehoist" => {
             let user = target_id.ok_or("missing user")?.get();
@@ -198,7 +215,7 @@ pub fn definitions() -> Vec<Command> {
     let guild_only = |b: CommandBuilder| b.contexts([InteractionContextType::Guild]).build();
     let chat = |n: &str, d: &str| CommandBuilder::new(n, d, CommandType::ChatInput);
     let menu = |n: &str| CommandBuilder::new(n, "", CommandType::User);
-    let mut defs = modcmds::definitions();
+    let mut defs = crate::modslash::definitions();
     defs.extend([
         guild_only(
             chat("ban", "Ban a member")
@@ -242,7 +259,12 @@ pub fn definitions() -> Vec<Command> {
                 ))
                 .option(StringBuilder::new("duration", "Unlock after, e.g. 30m")),
         ),
-        guild_only(chat("unlock", "Unlock the server")),
+        guild_only(
+            chat("unlock", "Unlock the server").option(StringBuilder::new(
+                "type",
+                "Only this lock: server, role, kick, ban or all",
+            )),
+        ),
         guild_only(
             chat("revert", "Undo a member's recent logged actions")
                 .option(UserBuilder::new("actor", "Whose actions to undo").required(true))
@@ -404,9 +426,9 @@ async fn run(
             .await
         }
         Cmd::Lock { kind, duration_s } => {
-            commands::lockdown_cmd(app, gid, &actor, false, kind, duration_s).await
+            crate::lockdown::command(app, gid, &actor, false, kind, duration_s).await
         }
-        Cmd::Unlock => commands::lockdown_cmd(app, gid, &actor, true, None, None).await,
+        Cmd::Unlock { kind } => crate::lockdown::command(app, gid, &actor, true, kind, None).await,
         Cmd::Revert { target, since_s } => {
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }
@@ -525,7 +547,8 @@ mod tests {
         assert!(ModCmd::Purge {
             count: 5,
             user: None,
-            from: None
+            from: None,
+            filters: vec![]
         }
         .destructive());
         assert!(!ModCmd::Unban { user: 1 }.destructive());

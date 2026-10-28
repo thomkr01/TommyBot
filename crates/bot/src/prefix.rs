@@ -9,6 +9,11 @@ pub struct Parsed {
     pub reason: Option<String>,
     /// `?t TYPE` that is not a duration (lock types such as `sc`); lock shortcuts like `slock` set it too.
     pub kind: Option<String>,
+    /// Words after `?t TYPE` (purge `has`/`equals`/`starts` text, ids for `after`/`before`/`webhook`).
+    pub input: Option<String>,
+    /// `<@&id>` and `<#id>` mentions.
+    pub roles: Vec<u64>,
+    pub channels: Vec<u64>,
     pub flags: Flags,
 }
 
@@ -74,7 +79,16 @@ pub fn parse(s: &str) -> Option<Parsed> {
                 if let Some(v) = it.next_if(|t| !t.starts_with('?')) {
                     match tommybot_core::duration::parse(v) {
                         Some(d) => p.duration_s = Some(d),
-                        None => p.kind = Some(v.to_lowercase()),
+                        None => {
+                            p.kind = Some(v.to_lowercase());
+                            let mut words = vec![];
+                            while let Some(t) =
+                                it.next_if(|t| !t.starts_with('?') && !t.starts_with('<'))
+                            {
+                                words.push(t);
+                            }
+                            p.input = Some(words.join(" ")).filter(|w| !w.is_empty());
+                        }
                     }
                 }
             }
@@ -82,6 +96,15 @@ pub fn parse(s: &str) -> Option<Parsed> {
             "?s" => p.flags.soft = true,
             "?p" => p.flags.compact = true,
             "?h" => {}
+            _ if tok.starts_with("<@&") || tok.starts_with("<#") => {
+                if let Ok(id) = tok.trim_matches(|c: char| !c.is_ascii_digit()).parse() {
+                    if tok.starts_with("<#") {
+                        p.channels.push(id)
+                    } else {
+                        p.roles.push(id)
+                    }
+                }
+            }
             _ => {
                 let id = tok
                     .trim_matches(|c: char| !c.is_ascii_digit())
@@ -170,6 +193,24 @@ mod tests {
         assert_eq!(
             (p.duration_s, p.reason.as_deref()),
             (Some(3600), Some("too loud"))
+        );
+    }
+
+    #[test]
+    fn type_input_roles_channels() {
+        let p = parse("purge 50 <@&7> ?t has free nitro ?r spam").unwrap();
+        assert_eq!(
+            (p.kind.as_deref(), p.input.as_deref()),
+            (Some("has"), Some("free nitro"))
+        );
+        assert_eq!(
+            (p.roles.as_slice(), p.targets.as_slice()),
+            (&[7][..], &[50][..])
+        );
+        let p = parse("lock ?t c <#1> <#2>").unwrap();
+        assert_eq!(
+            (p.kind.as_deref(), p.input, p.channels),
+            (Some("c"), None, vec![1, 2])
         );
     }
 
