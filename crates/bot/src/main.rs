@@ -15,12 +15,14 @@ mod prefix;
 mod reply;
 mod reports;
 mod scheduler;
+mod settings;
 mod slash;
 mod targets;
 mod tickets;
 mod timeout_roles;
 mod verify;
 mod welcome;
+mod whitelist;
 
 use anyhow::Result;
 use std::sync::Arc;

@@ -183,8 +183,12 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
-                if let Some(parsed) = m.content.strip_prefix(&pfx).and_then(prefix::parse) {
-                    commands::run(app, m, parsed).await?;
+                if let Some(rest) = m.content.strip_prefix(&pfx) {
+                    if !crate::settings::try_run(app, m, rest).await? {
+                        if let Some(parsed) = prefix::parse(rest) {
+                            commands::run(app, m, parsed).await?;
+                        }
+                    }
                 }
             }
             automod::on_message(app, m).await?;
@@ -222,6 +226,8 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
                 && !tickets::handle(app, &i.0).await?
                 && !commands::handle_confirm(app, &i.0).await?
                 && !reports::handle(app, &i.0).await?
+                && !crate::settings::handle(app, &i.0).await?
+                && !crate::whitelist::handle(app, &i.0).await?
             {
                 slash::handle(app, &i.0).await?
             }

@@ -61,8 +61,28 @@ fn section<T: DeserializeOwned + Default>(cfg: &Value, name: &str) -> T {
     }
 }
 
+/// Strict parse of one section for writes from Discord: a bad value is refused, not defaulted.
+pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
+    fn t<T: DeserializeOwned>(v: &Value) -> Result<(), String> {
+        T::deserialize(v).map(drop).map_err(|e| e.to_string())
+    }
+    match name {
+        "logging" => t::<LogConfig>(v),
+        "antinuke" => t::<AntinukeCfg>(v),
+        "automod" => t::<AutomodCfg>(v),
+        "joingate" => t::<GateCfg>(v),
+        "joinraid" => t::<RaidCfg>(v),
+        "lockdown" => t::<LockdownCfg>(v).and(t::<LockdownPrefs>(v)),
+        "panic" => t::<PanicCfg>(v),
+        "misc" => t::<MiscCfg>(v),
+        "whitelist" => t::<WhitelistCfg>(v),
+        "verification" => t::<VerificationCfg>(v),
+        _ => Ok(()),
+    }
+}
+
 impl GuildCfg {
-    fn parse(cfg: &Value) -> Self {
+    pub(crate) fn parse(cfg: &Value) -> Self {
         Self {
             logging: section(cfg, "logging"),
             antinuke: section(cfg, "antinuke"),
@@ -238,6 +258,11 @@ impl App {
         let cfg = Arc::new(row.map_or_else(GuildCfg::default, |(v,)| GuildCfg::parse(&v)));
         self.cfgs.write().unwrap().insert(guild, cfg.clone());
         Ok(cfg)
+    }
+
+    /// Drops a guild's cached config after a write from Discord, before the NOTIFY round trip.
+    pub fn forget_cfg(&self, guild: u64) {
+        self.cfgs.write().unwrap().remove(&guild);
     }
 
     /// Reloads configs when the dashboard saves. Reconnects by itself; a gap only delays a reload.
