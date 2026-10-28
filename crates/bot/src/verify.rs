@@ -8,11 +8,11 @@ use captcha::{
 use image::{Rgb, RgbImage};
 use serde::Deserialize;
 use tommybot_automod::join::{
-    effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
+    account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
 };
 use tommybot_core::jobs;
 use tommybot_logging::{
-    embed::{ALERT, NO},
+    embed::{ALERT, DONE, NO, YES},
     Log, LogKind,
 };
 use twilight_model::{
@@ -29,6 +29,7 @@ use twilight_model::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
     },
+    user::User,
 };
 
 use crate::{
@@ -195,14 +196,9 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
         app,
         gid.get(),
         LogKind::Verification,
-        Log::new(
-            &format!("{}'s Verification Result:", member.user.name),
+        result_log(
+            &member.user,
             ALERT,
-        )
-        .thumbnail(&member.user)
-        .line("Member", &format!("{} [{user}]", member.user.name))
-        .field(
-            "Status:",
             &format!(
                 "{NO} `{}` did not verify in time: **{:?}**",
                 member.user.name, v.verify.on_fail
@@ -272,7 +268,26 @@ pub(crate) async fn grant(
             .execute(&app.pool)
             .await?;
     }
+    if let Ok(u) = async { anyhow::Ok(app.http.user(user).await?.model().await?) }.await {
+        let status = format!("{YES} `{}` has passed verification successfully.", u.name);
+        let log = result_log(&u, DONE, &status);
+        if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
+            tracing::warn!(?e, "verification log failed");
+        }
+    }
     Ok(())
+}
+
+/// Wick's "name's Verification Result:" log.
+fn result_log(u: &User, color: u32, status: &str) -> Log {
+    Log::new(&format!("{}'s Verification Result:", u.name), color)
+        .thumbnail(u)
+        .line("Member", &format!("{} [{}]", u.name, u.id))
+        .line(
+            "Creation",
+            &format!("<t:{}:F>", account_created_ms(u.id.get()) / 1000),
+        )
+        .field("Status:", status)
 }
 
 fn rgb(hex: &str) -> Option<Rgb<u8>> {

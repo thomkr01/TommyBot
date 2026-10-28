@@ -133,7 +133,12 @@ impl Log {
     /// instead of rejected.
     pub fn build(self) -> Embed {
         let mut left = TOTAL - self.title.chars().count();
-        let mut embed = self.embed.title(self.title);
+        // Wick's mod logs have no title, and Discord rejects an empty one.
+        let mut embed = if self.title.is_empty() {
+            self.embed
+        } else {
+            self.embed.title(self.title)
+        };
         if let Some(f) = self.footer {
             left -= f.chars().count();
             embed = embed.footer(EmbedFooterBuilder::new(f));

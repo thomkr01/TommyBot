@@ -7,7 +7,7 @@ use serde_json::json;
 use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
 use tommybot_logging::{
-    embed::{duration, ORANGE, RED},
+    embed::{self, duration, ARROW, ORANGE, RED},
     Log, LogKind,
 };
 use twilight_http::Client;
@@ -229,17 +229,16 @@ pub async fn apply_dm(
     )
     .await?;
     let name = if soft { "softban" } else { perm };
-    let mut log = Log::new(
-        &format!("Case #{case_no} | {}", case_title(name)),
-        case_color(name),
-    )
-    .user("Target", t)
-    .user("Moderator", actor_id.get())
-    .time();
+    // Wick's mod log: no title, Case / Type / Moderator columns, then Target and Reason.
+    let mut log = Log::new("", case_color(name))
+        .inline("Case:", &format!("`{case_no}`"))
+        .inline("Type:", &format!("`{}`", case_title(name)))
+        .inline("Moderator:", &embed::user(actor_id.get()))
+        .field("Target:", &format!("{ARROW} {}", embed::user(t)));
     if let Some(d) = duration_s {
-        log = log.line("Duration", &format!("`{}`", duration(d)));
+        log = log.field("Duration:", &format!("`{}`", duration(d)));
     }
-    let log = log.line("Reason", reason.unwrap_or("No reason provided"));
+    let log = log.field("Reason:", reason.unwrap_or("No reason provided"));
     if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
         tracing::warn!(?e, "mod log failed");
     }

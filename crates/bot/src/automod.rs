@@ -17,7 +17,7 @@ use tommybot_core::{
     sections::{AutomodCfg, FilterAction, FilterCfg, FiltersCfg, WhitelistList},
 };
 use tommybot_logging::{
-    embed::{channel, duration, ALERT, ARROW, ORANGE, RED, YES},
+    embed::{channel, clip, duration, ALERT, ARROW, ORANGE, RED, YES},
     Log, LogKind,
 };
 use twilight_model::{
@@ -212,7 +212,8 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     crate::panic::note(app, gid, m.author.id, true).await?;
     if let Some(fc) = tripped_filter(&breakdown, f, bad_site) {
         if let Some(action) = fc.action {
-            return filter_action(app, &cfg, gid, m, action, fc.duration_secs).await;
+            let why = (factor(&breakdown), fc.duration_secs);
+            return filter_action(app, &cfg, gid, m, action, why).await;
         }
     }
     let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
@@ -245,24 +246,20 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         }
         timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
     }
-    let title = format!(
-        "{} has been silenced for {}!",
-        m.author.name,
-        duration(act.timeout_ms / 1000)
-    );
-    let log = Log::new(&title, ALERT)
-        .thumbnail(&m.author)
+    let reason = if act.purge {
+        "Message spam (strike cap)"
+    } else {
+        factor(&breakdown)
+    };
+    let log = Log::new(&format!("*{} has been timed out!*", m.author.name), ORANGE)
+        .line("Reason", &format!("*{reason}*"))
         .user("Member", m.author.id.get())
         .line("Channel", &channel(m.channel_id.get()))
-        .line("Strike", &format!("`{}`", act.strike))
-        .field(
-            "REASON:",
-            if act.purge {
-                "Message Spam (strike cap)"
-            } else {
-                "Message Spam"
-            },
-        );
+        .line(
+            "Duration",
+            &format!("`{}`", duration(act.timeout_ms / 1000)),
+        )
+        .line("Strike", &format!("`{}`", act.strike));
     send_log(app, gid.get(), LogKind::AutoMod, log).await?;
     if lock.enabled
         && lock.strikes.is_some_and(|n| act.strike >= n)
@@ -330,6 +327,30 @@ fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
     h
 }
 
+/// Wick's "Factor" line for the biggest heat contribution.
+fn factor(b: &Breakdown) -> &'static str {
+    let name = b
+        .parts
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|p| p.0);
+    match name.unwrap_or_default() {
+        "blacklisted_words" => "Use of blacklisted words",
+        "invites" => "Posting an invite link",
+        "malicious" => "Posting a malicious link",
+        "nsfw" => "Posting an NSFW link",
+        "links_blacklist" => "Posting a blacklisted link",
+        "similarity" => "Spamming the same message",
+        "mentions" | "role_mentions" | "everyone" => "Mass mentioning",
+        "zalgo" => "Use of zalgo text",
+        "uppercase" => "Excessive caps",
+        "emojis" => "Emoji spam",
+        "newlines" => "Newline spam",
+        "images" | "files" | "embeds" | "links" | "stickers" => "Attachment spam",
+        _ => "Message spam",
+    }
+}
+
 /// The filter behind the biggest heat contribution.
 fn tripped_filter<'a>(b: &Breakdown, f: &'a FiltersCfg, bad_site: bool) -> Option<&'a FilterCfg> {
     let (name, _) = b.parts.iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
@@ -362,7 +383,7 @@ async fn filter_action(
     gid: Id<GuildMarker>,
     m: &MessageCreate,
     action: FilterAction,
-    duration_secs: Option<i64>,
+    (factor, duration_secs): (&str, Option<i64>),
 ) -> Result<()> {
     let uid = m.author.id;
     app.http.delete_message(m.channel_id, m.id).await.ok();
@@ -403,12 +424,31 @@ async fn filter_action(
         app,
         gid.get(),
         LogKind::AutoMod,
-        Log::new("Auto Mod Action", ORANGE)
-            .user("Member", uid.get())
-            .line("Action", &format!("`{action:?}`"))
-            .line("Reason", "Filter"),
+        Log::new(&action_title(&m.author.name, action), action_color(action))
+            .line("Factor", &format!("*{factor}*"))
+            .line("Channel", &channel(m.channel_id.get()))
+            .line("Message", &format!("||{}||", clip(&m.content, 500)))
+            .user("Member", uid.get()),
     )
     .await
+}
+
+/// Wick's automod log title: "*name has been warned!*".
+fn action_title(name: &str, action: FilterAction) -> String {
+    match action {
+        FilterAction::Delete => format!("*{name}'s message has been deleted!*"),
+        FilterAction::Warn => format!("*{name} has been warned!*"),
+        FilterAction::Timeout => format!("*{name} has been timed out!*"),
+        FilterAction::Kick => format!("*{name} has been kicked!*"),
+        FilterAction::Ban => format!("*{name} has been banned!*"),
+    }
+}
+
+fn action_color(action: FilterAction) -> u32 {
+    match action {
+        FilterAction::Kick | FilterAction::Ban => RED,
+        _ => ORANGE,
+    }
 }
 
 /// Keeps the native Discord AutoMod keyword rule in step with the saved word lists.
