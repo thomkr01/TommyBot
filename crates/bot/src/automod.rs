@@ -210,10 +210,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         return delete_new_webhooks(app, gid).await;
     }
     crate::panic::note(app, gid, m.author.id, true).await?;
-    if let Some(fc) = tripped_filter(&breakdown, f, bad_site) {
+    let tripped = tripped_filter(&breakdown, f, bad_site);
+    if let Some((fc, factor)) = tripped {
         if let Some(action) = fc.action {
-            let why = (factor(&breakdown), fc.duration_secs);
-            return filter_action(app, &cfg, gid, m, action, why).await;
+            return filter_action(app, &cfg, gid, m, action, (factor, fc.duration_secs)).await;
         }
     }
     let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
@@ -249,7 +249,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let reason = if act.purge {
         "Message spam (strike cap)"
     } else {
-        factor(&breakdown)
+        tripped.map_or("Message spam", |t| t.1)
     };
     let log = Log::new(&format!("*{} has been timed out!*", m.author.name), ORANGE)
         .line("Reason", &format!("*{reason}*"))
@@ -327,51 +327,31 @@ fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
     h
 }
 
-/// Wick's "Factor" line for the biggest heat contribution.
-fn factor(b: &Breakdown) -> &'static str {
-    let name = b
-        .parts
-        .iter()
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|p| p.0);
-    match name.unwrap_or_default() {
-        "blacklisted_words" => "Use of blacklisted words",
-        "invites" => "Posting an invite link",
-        "malicious" => "Posting a malicious link",
-        "nsfw" => "Posting an NSFW link",
-        "links_blacklist" => "Posting a blacklisted link",
-        "similarity" => "Spamming the same message",
-        "mentions" | "role_mentions" | "everyone" => "Mass mentioning",
-        "zalgo" => "Use of zalgo text",
-        "uppercase" => "Excessive caps",
-        "emojis" => "Emoji spam",
-        "newlines" => "Newline spam",
-        "images" | "files" | "embeds" | "links" | "stickers" => "Attachment spam",
-        _ => "Message spam",
-    }
-}
-
-/// The filter behind the biggest heat contribution.
-fn tripped_filter<'a>(b: &Breakdown, f: &'a FiltersCfg, bad_site: bool) -> Option<&'a FilterCfg> {
+/// The filter behind the biggest heat contribution, with Wick's "Factor" text for it.
+fn tripped_filter<'a>(
+    b: &Breakdown,
+    f: &'a FiltersCfg,
+    bad_site: bool,
+) -> Option<(&'a FilterCfg, &'static str)> {
     let (name, _) = b.parts.iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
     Some(match *name {
-        "message" => &f.regular,
-        "similarity" => &f.similar,
-        "emojis" => &f.emojis,
-        "newlines" => &f.newlines,
-        "uppercase" => &f.chars_upper,
-        "lowercase" | "characters" => &f.chars_lower,
-        "zalgo" => &f.zalgo,
-        "suspicious_account" => &f.suspicion,
-        "inactive_channel" => &f.inactive_channel,
-        "blacklisted_words" => &f.words.filter,
-        "invites" => &f.invites,
-        "malicious" if bad_site => &f.bad_sites,
-        "malicious" => &f.scam_links,
-        "nsfw" => &f.nsfw_links,
-        "links_blacklist" => &f.links,
-        "mentions" | "role_mentions" | "everyone" => &f.mentions,
-        "images" | "files" | "embeds" | "links" | "stickers" => &f.attachments,
+        "message" => (&f.regular, "Message spam"),
+        "similarity" => (&f.similar, "Spamming the same message"),
+        "emojis" => (&f.emojis, "Emoji spam"),
+        "newlines" => (&f.newlines, "Newline spam"),
+        "uppercase" => (&f.chars_upper, "Excessive caps"),
+        "lowercase" | "characters" => (&f.chars_lower, "Character spam"),
+        "zalgo" => (&f.zalgo, "Use of zalgo text"),
+        "suspicious_account" => (&f.suspicion, "Suspicious account"),
+        "inactive_channel" => (&f.inactive_channel, "Spam in an inactive channel"),
+        "blacklisted_words" => (&f.words.filter, "Use of blacklisted words"),
+        "invites" => (&f.invites, "Posting an invite link"),
+        "malicious" if bad_site => (&f.bad_sites, "Posting a malicious link"),
+        "malicious" => (&f.scam_links, "Posting a scam link"),
+        "nsfw" => (&f.nsfw_links, "Posting an NSFW link"),
+        "links_blacklist" => (&f.links, "Posting a blacklisted link"),
+        "mentions" | "role_mentions" | "everyone" => (&f.mentions, "Mass mentioning"),
+        "images" | "files" | "embeds" | "links" | "stickers" => (&f.attachments, "Attachment spam"),
         _ => return None,
     })
 }
@@ -874,6 +854,7 @@ mod tests {
         let pick = |parts| {
             tripped_filter(&Breakdown { parts }, &f, false)
                 .unwrap()
+                .0
                 .action
         };
         assert_eq!(
