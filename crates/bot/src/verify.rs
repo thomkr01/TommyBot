@@ -652,21 +652,20 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         }
         Some(InteractionData::ModalSubmit(m)) if m.custom_id.starts_with(CODE) => {
             let typed = m.components.iter().find_map(typed_text).unwrap_or_default();
-            // Kept until it is solved, so a wrong answer can be retried.
-            let expected = app
-                .captchas
-                .lock()
-                .unwrap()
-                .get(&(gid.get(), user.get()))
-                .cloned();
-            if expected.is_some_and(|e| e.eq_ignore_ascii_case(typed.trim())) {
-                app.captchas
-                    .lock()
-                    .unwrap()
-                    .remove(&(gid.get(), user.get()));
+            let solved = {
+                let mut codes = app.captchas.lock().unwrap();
+                let key = (gid.get(), user.get());
+                let ok = codes
+                    .get(&key)
+                    .is_some_and(|e| e.eq_ignore_ascii_case(typed.trim()));
+                if ok {
+                    codes.remove(&key);
+                }
+                ok
+            };
+            if solved {
                 let cfg = app.cfg(gid.get()).await?;
                 grant(app, gid, user, &cfg.verification).await?;
-                // Turn the challenge message into "Verification done." when the modal came from it.
                 let edit = i.message.is_some();
                 let kind = if edit {
                     InteractionResponseType::UpdateMessage
