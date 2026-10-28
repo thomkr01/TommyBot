@@ -85,9 +85,12 @@ pub enum PanicStep {
     UnlockServer,
 }
 
-pub fn panic_plan(lock_mod_commands: bool) -> Vec<PanicStep> {
+pub fn panic_plan(lock_server: bool, lock_mod_commands: bool) -> Vec<PanicStep> {
     use PanicStep::*;
-    let mut v = vec![LockServer];
+    let mut v = vec![];
+    if lock_server {
+        v.push(LockServer);
+    }
     if lock_mod_commands {
         v.push(LockModCommands);
     }
@@ -186,7 +189,7 @@ mod tests {
     fn panic_plans() {
         use PanicStep::*;
         assert_eq!(
-            panic_plan(false),
+            panic_plan(true, false),
             vec![
                 LockServer,
                 PingWarnedRoles,
@@ -194,7 +197,8 @@ mod tests {
                 LoadLatestBackup
             ]
         );
-        assert_eq!(panic_plan(true)[1], LockModCommands);
+        assert_eq!(panic_plan(true, true)[1], LockModCommands);
+        assert_eq!(panic_plan(false, true)[0], LockModCommands);
         assert_eq!(panic_end_plan(true), vec![UnlockServer]);
         assert!(panic_end_plan(false).is_empty());
     }

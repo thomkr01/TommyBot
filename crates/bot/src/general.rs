@@ -99,6 +99,13 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "Panic mode panel",
     ),
     (
+        "antinukerestore",
+        &["anr"],
+        "*",
+        "anr [N ?on | N ?off]",
+        "Restore system filters",
+    ),
+    (
         "joingate",
         &["jg"],
         "*",
@@ -297,6 +304,7 @@ const CATEGORIES: [(&str, &[&str]); 3] = [
             "hfilters",
             "antinuke",
             "anpanic",
+            "antinukerestore",
             "joingate",
             "joinraid",
             "verification",

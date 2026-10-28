@@ -653,9 +653,24 @@ pub fn schema() -> Vec<Value> {
         dv(fg("Response", "duration_secs", "int"), 600),
         dv(fg("Response", "lock_mod_commands", "bool"), true),
         dv(fg("Response", "unlock_when_ending", "bool"), true),
+        ti(
+            dv(fg("Response", "lock_on_trigger", "bool"), true),
+            "Lock the server on trigger",
+        ),
         fg("Response", "warned_roles", "roles"),
         fg("Response", "whitelisted_categories", "categories"),
     ];
+    let mut backups = vec![f("auto", "bool")];
+    for (path, title) in [
+        ("restore", "Restore after a nuke"),
+        ("restore_roles", "Restore deleted roles"),
+        ("delete_roles", "Delete created roles"),
+        ("restore_channels", "Restore deleted channels"),
+        ("delete_channels", "Delete created channels"),
+        ("delete_webhooks", "Delete created webhooks"),
+    ] {
+        backups.push(ti(dv(fg("Restore", path, "bool"), true), title));
+    }
     let mut whitelist = vec![];
     for (tab, prefix) in [
         ("", ""),
@@ -921,7 +936,7 @@ pub fn schema() -> Vec<Value> {
             ],
         ),
         ("panic", "Panic mode", panic),
-        ("backups", "Backups", vec![f("auto", "bool")]),
+        ("backups", "Backups", backups),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),
         ("tickets", "Tickets", tickets),

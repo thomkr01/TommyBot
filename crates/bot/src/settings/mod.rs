@@ -241,7 +241,9 @@ pub fn apply(doc: &mut Value, path: &str, e: Edit) {
 /// Wick: Trusted Admins may not change Miscellaneous or Anti-Nuke; everyone else needs Dashboard Edit.
 pub fn may_edit(level: &Level, section: &str) -> bool {
     match section {
-        "misc" | "antinuke" | "panic" => matches!(level, Level::Owner | Level::ExtraOwner),
+        "misc" | "antinuke" | "panic" | "backups" => {
+            matches!(level, Level::Owner | Level::ExtraOwner)
+        }
         "whitelist" => level.immune(),
         _ => level.has("dashboard_edit"),
     }
