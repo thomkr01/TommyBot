@@ -241,8 +241,8 @@ fn changes(
                 }
                 l
             }
-            key if created => log.line(&words(key), &show(key, kind, new)),
-            key if deleted => log.line(&words(key), &show(key, kind, old)),
+            key if created => log.line(&words(key), &value(key, kind, new)),
+            key if deleted => log.line(&words(key), &value(key, kind, old)),
             key => log
                 .text(&format!("{ARROW} **{}:**", words(key)))
                 .diff(Some(&show(key, kind, old)), Some(&show(key, kind, new))),
@@ -362,14 +362,20 @@ fn target_ref(kind: LogKind, id: u64) -> String {
     }
 }
 
-/// A change value as Wick shows it: mentions for ids, names for channel types, hex colours.
+/// A settings line value: like [`show`], with mentions for ids (they would not render in a diff).
+fn value(key: &str, kind: LogKind, v: Option<&Value>) -> String {
+    let id = v.and_then(Value::as_str).and_then(|s| s.parse().ok());
+    match (key, id) {
+        ("channel_id", Some(id)) => embed::channel(id),
+        ("inviter_id" | "application_id", Some(id)) => embed::user(id),
+        _ => show(key, kind, v),
+    }
+}
+
+/// A change value as Wick shows it: names for channel types, hex colours.
 fn show(key: &str, kind: LogKind, v: Option<&Value>) -> String {
     match (key, v) {
         (_, None | Some(Value::Null)) => "none".into(),
-        ("channel_id", Some(Value::String(s))) => s.parse().map_or(s.clone(), embed::channel),
-        ("inviter_id" | "application_id", Some(Value::String(s))) => {
-            s.parse().map_or(s.clone(), embed::user)
-        }
         ("color", Some(Value::Number(n))) => format!("#{:06X}", n.as_u64().unwrap_or(0)),
         ("permission_overwrites", Some(Value::Array(a))) => a.len().to_string(),
         ("type", Some(Value::Number(n))) if matches!(kind, LogKind::Channel | LogKind::Thread) => {
@@ -470,7 +476,8 @@ mod tests {
         let d = audit(&e).unwrap().embed.description.unwrap();
         assert!(d.ends_with("**Settings**\n▸ **Type:** Text\n▸ **Permission overwrites:** 0"));
         let v = serde_json::json!("5");
-        assert_eq!(show("channel_id", LogKind::Invite, Some(&v)), "<#5> *`5`*");
+        assert_eq!(value("channel_id", LogKind::Invite, Some(&v)), "<#5> *`5`*");
+        assert_eq!(show("channel_id", LogKind::Invite, Some(&v)), "5");
         assert_eq!(
             show("color", LogKind::Role, Some(&serde_json::json!(3447003))),
             "#3498DB"

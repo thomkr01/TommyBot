@@ -421,7 +421,7 @@ impl Pending {
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(?e, "mod command failed");
-                    "Command failed, see logs".into()
+                    format!("Command failed: {}", why(&e))
                 });
                 return Ok(vec![text]);
             }
@@ -457,19 +457,19 @@ impl Pending {
 }
 
 /// Discord's reason for a failed mod action, for the reply.
-fn why(e: &anyhow::Error) -> String {
+pub fn why(e: &anyhow::Error) -> String {
     use twilight_http::{api_error::ApiError, error::ErrorType};
     match e.downcast_ref::<twilight_http::Error>().map(|e| e.kind()) {
         Some(ErrorType::Response {
             error: ApiError::General(g),
             ..
-        }) if g.code == 50013 => {
-            "missing permissions (their top role is above mine, or they have Administrator)".into()
-        }
-        Some(ErrorType::Response {
-            error: ApiError::General(g),
-            ..
-        }) => g.message.clone(),
+        }) => match g.code {
+            50013 => {
+                "missing permissions (their top role is above mine, or they have Administrator)"
+                    .into()
+            }
+            _ => g.message.clone(),
+        },
         _ => "see logs".into(),
     }
 }

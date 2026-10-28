@@ -459,7 +459,6 @@ mod tests {
             })
         );
         assert!(parse("timeout", &o[..1], None).is_err()); // duration required
-                                                           // A reason typed into the duration field.
         let typed = [
             o[0].clone(),
             opt(

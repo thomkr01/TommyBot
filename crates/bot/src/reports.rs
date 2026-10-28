@@ -311,7 +311,10 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(?e, action, "report action failed");
-            Outcome("Something went wrong, see logs".into(), None)
+            Outcome(
+                format!("Something went wrong: {}", crate::commands::why(&e)),
+                None,
+            )
         });
     if let Some(verb) = verb {
         let status = if action == "dismiss" {
