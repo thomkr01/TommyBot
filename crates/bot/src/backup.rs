@@ -290,8 +290,13 @@ fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
         .collect()
 }
 
-/// Drops the creates and deletes the restore filters (`anr`) turned off; updates always stay.
+/// Drops the creates and deletes the restore filters (`anr`) turned off; updates stay unless the
+/// whole restore system is off.
 fn apply_filters(p: &mut Plan, f: &BackupsCfg) {
+    if !f.restore {
+        *p = Plan::default();
+        return;
+    }
     fn keep<T>(c: &Change<T>, create: bool, delete: bool) -> bool {
         match c {
             Change::Create(_) => create,

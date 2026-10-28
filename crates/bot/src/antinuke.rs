@@ -493,7 +493,7 @@ pub(crate) async fn revert_actor(
     .fetch_all(&app.pool)
     .await?;
     let gone: std::collections::HashSet<u64> = gone.into_iter().map(|(id,)| id as u64).collect();
-    let recreated = if gone.is_empty() || filters.is_some_and(|f| !f.restore) {
+    let recreated = if gone.is_empty() {
         0
     } else {
         backup::recreate(app, gid, &gone, filters)
