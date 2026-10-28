@@ -63,6 +63,25 @@ impl LockKind {
             LockKind::Channel(_) => (false, false, None),
         }
     }
+
+    /// Two locks that touch the same thing cannot both be active: unlocking one would undo the other.
+    pub fn overlaps(&self, other: &LockKind) -> bool {
+        let (a, b) = (self.covers(), other.covers());
+        (a.0 && b.0)
+            || (a.1 && b.1)
+            || (a.2.is_some() && b.2.is_some())
+            || matches!((self, other), (LockKind::Channel(x), LockKind::Channel(y)) if x == y)
+    }
+
+    /// Role permission bits this lock may strip, and so may give back.
+    fn mask(&self) -> u64 {
+        let (channels, roles, _) = self.covers();
+        (if channels {
+            SEND_MESSAGES | VIEW_CHANNEL
+        } else {
+            0
+        }) | (if roles { DANGEROUS } else { 0 })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -132,6 +151,12 @@ pub struct Snapshot {
     pub channel_denies: Vec<(u64, u64)>,
     pub join_lock: bool,
     pub invites_paused: bool,
+    /// (channel, role, allow, deny) of overwrites a channel lock changed; missing ones are deleted on unlock.
+    #[serde(default)]
+    pub prior: Vec<(u64, u64, u64, u64)>,
+    /// The blind lock's `#server-locked` channel, deleted on unlock.
+    #[serde(default)]
+    pub locked_channel: Option<u64>,
 }
 
 pub struct Plan {
@@ -315,10 +340,17 @@ pub fn tshoot(
 }
 
 /// Ops that put every saved perm back exactly; join lock / invites are lifted by the caller via the flags.
-pub fn unlock_ops(s: &Snapshot) -> Vec<Op> {
+/// Gives back only the bits this lock took, so permissions changed meanwhile, or held by another
+/// active lock, are kept. `current` is (role, perms) now.
+pub fn unlock_ops(s: &Snapshot, current: &[(u64, u64)]) -> Vec<Op> {
+    let mask = s.kind.as_ref().map_or(0, LockKind::mask);
     s.role_perms
         .iter()
-        .map(|&(role, perms)| Op::SetRolePerms { role, perms })
+        .filter_map(|&(role, before)| {
+            let now = current.iter().find(|(r, _)| *r == role)?.1;
+            let perms = now | (before & mask);
+            (perms != now).then_some(Op::SetRolePerms { role, perms })
+        })
         .collect()
 }
 
@@ -397,12 +429,23 @@ mod tests {
             }]
         );
         assert_eq!(
-            unlock_ops(&p.snapshot),
+            unlock_ops(&p.snapshot, &[(10, VIEW_CHANNEL | 1)]),
             vec![Op::SetRolePerms {
                 role: 10,
-                perms: VIEW_CHANNEL | SEND_MESSAGES
+                perms: VIEW_CHANNEL | SEND_MESSAGES | 1
             }]
         );
+        // A role deleted meanwhile is skipped.
+        assert!(unlock_ops(&p.snapshot, &[]).is_empty());
+    }
+
+    #[test]
+    fn overlapping_locks() {
+        assert!(LockKind::Server.overlaps(&LockKind::All));
+        assert!(!LockKind::Server.overlaps(&LockKind::Role));
+        assert!(!LockKind::Channel(1).overlaps(&LockKind::Channel(2)));
+        assert!(LockKind::Channel(1).overlaps(&LockKind::Channel(1)));
+        assert!(LockKind::Join(JoinLock::Kick).overlaps(&LockKind::Join(JoinLock::Ban)));
     }
 
     #[test]

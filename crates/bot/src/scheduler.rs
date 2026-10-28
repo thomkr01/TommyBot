@@ -42,20 +42,24 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let kind = kind_from(p["kind"].as_str().unwrap_or_default(), channel)
                 .context("job payload has no valid lock kind")?;
             if let (true, Some(d)) = (
-                lockdown::lock(app, gid, kind).await?,
+                lockdown::lock(app, gid, kind.clone()).await?,
                 p["duration_s"].as_i64(),
             ) {
                 jobs::replace(
                     &app.pool,
                     job.guild_id,
                     "unlock",
-                    Value::Null,
+                    serde_json::json!({ "lock": kind }),
                     now_secs() + d,
                 )
                 .await?;
             }
         }
-        "unlock" => lockdown::unlock(app, gid).await?,
+        // Timed unlocks name their lock; older jobs and the dashboard's lift everything.
+        "unlock" => {
+            let which = serde_json::from_value(job.payload["lock"].clone()).ok();
+            lockdown::unlock(app, gid, which.as_ref()).await?;
+        }
         "timeout_renew" => {
             let until = job.payload["until_secs"]
                 .as_i64()

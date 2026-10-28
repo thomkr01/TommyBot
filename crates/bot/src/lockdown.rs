@@ -2,7 +2,7 @@
 use anyhow::Result;
 use tommybot_automod::{
     discord_api::MAX_INVITE_PAUSE_MS,
-    lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot},
+    lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot, SEND_MESSAGES},
     store,
 };
 use twilight_model::{
@@ -20,7 +20,8 @@ use tommybot_logging::{
     Log, LogKind,
 };
 
-async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
+/// Runs one op; returns the channel it created, if any.
+async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Result<Option<u64>> {
     match op {
         Op::SetRolePerms { role, perms } => {
             let perms = Permissions::from_bits_truncate(*perms);
@@ -30,18 +31,42 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
                 .await?;
         }
         Op::DenyChannelSend { channel, role } => {
+            // Other bits of an existing overwrite stay; unlock puts the old one back.
+            let (allow, deny) = snap
+                .prior
+                .iter()
+                .find(|p| p.0 == *channel && p.1 == *role)
+                .map_or((0, 0), |p| (p.2, p.3));
             let o = PermissionOverwrite {
                 id: Id::new(*role),
                 kind: PermissionOverwriteType::Role,
-                allow: None,
-                deny: Some(Permissions::SEND_MESSAGES),
+                allow: Some(Permissions::from_bits_truncate(allow & !SEND_MESSAGES)),
+                deny: Some(Permissions::from_bits_truncate(deny | SEND_MESSAGES)),
             };
             app.http
                 .update_channel_permission(Id::new(*channel), &o)
                 .await?;
         }
         Op::CreateLockedChannel => {
-            app.http.create_guild_channel(gid, "server-locked").await?;
+            // @everyone may read it but not write, so members see why the server went quiet.
+            let everyone = twilight_model::channel::permission_overwrite::PermissionOverwrite {
+                id: gid.cast(),
+                kind: twilight_model::channel::permission_overwrite::PermissionOverwriteType::Role,
+                allow: Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
+                deny: Permissions::SEND_MESSAGES,
+            };
+            let ch = app
+                .http
+                .create_guild_channel(gid, "server-locked")
+                .permission_overwrites(&[everyone])
+                .await?
+                .model()
+                .await?;
+            app.http
+                .create_message(ch.id)
+                .content("🔒 **The server is locked down.** Staff are on it; channels open again when the lock ends.")
+                .await?;
+            return Ok(Some(ch.id.get()));
         }
         // No-op: the saved snapshot records the join lock and `join_lock` reads it from there.
         Op::EnableJoinLock(_) => {}
@@ -52,17 +77,18 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op) -> Result<()> {
                 .await?;
         }
     }
-    Ok(())
+    Ok(None)
 }
 
-/// Locks the guild unless a lock is already stored (a second snapshot would save locked perms).
+/// Locks the guild unless an active lock already covers the same part (its snapshot would save
+/// locked perms).
 pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<bool> {
-    let (locked,): (bool,) =
-        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM lock_snapshots WHERE guild_id = $1)")
-            .bind(gid.get() as i64)
-            .fetch_one(&app.pool)
-            .await?;
-    if locked {
+    let active = store::locks(&app.pool, gid.get()).await?;
+    if active
+        .iter()
+        .filter_map(|s| s.kind.as_ref())
+        .any(|k| k.overlaps(&kind))
+    {
         return Ok(false);
     }
     let cfg = app.cfg(gid.get()).await?;
@@ -90,11 +116,24 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
         })
         .collect();
     let main_roles: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
-    let plan = plan(&kind, gid.get(), &main_roles, &info, bot_position);
+    let mut plan = plan(&kind, gid.get(), &main_roles, &info, bot_position);
+    if let LockKind::Channel(c) = kind {
+        let ch = app.http.channel(Id::new(c)).await?.model().await?;
+        plan.snapshot.prior = ch
+            .permission_overwrites
+            .unwrap_or_default()
+            .iter()
+            .filter(|o| plan.snapshot.channel_denies.contains(&(c, o.id.get())))
+            .map(|o| (c, o.id.get(), o.allow.bits(), o.deny.bits()))
+            .collect();
+    }
     // Saved first so a failure halfway can still be unlocked exactly.
     store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
     for op in &plan.ops {
-        exec(app, gid, op).await?;
+        if let Some(created) = exec(app, gid, op, &plan.snapshot).await? {
+            plan.snapshot.locked_channel = Some(created);
+            store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+        }
     }
     announce(
         app,
@@ -106,18 +145,25 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
     Ok(true)
 }
 
+/// Kinds of the guild's active locks, oldest first.
+pub async fn active(app: &App, gid: Id<GuildMarker>) -> Result<Vec<LockKind>> {
+    Ok(store::locks(&app.pool, gid.get())
+        .await?
+        .into_iter()
+        .filter_map(|s| s.kind)
+        .collect())
+}
+
 /// Join lock of the guild's stored snapshot, if it has one.
 pub async fn join_lock(app: &App, gid: Id<GuildMarker>) -> Result<Option<JoinLock>> {
     load_join_lock(&app.pool, gid.get()).await
 }
 
 async fn load_join_lock(pool: &sqlx::PgPool, guild: u64) -> Result<Option<JoinLock>> {
-    let row: Option<(sqlx::types::Json<Snapshot>,)> =
-        sqlx::query_as("SELECT snapshot FROM lock_snapshots WHERE guild_id = $1")
-            .bind(guild as i64)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.and_then(|(s,)| s.0.kind.as_ref().and_then(join_lock_of)))
+    let locks = store::locks(pool, guild).await?;
+    Ok(locks
+        .iter()
+        .find_map(|s| s.kind.as_ref().and_then(join_lock_of)))
 }
 
 fn join_lock_of(kind: &LockKind) -> Option<JoinLock> {
@@ -136,29 +182,69 @@ async fn announce(app: &App, gid: Id<GuildMarker>, log: Log) {
     }
 }
 
-pub async fn unlock(app: &App, gid: Id<GuildMarker>) -> Result<()> {
-    let Some(snap) = store::take_lock(&app.pool, gid.get()).await? else {
-        return Ok(());
-    };
-    for op in unlock_ops(&snap) {
-        exec(app, gid, &op).await?;
+/// Lifts the active locks that overlap `which`, or all of them; returns how many were lifted.
+pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
+    let mut lifted = 0;
+    for snap in store::locks(&app.pool, gid.get()).await? {
+        let hit = match (which, &snap.kind) {
+            (Some(w), Some(k)) => w.overlaps(k),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        if !hit || !store::take_lock(&app.pool, gid.get(), &snap).await? {
+            continue;
+        }
+        let current: Vec<(u64, u64)> = app
+            .http
+            .roles(gid)
+            .await?
+            .models()
+            .await?
+            .iter()
+            .map(|r| (r.id.get(), r.permissions.bits()))
+            .collect();
+        for op in unlock_ops(&snap, &current) {
+            exec(app, gid, &op, &snap).await?;
+        }
+        if snap.invites_paused {
+            app.api.pause_invites(gid.get(), None).await?;
+        }
+        for &(channel, role) in &snap.channel_denies {
+            match snap.prior.iter().find(|p| p.0 == channel && p.1 == role) {
+                Some(&(_, _, allow, deny)) => {
+                    let o = PermissionOverwrite {
+                        id: Id::new(role),
+                        kind: PermissionOverwriteType::Role,
+                        allow: Some(Permissions::from_bits_truncate(allow)),
+                        deny: Some(Permissions::from_bits_truncate(deny)),
+                    };
+                    app.http
+                        .update_channel_permission(Id::new(channel), &o)
+                        .await?;
+                }
+                None => {
+                    app.http
+                        .delete_channel_permission(Id::new(channel))
+                        .role(Id::new(role))
+                        .await?;
+                }
+            }
+        }
+        if let Some(c) = snap.locked_channel {
+            app.http.delete_channel(Id::new(c)).await.ok();
+        }
+        lifted += 1;
     }
-    if snap.invites_paused {
-        app.api.pause_invites(gid.get(), None).await?;
+    if lifted > 0 {
+        announce(
+            app,
+            gid,
+            Log::new("Server Unlocked", DONE)
+                .text(&format!("{YES} **The server has been unlocked.**")),
+        )
+        .await;
     }
-    for (channel, role) in &snap.channel_denies {
-        app.http
-            .delete_channel_permission(Id::new(*channel))
-            .role(Id::new(*role))
-            .await?;
-    }
-    announce(
-        app,
-        gid,
-        Log::new("Server Unlocked", DONE).text(&format!("{YES} **The server has been unlocked.**")),
-    )
-    .await;
-    Ok(())
+    Ok(lifted)
 }
 
 #[cfg(test)]
@@ -190,7 +276,7 @@ mod tests {
             load_join_lock(&pool, gid).await.unwrap(),
             Some(JoinLock::Kick)
         );
-        store::take_lock(&pool, gid).await.unwrap();
+        store::take_lock(&pool, gid, &p.snapshot).await.unwrap();
         assert_eq!(load_join_lock(&pool, gid).await.unwrap(), None);
     }
 }

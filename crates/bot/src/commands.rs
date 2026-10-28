@@ -347,16 +347,32 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;
             // `lock role`, `lock server`, `lock channel`...: one-off type instead of the dashboard default.
-            let kind = match p.kind.as_ref().or(p.names.first()) {
-                Some(n) => match kind_from(n, Some(msg.channel_id.get())) {
-                    Some(k) => Some(k),
-                    None => return say(app, msg, LOCK_TYPES).await,
-                },
-                None => None,
+            // Channel mentions lock (or unlock) those channels instead of this one.
+            let channels = match p.channels.as_slice() {
+                [] => vec![msg.channel_id.get()],
+                c => c.to_vec(),
             };
+            let name = p.kind.as_ref().or(p.names.first()).map(String::as_str);
+            let name = name.or((!p.channels.is_empty()).then_some("c"));
+            let mut kinds = vec![];
+            for c in &channels {
+                match name.map(|n| kind_from(n, Some(*c))) {
+                    Some(Some(k)) if !kinds.contains(&k) => kinds.push(k),
+                    Some(Some(_)) => {}
+                    Some(None) => return say(app, msg, LOCK_TYPES).await,
+                    None => {}
+                }
+            }
             let unlock = p.command == "unlock";
-            let text = lockdown_cmd(app, gid, &actor, unlock, kind, p.duration_s).await?;
-            return say(app, msg, &text).await;
+            let mut out = vec![];
+            for kind in kinds
+                .into_iter()
+                .map(Some)
+                .chain(name.is_none().then_some(None))
+            {
+                out.push(lockdown_cmd(app, gid, &actor, unlock, kind, p.duration_s).await?);
+            }
+            return say(app, msg, &out.join("\n")).await;
         }
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
         | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
@@ -795,6 +811,31 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
     Ok(())
 }
 
+fn lock_name(k: &LockKind) -> String {
+    match k {
+        LockKind::Server => "channels".into(),
+        LockKind::Blind => "channels (blind)".into(),
+        LockKind::Channel(c) => format!("<#{c}>"),
+        LockKind::Role => "roles".into(),
+        LockKind::Join(j) => format!("joins ({j:?})").to_lowercase(),
+        LockKind::All => "everything".into(),
+        LockKind::Mixed {
+            channels,
+            roles,
+            joins,
+        } => [
+            (*channels, "channels"),
+            (*roles, "roles"),
+            (*joins, "joins"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(" + "),
+    }
+}
+
 pub const LOCK_TYPES: &str =
     "Lock type: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s)";
 
@@ -811,32 +852,43 @@ pub async fn lockdown_cmd(
         return Ok("Cannot lock: no permit".into());
     }
     if unlock {
-        lockdown::unlock(app, gid).await?;
-        return Ok("Server unlocked".into());
+        return Ok(match lockdown::unlock(app, gid, kind.as_ref()).await? {
+            0 => "Nothing to unlock".into(),
+            1 => "Unlocked".into(),
+            n => format!("Lifted {n} locks"),
+        });
     }
     let kind = match kind {
         Some(k) => k,
-        None => app.cfg(gid.get()).await?.lockdown_prefs.kind(),
+        None => {
+            // Wick: a bare `lock` while locked shows what is locked.
+            let active = lockdown::active(app, gid).await?;
+            if !active.is_empty() {
+                let list: Vec<String> = active.iter().map(lock_name).collect();
+                return Ok(format!("Active locks: {}", list.join(", ")));
+            }
+            app.cfg(gid.get()).await?.lockdown_prefs.kind()
+        }
     };
-    let done = lockdown::lock(app, gid, kind).await?;
+    let name = lock_name(&kind);
+    let done = lockdown::lock(app, gid, kind.clone()).await?;
     if done {
         if let Some(d) = duration_s {
             jobs::enqueue(
                 &app.pool,
                 gid.get() as i64,
                 "unlock",
-                json!({}),
+                json!({ "lock": kind }),
                 now_secs() + d,
             )
             .await?;
         }
     }
     Ok(if done {
-        "Server locked"
+        format!("Locked: {name}")
     } else {
-        "Already locked"
-    }
-    .into())
+        format!("Cannot lock {name}: an active lock already covers it")
+    })
 }
 
 /// `/backup create|list|load|delete`. `load` previews unless `confirm` is set.

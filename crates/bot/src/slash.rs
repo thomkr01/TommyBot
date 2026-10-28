@@ -44,7 +44,9 @@ pub enum Cmd {
         kind: Option<LockKind>,
         duration_s: Option<i64>,
     },
-    Unlock,
+    Unlock {
+        kind: Option<LockKind>,
+    },
     Revert {
         target: Id<UserMarker>,
         since_s: i64,
@@ -155,7 +157,13 @@ pub fn parse(
                 duration_s: dur(o, "duration")?,
             });
         }
-        "unlock" => return Ok(Cmd::Unlock),
+        "unlock" => {
+            let kind = match string(o, "type") {
+                Some(n) => Some(kind_from(n, None).ok_or(commands::LOCK_TYPES)?),
+                None => None,
+            };
+            return Ok(Cmd::Unlock { kind });
+        }
         "backups" => return backup(o),
         "Quarantine" | "Sanitize & Dehoist" => {
             let user = target_id.ok_or("missing user")?.get();
@@ -251,7 +259,12 @@ pub fn definitions() -> Vec<Command> {
                 ))
                 .option(StringBuilder::new("duration", "Unlock after, e.g. 30m")),
         ),
-        guild_only(chat("unlock", "Unlock the server")),
+        guild_only(
+            chat("unlock", "Unlock the server").option(StringBuilder::new(
+                "type",
+                "Only this lock: server, role, kick, ban or all",
+            )),
+        ),
         guild_only(
             chat("revert", "Undo a member's recent logged actions")
                 .option(UserBuilder::new("actor", "Whose actions to undo").required(true))
@@ -415,7 +428,7 @@ async fn run(
         Cmd::Lock { kind, duration_s } => {
             commands::lockdown_cmd(app, gid, &actor, false, kind, duration_s).await
         }
-        Cmd::Unlock => commands::lockdown_cmd(app, gid, &actor, true, None, None).await,
+        Cmd::Unlock { kind } => commands::lockdown_cmd(app, gid, &actor, true, kind, None).await,
         Cmd::Revert { target, since_s } => {
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }
