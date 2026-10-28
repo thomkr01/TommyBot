@@ -467,18 +467,18 @@ pub async fn save(
     Ok(Ok(doc))
 }
 
-async fn send(
+/// One reply; mentions never ping.
+pub(crate) async fn send(
     app: &App,
     msg: &MessageCreate,
-    text: Option<&str>,
+    text: &str,
     embed: Option<Embed>,
-    row: Option<Component>,
+    rows: Vec<Component>,
 ) -> Result<()> {
     let embeds: Vec<Embed> = embed.into_iter().collect();
-    let rows: Vec<Component> = row.into_iter().collect();
     app.http
         .create_message(msg.channel_id)
-        .content(text.unwrap_or_default())
+        .content(text)
         .embeds(&embeds)
         .components(&rows)
         .allowed_mentions(Some(&AllowedMentions::default()))
@@ -511,7 +511,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
     let op = match parse_op(args) {
         Ok(op) => op,
         Err(e) => {
-            send(app, msg, Some(e), None, None).await?;
+            send(app, msg, e, None, vec![]).await?;
             return Ok(true);
         }
     };
@@ -527,7 +527,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
                     pages,
                 )
             });
-            send(app, msg, None, Some(embed), row).await?;
+            send(app, msg, "", Some(embed), row.into_iter().collect()).await?;
             return Ok(true);
         }
         Op::Set(c, _) | Op::Toggle(c, _) | Op::Add(c, _) | Op::Remove(c, _) => c.clone(),
@@ -536,26 +536,16 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         send(
             app,
             msg,
-            Some(&format!(
-                "{} has no setting `{code}`",
-                m.title.trim_end_matches(':')
-            )),
+            &format!("{} has no setting `{code}`", m.title.trim_end_matches(':')),
             None,
-            None,
+            vec![],
         )
         .await?;
         return Ok(true);
     };
     let section = row.path.split('.').next().unwrap_or_default();
     if !row.path.is_empty() && !may_edit(&level, section) {
-        send(
-            app,
-            msg,
-            Some("You may not change this setting"),
-            None,
-            None,
-        )
-        .await?;
+        send(app, msg, "You may not change this setting", None, vec![]).await?;
         return Ok(true);
     }
     let ids = match (row.kind, &op) {
@@ -565,7 +555,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         ) => match resolve(app, gid, matches!(row.kind, Kind::Role | Kind::Roles), v).await? {
             Ok(ids) => ids,
             Err(e) => {
-                send(app, msg, Some(&e), None, None).await?;
+                send(app, msg, &e, None, vec![]).await?;
                 return Ok(true);
             }
         },
@@ -589,7 +579,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         }
         Err(e) => e,
     };
-    send(app, msg, Some(&text), None, None).await?;
+    send(app, msg, &text, None, vec![]).await?;
     Ok(true)
 }
 
@@ -631,11 +621,16 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         return Ok(true);
     }
     let page: usize = it.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    let Some(m) = module(kind) else {
-        return Ok(true);
-    };
     let cfg = app.cfg(gid.get()).await?;
-    let (embed, pages) = panel(m, &cfg, gid.get(), page);
+    let (embed, pages) = match module(kind) {
+        Some(m) => panel(m, &cfg, gid.get(), page),
+        None if kind == "cmds" => {
+            let owner = app.guild_info(gid).await?.owner;
+            let level = app.level(gid, owner, Id::new(invoker.unwrap_or(1))).await?;
+            crate::general::commands_page(&level, &cfg.misc.prefix, page)
+        }
+        None => return Ok(true),
+    };
     let r = InteractionResponse {
         kind: InteractionResponseType::UpdateMessage,
         data: Some(InteractionResponseData {

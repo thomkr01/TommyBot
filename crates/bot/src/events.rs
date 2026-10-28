@@ -184,7 +184,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
                 if let Some(rest) = m.content.strip_prefix(&pfx) {
-                    if !crate::settings::try_run(app, m, rest).await? {
+                    if !crate::general::try_run(app, m, rest).await?
+                        && !crate::settings::try_run(app, m, rest).await?
+                    {
                         if let Some(parsed) = prefix::parse(rest) {
                             commands::run(app, m, parsed).await?;
                         }

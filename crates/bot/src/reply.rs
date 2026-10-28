@@ -30,6 +30,33 @@ pub fn case_text(
     s
 }
 
+/// One reply for all targets. Compact mode turns several targets into Wick's count lines; failures stay listed.
+pub fn summary(
+    kind: &str,
+    compact: bool,
+    texts: &[String],
+    reason: Option<&str>,
+    actor: u64,
+) -> String {
+    let mut s = if compact && texts.len() > 1 {
+        let (ok, failed): (Vec<_>, Vec<_>) = texts.iter().partition(|t| t.starts_with("Case #"));
+        let mut s = format!(
+            "✅ Successful {kind}s: `{}`\n❎ Unsuccessful {kind}s: `{}`",
+            ok.len(),
+            failed.len()
+        );
+        if let Some(r) = reason {
+            s += format!("\n📄 Reason: {r}").as_str();
+        }
+        s += format!("\n👤 Moderator: <@{actor}>").as_str();
+        failed.iter().fold(s, |s, f| s + "\n" + f.as_str())
+    } else {
+        texts.join("\n")
+    };
+    s.truncate(s.floor_char_boundary(2000));
+    s
+}
+
 /// Wick's "Add Reason" pointer for actions run without a reason.
 pub fn add_reason_hint(case_no: i64) -> String {
     format!("\nAdd Reason: `/cases modify case:{case_no} reason:`")
@@ -139,6 +166,20 @@ mod tests {
         );
         assert!(case_text(true, (3, "ban", 5), None, 9)
             .ends_with("\nAdd Reason: `/cases modify case:3 reason:`"));
+    }
+
+    #[test]
+    fn compact_summary_counts() {
+        let t = [
+            "Case #1: kick <@5>".to_string(),
+            "Cannot kick <@6>: they are immune".into(),
+        ];
+        assert_eq!(
+            summary("kick", true, &t, Some("spam"), 9),
+            "✅ Successful kicks: `1`\n❎ Unsuccessful kicks: `1`\n📄 Reason: spam\n👤 Moderator: <@9>\nCannot kick <@6>: they are immune"
+        );
+        assert_eq!(summary("kick", false, &t, None, 9), t.join("\n"));
+        assert_eq!(summary("kick", true, &t[..1], None, 9), t[0]);
     }
 
     #[test]

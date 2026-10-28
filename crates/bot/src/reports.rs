@@ -264,6 +264,8 @@ async fn act(
             let cmd = ModCmd::CasesView {
                 case: None,
                 user: Some(target.get()),
+                by: None,
+                kind: None,
             };
             let text =
                 modcmds::run(app, gid, owner, who, Id::new(channel as u64), cmd, None).await?;

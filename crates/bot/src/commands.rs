@@ -312,6 +312,8 @@ const KNOWN: &[&str] = &[
     "opencase",
     "caseon",
     "clearwarns",
+    "warns",
+    "modcases",
 ];
 
 /// Prefix entry: resolves names, then runs [`apply`] per target and posts each reply.
@@ -358,9 +360,8 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         }
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
         | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
-        | "editreason" | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns" => {
-            return modcmds::run_prefix(app, msg, p).await
-        }
+        | "editreason" | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns"
+        | "warns" | "modcases" => return modcmds::run_prefix(app, msg, p).await,
         _ => return Ok(()),
     };
     let owner = app.guild_info(gid).await?.owner;
@@ -377,6 +378,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             Err(e) => say(app, msg, &e).await?,
         }
     }
+    let reason = p.reason.clone();
     let job = Pending::new(
         gid,
         msg.author.id,
@@ -391,10 +393,16 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
     if cfg.misc.confirm && job.needs_confirm() {
         return ask_confirm(app, msg, job).await;
     }
-    for text in job.run(app, owner, cfg.misc.warn_base_points).await? {
-        say(app, msg, &text).await?;
-    }
-    Ok(())
+    let texts = job.run(app, owner, cfg.misc.warn_base_points).await?;
+    let compact = cfg.misc.compact_replies || p.flags.compact;
+    let text = reply::summary(
+        kind.name(),
+        compact,
+        &texts,
+        reason.as_deref(),
+        msg.author.id.get(),
+    );
+    say(app, msg, &text).await
 }
 
 /// What a [`Pending`] does once confirmed.
