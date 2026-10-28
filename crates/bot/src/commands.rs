@@ -10,7 +10,7 @@ use tommybot_logging::{
     embed::{self, duration, ARROW, ORANGE, RED},
     Log, LogKind,
 };
-use twilight_http::Client;
+use twilight_http::{request::AuditLogReason, Client};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::message::{
@@ -177,20 +177,30 @@ pub async fn apply_dm(
     {
         reply::dm(app, target, &text).await;
     }
+    // Wick also writes the case into Discord's audit log, which caps reasons at 512 characters.
+    let audit = embed::clip(
+        &format!(
+            "{} | Moderator: {actor_id}",
+            reason.unwrap_or("No reason provided")
+        ),
+        500,
+    );
     let (inverse, points) = match kind {
         ModKind::Ban if soft => {
             // A softban exists to purge messages, so purge a day when the server default is none.
             app.http
                 .create_ban(gid, target)
                 .delete_message_seconds(cfg.misc.purge_secs().max(86_400))
+                .reason(&audit)
                 .await?;
-            app.http.delete_ban(gid, target).await?;
+            app.http.delete_ban(gid, target).reason(&audit).await?;
             (None, 0)
         }
         ModKind::Ban => {
             app.http
                 .create_ban(gid, target)
                 .delete_message_seconds(cfg.misc.purge_secs())
+                .reason(&audit)
                 .await?;
             if let Some(d) = duration_s {
                 let job = json!({"user":t});
@@ -199,7 +209,10 @@ pub async fn apply_dm(
             (Some(json!({"op":"unban","user":t})), 0)
         }
         ModKind::Kick => {
-            app.http.remove_guild_member(gid, target).await?;
+            app.http
+                .remove_guild_member(gid, target)
+                .reason(&audit)
+                .await?;
             (None, 0)
         }
         ModKind::Timeout => {
@@ -208,6 +221,7 @@ pub async fn apply_dm(
                 gid,
                 target,
                 now_secs() + duration_s.unwrap_or(cfg.misc.timeout_secs() as i64),
+                &audit,
             )
             .await?;
             (Some(json!({"op":"untimeout","user":t})), 0)
@@ -679,6 +693,7 @@ pub async fn timeout_until(
     g: Id<GuildMarker>,
     u: Id<UserMarker>,
     until: i64,
+    reason: &str,
 ) -> Result<()> {
     let now = now_secs();
     let (chunk, more) = timeout_chunk(until - now);
@@ -688,6 +703,7 @@ pub async fn timeout_until(
     app.http
         .update_guild_member(g, u)
         .communication_disabled_until(Some(Timestamp::from_secs(now + chunk)?))
+        .reason(reason)
         .await?;
     if more {
         // Renewed a day early so scheduler lag cannot open a gap.
