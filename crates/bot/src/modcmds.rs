@@ -238,16 +238,10 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                 _ => ModCmd::NoteList { user: need_user()? },
             }
         }
-        "cases" | "case"
-            if p.names
-                .first()
-                .is_some_and(|n| n == "modify" || n == "edit") =>
-        {
-            ModCmd::CasesEdit {
-                case: case()?,
-                reason: p.reason.clone().ok_or("Give a new reason with ?r")?,
-            }
-        }
+        "cases" | "case" if p.names.first().is_some_and(|n| n == "modify") => ModCmd::CasesEdit {
+            case: case()?,
+            reason: p.reason.clone().ok_or("Give a new reason with ?r")?,
+        },
         // No case and no user lists the guild's latest cases.
         "cases" | "case" => ModCmd::CasesView {
             case: small.map(|n| n as i32),
@@ -271,7 +265,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     let name = p.names.iter().find(|n| {
         !matches!(
             n.as_str(),
-            "edit" | "modify" | "view" | "off" | "add" | "remove" | "sweep" | "list"
+            "modify" | "view" | "off" | "add" | "remove" | "sweep" | "list"
         )
     });
     // `editc 3 new reason`: the words are the reason, not a member.
@@ -897,7 +891,7 @@ mod tests {
         assert_eq!(pf("slowmode off", None), Ok(ModCmd::Slowmode { secs: 0 }));
         assert!(pf("slowmode 7h", None).is_err());
         assert_eq!(
-            pf("cases edit 3 ?r typo", None),
+            pf("cases modify 3 ?r typo", None),
             Ok(ModCmd::CasesEdit {
                 case: 3,
                 reason: "typo".into()
