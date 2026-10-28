@@ -48,11 +48,11 @@ impl Default for HeatCfg {
         Self {
             max: 100.0,
             decay_per_sec: 0.05,
-            base: 18.0,
+            base: 15.0,
             per_char: 0.05,
             free_chars: 200,
-            per_newline: 2.0,
-            per_emoji: 3.0,
+            per_newline: 5.0,
+            per_emoji: 9.0,
             per_mention: 15.0,
             per_role_mention: 20.0,
             per_everyone: 100.0,
@@ -61,15 +61,15 @@ impl Default for HeatCfg {
             per_embed: 15.0,
             per_link: 10.0,
             per_sticker: 15.0,
-            inactive_channel: 10.0,
-            per_blacklisted_word: 40.0,
-            suspicious_account: 10.0,
-            similarity: 40.0,
+            inactive_channel: 25.0,
+            per_blacklisted_word: 100.0,
+            suspicious_account: 7.0,
+            similarity: 22.0,
             similarity_floor: 0.8,
             webhook_multiplier: 1.5,
-            zalgo: 40.0,
-            per_upper: 0.0,
-            per_lower: 0.0,
+            zalgo: 1.5,
+            per_upper: 0.12,
+            per_lower: 0.08,
             invite: 100.0,
             malicious: 100.0,
             nsfw: 100.0,
@@ -353,10 +353,10 @@ mod tests {
         let cfg = HeatCfg::default();
         let hist = UserHistory::default();
         let mut fast = HeatState::default();
-        let hits: Vec<bool> = (0..6)
+        let hits: Vec<bool> = (0..7)
             .map(|i| fast.apply(&heat(&msg("hi"), &hist, &cfg), i * 100, &cfg))
             .collect();
-        assert!(!hits[0] && hits[5]);
+        assert!(!hits[0] && hits[6]);
         let mut slow = HeatState::default();
         assert!((0..20).all(|i| !slow.apply(&heat(&msg("hi"), &hist, &cfg), i * 10_000, &cfg)));
     }
@@ -413,7 +413,7 @@ mod tests {
         let part = |n| b.parts.iter().find(|p| p.0 == n).map(|p| p.1);
         assert_eq!(
             (part("uppercase"), part("lowercase"), part("zalgo")),
-            (Some(6.0), Some(4.0), Some(40.0))
+            (Some(6.0), Some(4.0), Some(1.5))
         );
     }
 

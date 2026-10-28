@@ -121,7 +121,7 @@ const RULE_KINDS: [(&str, &str, &str); 4] = [
 ];
 
 fn blank_rule(name: &str, trigger: &str) -> Value {
-    json!({"name": name, "enabled": true, "trigger": trigger, "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 10,
+    json!({"name": name, "enabled": true, "trigger": trigger, "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 20,
         "custom_message": "", "alert_channel": "", "timeout_s": 0, "exempt_roles": [], "exempt_channels": [], "bot_actions": []})
 }
 
