@@ -170,7 +170,7 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         log = log.line("Reason", reason);
     }
 
-    log = changes(log, e, created, deleted);
+    log = changes(log, e, kind, overwrite, created, deleted);
     log = additional_info(log, opts);
 
     // Wick links the channel of channel and thread logs, except when it is gone.
@@ -193,7 +193,14 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
 }
 
 /// Wick's "Settings" (created), "Previous Settings" (deleted) or "Changes" (updated) section.
-fn changes(mut log: Log, e: &AuditLogEntry, created: bool, deleted: bool) -> Log {
+fn changes(
+    mut log: Log,
+    e: &AuditLogEntry,
+    kind: LogKind,
+    overwrite: bool,
+    created: bool,
+    deleted: bool,
+) -> Log {
     if !e.changes.is_empty() {
         log = log.section(if created {
             "Settings"
@@ -210,6 +217,13 @@ fn changes(mut log: Log, e: &AuditLogEntry, created: bool, deleted: bool) -> Log
         };
         let (old, new) = (v.get("old_value"), v.get("new_value"));
         log = match v["key"].as_str().unwrap_or("?") {
+            // Changes twilight cannot decode, and ids the target line already shows (Wick keeps the overwrite's).
+            "other" => log,
+            "id" if !overwrite => log,
+            "type" if overwrite => {
+                let member = if deleted { old } else { new }.is_some_and(|v| v == 1 || v == "1");
+                log.line("Type", if member { "Member" } else { "Role" })
+            }
             "$add" => log.line("Roles Added", &roles(new)),
             "$remove" => log.line("Roles Removed", &roles(new)),
             key @ ("permissions" | "allow" | "deny") => {
@@ -219,6 +233,9 @@ fn changes(mut log: Log, e: &AuditLogEntry, created: bool, deleted: bool) -> Log
                     _ => format!("{ARROW} **Permissions:**"),
                 };
                 let (added, removed) = perm_diff(old, new);
+                if added.is_empty() && removed.is_empty() {
+                    continue;
+                }
                 let mut l = log.text(&label);
                 if !added.is_empty() {
                     l = l.text(&format!("{ARROW} **Additions:** {added}"));
@@ -228,11 +245,11 @@ fn changes(mut log: Log, e: &AuditLogEntry, created: bool, deleted: bool) -> Log
                 }
                 l
             }
-            key if created => log.line(&words(key), &show(new)),
-            key if deleted => log.line(&words(key), &show(old)),
+            key if created => log.line(&words(key), &value(key, kind, new)),
+            key if deleted => log.line(&words(key), &value(key, kind, old)),
             key => log
                 .text(&format!("{ARROW} **{}:**", words(key)))
-                .diff(Some(&show(old)), Some(&show(new))),
+                .diff(Some(&show(key, kind, old)), Some(&show(key, kind, new))),
         };
     }
 
@@ -343,16 +360,49 @@ fn target_ref(kind: LogKind, id: u64) -> String {
     match kind {
         LogKind::Channel | LogKind::Thread => embed::channel(id),
         LogKind::Role => embed::role(id),
-        LogKind::Member => embed::user(id),
+        // A pin's target is the message author.
+        LogKind::Member | LogKind::Message => embed::user(id),
         _ => format!("`{id}`"),
     }
 }
 
-fn show(v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => "none".into(),
-        Some(Value::String(s)) => s.clone(),
-        Some(v) => v.to_string(),
+/// A settings line value: like [`show`], with mentions for ids (they would not render in a diff).
+fn value(key: &str, kind: LogKind, v: Option<&Value>) -> String {
+    let id = v.and_then(Value::as_str).and_then(|s| s.parse().ok());
+    match (key, id) {
+        ("channel_id", Some(id)) => embed::channel(id),
+        ("inviter_id" | "application_id", Some(id)) => embed::user(id),
+        _ => show(key, kind, v),
+    }
+}
+
+/// A change value as Wick shows it: names for channel types, hex colours.
+fn show(key: &str, kind: LogKind, v: Option<&Value>) -> String {
+    match (key, v) {
+        (_, None | Some(Value::Null)) => "none".into(),
+        ("color", Some(Value::Number(n))) => format!("#{:06X}", n.as_u64().unwrap_or(0)),
+        ("permission_overwrites", Some(Value::Array(a))) => a.len().to_string(),
+        ("type", Some(Value::Number(n))) if matches!(kind, LogKind::Channel | LogKind::Thread) => {
+            channel_type(n.as_u64().unwrap_or(u64::MAX)).into()
+        }
+        (_, Some(Value::String(s))) => s.clone(),
+        (_, Some(v)) => v.to_string(),
+    }
+}
+
+fn channel_type(t: u64) -> &'static str {
+    match t {
+        0 => "Text",
+        2 => "Voice",
+        4 => "Category",
+        5 => "Announcement",
+        10 => "Announcement Thread",
+        11 => "Public Thread",
+        12 => "Private Thread",
+        13 => "Stage",
+        15 => "Forum",
+        16 => "Media",
+        _ => "Other",
     }
 }
 
@@ -405,15 +455,41 @@ mod tests {
         let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
             "action_type": 13, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
             "options": { "id": "40", "type": "0", "role_name": "Quarantine" },
-            "changes": [{ "key": "deny", "new_value": "2048" }]
+            "changes": [
+                { "key": "id", "new_value": "40" },
+                { "key": "type", "new_value": 0 },
+                { "key": "deny", "new_value": "2048" }
+            ]
         }))
         .unwrap();
         let entry = audit(&e).unwrap();
         let d = entry.embed.description.unwrap();
         assert!(d.contains("▸ **Channel:** <#30> *`30`*\n▸ **Target:** <@&40> *`40`*"));
-        assert!(d.contains("**Settings**\n❌ **Denied:**\n▸ **Additions:** Send Messages"));
+        assert!(d.contains("**Settings**\n▸ **Id:** 40\n▸ **Type:** Role\n❌ **Denied:**\n▸ **Additions:** Send Messages"));
         assert!(d.ends_with("**Additional Information**\n▸ **Id:** `40`\n▸ **Role Name:** `Quarantine`\n▸ **Type:** `Role`"));
         assert_eq!(entry.link.unwrap().1, "https://discord.com/channels/9/30");
+    }
+
+    #[test]
+    fn change_values_read_like_wick() {
+        let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
+            "action_type": 10, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
+            "changes": [
+                { "key": "type", "new_value": 0 },
+                { "key": "permission_overwrites", "new_value": [] },
+                { "key": "id", "new_value": "30" }
+            ]
+        }))
+        .unwrap();
+        let d = audit(&e).unwrap().embed.description.unwrap();
+        assert!(d.ends_with("**Settings**\n▸ **Type:** Text\n▸ **Permission overwrites:** 0"));
+        let v = serde_json::json!("5");
+        assert_eq!(value("channel_id", LogKind::Invite, Some(&v)), "<#5> *`5`*");
+        assert_eq!(show("channel_id", LogKind::Invite, Some(&v)), "5");
+        assert_eq!(
+            show("color", LogKind::Role, Some(&serde_json::json!(3447003))),
+            "#3498DB"
+        );
     }
 
     #[test]

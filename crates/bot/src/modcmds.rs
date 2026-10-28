@@ -31,6 +31,14 @@ use crate::{
     targets,
 };
 
+/// The clicked message of a purge menu: From Here purges it and the newer ones below it, Until Here
+/// the older ones above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Anchor {
+    From(u64),
+    Until(u64),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModCmd {
     Unban {
@@ -54,8 +62,8 @@ pub enum ModCmd {
     Purge {
         count: usize,
         user: Option<u64>,
-        /// Start at this message id (message context menu) instead of the newest.
-        from: Option<u64>,
+        /// Start at this message (message context menus) instead of the newest.
+        from: Option<Anchor>,
     },
     Slowmode {
         secs: u16,
@@ -268,7 +276,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(?e, "mod command failed");
-                "Command failed, see logs".into()
+                format!("Command failed: {}", crate::commands::why(&e))
             })
         }
     };
@@ -530,16 +538,17 @@ async fn purge(
     ch: Id<ChannelMarker>,
     count: usize,
     user: Option<u64>,
-    from: Option<u64>,
+    from: Option<Anchor>,
 ) -> Result<usize> {
     let req = app.http.channel_messages(ch);
     let page = match from {
         // `after` is exclusive, so start one id earlier to include the clicked message.
-        Some(m) => {
+        Some(Anchor::From(m)) => {
             req.after(Id::new(m.max(2) - 1))
                 .limit(PURGE_MAX as u16)
                 .await?
         }
+        Some(Anchor::Until(m)) => req.before(Id::new(m)).limit(PURGE_MAX as u16).await?,
         None => req.limit(PURGE_MAX as u16).await?,
     };
     let msgs: Vec<Msg> = page

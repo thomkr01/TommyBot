@@ -643,7 +643,8 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
             app.http.create_ban(gid, Id::new(*user)).await?;
         }
         Inverse::Timeout { user, until } => {
-            crate::commands::timeout_until(app, gid, Id::new(*user), *until).await?;
+            crate::commands::timeout_until(app, gid, Id::new(*user), *until, "Restored timeout")
+                .await?;
         }
         // Discord cannot undo a kick, so this is reported for re-invite, not executed.
         Inverse::Reinvite { .. } => {}

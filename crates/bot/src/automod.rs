@@ -17,7 +17,7 @@ use tommybot_core::{
     sections::{AutomodCfg, FilterAction, FilterCfg, FiltersCfg, WhitelistList},
 };
 use tommybot_logging::{
-    embed::{channel, duration, ALERT, ARROW, ORANGE, RED, YES},
+    embed::{channel, clip, duration, ALERT, ARROW, ORANGE, RED, YES},
     Log, LogKind,
 };
 use twilight_model::{
@@ -210,9 +210,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         return delete_new_webhooks(app, gid).await;
     }
     crate::panic::note(app, gid, m.author.id, true).await?;
-    if let Some(fc) = tripped_filter(&breakdown, f, bad_site) {
+    let tripped = tripped_filter(&breakdown, f, bad_site);
+    if let Some((fc, factor)) = tripped {
         if let Some(action) = fc.action {
-            return filter_action(app, &cfg, gid, m, action, fc.duration_secs).await;
+            return filter_action(app, &cfg, gid, m, action, (factor, fc.duration_secs)).await;
         }
     }
     let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
@@ -245,24 +246,20 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         }
         timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
     }
-    let title = format!(
-        "{} has been silenced for {}!",
-        m.author.name,
-        duration(act.timeout_ms / 1000)
-    );
-    let log = Log::new(&title, ALERT)
-        .thumbnail(&m.author)
+    let reason = if act.purge {
+        "Message spam (strike cap)"
+    } else {
+        tripped.map_or("Message spam", |t| t.1)
+    };
+    let log = Log::new(&format!("*{} has been timed out!*", m.author.name), ORANGE)
+        .line("Reason", &format!("*{reason}*"))
         .user("Member", m.author.id.get())
         .line("Channel", &channel(m.channel_id.get()))
-        .line("Strike", &format!("`{}`", act.strike))
-        .field(
-            "REASON:",
-            if act.purge {
-                "Message Spam (strike cap)"
-            } else {
-                "Message Spam"
-            },
-        );
+        .line(
+            "Duration",
+            &format!("`{}`", duration(act.timeout_ms / 1000)),
+        )
+        .line("Strike", &format!("`{}`", act.strike));
     send_log(app, gid.get(), LogKind::AutoMod, log).await?;
     if lock.enabled
         && lock.strikes.is_some_and(|n| act.strike >= n)
@@ -330,27 +327,31 @@ fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
     h
 }
 
-/// The filter behind the biggest heat contribution.
-fn tripped_filter<'a>(b: &Breakdown, f: &'a FiltersCfg, bad_site: bool) -> Option<&'a FilterCfg> {
+/// The filter behind the biggest heat contribution, with Wick's "Factor" text for it.
+fn tripped_filter<'a>(
+    b: &Breakdown,
+    f: &'a FiltersCfg,
+    bad_site: bool,
+) -> Option<(&'a FilterCfg, &'static str)> {
     let (name, _) = b.parts.iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
     Some(match *name {
-        "message" => &f.regular,
-        "similarity" => &f.similar,
-        "emojis" => &f.emojis,
-        "newlines" => &f.newlines,
-        "uppercase" => &f.chars_upper,
-        "lowercase" | "characters" => &f.chars_lower,
-        "zalgo" => &f.zalgo,
-        "suspicious_account" => &f.suspicion,
-        "inactive_channel" => &f.inactive_channel,
-        "blacklisted_words" => &f.words.filter,
-        "invites" => &f.invites,
-        "malicious" if bad_site => &f.bad_sites,
-        "malicious" => &f.scam_links,
-        "nsfw" => &f.nsfw_links,
-        "links_blacklist" => &f.links,
-        "mentions" | "role_mentions" | "everyone" => &f.mentions,
-        "images" | "files" | "embeds" | "links" | "stickers" => &f.attachments,
+        "message" => (&f.regular, "Message spam"),
+        "similarity" => (&f.similar, "Spamming the same message"),
+        "emojis" => (&f.emojis, "Emoji spam"),
+        "newlines" => (&f.newlines, "Newline spam"),
+        "uppercase" => (&f.chars_upper, "Excessive caps"),
+        "lowercase" | "characters" => (&f.chars_lower, "Character spam"),
+        "zalgo" => (&f.zalgo, "Use of zalgo text"),
+        "suspicious_account" => (&f.suspicion, "Suspicious account"),
+        "inactive_channel" => (&f.inactive_channel, "Spam in an inactive channel"),
+        "blacklisted_words" => (&f.words.filter, "Use of blacklisted words"),
+        "invites" => (&f.invites, "Posting an invite link"),
+        "malicious" if bad_site => (&f.bad_sites, "Posting a malicious link"),
+        "malicious" => (&f.scam_links, "Posting a scam link"),
+        "nsfw" => (&f.nsfw_links, "Posting an NSFW link"),
+        "links_blacklist" => (&f.links, "Posting a blacklisted link"),
+        "mentions" | "role_mentions" | "everyone" => (&f.mentions, "Mass mentioning"),
+        "images" | "files" | "embeds" | "links" | "stickers" => (&f.attachments, "Attachment spam"),
         _ => return None,
     })
 }
@@ -362,7 +363,7 @@ async fn filter_action(
     gid: Id<GuildMarker>,
     m: &MessageCreate,
     action: FilterAction,
-    duration_secs: Option<i64>,
+    (factor, duration_secs): (&str, Option<i64>),
 ) -> Result<()> {
     let uid = m.author.id;
     app.http.delete_message(m.channel_id, m.id).await.ok();
@@ -403,12 +404,31 @@ async fn filter_action(
         app,
         gid.get(),
         LogKind::AutoMod,
-        Log::new("Auto Mod Action", ORANGE)
-            .user("Member", uid.get())
-            .line("Action", &format!("`{action:?}`"))
-            .line("Reason", "Filter"),
+        Log::new(&action_title(&m.author.name, action), action_color(action))
+            .line("Factor", &format!("*{factor}*"))
+            .line("Channel", &channel(m.channel_id.get()))
+            .line("Message", &format!("||{}||", clip(&m.content, 500)))
+            .user("Member", uid.get()),
     )
     .await
+}
+
+/// Wick's automod log title: "*name has been warned!*".
+fn action_title(name: &str, action: FilterAction) -> String {
+    match action {
+        FilterAction::Delete => format!("*{name}'s message has been deleted!*"),
+        FilterAction::Warn => format!("*{name} has been warned!*"),
+        FilterAction::Timeout => format!("*{name} has been timed out!*"),
+        FilterAction::Kick => format!("*{name} has been kicked!*"),
+        FilterAction::Ban => format!("*{name} has been banned!*"),
+    }
+}
+
+fn action_color(action: FilterAction) -> u32 {
+    match action {
+        FilterAction::Kick | FilterAction::Ban => RED,
+        _ => ORANGE,
+    }
 }
 
 /// Keeps the native Discord AutoMod keyword rule in step with the saved word lists.
@@ -834,6 +854,7 @@ mod tests {
         let pick = |parts| {
             tripped_filter(&Breakdown { parts }, &f, false)
                 .unwrap()
+                .0
                 .action
         };
         assert_eq!(

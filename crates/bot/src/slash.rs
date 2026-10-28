@@ -114,11 +114,12 @@ fn backup(o: &[CommandDataOption]) -> Result<Cmd, String> {
     }))
 }
 
-/// Optional duration option: absent is fine, unparseable is an error.
+/// Optional duration option: absent is fine, unparseable is an error. Only the first word counts,
+/// so "1m spamming" works; [`parse`] takes the rest as the reason.
 fn dur(o: &[CommandDataOption], name: &str) -> Result<Option<i64>, String> {
     string(o, name)
         .map(|s| {
-            duration::parse(s)
+            duration::parse(s.split_whitespace().next().unwrap_or_default())
                 .ok_or_else(|| format!("`{s}` is not a duration, use e.g. 10m, 2h, 5d"))
         })
         .transpose()
@@ -182,7 +183,9 @@ pub fn parse(
     Ok(Cmd::Mod {
         kind,
         target,
-        reason: string(o, "reason").map(String::from),
+        reason: string(o, "reason")
+            .or_else(|| Some(string(o, "duration")?.trim().split_once(' ')?.1.trim()))
+            .map(String::from),
         duration_s,
         points: int(o, "points").unwrap_or(1) as i32,
         flags: Flags {
@@ -267,9 +270,18 @@ pub fn definitions() -> Vec<Command> {
         guild_only(menu("Timeout")),
         guild_only(menu("Quarantine")),
         guild_only(menu("Sanitize")),
-        guild_only(CommandBuilder::new("Report", "", CommandType::Message)),
         guild_only(CommandBuilder::new(
-            "Purge from here",
+            "Purge 100 From Here",
+            "",
+            CommandType::Message,
+        )),
+        guild_only(CommandBuilder::new(
+            "Purge 100 Until Here",
+            "",
+            CommandType::Message,
+        )),
+        guild_only(CommandBuilder::new(
+            "Report Message",
             "",
             CommandType::Message,
         )),
@@ -456,6 +468,17 @@ mod tests {
             })
         );
         assert!(parse("timeout", &o[..1], None).is_err()); // duration required
+        let typed = [
+            o[0].clone(),
+            opt(
+                "duration",
+                CommandOptionValue::String("1m being rude".into()),
+            ),
+        ];
+        assert!(matches!(
+            parse("timeout", &typed, None),
+            Ok(Cmd::Mod { duration_s: Some(60), reason: Some(r), .. }) if r == "being rude"
+        ));
         assert!(parse(
             "ban",
             &[

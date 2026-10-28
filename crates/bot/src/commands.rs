@@ -7,10 +7,10 @@ use serde_json::json;
 use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
 use tommybot_logging::{
-    embed::{duration, ORANGE, RED},
+    embed::{self, duration, ARROW, ORANGE, RED},
     Log, LogKind,
 };
-use twilight_http::Client;
+use twilight_http::{request::AuditLogReason, Client};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::message::{
@@ -177,20 +177,30 @@ pub async fn apply_dm(
     {
         reply::dm(app, target, &text).await;
     }
+    // Wick also writes the case into Discord's audit log, which caps reasons at 512 characters.
+    let audit = embed::clip(
+        &format!(
+            "{} | Moderator: {actor_id}",
+            reason.unwrap_or("No reason provided")
+        ),
+        500,
+    );
     let (inverse, points) = match kind {
         ModKind::Ban if soft => {
             // A softban exists to purge messages, so purge a day when the server default is none.
             app.http
                 .create_ban(gid, target)
                 .delete_message_seconds(cfg.misc.purge_secs().max(86_400))
+                .reason(&audit)
                 .await?;
-            app.http.delete_ban(gid, target).await?;
+            app.http.delete_ban(gid, target).reason(&audit).await?;
             (None, 0)
         }
         ModKind::Ban => {
             app.http
                 .create_ban(gid, target)
                 .delete_message_seconds(cfg.misc.purge_secs())
+                .reason(&audit)
                 .await?;
             if let Some(d) = duration_s {
                 let job = json!({"user":t});
@@ -199,7 +209,10 @@ pub async fn apply_dm(
             (Some(json!({"op":"unban","user":t})), 0)
         }
         ModKind::Kick => {
-            app.http.remove_guild_member(gid, target).await?;
+            app.http
+                .remove_guild_member(gid, target)
+                .reason(&audit)
+                .await?;
             (None, 0)
         }
         ModKind::Timeout => {
@@ -208,6 +221,7 @@ pub async fn apply_dm(
                 gid,
                 target,
                 now_secs() + duration_s.unwrap_or(cfg.misc.timeout_secs() as i64),
+                &audit,
             )
             .await?;
             (Some(json!({"op":"untimeout","user":t})), 0)
@@ -229,17 +243,16 @@ pub async fn apply_dm(
     )
     .await?;
     let name = if soft { "softban" } else { perm };
-    let mut log = Log::new(
-        &format!("Case #{case_no} | {}", case_title(name)),
-        case_color(name),
-    )
-    .user("Target", t)
-    .user("Moderator", actor_id.get())
-    .time();
+    // Wick's mod log: no title, Case / Type / Moderator columns, then Target and Reason.
+    let mut log = Log::new("", case_color(name))
+        .inline("Case:", &format!("`{case_no}`"))
+        .inline("Type:", &format!("`{}`", case_title(name)))
+        .inline("Moderator:", &embed::user(actor_id.get()))
+        .field("Target:", &format!("{ARROW} {}", embed::user(t)));
     if let Some(d) = duration_s {
-        log = log.line("Duration", &format!("`{}`", duration(d)));
+        log = log.field("Duration:", &format!("`{}`", duration(d)));
     }
-    let log = log.line("Reason", reason.unwrap_or("No reason provided"));
+    let log = log.field("Reason:", reason.unwrap_or("No reason provided"));
     if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
         tracing::warn!(?e, "mod log failed");
     }
@@ -421,7 +434,7 @@ impl Pending {
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(?e, "mod command failed");
-                    "Command failed, see logs".into()
+                    format!("Command failed: {}", why(&e))
                 });
                 return Ok(vec![text]);
             }
@@ -447,12 +460,30 @@ impl Pending {
                 Ok(text) => text,
                 Err(e) => {
                     tracing::warn!(?e, "mod command failed");
-                    format!("Failed to {} <@{t}>, see logs", kind.name())
+                    format!("Failed to {} <@{t}>: {}", kind.name(), why(&e))
                 }
             };
             out.push(text);
         }
         Ok(out)
+    }
+}
+
+/// Discord's reason for a failed mod action, for the reply.
+pub fn why(e: &anyhow::Error) -> String {
+    use twilight_http::{api_error::ApiError, error::ErrorType};
+    match e.downcast_ref::<twilight_http::Error>().map(|e| e.kind()) {
+        Some(ErrorType::Response {
+            error: ApiError::General(g),
+            ..
+        }) => match g.code {
+            50013 => {
+                "missing permissions (their top role is above mine, or they have Administrator)"
+                    .into()
+            }
+            _ => g.message.clone(),
+        },
+        _ => "see logs".into(),
     }
 }
 
@@ -662,6 +693,7 @@ pub async fn timeout_until(
     g: Id<GuildMarker>,
     u: Id<UserMarker>,
     until: i64,
+    reason: &str,
 ) -> Result<()> {
     let now = now_secs();
     let (chunk, more) = timeout_chunk(until - now);
@@ -671,6 +703,7 @@ pub async fn timeout_until(
     app.http
         .update_guild_member(g, u)
         .communication_disabled_until(Some(Timestamp::from_secs(now + chunk)?))
+        .reason(reason)
         .await?;
     if more {
         // Renewed a day early so scheduler lag cannot open a gap.
@@ -837,7 +870,7 @@ mod tests {
         let purge = ModCmd::Purge {
             count: 5,
             user: None,
-            from: Some(9),
+            from: Some(crate::modcmds::Anchor::Until(9)),
         };
         let e = Action::Ext {
             cmd: purge.clone(),

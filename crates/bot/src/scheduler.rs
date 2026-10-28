@@ -60,7 +60,8 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let until = job.payload["until_secs"]
                 .as_i64()
                 .context("job payload has no until_secs")?;
-            commands::timeout_until(app, gid, user(&job.payload)?, until).await?;
+            commands::timeout_until(app, gid, user(&job.payload)?, until, "Timeout renewal")
+                .await?;
         }
         "panic_end" => panic::end(app, gid, &job.payload).await?,
         "panic_start" => {
