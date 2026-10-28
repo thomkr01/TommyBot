@@ -713,6 +713,13 @@ pub fn schema() -> Vec<Value> {
                 "The roles your members have; lockdown and verification use them.",
             ),
         ),
+        sx(
+            "whitelist",
+            hp(
+                ti(fg("Statics", "partner_channels", "channels"), "Partnering channels"),
+                "Spam, @everyone pings and invites are allowed here.",
+            ),
+        ),
         ti(dv(fg("Moderation commands", "confirm", "bool"), true), "Display a confirmation message before executing the moderation action a moderator wants"),
         ti(fg("Moderation commands", "always_dm", "bool"), "Always DM the members punished regardless of the presence of a ?dm parameter"),
         ti(fg("Moderation commands", "delete_invocation", "bool"), "Always delete the moderation execution messages for regular prefix commands"),
@@ -725,6 +732,7 @@ pub fn schema() -> Vec<Value> {
             "0 means 28 days",
         ),
         ti(dv(fg("Moderation commands", "ban_purge_days", "int"), 7), "Days purged on bans"),
+        ti(fg("Moderation commands", "remove_main_roles_on_timeout", "bool"), "Remove the main roles from the target on timeout"),
         ti(dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true), "Display the reason behind the auto punishment in the message TommyBot sends"),
         ti(fg("Auto moderation", "purge_last_100", "bool"), "Always purge the messages sent by the punished member found in the recent 100 messages"),
         ti(fg("Auto moderation", "staff_only_permitted", "bool"), "Consider only owners, trusted admins and any member with the flags (IMMUNITY|AUTOMOD IMMUNITY) to be considered staff members. Punish anyone else triggering the auto mod"),

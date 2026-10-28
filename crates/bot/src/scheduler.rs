@@ -111,6 +111,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             )
             .await?
         }
+        "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())

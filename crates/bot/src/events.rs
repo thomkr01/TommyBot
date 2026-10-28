@@ -211,6 +211,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(e) = antinuke::enforce_permits(app, m).await {
                 tracing::warn!(?e, "enforcing permits failed");
             }
+            if let Err(e) = crate::timeout_roles::on_member_update(app, m).await {
+                tracing::warn!(?e, "removing main roles on timeout failed");
+            }
             automod::on_member_update(app, m).await?
         }
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
