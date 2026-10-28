@@ -45,8 +45,8 @@ pub async fn message_menu(
         return Ok("Message not found".into());
     };
     let from = match data.name.as_str() {
-        "Purge 100 From Here" => Anchor::After(msg.id.get()),
-        "Purge 100 Until Here" => Anchor::Before(msg.id.get()),
+        "Purge 100 From Here" => Anchor::From(msg.id.get()),
+        "Purge 100 Until Here" => Anchor::Until(msg.id.get()),
         _ => return report(app, gid, actor_id, msg).await,
     };
     let owner = app.guild_info(gid).await?.owner;
