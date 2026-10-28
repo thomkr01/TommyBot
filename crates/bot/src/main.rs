@@ -18,6 +18,7 @@ mod scheduler;
 mod slash;
 mod targets;
 mod tickets;
+mod timeout_roles;
 mod verify;
 mod welcome;
 

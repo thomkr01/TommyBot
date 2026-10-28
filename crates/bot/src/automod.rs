@@ -71,6 +71,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if listed(&wl.spam) {
         return Ok(());
     }
+    let partner = wl.partner_channels.contains(&m.channel_id);
     let now = now_ms();
     let content = m.content.as_str();
     let f = &am.filters;
@@ -128,10 +129,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         lower_chars,
         from_webhook: m.webhook_id.is_some(),
         whitelist: Whitelist {
-            spam: false,
+            spam: partner,
             mention_spam: listed(&wl.mentions),
-            advertising: listed(&wl.invites),
-            everyone: listed(&wl.everyone),
+            advertising: partner || listed(&wl.invites),
+            everyone: partner || listed(&wl.everyone),
         },
         ..Default::default()
     };
@@ -489,8 +490,15 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     verify::on_join(app, gid, user.id, suspicious).await;
-    if let Some(action) = harshest(&gate(&j, &cfg.joingate, now)) {
-        punish(app, &cfg, gid, j.id, action, "join gate").await?;
+    let hits = gate(&j, &cfg.joingate, now);
+    if let Some(action) = harshest(&hits) {
+        let why = if hits.iter().any(|h| h.0 == Filter::AccountAge) {
+            let min = duration(cfg.joingate.min_age_ms() / 1000);
+            format!("join gate: accounts must be at least {min} old")
+        } else {
+            "join gate".into()
+        };
+        punish(app, &cfg, gid, j.id, action, &why).await?;
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
         join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;

@@ -330,6 +330,8 @@ pub struct WhitelistCfg {
     pub mentions: WhitelistList,
     /// @everyone and @here.
     pub everyone: WhitelistList,
+    /// Wick's partnering channels static: spam, @everyone and invites are allowed there.
+    pub partner_channels: Vec<Id<ChannelMarker>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -457,6 +459,8 @@ pub struct MiscCfg {
     /// Apply `warn_actions` once a member's warn points reach them.
     pub auto_warn_actions: bool,
     pub warn_actions: Vec<crate::warn::Threshold>,
+    /// Take the main roles away while a member is timed out.
+    pub remove_main_roles_on_timeout: bool,
 }
 
 impl Default for MiscCfg {
@@ -481,6 +485,7 @@ impl Default for MiscCfg {
             warn_base_points: 5,
             auto_warn_actions: true,
             warn_actions: vec![],
+            remove_main_roles_on_timeout: false,
         }
     }
 }
