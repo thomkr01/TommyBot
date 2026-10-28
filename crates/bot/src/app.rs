@@ -74,6 +74,7 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
         "joinraid" => t::<RaidCfg>(v),
         "lockdown" => t::<LockdownCfg>(v).and(t::<LockdownPrefs>(v)),
         "panic" => t::<PanicCfg>(v),
+        "backups" => t::<BackupsCfg>(v),
         "misc" => t::<MiscCfg>(v),
         "whitelist" => t::<WhitelistCfg>(v),
         "verification" => t::<VerificationCfg>(v),

@@ -653,6 +653,10 @@ pub fn schema() -> Vec<Value> {
         dv(fg("Response", "duration_secs", "int"), 600),
         dv(fg("Response", "lock_mod_commands", "bool"), true),
         dv(fg("Response", "unlock_when_ending", "bool"), true),
+        ti(
+            dv(fg("Response", "lock_on_trigger", "bool"), true),
+            "Lock the server on trigger",
+        ),
         fg("Response", "warned_roles", "roles"),
         fg("Response", "whitelisted_categories", "categories"),
     ];
@@ -921,7 +925,19 @@ pub fn schema() -> Vec<Value> {
             ],
         ),
         ("panic", "Panic mode", panic),
-        ("backups", "Backups", vec![f("auto", "bool")]),
+        (
+            "backups",
+            "Backups",
+            vec![
+                f("auto", "bool"),
+                ti(dv(fg("Restore", "restore", "bool"), true), "Restore after a nuke"),
+                ti(dv(fg("Restore", "restore_roles", "bool"), true), "Restore deleted roles"),
+                ti(dv(fg("Restore", "delete_roles", "bool"), true), "Delete created roles"),
+                ti(dv(fg("Restore", "restore_channels", "bool"), true), "Restore deleted channels"),
+                ti(dv(fg("Restore", "delete_channels", "bool"), true), "Delete created channels"),
+                ti(dv(fg("Restore", "delete_webhooks", "bool"), true), "Delete created webhooks"),
+            ],
+        ),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),
         ("tickets", "Tickets", tickets),

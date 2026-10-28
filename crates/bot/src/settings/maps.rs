@@ -173,7 +173,7 @@ pub(super) static ANTINUKE: Module = Module {
     names: &["antinuke", "an"],
     title: "Anti Nuke Panel:",
     per_page: 0,
-    footer: "Panic Mode: w!anp",
+    footer: "Panic Mode: w!anp · Restore Filters: w!anr",
     rows: &[
         r!("1", "Status", "antinuke.enabled", Kind::Bool, |c| on(c.antinuke.enabled)),
         dash!("2", "Limits"),
@@ -198,12 +198,28 @@ pub(super) static PANIC: Module = Module {
     rows: &[
         r!("1", "Status", "panic.executors", Kind::Switch("3", "0"), |c| on(c.panic.executors > 0)),
         r!("2", "Heat Algorithm", "panic.heat_algorithm", Kind::Bool, |c| on(c.panic.heat_algorithm)),
+        r!("3", "Lockdown Server On Trigger", "panic.lock_on_trigger", Kind::Bool, |c| on(c.panic.lock_on_trigger)),
         r!("4", "Unlock Server When Ending", "panic.unlock_when_ending", Kind::Bool, |c| on(c.panic.unlock_when_ending)),
         r!("5", "Warned Roles", "panic.warned_roles", Kind::Roles, |c| roles(&c.panic.warned_roles)),
         r!("6", "Whitelisted Categories", "panic.whitelisted_categories", Kind::Channels, |c| chans(&c.panic.whitelisted_categories)),
         r!("7", "Lock Mod Cmds On Trigger", "panic.lock_mod_commands", Kind::Bool, |c| on(c.panic.lock_mod_commands)),
         r!("8", "Trigger", "panic.executors", Kind::Int(1, 50), |c| format!("{} quarantined staff", c.panic.executors)),
         r!("9", "Panic Duration", "panic.duration_secs", Kind::Secs, |c| embed::duration(c.panic.duration_secs as i64)),
+    ],
+};
+
+pub(super) static RESTORE: Module = Module {
+    names: &["antinukerestore", "anr"],
+    title: "Restore System Filters:",
+    per_page: 0,
+    footer: "",
+    rows: &[
+        r!("1", "Status", "backups.restore", Kind::Bool, |c| on(c.backups.restore)),
+        r!("2", "Restoring Deleted Roles", "backups.restore_roles", Kind::Bool, |c| on(c.backups.restore_roles)),
+        r!("3", "Deleting Created Roles", "backups.delete_roles", Kind::Bool, |c| on(c.backups.delete_roles)),
+        r!("4", "Restoring Deleted Channels", "backups.restore_channels", Kind::Bool, |c| on(c.backups.restore_channels)),
+        r!("5", "Deleting Created Channels", "backups.delete_channels", Kind::Bool, |c| on(c.backups.delete_channels)),
+        r!("6", "Deleting Created Webhooks", "backups.delete_webhooks", Kind::Bool, |c| on(c.backups.delete_webhooks)),
     ],
 };
 
@@ -322,7 +338,7 @@ pub(super) static SETUP: Module = Module {
     ],
 };
 
-pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &PANIC, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP];
+pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &PANIC, &RESTORE, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP];
 
 pub fn module(name: &str) -> Option<&'static Module> {
     MODULES.iter().copied().find(|m| m.names.contains(&name))

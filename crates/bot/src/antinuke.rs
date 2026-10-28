@@ -14,6 +14,7 @@ use tommybot_automod::heat::{Breakdown, HeatCfg};
 use tommybot_core::{
     cases::{self, NewCase},
     permits,
+    sections::BackupsCfg,
 };
 use tommybot_logging::{
     embed::{ALERT, NO, YES},
@@ -442,6 +443,7 @@ pub(crate) async fn revert_actor(
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     since_secs: i64,
+    filters: Option<&BackupsCfg>,
 ) -> Result<RevertSummary> {
     let since = since_secs;
     let rows: Vec<(serde_json::Value, i64)> = sqlx::query_as(
@@ -464,7 +466,15 @@ pub(crate) async fn revert_actor(
             })
         })
         .collect();
-    let plan = plan_revert(&log, actor.get(), since);
+    let mut plan = plan_revert(&log, actor.get(), since);
+    if let Some(f) = filters {
+        plan.ops.retain(|op| match op {
+            Inverse::DeleteRole { .. } => f.restore && f.delete_roles,
+            Inverse::DeleteChannel { .. } => f.restore && f.delete_channels,
+            Inverse::DeleteWebhook { .. } => f.restore && f.delete_webhooks,
+            _ => true,
+        });
+    }
     let mut failed = 0;
     for op in &plan.ops {
         if let Err(e) = run_inverse(app, gid, op).await {
@@ -483,13 +493,15 @@ pub(crate) async fn revert_actor(
     .fetch_all(&app.pool)
     .await?;
     let gone: std::collections::HashSet<u64> = gone.into_iter().map(|(id,)| id as u64).collect();
-    let recreated = if gone.is_empty() {
+    let recreated = if gone.is_empty() || filters.is_some_and(|f| !f.restore) {
         0
     } else {
-        backup::recreate(app, gid, &gone).await.unwrap_or_else(|e| {
-            tracing::warn!(?e, "recreating deleted objects failed");
-            0
-        })
+        backup::recreate(app, gid, &gone, filters)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(?e, "recreating deleted objects failed");
+                0
+            })
     };
     sqlx::query("UPDATE action_log SET reverted = true WHERE guild_id=$1 AND actor_id=$2 AND created_at >= to_timestamp($3)")
         .bind(gid.get() as i64)
@@ -522,14 +534,15 @@ async fn quarantine_and_revert(
     actor: Id<UserMarker>,
     why: &str,
 ) -> Result<()> {
-    let auto = app.cfg(gid.get()).await?.antinuke.auto_quarantine;
+    let cfg = app.cfg(gid.get()).await?;
+    let auto = cfg.antinuke.auto_quarantine;
     // A failed quarantine (bot role too low) must not stop the revert.
     let quarantined = auto
         && contain(app, gid, actor)
             .await
             .inspect_err(|e| tracing::warn!(?e, "quarantine failed"))
             .is_ok();
-    let sum = revert_actor(app, gid, actor, now_secs() - 3600).await?;
+    let sum = revert_actor(app, gid, actor, now_secs() - 3600, Some(&cfg.backups)).await?;
     let case = open_case(app, gid, actor, why).await?;
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
     let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();

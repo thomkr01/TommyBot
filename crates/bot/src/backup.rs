@@ -23,6 +23,7 @@ use twilight_model::{
 };
 
 use crate::app::App;
+use tommybot_core::sections::BackupsCfg;
 
 /// Backups kept per guild; older ones are dropped on save.
 const KEEP: i64 = 10;
@@ -178,7 +179,10 @@ pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<us
         return Ok(None);
     };
     let keep = keep_set(app, gid).await?;
-    Ok(Some(restore(app, gid, &image, &keep, true).await?))
+    let filters = app.cfg(gid.get()).await?.backups.clone();
+    Ok(Some(
+        restore(app, gid, &image, &keep, Some(&filters)).await?,
+    ))
 }
 
 /// The 10 latest backups as `(id, created_at unix secs, roles, channels)`, newest first.
@@ -216,7 +220,7 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: i64, confirm: bool) -> Re
     };
     let keep = keep_set(app, gid).await?;
     if confirm {
-        let n = restore(app, gid, &image, &keep, false).await?;
+        let n = restore(app, gid, &image, &keep, None).await?;
         return Ok(format!("Restored backup #{id} ({n} changes)"));
     }
     let live = snapshot(&app.http, gid).await?;
@@ -240,7 +244,12 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: i64, confirm: bool) -> Re
 
 /// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker) from
 /// the latest image, plus children re-parented to a recreated category. Nothing else is touched.
-pub async fn recreate(app: &App, gid: Id<GuildMarker>, ids: &HashSet<u64>) -> Result<usize> {
+pub async fn recreate(
+    app: &App,
+    gid: Id<GuildMarker>,
+    ids: &HashSet<u64>,
+    filters: Option<&BackupsCfg>,
+) -> Result<usize> {
     let Some(image) = latest(app, gid).await? else {
         return Ok(0);
     };
@@ -260,6 +269,9 @@ pub async fn recreate(app: &App, gid: Id<GuildMarker>, ids: &HashSet<u64>) -> Re
         Change::Update { to, .. } => to.parent.is_some_and(|p| ids.contains(&p)),
         Change::Delete(_) => false,
     });
+    if let Some(f) = filters {
+        apply_filters(&mut p, f);
+    }
     Ok(execute(app, gid, &image, p, true).await)
 }
 
@@ -278,16 +290,32 @@ fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
         .collect()
 }
 
-/// Syncs the server to `image` and returns how many changes were made. `respect_lock` keeps live
-/// role permissions and channel overwrites (panic mode locks the server first). One failed change
-/// is logged and skipped, so a single missing permission can't abort the whole restore.
+/// Drops the creates and deletes the restore filters (`anr`) turned off; updates always stay.
+fn apply_filters(p: &mut Plan, f: &BackupsCfg) {
+    fn keep<T>(c: &Change<T>, create: bool, delete: bool) -> bool {
+        match c {
+            Change::Create(_) => create,
+            Change::Delete(_) => delete,
+            Change::Update { .. } => true,
+        }
+    }
+    p.roles.retain(|c| keep(c, f.restore_roles, f.delete_roles));
+    p.channels
+        .retain(|c| keep(c, f.restore_channels, f.delete_channels));
+}
+
+/// Syncs the server to `image` and returns how many changes were made. `filters` is set for panic
+/// mode: it applies the restore filters and keeps live role permissions and channel overwrites
+/// (panic mode locks the server first). One failed change is logged and skipped, so a single
+/// missing permission can't abort the whole restore.
 pub async fn restore(
     app: &App,
     gid: Id<GuildMarker>,
     image: &Image,
     keep: &HashSet<u64>,
-    respect_lock: bool,
+    filters: Option<&BackupsCfg>,
 ) -> Result<usize> {
+    let respect_lock = filters.is_some();
     let http = &app.restore_http;
     let live = snapshot(http, gid).await?;
     // Created by lockdown::exec; restoring must not delete it while the server is locked.
@@ -298,7 +326,10 @@ pub async fn restore(
             .filter(|c| c.name == "server-locked")
             .map(|c| c.id),
     );
-    let p = plan(image, &live, &keep, respect_lock);
+    let mut p = plan(image, &live, &keep, respect_lock);
+    if let Some(f) = filters {
+        apply_filters(&mut p, f);
+    }
     Ok(execute(app, gid, image, p, respect_lock).await)
 }
 
@@ -464,5 +495,42 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
             }
             Err(e) => tracing::warn!(?e, "listing guilds for backup failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_drop_creates_and_deletes_only() {
+        let role = RoleImg {
+            id: 1,
+            name: "a".into(),
+            color: 0,
+            permissions: 0,
+            position: 1,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+        };
+        let mut p = Plan {
+            roles: vec![
+                Change::Create(role.clone()),
+                Change::Update { live: 1, to: role },
+                Change::Delete(2),
+            ],
+            channels: vec![Change::Delete(3)],
+            ..Default::default()
+        };
+        let f = BackupsCfg {
+            restore_roles: false,
+            delete_channels: false,
+            ..Default::default()
+        };
+        apply_filters(&mut p, &f);
+        assert_eq!(p.roles.len(), 2);
+        assert!(matches!(p.roles[0], Change::Update { .. }));
+        assert!(p.channels.is_empty());
     }
 }

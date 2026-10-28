@@ -531,6 +531,7 @@ pub struct PanicCfg {
     pub heat_decay: f64,
     /// Categories panic mode leaves unlocked.
     pub whitelisted_categories: Vec<Id<ChannelMarker>>,
+    pub lock_on_trigger: bool,
 }
 
 impl Default for PanicCfg {
@@ -546,15 +547,37 @@ impl Default for PanicCfg {
             heat_executors: 3,
             heat_decay: 0.01,
             whitelisted_categories: vec![],
+            lock_on_trigger: true,
         }
     }
 }
 
-/// Server backups: the 3-hour auto backup is off until a guild turns it on.
-#[derive(Clone, Default, Deserialize)]
+/// Server backups: the 3-hour auto backup is off until a guild turns it on. The rest are Wick's
+/// restore filters (`anr`), used by anti-nuke reverts and panic mode, never by `/backup load`.
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct BackupsCfg {
     pub auto: bool,
+    pub restore: bool,
+    pub restore_roles: bool,
+    pub delete_roles: bool,
+    pub restore_channels: bool,
+    pub delete_channels: bool,
+    pub delete_webhooks: bool,
+}
+
+impl Default for BackupsCfg {
+    fn default() -> Self {
+        Self {
+            auto: false,
+            restore: true,
+            restore_roles: true,
+            delete_roles: true,
+            restore_channels: true,
+            delete_channels: true,
+            delete_webhooks: true,
+        }
+    }
 }
 
 /// What the catch channel does to a writer; `Log` is the test mode.

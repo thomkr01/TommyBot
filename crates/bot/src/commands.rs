@@ -859,7 +859,7 @@ pub async fn revert_cmd(
     if let Some(msg) = gated(app, gid, actor_id, actor, "revert").await? {
         return Ok(msg);
     }
-    let r = antinuke::revert_actor(app, gid, target, now_secs() - since_s).await?;
+    let r = antinuke::revert_actor(app, gid, target, now_secs() - since_s, None).await?;
     let reinvite: Vec<String> = r.reinvite.iter().map(|u| format!("<@{u}>")).collect();
     Ok(format!(
         "Reverted {}/{} actions by <@{target}> and recreated {} deleted. Re-invite: {}",
