@@ -101,6 +101,17 @@ pub(crate) async fn gated(
     )))
 }
 
+/// Readable reason for a refused permit check.
+pub(crate) fn deny_text(perm: &str, target: u64, d: &permits::Denied) -> String {
+    let why = match d {
+        permits::Denied::NoPermit => format!("you lack the {perm} permit"),
+        permits::Denied::TargetProtected => "they are immune".into(),
+        permits::Denied::TargetAboveBot => "their top role is above the bot".into(),
+        permits::Denied::SelfTarget => "you cannot target yourself".into(),
+    };
+    format!("Cannot {perm} <@{target}>: {why}")
+}
+
 /// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text; Err only for
 /// infrastructure failures. `points` only matters for warns.
 #[allow(clippy::too_many_arguments)]
@@ -155,7 +166,7 @@ pub async fn apply_dm(
         target.get() as i64,
         above,
     ) {
-        return Ok(format!("Cannot {perm} <@{target}>: {d:?}"));
+        return Ok(deny_text(perm, target.get(), &d));
     }
     if let Some(msg) = gated(app, gid, actor_id, actor, perm).await? {
         return Ok(msg);
@@ -270,17 +281,59 @@ pub async fn apply_dm(
     Ok(text)
 }
 
+/// Every command name [`run`] answers; the invoking message is deleted for these when `delete_invocation` is on.
+const KNOWN: &[&str] = &[
+    "ban",
+    "softban",
+    "kick",
+    "warn",
+    "timeout",
+    "verifysetup",
+    "lock",
+    "unlock",
+    "unban",
+    "hackban",
+    "untimeout",
+    "unwarn",
+    "quarantine",
+    "unquarantine",
+    "purge",
+    "slowmode",
+    "cases",
+    "case",
+    "verify",
+    "sanitize",
+    "note",
+    "notes",
+    "editc",
+    "editreason",
+    "closecase",
+    "caseoff",
+    "opencase",
+    "caseon",
+    "clearwarns",
+];
+
 /// Prefix entry: resolves names, then runs [`apply`] per target and posts each reply.
 pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
     let Some(gid) = msg.guild_id else {
         return Ok(());
     };
     p.flags.soft |= p.command == "softban";
+    if KNOWN.contains(&p.command.as_str()) {
+        let cfg = app.cfg(gid.get()).await?;
+        if cfg.misc.delete_invocation {
+            let owner = app.guild_info(gid).await?.owner;
+            if app.level(gid, owner, msg.author.id).await? != permits::Level::None {
+                app.http.delete_message(msg.channel_id, msg.id).await.ok();
+            }
+        }
+    }
     let kind = match p.command.as_str() {
         "ban" | "softban" => ModKind::Ban,
         "kick" => ModKind::Kick,
         "warn" => ModKind::Warn,
-        "timeout" | "mute" => ModKind::Timeout,
+        "timeout" => ModKind::Timeout,
         "verifysetup" => {
             if !app.is_immune(gid, msg.author.id).await? {
                 return Ok(());
@@ -292,7 +345,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;
             // `lock role`, `lock server`, `lock channel`...: one-off type instead of the dashboard default.
-            let kind = match p.names.first() {
+            let kind = match p.kind.as_ref().or(p.names.first()) {
                 Some(n) => match kind_from(n, Some(msg.channel_id.get())) {
                     Some(k) => Some(k),
                     None => return say(app, msg, LOCK_TYPES).await,
@@ -303,9 +356,11 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             let text = lockdown_cmd(app, gid, &actor, unlock, kind, p.duration_s).await?;
             return say(app, msg, &text).await;
         }
-        "unban" | "hackban" | "untimeout" | "unmute" | "unwarn" | "quarantine" | "unquarantine"
-        | "purge" | "clear" | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "dehoist"
-        | "note" | "notes" => return modcmds::run_prefix(app, msg, p).await,
+        "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
+        | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
+        | "editreason" | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns" => {
+            return modcmds::run_prefix(app, msg, p).await
+        }
         _ => return Ok(()),
     };
     let owner = app.guild_info(gid).await?.owner;
@@ -314,11 +369,6 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         && app.level(gid, owner, msg.author.id).await? == permits::Level::None
     {
         return Ok(());
-    }
-    if cfg.misc.delete_invocation
-        && app.level(gid, owner, msg.author.id).await? != permits::Level::None
-    {
-        app.http.delete_message(msg.channel_id, msg.id).await.ok();
     }
     let mut targets: Vec<Id<UserMarker>> = p.targets.iter().map(|t| Id::new(*t)).collect();
     for n in &p.names {
@@ -737,7 +787,8 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
     Ok(())
 }
 
-pub const LOCK_TYPES: &str = "Lock type: server, blind, role, channel, kick, ban or all";
+pub const LOCK_TYPES: &str =
+    "Lock type: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s)";
 
 /// Lock or unlock the server; shared by the prefix and slash commands. `kind` overrides the dashboard's lock type.
 pub async fn lockdown_cmd(

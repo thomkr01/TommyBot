@@ -24,7 +24,15 @@ pub fn case_text(
             s += format!("\nReason: {r}").as_str();
         }
     }
+    if reason.is_none() {
+        s += add_reason_hint(case_no).as_str();
+    }
     s
+}
+
+/// Wick's "Add Reason" pointer for actions run without a reason.
+pub fn add_reason_hint(case_no: i64) -> String {
+    format!("\nAdd Reason: `/cases modify case:{case_no} reason:`")
 }
 
 /// What the target is told; `actor` is None when staff identity is hidden.
@@ -129,6 +137,8 @@ mod tests {
             case_text(false, (3, "ban", 5), Some("x"), 9),
             "Case #3: ban <@5>\nModerator: <@9>\nReason: x"
         );
+        assert!(case_text(true, (3, "ban", 5), None, 9)
+            .ends_with("\nAdd Reason: `/cases modify case:3 reason:`"));
     }
 
     #[test]

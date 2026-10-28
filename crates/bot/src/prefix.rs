@@ -7,7 +7,32 @@ pub struct Parsed {
     pub names: Vec<String>,
     pub duration_s: Option<i64>,
     pub reason: Option<String>,
+    /// `?t TYPE` that is not a duration (lock types such as `sc`); lock shortcuts like `slock` set it too.
+    pub kind: Option<String>,
     pub flags: Flags,
+}
+
+/// Wick's command aliases -> (canonical command, implied `?t` type).
+fn alias(cmd: &str) -> (&str, Option<&str>) {
+    match cmd {
+        "b" => ("ban", None),
+        "hb" => ("hackban", None),
+        "k" => ("kick", None),
+        "mute" | "silence" | "m" | "to" | "tout" | "t" => ("timeout", None),
+        "deltimeout" | "unmute" | "um" => ("untimeout", None),
+        "q" => ("quarantine", None),
+        "uq" | "restore" | "r" => ("unquarantine", None),
+        "wa" => ("warn", None),
+        "ub" => ("unban", None),
+        "lockdown" | "ld" => ("lock", None),
+        "lockc" | "clock" => ("lock", Some("c")),
+        "serverlock" | "slock" | "locks" | "lockserver" | "lockchannels" => ("lock", Some("sc")),
+        "ul" => ("unlock", None),
+        "sweep" | "clear" | "p" | "c" => ("purge", None),
+        "san" | "sanitise" | "dehoist" => ("sanitize", None),
+        "sm" => ("slowmode", None),
+        c => (c, None),
+    }
 }
 
 /// `?dm` tell the target, `?s` softban (ban + unban to purge messages), `?p` short reply.
@@ -23,8 +48,11 @@ pub struct Flags {
 /// each comma-separated chunk is one name so multi-word names work).
 pub fn parse(s: &str) -> Option<Parsed> {
     let mut it = s.split_whitespace().peekable();
+    let word = it.next()?.to_lowercase();
+    let (command, kind) = alias(&word);
     let mut p = Parsed {
-        command: it.next()?.to_lowercase(),
+        command: command.into(),
+        kind: kind.map(Into::into),
         ..Default::default()
     };
     let mut name_words: Vec<&str> = vec![];
@@ -34,11 +62,20 @@ pub fn parse(s: &str) -> Option<Parsed> {
         match tok {
             "?r" => {
                 let mut words = vec![];
-                while let Some(t) = it.next_if(|t| !matches!(*t, "?dm" | "?s" | "?h" | "?p")) {
+                while let Some(t) = it.next_if(|t| !matches!(*t, "?dm" | "?s" | "?h" | "?p" | "?t"))
+                {
                     words.push(t);
                 }
                 if !words.is_empty() {
                     p.reason = Some(words.join(" "));
+                }
+            }
+            "?t" => {
+                if let Some(v) = it.next_if(|t| !t.starts_with('?')) {
+                    match tommybot_core::duration::parse(v) {
+                        Some(d) => p.duration_s = Some(d),
+                        None => p.kind = Some(v.to_lowercase()),
+                    }
                 }
             }
             "?dm" => p.flags.dm = true,
@@ -108,6 +145,31 @@ mod tests {
         assert_eq!(
             (p.flags.soft, p.flags.compact, p.flags.dm),
             (true, true, false)
+        );
+    }
+
+    #[test]
+    fn aliases_and_t_flag() {
+        assert_eq!(parse("b 5").unwrap().command, "ban");
+        assert_eq!(parse("hb 5").unwrap().command, "hackban");
+        assert_eq!(parse("deltimeout 5").unwrap().command, "untimeout");
+        assert_eq!(parse("r 5").unwrap().command, "unquarantine");
+        let p = parse("slock").unwrap();
+        assert_eq!(
+            (p.command.as_str(), p.kind.as_deref()),
+            ("lock", Some("sc"))
+        );
+        assert_eq!(parse("ld ?t K").unwrap().kind.as_deref(), Some("k"));
+        let p = parse("t 5 ?t 15m ?r why").unwrap();
+        assert_eq!(
+            (p.duration_s, p.reason.as_deref()),
+            (Some(900), Some("why"))
+        );
+        // `?t` ends a reason.
+        let p = parse("m 5 ?r too loud ?t 1h").unwrap();
+        assert_eq!(
+            (p.duration_s, p.reason.as_deref()),
+            (Some(3600), Some("too loud"))
         );
     }
 

@@ -181,12 +181,12 @@ pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<us
     Ok(Some(restore(app, gid, &image, &keep, true).await?))
 }
 
-/// Backups as `(id, created_at unix secs, roles, channels)`, newest first.
+/// The 10 latest backups as `(id, created_at unix secs, roles, channels)`, newest first.
 pub async fn list(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(i64, i64, i32, i32)>> {
     Ok(sqlx::query_as(
         "SELECT id, EXTRACT(EPOCH FROM created_at)::BIGINT, jsonb_array_length(image->'roles')::INT, \
          jsonb_array_length(image->'channels')::INT FROM backups \
-         WHERE guild_id = $1 ORDER BY created_at DESC, id DESC",
+         WHERE guild_id = $1 ORDER BY created_at DESC, id DESC LIMIT 10",
     )
     .bind(gid.get() as i64)
     .fetch_all(&app.pool)
