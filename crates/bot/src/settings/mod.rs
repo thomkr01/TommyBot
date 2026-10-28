@@ -631,11 +631,16 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         return Ok(true);
     }
     let page: usize = it.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    let Some(m) = module(kind) else {
-        return Ok(true);
-    };
     let cfg = app.cfg(gid.get()).await?;
-    let (embed, pages) = panel(m, &cfg, gid.get(), page);
+    let (embed, pages) = match module(kind) {
+        Some(m) => panel(m, &cfg, gid.get(), page),
+        None if kind == "cmds" => {
+            let owner = app.guild_info(gid).await?.owner;
+            let level = app.level(gid, owner, Id::new(invoker.unwrap_or(1))).await?;
+            crate::general::commands_page(&level, &cfg.misc.prefix, page)
+        }
+        None => return Ok(true),
+    };
     let r = InteractionResponse {
         kind: InteractionResponseType::UpdateMessage,
         data: Some(InteractionResponseData {

@@ -24,7 +24,7 @@ fn wizard_url(base: &str, guild: impl std::fmt::Display) -> String {
     format!("{}/#/{guild}/wizard", base.trim_end_matches('/'))
 }
 
-fn link(label: &str, url: String) -> Component {
+pub(crate) fn link(label: &str, url: String) -> Component {
     Component::Button(Button {
         id: None,
         custom_id: None,

@@ -6,6 +6,7 @@ mod backup;
 mod catch;
 mod commands;
 mod events;
+mod general;
 mod hierarchy;
 mod lockdown;
 mod metrics;
@@ -59,6 +60,7 @@ async fn main() -> Result<()> {
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
     }
+    metrics::STARTED.store(app::now_secs() as u64, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(scheduler::run(app.clone()));
     tokio::spawn({
         let app = app.clone();
@@ -104,6 +106,10 @@ async fn main() -> Result<()> {
         };
         match event {
             Some(Ok(event)) => {
+                if let Some(d) = shard.latency().average() {
+                    metrics::LATENCY_MS
+                        .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
                 tokio::spawn(events::handle(app.clone(), event));
             }
             Some(Err(e)) => {

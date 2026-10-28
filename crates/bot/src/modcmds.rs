@@ -71,6 +71,10 @@ pub enum ModCmd {
     CasesView {
         case: Option<i32>,
         user: Option<u64>,
+        /// `modcases`: cases this moderator made.
+        by: Option<u64>,
+        /// `?t TYPE`: one case kind.
+        kind: Option<String>,
     },
     CasesEdit {
         case: i32,
@@ -246,9 +250,43 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
         "cases" | "case" => ModCmd::CasesView {
             case: small.map(|n| n as i32),
             user,
+            by: None,
+            kind: case_kind(p.kind.as_deref())?,
+        },
+        "warns" => ModCmd::CasesView {
+            case: None,
+            user: Some(need_user()?),
+            by: None,
+            kind: Some("warn".into()),
+        },
+        "modcases" => ModCmd::CasesView {
+            case: None,
+            user: None,
+            by: Some(need_user()?),
+            kind: case_kind(p.kind.as_deref())?,
         },
         _ => return Err("Unknown command".into()),
     })
+}
+
+/// Wick's `?t` codes (B, UB, K, TIMEOUT, WA, Q, UQ) and plain kind names, singular or plural.
+fn case_kind(t: Option<&str>) -> Result<Option<String>, String> {
+    let Some(t) = t else { return Ok(None) };
+    let kind = match t.trim_end_matches('s') {
+        "b" | "ban" => "ban",
+        "ub" | "unban" => "unban",
+        "k" | "kick" => "kick",
+        "t" | "to" | "timeout" | "mute" => "timeout",
+        "wa" | "warn" => "warn",
+        "q" | "quarantine" => "quarantine",
+        "uq" | "unquarantine" => "unquarantine",
+        _ => {
+            return Err(format!(
+                "Unknown case type `{t}`: use b, ub, k, timeout, wa, q or uq"
+            ))
+        }
+    };
+    Ok(Some(kind.into()))
 }
 
 /// Prefix entry for the commands above; the caller only routes known names here.
@@ -337,7 +375,12 @@ pub async fn run(
     // (case kind, case user, inverse, reason prefix, reply)
     let (kind, uid, inverse, note, reply): (&str, u64, Option<Value>, Option<String>, String) =
         match cmd {
-            ModCmd::CasesView { case, user } => return view_cases(app, g, case, user).await,
+            ModCmd::CasesView {
+                case,
+                user,
+                by,
+                kind,
+            } => return view_cases(app, g, case, user, by, kind).await,
             ModCmd::NoteAdd { user, text } => {
                 if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
                     return Ok(format!(
@@ -636,16 +679,26 @@ fn fmt_case((no, kind, user, moderator, reason, active, at): &CaseRow) -> String
     )
 }
 
-/// One case by number, or the 10 latest (optionally of one user).
-async fn view_cases(app: &App, g: i64, case: Option<i32>, user: Option<u64>) -> Result<String> {
+/// One case by number, or the 10 latest (optionally of one user, by one moderator, of one kind).
+async fn view_cases(
+    app: &App,
+    g: i64,
+    case: Option<i32>,
+    user: Option<u64>,
+    by: Option<u64>,
+    kind: Option<String>,
+) -> Result<String> {
     let rows: Vec<CaseRow> = sqlx::query_as(
         "SELECT case_no, kind, user_id, mod_id, reason, active, EXTRACT(EPOCH FROM created_at)::bigint
          FROM cases WHERE guild_id=$1 AND ($2::int IS NULL OR case_no=$2) AND ($3::bigint IS NULL OR user_id=$3)
+         AND ($4::bigint IS NULL OR mod_id=$4) AND ($5::text IS NULL OR kind=$5)
          ORDER BY case_no DESC LIMIT 10",
     )
     .bind(g)
     .bind(case)
     .bind(user.map(|u| u as i64))
+    .bind(by.map(|u| u as i64))
+    .bind(kind)
     .fetch_all(&app.pool)
     .await?;
     Ok(if rows.is_empty() {
@@ -738,6 +791,8 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                 "view" => ModCmd::CasesView {
                     case: case(s).ok(),
                     user: user(s, "user").map(|u| u.get()),
+                    by: user(s, "mod").map(|u| u.get()),
+                    kind: string(s, "type").map(String::from),
                 },
                 "modify" => ModCmd::CasesEdit {
                     case: case(s)?,
@@ -845,7 +900,22 @@ pub fn definitions() -> Vec<Command> {
             .option(
                 SubCommandBuilder::new("view", "Show a case, or the latest cases of a user")
                     .option(case(false))
-                    .option(UserBuilder::new("user", "Member")),
+                    .option(UserBuilder::new("user", "Member"))
+                    .option(UserBuilder::new("mod", "Moderator who made the cases"))
+                    .option(
+                        StringBuilder::new("type", "Case type").choices(
+                            [
+                                "ban",
+                                "unban",
+                                "kick",
+                                "timeout",
+                                "warn",
+                                "quarantine",
+                                "unquarantine",
+                            ]
+                            .map(|k| (k, k)),
+                        ),
+                    ),
             )
             .option(
                 SubCommandBuilder::new("modify", "Change a case's reason")
@@ -901,14 +971,18 @@ mod tests {
             pf("cases 3", None),
             Ok(ModCmd::CasesView {
                 case: Some(3),
-                user: None
+                user: None,
+                by: None,
+                kind: None
             })
         );
         assert_eq!(
             pf("cases", None),
             Ok(ModCmd::CasesView {
                 case: None,
-                user: None
+                user: None,
+                by: None,
+                kind: None
             })
         );
         assert_eq!(

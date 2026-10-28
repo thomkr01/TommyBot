@@ -17,6 +17,10 @@ pub static JOBS_DONE: AtomicU64 = AtomicU64::new(0);
 pub static JOBS_FAILED: AtomicU64 = AtomicU64::new(0);
 /// Event handlers running right now; shutdown waits for it to reach zero.
 pub static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+/// Unix seconds at boot, for uptime.
+pub static STARTED: AtomicU64 = AtomicU64::new(0);
+/// Average gateway heartbeat latency, updated as events arrive.
+pub static LATENCY_MS: AtomicU64 = AtomicU64::new(0);
 
 fn render(gauges: &[(&str, u64)]) -> String {
     let counters = [
