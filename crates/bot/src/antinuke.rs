@@ -109,6 +109,14 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     let Some((_, heat)) = cfg.antinuke.limit(action) else {
         return Ok(());
     };
+    // Ticket bots open and close channels all day; the gateway event names the category first.
+    if matches!(action, Action::ChannelCreate | Action::ChannelDelete)
+        && e.target_id
+            .and_then(|t| app.channel_parents.lock().unwrap().remove(&t.get()))
+            .is_some_and(|p| cfg.antinuke.ticket_categories.iter().any(|c| c.get() == p))
+    {
+        return Ok(());
+    }
     let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?;
     let inv = inverse(action, e.target_id.map(|t| t.get()));
     if let (true, Some(t), Action::ChannelCreate | Action::RoleCreate) =

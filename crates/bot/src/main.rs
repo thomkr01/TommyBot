@@ -3,6 +3,7 @@ mod app;
 mod appeals;
 mod automod;
 mod backup;
+mod catch;
 mod commands;
 mod events;
 mod hierarchy;
@@ -16,6 +17,7 @@ mod reports;
 mod scheduler;
 mod slash;
 mod targets;
+mod tickets;
 mod verify;
 mod welcome;
 

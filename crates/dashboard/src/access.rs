@@ -11,7 +11,7 @@ pub enum Level {
 }
 
 /// Sections that need Admin + TOTP step-up (spec 2.5.5).
-pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic"];
+pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
 
 /// Level and step-up a write to `section` needs.
 pub fn write_bar(section: &str) -> (Level, bool) {
@@ -35,7 +35,9 @@ pub const SECTIONS: &[&str] = &[
     "joingate",
     "joinraid",
     "verification",
+    "tickets",
     "lockdown",
+    "catch",
     "moderation",
     "warn_points",
     "punish",
@@ -43,6 +45,7 @@ pub const SECTIONS: &[&str] = &[
     "misc",
     "logging",
     "utility",
+    "channel_profiles",
 ];
 
 pub struct Facts<'a> {

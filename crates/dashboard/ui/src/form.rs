@@ -121,7 +121,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
     let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
     let tail = path.rsplit('.').next().unwrap_or("").to_string();
     let dur = kind == "int" && (tail.ends_with("_secs") || tail.ends_with("_ms"));
-    let input = match kind.as_str() {
+    // A single category picker is the channel picker listing categories.
+    let input = match if kind == "category" { "channel" } else { kind.as_str() } {
         "bool" => view! { <input type="checkbox" class="sw" prop:checked=move || get().as_bool().unwrap_or(false) on:change=move |e| set(json!(event_target_checked(&e))) /> }.into_any(),
         "int" if dur => {
             let per = if tail.ends_with("_ms") { 0.001 } else { 1.0 }; // seconds per stored unit
@@ -261,8 +262,45 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); } if let Some(a) = cur.as_array_mut() { a.push(json!({"events": [], "channel": null})); } set(cur) }>"Add a new logging type"</button>
             </div> }.into_any()
         }
+        "profiles" => {
+            let perms = strs(&f["options"]);
+            let count = move || get().as_array().map_or(0, Vec::len);
+            let upd = move |i: usize, k: &'static str, x: Value| { let mut cur = get(); cur[i][k] = x; set(cur) };
+            let push = move |p: Value| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(p); set(json!(cur)) };
+            let swap = move |i: usize, j: usize| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { if j < a.len() { a.swap(i, j); } } set(cur) };
+            let preset = |name: &str, roles: Value, private: bool| json!({"name": name, "roles": roles, "private": private, "perms": {"view": "allow", "send": "allow", "history": "allow"}});
+            let everyone = crate::hash().into_iter().next().unwrap_or_default();
+            view! { <div>
+                {move || (0..count()).map(|i| {
+                    let sub = |k: &str, kind: &str, title: &str| json!({"path": format!("{}.{i}.{k}", p.get_value()), "kind": kind, "title": title});
+                    let boxes = perms.iter().map(|k| { let (k, k2) = (k.clone(), k.clone()); view! {
+                        <label>{k.replace('_', " ")}" "<select on:change=move |e| { let mut cur = get(); let s = event_target_value(&e); if s.is_empty() { if let Some(m) = cur[i]["perms"].as_object_mut() { m.remove(&k2); } } else { cur[i]["perms"][&k2] = json!(s); } set(cur) }>
+                            {["", "allow", "deny"].map(|o| { let k = k.clone(); view! { <option value=o selected=move || show(&get()[i]["perms"][&k]) == o>{if o.is_empty() { "-" } else { o }}</option> } }).collect_view()}
+                        </select></label> } }).collect_view();
+                    view! { <div class="card">
+                        <div class="row">
+                            <input aria-label="profile name" prop:value=move || show(&get()[i]["name"]) on:change=move |e| upd(i, "name", json!(event_target_value(&e))) />
+                            <label><input type="checkbox" prop:checked=move || get()[i]["private"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "private", json!(event_target_checked(&e))) />" hide from @everyone"</label>
+                            <button class="ghost" aria-label="move up" on:click=move |_| { if i > 0 { swap(i - 1, i) } }>"↑"</button>
+                            <button class="ghost" aria-label="move down" on:click=move |_| swap(i, i + 1)>"↓"</button>
+                            <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
+                        </div>
+                        <Field f=sub("roles", "roles", "Roles") val dc />
+                        <div class="row"><label>"Permissions"</label><div class="pick">{boxes}</div></div>
+                        <Field f=sub("channels", "channels", "Channels") val dc />
+                        <Field f=sub("categories", "categories", "Categories (all channels in them)") val dc />
+                        <Field f=sub("exclude", "channels", "Except these channels") val dc />
+                    </div> }
+                }).collect_view()}
+                <div class="row">
+                    <button on:click=move |_| push(preset("New profile", json!([]), false))>"Add profile"</button>
+                    <button class="ghost" on:click=move |_| push(preset("Mod/admin", json!([]), true))>"Add mod/admin preset"</button>
+                    <button class="ghost" on:click=move |_| push(preset("Everyone", json!([everyone.clone()]), false))>"Add everyone preset"</button>
+                </div>
+            </div> }.into_any()
+        }
         "channel" | "role" => {
-            let key = if kind == "channel" { "channels" } else { "roles" };
+            let key = match kind.as_str() { "channel" => "channels", "category" => "categories", _ => "roles" };
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
                 <option value="" selected=move || get().is_null()>"none"</option>
                 {move || items(&dc.get(), key).into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || get().as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
@@ -424,7 +462,11 @@ pub fn Section(
                 {move || {
                     // One card per path prefix ("limits.ban" -> "limits ban"); unprefixed fields go under "General".
                     let mut groups: Vec<(String, Vec<Value>)> = vec![];
-                    for f in fields.get() {
+                    // While searching, only the matching fields show (all of them when none match here).
+                    let q = use_context::<crate::search::Search>().map(|s| s.q.get()).unwrap_or_default();
+                    let all = fields.get();
+                    let hits: Vec<Value> = all.iter().filter(|f| crate::search::field_score(f, &q) > 0).cloned().collect();
+                    for f in if hits.is_empty() { all } else { hits } {
                         let p = f["path"].as_str().unwrap_or("").split_once('.').map_or("", |(_, p)| p);
                         let g = f["group"].as_str().map_or_else(|| p.rsplit_once('.').map_or("General".to_string(), |(g, _)| g.replace(['.', '_'], " ")), String::from);
                         match groups.iter_mut().find(|(k, _)| *k == g) { Some((_, v)) => v.push(f), None => groups.push((g, vec![f])) }

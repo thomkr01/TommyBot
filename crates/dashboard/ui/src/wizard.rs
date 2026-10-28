@@ -130,6 +130,10 @@ pub const ANTINUKE: &[Card] = &[
             text("Timeout, kick, ban and role changes on a quarantined member are blocked for everyone else.")
         })
     },
+    card("Ticket categories", "Do you use a ticket bot? Pick the categories it opens and closes ticket channels in, so the antinuke does not punish it.", &[("antinuke.ticket_categories", "Ticket categories")], |c, dc| {
+        let picked: Vec<String> = strs(&c["antinuke"]["ticket_categories"]).iter().map(|id| name_of(dc, "categories", id)).collect();
+        if picked.is_empty() { text("No ticket categories: every channel a bot creates or deletes counts.") } else { text(&format!("Channels created or deleted in {} never count.", picked.join(", "))) }
+    }),
 ];
 
 const AUTO_WL: &str = "Owners, Trusted admins and members with dangerous Discord/TommyBot permissions are automatically whitelisted.";

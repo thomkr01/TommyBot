@@ -37,6 +37,18 @@ fs.mkdirSync(out, { recursive: true });
     await page.screenshot({ path: `${out}/${name}.png` });
     if (errors.length || text.length < 40) failed.push(`${h}: ${errors.join(' | ') || 'blank page'}`);
   }
+  // Embed builder: the bot posts the embed, then edits the same message.
+  const embeds = links[0].replace(/^(#\/\d+\/).*/, '$1embeds');
+  await page.goto(`${base}/${embeds}`);
+  await page.fill('input[placeholder="Name"]', 'e2e');
+  await page.selectOption('select[aria-label="channel"]', { index: 1 });
+  await page.locator('.row', { hasText: 'Title' }).locator('input').first().fill('Hello');
+  await page.click('text=Post');
+  await page.waitForSelector('text=Embed posted.', { timeout: 5000 }).catch(() => failed.push('embeds: post failed'));
+  await page.click('text=Update message');
+  await page.waitForSelector('text=Embed edited.', { timeout: 5000 }).catch(() => failed.push('embeds: edit failed'));
+  const sent = await (await fetch('http://127.0.0.1:9100/sent')).json();
+  if (!sent.some((m) => /\/messages\/1$/.test(m.path) && m.body.includes('Hello'))) failed.push('embeds: no edit reached Discord');
   await browser.close();
   if (failed.length) { console.log('FAIL\n' + failed.join('\n')); process.exit(1); }
   console.log('PASS');

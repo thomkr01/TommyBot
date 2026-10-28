@@ -107,7 +107,12 @@ async fn unlock(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> 
     Ok(Json(json!({"ok": true})))
 }
 
-async fn audit(st: &AppState, s: &Sess, guild: i64, what: String) -> Result<(), ApiError> {
+pub(crate) async fn audit(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+    what: String,
+) -> Result<(), ApiError> {
     let (_, c) = crate::store::current(&st.db, guild).await?;
     log_change(
         st,

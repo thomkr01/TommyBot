@@ -249,6 +249,10 @@ pub fn schema() -> Vec<Value> {
             ti(fg("Auto quarantine", "quarantine_whitelist", "users"), "Quarantine whitelist"),
             "Members that may change the roles of quarantined members.",
         ),
+        hp(
+            ti(fg("Ticket categories", "ticket_categories", "categories"), "Ticket categories"),
+            "Channels a ticket bot creates or deletes in these categories never count.",
+        ),
     ];
     for (a, title) in NUKE_CARDS {
         let (m, h, heat) = NukeAction::ALL
@@ -836,6 +840,22 @@ pub fn schema() -> Vec<Value> {
             "Decoy color",
         ),
     ];
+    let tickets = vec![
+        ti(fg("General", "enabled", "bool"), "Use the ticket system"),
+        ti(fg("General", "category", "category"), "Ticket category"),
+        ti(fg("General", "panel_channel", "channel"), "Panel channel"),
+        ti(
+            fg("General", "log_channel", "channel"),
+            "Transcript log channel",
+        ),
+        hp(
+            ti(
+                dv(fg("General", "max_open", "int"), 1),
+                "Open tickets per member",
+            ),
+            "Staff with the Manage Tickets permit see and close every ticket.",
+        ),
+    ];
     let appeals = vec![
         ti(fg("General", "enabled", "bool"), "Appeals System Status"),
         ti(fg("General", "channel", "channel"), "Appeals channel"),
@@ -867,12 +887,50 @@ pub fn schema() -> Vec<Value> {
                 ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
             ],
         ),
+        (
+            "catch",
+            "Catch channel",
+            vec![
+                ti(fg("General", "enabled", "bool"), "Use the catch channel"),
+                hp(
+                    ti(fg("General", "channel", "channel"), "Catch channel"),
+                    "Anyone without a permit who writes here is punished. Hacked accounts spam every channel, so they land here first.",
+                ),
+                hp(
+                    dv(
+                        ti(
+                            choice("General", "action", &["Ban", "Softban", "Kick", "Timeout", "Log"]),
+                            "Action",
+                        ),
+                        "Ban",
+                    ),
+                    "Log is a test mode: it only logs. Bans delete messages for the days set under Miscellaneous.",
+                ),
+                ti(fg("General", "dm", "bool"), "DM the member first, with the appeal link"),
+                ti(fg("General", "keep_top", "bool"), "Keep the channel at the top of the server"),
+                ti(fg("Whitelist", "roles", "roles"), "Whitelisted roles"),
+                ti(fg("Whitelist", "users", "users"), "Whitelisted members"),
+            ],
+        ),
         ("panic", "Panic mode", panic),
         ("backups", "Backups", vec![dv(f("auto", "bool"), true)]),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),
+        ("tickets", "Tickets", tickets),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
+        (
+            "channel_profiles",
+            "Channel setup",
+            vec![{
+                let mut v = fg("Role profiles", "profiles", "profiles");
+                v["options"] = json!(crate::channels::PERMS
+                    .iter()
+                    .map(|(k, _)| k)
+                    .collect::<Vec<_>>());
+                v
+            }],
+        ),
     ]
     .into_iter()
     .map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields}))
@@ -922,10 +980,13 @@ mod tests {
                         .find(|o| o.as_str() != Some(""))
                         .unwrap()
                         .clone(),
-                    "channel" | "role" => json!("1"),
+                    "channel" | "role" | "category" => json!("1"),
                     "form" => json!([{"label": "x"}]),
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
                     "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
+                    "profiles" => {
+                        json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
+                    }
                     _ => json!(["1"]),
                 };
                 let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();

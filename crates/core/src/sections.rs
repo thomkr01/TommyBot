@@ -33,6 +33,8 @@ pub struct AntinukeCfg {
     pub monitor_channel_perms: bool,
     /// May change a quarantined member's roles.
     pub quarantine_whitelist: Vec<Id<UserMarker>>,
+    /// Channels created or deleted in these categories never count (ticket bots).
+    pub ticket_categories: Vec<Id<ChannelMarker>>,
 }
 
 impl Default for AntinukeCfg {
@@ -49,6 +51,7 @@ impl Default for AntinukeCfg {
             monitor_public_roles: false,
             monitor_channel_perms: false,
             quarantine_whitelist: vec![],
+            ticket_categories: vec![],
         }
     }
 }
@@ -373,6 +376,32 @@ fn yes() -> bool {
     true
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct TicketsCfg {
+    pub enabled: bool,
+    /// Where ticket channels are created.
+    pub category: Option<Id<ChannelMarker>>,
+    /// Holds the "Open a ticket" button.
+    pub panel_channel: Option<Id<ChannelMarker>>,
+    /// Gets a log and the transcript of every closed ticket.
+    pub log_channel: Option<Id<ChannelMarker>>,
+    /// Open tickets one member may have at once.
+    pub max_open: u32,
+}
+
+impl Default for TicketsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            category: None,
+            panel_channel: None,
+            log_channel: None,
+            max_open: 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct AppealsCfg {
@@ -526,6 +555,33 @@ impl Default for BackupsCfg {
     }
 }
 
+/// What the catch channel does to a writer; `Log` is the test mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum CatchAction {
+    #[default]
+    Ban,
+    Softban,
+    Kick,
+    Timeout,
+    Log,
+}
+
+/// Honeypot channel: hacked accounts spam every channel, so anyone writing here is punished.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct CatchCfg {
+    pub enabled: bool,
+    pub channel: Option<Id<ChannelMarker>>,
+    pub action: CatchAction,
+    /// DM the member first (with the appeal link for bans and timeouts).
+    pub dm: bool,
+    /// Move the channel back to the top when it is dragged down (set by the dashboard's setup).
+    pub keep_top: bool,
+    /// Never punished, besides bots, permit holders and owners.
+    pub roles: Vec<Id<RoleMarker>>,
+    pub users: Vec<Id<UserMarker>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +595,14 @@ mod tests {
         assert_eq!(w.regex.hits("hello"), 0);
         assert_eq!(WordsCfg::default().regex.hits("anything"), 0);
         assert!(serde_json::from_value::<WordsCfg>(json!({"regex": ["(unclosed"]})).is_err());
+    }
+
+    #[test]
+    fn catch_is_off_and_bans_by_default() {
+        let c: CatchCfg = serde_json::from_value(json!({})).unwrap();
+        assert!(!c.enabled && c.channel.is_none() && c.action == CatchAction::Ban);
+        let c: CatchCfg = serde_json::from_value(json!({"action": "Log"})).unwrap();
+        assert_eq!(c.action, CatchAction::Log);
     }
 
     #[test]

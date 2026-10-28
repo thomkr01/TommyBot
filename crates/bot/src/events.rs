@@ -17,7 +17,9 @@ use twilight_model::{
     },
 };
 
-use crate::{antinuke, app::App, automod, commands, metrics, prefix, reports, slash, verify};
+use crate::{
+    antinuke, app::App, automod, commands, metrics, prefix, reports, slash, tickets, verify,
+};
 
 fn guild_of(ev: &Event) -> Option<u64> {
     let g = match ev {
@@ -176,6 +178,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
     match ev {
         // Webhook posts count as bots but still carry heat, so they reach automod (never commands).
         Event::MessageCreate(m) if !m.author.bot || m.webhook_id.is_some() => {
+            if crate::catch::on_message(app, m).await? {
+                return Ok(());
+            }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
                 if let Some(parsed) = m.content.strip_prefix(&pfx).and_then(prefix::parse) {
@@ -187,9 +192,18 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
-        Event::ChannelCreate(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
-        Event::ChannelUpdate(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
-        Event::ChannelDelete(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
+        Event::ChannelCreate(c) => {
+            app.note_parent(&c.0);
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
+        }
+        Event::ChannelUpdate(c) => {
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::catch::keep_top(app, c).await?;
+        }
+        Event::ChannelDelete(c) => {
+            app.note_parent(&c.0);
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
+        }
         Event::GuildUpdate(g) => app.invalidate_guild(g.id),
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),
@@ -202,6 +216,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::MemberAdd(m) => automod::on_join(app, m).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
+                && !tickets::handle(app, &i.0).await?
                 && !commands::handle_confirm(app, &i.0).await?
                 && !reports::handle(app, &i.0).await?
             {

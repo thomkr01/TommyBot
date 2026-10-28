@@ -25,6 +25,8 @@ pub fn routes() -> Router<AppState> {
             "/api/guilds/{guild}/wizard/verify-channel",
             post(verify_channel),
         )
+        .route("/api/guilds/{guild}/catch/setup", post(catch_channel))
+        .route("/api/guilds/{guild}/tickets/setup", post(tickets_setup))
 }
 
 async fn schema_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -268,10 +270,18 @@ async fn verify_channel(
     {
         overwrites.push(json!({"id": r, "type": 0, "deny": "1024"}));
     }
+    let existing = own(&config["verification"]["channel"]);
+    if existing.is_none() {
+        let channels = st
+            .discord
+            .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+            .await?;
+        drop_named(&st, &channels, &config, "verify-here").await?;
+    }
     let channel = create(
         &st,
         guild,
-        own(&config["verification"]["channel"]),
+        existing,
         "channels",
         json!({"name": "verify-here", "type": 0, "permission_overwrites": overwrites}),
     )
@@ -296,12 +306,193 @@ async fn verify_channel(
     Ok(Json(json!({"version": version, "channel": channel})))
 }
 
+const CATCH_WARNING: &str =
+    "Do not write here. Writing = instant ban. Account hacked? Change your password.";
+
+/// The catch channel: on top of the list (uncategorized channels sit above every category),
+/// @everyone may only read and write plain text. Turns the catch channel on; an already set
+/// channel is reused.
+async fn catch_channel(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Json(b): Json<Setup>,
+) -> Res {
+    api::require(&st, &s, guild, Level::Admin, true).await?;
+    let (cur, mut config) = store::current(&st.db, guild).await?;
+    if cur != b.expected_version {
+        return Err(ApiError::Conflict(cur));
+    }
+    let existing = own(&config["catch"]["channel"]);
+    let fresh = existing.is_none();
+    // @everyone: View, Send, History; no reactions, embeds or files. The bot also deletes and pins.
+    let overwrites = json!([
+        {"id": guild.to_string(), "type": 0, "allow": "68608", "deny": "49216"},
+        {"id": st.discord.client_id, "type": 1, "allow": "93184"}
+    ]);
+    let channel = create(
+        &st,
+        guild,
+        existing,
+        "channels",
+        json!({"name": "do-not-write", "type": 0, "position": 0, "topic": CATCH_WARNING, "permission_overwrites": overwrites}),
+    )
+    .await?;
+    config["catch"]["channel"] = json!(channel);
+    config["catch"]["enabled"] = json!(true);
+    if fresh {
+        config["catch"]["keep_top"] = json!(true);
+    }
+    let mut tx = st.db.begin().await?;
+    let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
+    tx.commit().await?;
+    api::log_change(
+        &st,
+        &config,
+        format!(
+            "{} (<@{}>) set up the catch channel -> config v{version}",
+            s.username, s.user_id
+        ),
+    )
+    .await;
+    if fresh {
+        let m = st
+            .discord
+            .call(
+                Method::POST,
+                &format!("/channels/{channel}/messages"),
+                Some(json!({"embeds": [{"title": "Do not write here", "color": 0xE71B1B, "description": CATCH_WARNING}]})),
+            )
+            .await?;
+        if let Some(id) = m["id"].as_str() {
+            let pin = format!("/channels/{channel}/messages/pins/{id}");
+            st.discord.call(Method::PUT, &pin, None).await?;
+        }
+    }
+    Ok(Json(json!({"version": version, "channel": channel})))
+}
+
+/// One click: a private "Tickets" category with #ticket-logs, and #open-a-ticket holding the
+/// panel. Channels already set are reused; the panel is posted again on every run.
+async fn tickets_setup(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Json(b): Json<Setup>,
+) -> Res {
+    api::require(&st, &s, guild, Level::Admin, true).await?;
+    let (cur, mut config) = store::current(&st.db, guild).await?;
+    if cur != b.expected_version {
+        return Err(ApiError::Conflict(cur));
+    }
+    // Staff are the roles of permits with Manage Tickets; they get View Channel and Read History.
+    let staff = tommybot_core::permits::roles_with(&st.db, guild, "tickets").await?;
+    // The bot also needs Attach Files in #ticket-logs for the transcripts.
+    let bot = json!({"id": st.discord.client_id, "type": 1, "allow": "19456"});
+    let mut hidden = vec![
+        json!({"id": guild.to_string(), "type": 0, "deny": "1024"}),
+        json!({"id": st.discord.client_id, "type": 1, "allow": "52224"}),
+    ];
+    hidden.extend(
+        staff
+            .iter()
+            .map(|r| json!({"id": r.to_string(), "type": 0, "allow": "66560"})),
+    );
+    let t = config["tickets"].clone();
+    let category = create(
+        &st,
+        guild,
+        own(&t["category"]),
+        "channels",
+        json!({"name": "Tickets", "type": 4, "permission_overwrites": hidden}),
+    )
+    .await?;
+    let log = create(
+        &st,
+        guild,
+        own(&t["log_channel"]),
+        "channels",
+        json!({"name": "ticket-logs", "type": 0, "parent_id": category, "permission_overwrites": hidden}),
+    )
+    .await?;
+    // @everyone reads the panel but cannot write there.
+    let panel = create(
+        &st,
+        guild,
+        own(&t["panel_channel"]),
+        "channels",
+        json!({"name": "open-a-ticket", "type": 0, "permission_overwrites": [
+            {"id": guild.to_string(), "type": 0, "allow": "66560", "deny": "2048"}, bot
+        ]}),
+    )
+    .await?;
+    let tickets = &mut config["tickets"];
+    tickets["enabled"] = json!(true);
+    tickets["category"] = json!(category);
+    tickets["log_channel"] = json!(log);
+    tickets["panel_channel"] = json!(panel);
+    let mut tx = st.db.begin().await?;
+    let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
+    tx.commit().await?;
+    st.discord
+        .call(
+            Method::POST,
+            &format!("/channels/{panel}/messages"),
+            Some(json!({
+                "embeds": [{"title": "Need help?", "color": 0x0D9DF8,
+                    "description": "Press the button to open a private ticket with the staff team."}],
+                "components": [{"type": 1, "components": [
+                    {"type": 2, "style": 1, "label": "Open a ticket", "custom_id": "ticket:open"}
+                ]}]
+            })),
+        )
+        .await?;
+    api::log_change(
+        &st,
+        &config,
+        format!(
+            "{} (<@{}>) set up tickets -> config v{version}",
+            s.username, s.user_id
+        ),
+    )
+    .await;
+    Ok(Json(json!({"version": version, "channel": panel})))
+}
+
 fn at<'a>(config: &'a Value, path: &[&str]) -> &'a Value {
     path.iter().fold(config, |v, k| &v[*k])
 }
 
 fn own(v: &Value) -> Option<String> {
     v.as_str().map(String::from)
+}
+
+/// Deletes the text channels named `name` that `config` does not use, so a fresh setup
+/// replaces a leftover channel instead of adding a second one with the same name.
+async fn drop_named(
+    st: &AppState,
+    channels: &Value,
+    config: &Value,
+    name: &str,
+) -> Result<(), ApiError> {
+    for id in stale(channels, config, name) {
+        st.discord
+            .call(Method::DELETE, &format!("/channels/{id}"), None)
+            .await?;
+    }
+    Ok(())
+}
+
+fn stale<'a>(channels: &'a Value, config: &Value, name: &str) -> Vec<&'a str> {
+    let used = config.to_string();
+    channels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["type"] == 0 && c["name"] == name)
+        .filter_map(|c| c["id"].as_str())
+        .filter(|id| !used.contains(&format!("\"{id}\"")))
+        .collect()
 }
 
 /// Returns `existing`, or creates the role or channel on Discord and returns its id.
@@ -340,8 +531,8 @@ const LOG_CHANNELS: [(&[&str], &str); 11] = [
     (&["logging", "routes", "server"], "server-logs"),
 ];
 
-/// One click: a private "Logs" category with a channel per log type that has none yet, plus
-/// "discord-logs" for every Discord event without a channel. Existing channels are kept.
+/// One click: a channel per log type that has none yet, plus "discord-logs" for every Discord
+/// event without a channel, in private "Logs" and "Staff" categories. Set channels are kept.
 async fn log_setup(
     State(st): State<AppState>,
     s: Sess,
@@ -403,7 +594,38 @@ async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<us
 /// Wick's essential logs, always created: the main log channel and the mod log.
 const ESSENTIAL: [&str; 2] = ["tommybot-logs", "mod-logs"];
 
-/// Creates the "Logs" category and the missing log channels, and sets them in `config`.
+/// Staff-facing channels, kept in their own "Staff" category instead of "Logs".
+const STAFF_CHANNELS: [&str; 2] = ["reports", "appeals"];
+
+/// The private category `name`: the existing one, so a later run adds to it, or a new one.
+/// Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
+/// keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
+async fn category(
+    st: &AppState,
+    guild: i64,
+    channels: &Value,
+    name: &str,
+) -> Result<String, ApiError> {
+    let existing = channels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|c| (c["type"] == 4 && c["name"] == name).then(|| own(&c["id"]))?);
+    create(
+        st,
+        guild,
+        existing,
+        "channels",
+        json!({"name": name, "type": 4, "permission_overwrites": [
+            {"id": guild.to_string(), "type": 0, "deny": "1024"},
+            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
+        ]}),
+    )
+    .await
+}
+
+/// Creates the missing log channels under "Logs" (reports and appeals under "Staff"), and
+/// sets them in `config`.
 /// `only` limits it to the essentials plus the named channels ("discord-logs" for the Discord
 /// events). Returns the names of the channels it created; nothing when all have one.
 async fn log_channels(
@@ -430,44 +652,49 @@ async fn log_channels(
     if unset.is_empty() && missing.is_empty() {
         return Ok(vec![]);
     }
-    // A later run adds to the existing category instead of making a second one.
     let channels = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
         .await?;
-    let existing = channels
-        .as_array()
+    // `None` is the shared discord-logs channel for every unset Discord event.
+    let todo: Vec<(Option<&[&str]>, &str)> = missing
         .into_iter()
-        .flatten()
-        .find_map(|c| (c["type"] == 4 && c["name"] == "Logs").then(|| own(&c["id"]))?);
-    // Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
-    // keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
-    let category = create(
-        st,
-        guild,
-        existing,
-        "channels",
-        json!({"name": "Logs", "type": 4, "permission_overwrites": [
-            {"id": guild.to_string(), "type": 0, "deny": "1024"},
-            {"id": st.discord.client_id, "type": 1, "allow": "19456"}
-        ]}),
-    )
-    .await?;
-    let channel = |name: &str| json!({"name": name, "type": 0, "parent_id": category});
-    let mut created = vec![];
-    for (path, name) in missing {
-        let id = create(st, guild, None, "channels", channel(name)).await?;
-        let (last, parents) = path.split_last().expect("paths are not empty");
-        let slot = parents.iter().fold(&mut *config, |v, k| &mut v[*k]);
-        slot[*last] = json!(id);
-        created.push(name);
-    }
-    if !unset.is_empty() {
-        let id = create(st, guild, None, "channels", channel("discord-logs")).await?;
-        for e in &unset {
-            config["logging"]["events"][e] = json!(id);
+        .map(|(path, name)| (Some(path), name))
+        .chain((!unset.is_empty()).then_some((None, "discord-logs")))
+        .collect();
+    let category_of = |name: &str| {
+        if STAFF_CHANNELS.contains(&name) {
+            "Staff"
+        } else {
+            "Logs"
         }
-        created.push("discord-logs");
+    };
+    let mut parents = vec![];
+    for cat in ["Logs", "Staff"] {
+        if todo.iter().any(|(_, name)| category_of(name) == cat) {
+            parents.push((cat, category(st, guild, &channels, cat).await?));
+        }
+    }
+    let mut created = vec![];
+    for (path, name) in todo {
+        let parent = parents
+            .iter()
+            .find(|(c, _)| *c == category_of(name))
+            .map(|(_, id)| id);
+        drop_named(st, &channels, config, name).await?;
+        let body = json!({"name": name, "type": 0, "parent_id": parent});
+        let id = create(st, guild, None, "channels", body).await?;
+        match path.and_then(|p| p.split_last()) {
+            Some((last, parents)) => {
+                parents.iter().fold(&mut *config, |v, k| &mut v[*k])[*last] = json!(id)
+            }
+            None => {
+                for e in &unset {
+                    config["logging"]["events"][e] = json!(id);
+                }
+            }
+        }
+        created.push(name);
     }
     Ok(created)
 }
@@ -488,5 +715,17 @@ mod tests {
         assert!(log.fallback.is_some());
         assert_eq!(log.routes.len(), 9);
         assert!(at(&config, &["appeals", "channel"]).is_string());
+    }
+
+    #[test]
+    fn stale_skips_used_and_other_channels() {
+        let channels = json!([
+            {"id": "1", "name": "reports", "type": 0},
+            {"id": "2", "name": "reports", "type": 0},
+            {"id": "3", "name": "reports", "type": 4},
+            {"id": "4", "name": "appeals", "type": 0}
+        ]);
+        let config = json!({"logging": {"events": {"ban": "2"}}});
+        assert_eq!(stale(&channels, &config, "reports"), ["1"]);
     }
 }

@@ -2,31 +2,37 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
 mod appeals;
+mod channels;
 mod records;
 mod common;
+mod embeds;
 mod form;
 mod lockdown;
 mod pages;
 mod permits;
 mod recovery;
+mod search;
 mod wizard;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealForm, AppealList, Blacklist};
 use records::{CaseList, NoteList, RaidLog, ReportList};
 use common::*;
+use embeds::Embeds;
 use form::Section;
 use permits::Permits;
-use pages::{Logging, Rescue, Revert, Score, Wizard};
+use pages::{Catch, Logging, Rescue, Revert, Score, Tickets, Wizard};
+use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
+use channels::ChannelSetup;
 
 /// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
-const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("channel_setup", "Channel Setup"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
     ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
-    ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports")]),
-    ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("rescue", "Rescue Key")]),
+    ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports"), ("tickets", "Tickets"), ("catch", "Catch Channel")]),
+    ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("embeds", "Embed Builder"), ("rescue", "Rescue Key")]),
     ("Raw JSON", &[("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 /// Groups Wick has; the rest are TommyBot extras that stay folded until visited.
@@ -155,6 +161,10 @@ fn App() -> impl IntoView {
     let (guilds, set_guilds) = signal(Vec::<Value>::new());
     provide_context(guilds);
     provide_context(me);
+    let search = Search { q: RwSignal::new(String::new()), index: RwSignal::new(vec![]) };
+    provide_context(search);
+    let pages = StoredValue::new(TOP.iter().chain(NAV.iter().flat_map(|(_, i)| i.iter())).copied().collect::<Vec<_>>());
+    let guild = Signal::derive(move || route.get().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())));
     let (nav_open, set_nav_open) = signal(false);
     let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
     let load_guilds = move || async move {
@@ -179,7 +189,7 @@ fn App() -> impl IntoView {
         <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))><button>"Log in with Discord"</button></a></main> }>
             <header>
                 <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>"☰"</button>
-                <a class="logo" href="#/">"TommyBot"</a><span class="sp"></span>
+                <a class="logo" href="#/">"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
                 <details class="ico"><summary aria-label="language">"🌐"</summary><div><button>"English"</button></div></details>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>"🌓"</button>
@@ -196,7 +206,8 @@ fn App() -> impl IntoView {
                         Some(g) => {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
-                            let link = |p: &str, t: &str| { let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{matches!(p, "logging" | "discord_automod").then(|| view! { <span class="chip new">"new"</span> })}</a> } };
+                            let hits = search::counts(search);
+                            let link = |p: &str, t: &str| { let n: usize = hits.iter().filter(|(k, _)| *k == p || k.starts_with(&format!("{p}/"))).map(|(_, n)| n).sum(); let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{matches!(p, "logging" | "discord_automod").then(|| view! { <span class="chip new">"new"</span> })}{(n > 0).then(|| view! { <span class="chip hits">{n}</span> })}</a> } };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -228,13 +239,16 @@ fn App() -> impl IntoView {
                             let page = match (p.as_str(), rest.first()) {
                                 ("permits", _) => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
                                 ("logging", _) => view! { <Logging guild=g.clone() tab=rest.first().cloned().unwrap_or_default() sub=rest.get(1).cloned().unwrap_or_default() enrolled /> }.into_any(),
+                                ("embeds", _) => view! { <Embeds guild=g.clone() /> }.into_any(),
                                 ("history", _) => view! { <History guild=g.clone() enrolled /> }.into_any(),
                                 ("overview", _) => view! { <Score guild=g.clone() enrolled /> }.into_any(),
                                 ("wizard", _) => view! { <Wizard guild=g.clone() enrolled /> }.into_any(),
                                 ("revert", _) => view! { <Revert guild=g.clone() enrolled /> }.into_any(),
                                 ("backups", _) => view! { <Backups guild=g.clone() enrolled /> }.into_any(),
+                                ("channel_setup", _) => view! { <ChannelSetup guild=g.clone() enrolled /> }.into_any(),
                                 ("automod_panic", _) => view! { <Panic guild=g.clone() part="heat,general" enrolled /> }.into_any(),
                                 ("antinuke_panic", _) => view! { <Panic guild=g.clone() part="nuke,general" enrolled /> }.into_any(),
+                                ("tickets", _) => view! { <Tickets guild=g.clone() enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                                 ("lockdown", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownManage guild=g.clone() /> }.into_any(),
                                 ("lockdown_settings", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownSettings guild=g.clone() enrolled /> }.into_any(),
@@ -243,6 +257,7 @@ fn App() -> impl IntoView {
                                 ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><Blacklist guild=g.clone() base="appeals" purge=true /> }.into_any(),
                                 ("joinraid", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() />{sec("joinraid", "")} }.into_any(),
                                 ("raid_log", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() /><RaidLog guild=g.clone() /> }.into_any(),
+                                ("catch", _) => view! { <Catch guild=g.clone() enrolled /> }.into_any(),
                                 ("cases", _) => view! { <CaseList guild=g.clone() /> }.into_any(),
                                 ("notes", _) => view! { <NoteList guild=g.clone() /> }.into_any(),
                                 ("report_list", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><ReportList guild=g.clone() /> }.into_any(),

@@ -18,8 +18,8 @@ use tommybot_automod::{
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
     sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, LockdownCfg, MiscCfg, PanicCfg,
-        WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
+        TicketsCfg, WhitelistCfg,
     },
 };
 use tommybot_logging::{LogConfig, Logger};
@@ -45,6 +45,8 @@ pub struct GuildCfg {
     pub appeals: AppealsCfg,
     pub whitelist: WhitelistCfg,
     pub verification: VerificationCfg,
+    pub tickets: TicketsCfg,
+    pub catch: CatchCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -76,6 +78,8 @@ impl GuildCfg {
             appeals: section(cfg, "appeals"),
             whitelist: section(cfg, "whitelist"),
             verification: section(cfg, "verification"),
+            tickets: section(cfg, "tickets"),
+            catch: section(cfg, "catch"),
         }
     }
 }
@@ -113,6 +117,8 @@ pub struct App {
     pub panic_heat: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
+    /// Category of each channel created or deleted since its audit entry, for anti-nuke's ticket categories.
+    pub channel_parents: Mutex<HashMap<u64, u64>>,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -152,6 +158,7 @@ impl App {
             panic_heat: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
             panic_runs: Default::default(),
             guilds: Default::default(),
+            channel_parents: Default::default(),
         }
     }
 

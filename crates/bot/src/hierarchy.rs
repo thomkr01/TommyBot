@@ -70,6 +70,17 @@ impl App {
     pub fn invalidate_guild(&self, gid: Id<GuildMarker>) {
         self.guilds.lock().unwrap().remove(&gid);
     }
+
+    /// Remembers a created or deleted channel's category until its audit entry arrives.
+    pub fn note_parent(&self, c: &twilight_model::channel::Channel) {
+        let Some(p) = c.parent_id else { return };
+        let mut m = self.channel_parents.lock().unwrap();
+        // shortcut: entries whose audit entry never comes (anti-nuke off) pile up until this cap clears them all.
+        if m.len() > 10_000 {
+            m.clear();
+        }
+        m.insert(c.id.get(), p.get());
+    }
 }
 
 #[cfg(test)]
