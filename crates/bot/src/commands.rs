@@ -855,7 +855,7 @@ mod tests {
         let purge = ModCmd::Purge {
             count: 5,
             user: None,
-            from: Some(9),
+            from: Some(crate::modcmds::Anchor::Before(9)),
         };
         let e = Action::Ext {
             cmd: purge.clone(),

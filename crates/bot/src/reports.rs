@@ -1,4 +1,4 @@
-//! Message context menus: Report (anyone) and Purge from here (staff). A report is logged with
+//! Message context menus: Report Message (anyone) and the two purges (staff). A report is logged with
 //! action buttons; the staff who press them need the Manage Reports permit plus the permit of the action.
 use anyhow::Result;
 use tommybot_logging::{
@@ -25,7 +25,7 @@ use twilight_model::{
 use crate::{
     app::App,
     commands::{self, ModKind},
-    modcmds::{self, ModCmd},
+    modcmds::{self, Anchor, ModCmd},
 };
 
 const SNIPPET: usize = 300;
@@ -44,15 +44,17 @@ pub async fn message_menu(
     let Some(msg) = msg else {
         return Ok("Message not found".into());
     };
-    if data.name == "Report" {
-        return report(app, gid, actor_id, msg).await;
-    }
+    let from = match data.name.as_str() {
+        "Purge 100 From Here" => Anchor::After(msg.id.get()),
+        "Purge 100 Until Here" => Anchor::Before(msg.id.get()),
+        _ => return report(app, gid, actor_id, msg).await,
+    };
     let owner = app.guild_info(gid).await?.owner;
     let actor = app.level(gid, owner, actor_id).await?;
     let cmd = ModCmd::Purge {
         count: modcmds::PURGE_MAX,
         user: None,
-        from: Some(msg.id.get()),
+        from: Some(from),
     };
     modcmds::run(
         app,

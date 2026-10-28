@@ -270,9 +270,18 @@ pub fn definitions() -> Vec<Command> {
         guild_only(menu("Timeout")),
         guild_only(menu("Quarantine")),
         guild_only(menu("Sanitize")),
-        guild_only(CommandBuilder::new("Report", "", CommandType::Message)),
         guild_only(CommandBuilder::new(
-            "Purge from here",
+            "Purge 100 From Here",
+            "",
+            CommandType::Message,
+        )),
+        guild_only(CommandBuilder::new(
+            "Purge 100 Until Here",
+            "",
+            CommandType::Message,
+        )),
+        guild_only(CommandBuilder::new(
+            "Report Message",
             "",
             CommandType::Message,
         )),
