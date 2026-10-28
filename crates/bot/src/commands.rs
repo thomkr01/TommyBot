@@ -930,6 +930,7 @@ mod tests {
             count: 5,
             user: None,
             from: Some(crate::modcmds::Anchor::Until(9)),
+            filters: vec![],
         };
         let e = Action::Ext {
             cmd: purge.clone(),

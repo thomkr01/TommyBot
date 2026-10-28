@@ -13,6 +13,7 @@ mod metrics;
 mod modcmds;
 mod panic;
 mod prefix;
+mod purge;
 mod reply;
 mod reports;
 mod scheduler;

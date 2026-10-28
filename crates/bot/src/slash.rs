@@ -79,6 +79,15 @@ pub(crate) fn string<'a>(o: &'a [CommandDataOption], name: &str) -> Option<&'a s
         })
 }
 
+pub(crate) fn role(o: &[CommandDataOption], name: &str) -> Option<u64> {
+    o.iter()
+        .find(|o| o.name == name)
+        .and_then(|o| match o.value {
+            CommandOptionValue::Role(r) => Some(r.get()),
+            _ => None,
+        })
+}
+
 pub(crate) fn int(o: &[CommandDataOption], name: &str) -> Option<i64> {
     o.iter()
         .find(|o| o.name == name)
@@ -525,7 +534,8 @@ mod tests {
         assert!(ModCmd::Purge {
             count: 5,
             user: None,
-            from: None
+            from: None,
+            filters: vec![]
         }
         .destructive());
         assert!(!ModCmd::Unban { user: 1 }.destructive());

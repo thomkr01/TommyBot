@@ -14,20 +14,21 @@ use twilight_model::{
     },
     gateway::payload::incoming::MessageCreate,
     id::{
-        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, UserMarker},
         Id,
     },
 };
 use twilight_util::builder::command::{
-    CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
+    CommandBuilder, IntegerBuilder, RoleBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
 };
 
 use crate::{
     antinuke,
-    app::{now_secs, App},
+    app::App,
     commands::{self, gated, target_above_bot, Action, Pending},
     prefix::Parsed,
-    slash::{int, string, user},
+    purge,
+    slash::{int, role, string, user},
     targets,
 };
 
@@ -64,6 +65,8 @@ pub enum ModCmd {
         user: Option<u64>,
         /// Start at this message (message context menus) instead of the newest.
         from: Option<Anchor>,
+        #[serde(default)]
+        filters: Vec<crate::purge::Filter>,
     },
     Slowmode {
         secs: u16,
@@ -112,11 +115,8 @@ pub enum ModCmd {
 /// Numbers below this are case numbers / counts, not snowflakes.
 const SMALL: u64 = 1_000_000;
 const MAX_SLOWMODE: u64 = 21_600;
-pub(crate) const PURGE_MAX: usize = 100;
 const NOTE_MIN: usize = 5;
 const NOTE_MAX: usize = 500;
-/// Discord refuses bulk deletes of messages older than 14 days (a minute of margin).
-const BULK_AGE_S: i64 = 14 * 86_400 - 60;
 
 impl ModCmd {
     /// Permit name and rate-limit action. Unban/hackban share `ban`, untimeout shares `timeout`.
@@ -211,10 +211,18 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
         "sanitize" | "dehoist" => ModCmd::Sanitize { user: need_user()? },
         "purge" | "clear" => ModCmd::Purge {
             count: small
-                .filter(|n| (1..=PURGE_MAX as u64).contains(n))
-                .ok_or("Give a message count from 1 to 100")? as usize,
+                .filter(|n| (1..=purge::MAX as u64).contains(n))
+                .ok_or("Give a message count from 1 to 1000")? as usize,
             user,
             from: None,
+            filters: p
+                .kind
+                .as_deref()
+                .map(|k| purge::Filter::parse(k, p.input.as_deref()))
+                .transpose()?
+                .into_iter()
+                .chain(p.roles.iter().map(|r| purge::Filter::Role(*r)))
+                .collect(),
         },
         "slowmode" => {
             let off = p.names.iter().any(|n| n == "off");
@@ -545,8 +553,13 @@ pub async fn run(
                 let text = format!("Renamed <@{user}> to `{clean}`");
                 ("sanitize", user, None, Some(note), text)
             }
-            ModCmd::Purge { count, user, from } => {
-                let n = purge(app, channel, count, user, from).await?;
+            ModCmd::Purge {
+                count,
+                user,
+                from,
+                filters,
+            } => {
+                let n = purge::run(app, gid, channel, count, user, &filters, from).await?;
                 if n == 0 {
                     return Ok("No deletable messages found (over 14 days old are skipped)".into());
                 }
@@ -601,72 +614,30 @@ pub async fn run(
     Ok(format!("Case #{case_no}: {reply}{hint}"))
 }
 
+/// Fancy Unicode folded to plain letters (Wick: 𝓽𝓲𝓶𝓶𝔂 -> timmy), then leading symbols trimmed.
 fn sanitized(name: &str) -> String {
-    let ascii: String = name
+    let cured = if name.is_ascii() {
+        name.to_string()
+    } else {
+        // Symbols would cure to lookalike letters (⚡ -> s), so only letters and digits go in.
+        let letters: String = name
+            .chars()
+            .filter(|c| c.is_ascii() || c.is_alphanumeric())
+            .collect();
+        crate::automod::cure(&letters)
+    };
+    let ascii: String = cured
         .chars()
         .filter(|c| c.is_ascii_graphic() || *c == ' ')
         .collect();
     let s = ascii
-        .trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
         .trim_end();
     if s.is_empty() {
         "Moderated Nickname".into()
     } else {
         s.into()
     }
-}
-
-/// (message id, author id, created unix secs), newest first.
-type Msg = (u64, u64, i64);
-
-/// Up to `count` ids by `user` (any author when None) that bulk delete still accepts.
-fn purge_ids(msgs: &[Msg], count: usize, user: Option<u64>, now: i64) -> Vec<u64> {
-    msgs.iter()
-        .filter(|(_, author, ts)| user.is_none_or(|u| u == *author) && now - ts < BULK_AGE_S)
-        .take(count)
-        .map(|m| m.0)
-        .collect()
-}
-
-/// Scans the last 100 messages (so a user filter may find fewer than `count`); returns how many were deleted.
-async fn purge(
-    app: &App,
-    ch: Id<ChannelMarker>,
-    count: usize,
-    user: Option<u64>,
-    from: Option<Anchor>,
-) -> Result<usize> {
-    let req = app.http.channel_messages(ch);
-    let page = match from {
-        // `after` is exclusive, so start one id earlier to include the clicked message.
-        Some(Anchor::From(m)) => {
-            req.after(Id::new(m.max(2) - 1))
-                .limit(PURGE_MAX as u16)
-                .await?
-        }
-        Some(Anchor::Until(m)) => req.before(Id::new(m)).limit(PURGE_MAX as u16).await?,
-        None => req.limit(PURGE_MAX as u16).await?,
-    };
-    let msgs: Vec<Msg> = page
-        .models()
-        .await?
-        .iter()
-        .map(|m| (m.id.get(), m.author.id.get(), m.timestamp.as_secs()))
-        .collect();
-    let ids: Vec<Id<MessageMarker>> = purge_ids(&msgs, count, user, now_secs())
-        .into_iter()
-        .map(Id::new)
-        .collect();
-    match ids.as_slice() {
-        [] => {}
-        [one] => {
-            app.http.delete_message(ch, *one).await?;
-        }
-        many => {
-            app.http.delete_messages(ch, many).await?;
-        }
-    }
-    Ok(ids.len())
 }
 
 type CaseRow = (i32, String, i64, i64, Option<String>, bool, i64);
@@ -746,11 +717,17 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
         "verify" => ModCmd::Verify { user: u()? },
         "sanitize" => ModCmd::Sanitize { user: u()? },
         "purge" => ModCmd::Purge {
-            count: int(o, "count")
-                .ok_or("missing count")?
-                .clamp(1, PURGE_MAX as i64) as usize,
+            count: int(o, "number")
+                .ok_or("missing number")?
+                .clamp(1, purge::MAX as i64) as usize,
             user: user(o, "user").map(|u| u.get()),
             from: None,
+            filters: string(o, "type")
+                .map(|t| purge::Filter::parse(t, string(o, "input")))
+                .transpose()?
+                .into_iter()
+                .chain(role(o, "role").map(purge::Filter::Role))
+                .collect(),
         },
         "slowmode" => ModCmd::Slowmode {
             secs: int(o, "seconds")
@@ -852,12 +829,44 @@ pub fn definitions() -> Vec<Command> {
             .build(),
         chat("purge", "Bulk delete recent messages here")
             .option(
-                IntegerBuilder::new("count", "How many (1-100)")
+                IntegerBuilder::new("number", "How many (1-1000)")
                     .min_value(1)
-                    .max_value(100)
+                    .max_value(1000)
                     .required(true),
             )
+            .option(
+                StringBuilder::new("type", "Only messages of this type").choices(
+                    [
+                        "embeds",
+                        "suspicious",
+                        "bots",
+                        "mentions",
+                        "reactions",
+                        "emojis",
+                        "text",
+                        "noavatar",
+                        "norole",
+                        "attachments",
+                        "links",
+                        "after",
+                        "before",
+                        "equals",
+                        "has",
+                        "starts",
+                        "webhook",
+                    ]
+                    .map(|k| (k, k)),
+                ),
+            )
+            .option(StringBuilder::new(
+                "input",
+                "Text or id for has/equals/starts/after/before/webhook",
+            ))
             .option(UserBuilder::new("user", "Only this user's messages"))
+            .option(RoleBuilder::new(
+                "role",
+                "Only messages of members with this role",
+            ))
             .option(reason())
             .build(),
         chat("slowmode", "Set this channel's slowmode")
@@ -953,10 +962,11 @@ mod tests {
             Ok(ModCmd::Purge {
                 count: 50,
                 user: Some(big),
-                from: None
+                from: None,
+                filters: vec![]
             })
         );
-        assert!(pf("purge 500", None).is_err());
+        assert!(pf("purge 5000", None).is_err());
         assert_eq!(pf("slowmode 10s", None), Ok(ModCmd::Slowmode { secs: 10 }));
         assert_eq!(pf("slowmode off", None), Ok(ModCmd::Slowmode { secs: 0 }));
         assert!(pf("slowmode 7h", None).is_err());
@@ -1033,18 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn purge_filters_user_age_count() {
-        let now = 10_000_000;
-        let old = now - BULK_AGE_S - 1;
-        let msgs = [(5, 1, now), (4, 2, now - 5), (3, 1, now - 10), (2, 1, old)];
-        assert_eq!(purge_ids(&msgs, 2, None, now), vec![5, 4]);
-        assert_eq!(purge_ids(&msgs, 10, Some(1), now), vec![5, 3]); // old one skipped
-    }
-
-    #[test]
     fn sanitizes_names() {
         assert_eq!(sanitized("!!!Bob"), "Bob");
-        assert_eq!(sanitized("  .1ｂｏｂ the Builder"), "the Builder");
+        assert_eq!(sanitized("  .1ｂｏｂ the Builder"), "1bob the builder");
+        assert_eq!(sanitized("𝓽𝓲𝓶𝓶𝔂"), "timmy");
         assert_eq!(sanitized("Ann-Marie 2"), "Ann-Marie 2");
         assert_eq!(sanitized("⚡⚡"), "Moderated Nickname");
         assert_eq!(
