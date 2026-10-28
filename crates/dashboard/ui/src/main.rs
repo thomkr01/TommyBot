@@ -8,6 +8,7 @@ mod common;
 mod embeds;
 mod form;
 mod lockdown;
+mod md;
 mod pages;
 mod permits;
 mod recovery;

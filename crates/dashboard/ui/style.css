@@ -104,3 +104,10 @@ header .search { position:relative; } header .search input { width:240px; max-wi
 header .search .results { position:absolute; left:0; top:48px; width:max(100%, 320px); max-height:60vh; overflow:auto; background:var(--b2); border-radius:8px; padding:6px; box-shadow:0 4px 16px #0008; z-index:40; }
 header .search .results a { display:flex; flex-direction:column; padding:6px 10px; border-radius:6px; text-decoration:none; } header .search .results a:hover { background:color-mix(in srgb, var(--b3) 50%, transparent); }
 .chip.hits { margin-left:6px; font-size:10px; }
+/* Embed builder: Discord-coloured live preview that stays in view while the form scrolls */
+.eb > .card:last-child { position:sticky; top:96px; }
+.tools { display:flex; flex-wrap:wrap; gap:4px; position:sticky; top:80px; z-index:2; background:var(--b2); padding:4px 0; } .tools button { padding:2px 10px; min-width:34px; text-transform:none; }
+.dmsg { display:flex; gap:12px; background:#313338; color:#dbdee1; border-radius:6px; padding:12px; } .dmsg > i { width:40px; height:40px; border-radius:50%; background:var(--primary); color:#fff; display:grid; place-items:center; font-style:normal; font-weight:700; flex:none; } .dmsg > div { flex:1; min-width:0; }
+.dmsg .embed { background:#2b2d31; margin-top:4px; max-width:516px; } .embed .link { color:#00a8fc; } .embed .author { display:flex; align-items:center; gap:8px; } .embed .ico { width:24px; height:24px; border-radius:50%; }
+.md div { white-space:pre-wrap; } .md .h1 { font-size:1.5em; font-weight:700; } .md .h2 { font-size:1.25em; font-weight:700; } .md .h3 { font-size:1.1em; font-weight:700; } .md .sub { font-size:.8em; color:#949ba4; } .md .q { border-left:4px solid #4e5058; padding-left:10px; } .md .li::before { content:"• "; }
+.embed code { background:#1e1f22; border-radius:3px; padding:0 4px; font-size:.9em; } .embed pre { margin:4px 0; background:#1e1f22; border-color:#1e1f22; } .embed a { color:#00a8fc; } .spoiler { background:#1e1f22; color:transparent; border-radius:3px; } .spoiler:hover { color:inherit; background:#404249; }
