@@ -887,6 +887,31 @@ pub fn schema() -> Vec<Value> {
                 ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
             ],
         ),
+        (
+            "catch",
+            "Catch channel",
+            vec![
+                ti(fg("General", "enabled", "bool"), "Use the catch channel"),
+                hp(
+                    ti(fg("General", "channel", "channel"), "Catch channel"),
+                    "Anyone without a permit who writes here is punished. Hacked accounts spam every channel, so they land here first.",
+                ),
+                hp(
+                    dv(
+                        ti(
+                            choice("General", "action", &["Ban", "Softban", "Kick", "Timeout", "Log"]),
+                            "Action",
+                        ),
+                        "Ban",
+                    ),
+                    "Log is a test mode: it only logs. Bans delete messages for the days set under Miscellaneous.",
+                ),
+                ti(fg("General", "dm", "bool"), "DM the member first, with the appeal link"),
+                ti(fg("General", "keep_top", "bool"), "Keep the channel at the top of the server"),
+                ti(fg("Whitelist", "roles", "roles"), "Whitelisted roles"),
+                ti(fg("Whitelist", "users", "users"), "Whitelisted members"),
+            ],
+        ),
         ("panic", "Panic mode", panic),
         ("backups", "Backups", vec![dv(f("auto", "bool"), true)]),
         ("appeals", "Appeals", appeals),
@@ -894,6 +919,18 @@ pub fn schema() -> Vec<Value> {
         ("tickets", "Tickets", tickets),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
+        (
+            "channel_profiles",
+            "Channel setup",
+            vec![{
+                let mut v = fg("Role profiles", "profiles", "profiles");
+                v["options"] = json!(crate::channels::PERMS
+                    .iter()
+                    .map(|(k, _)| k)
+                    .collect::<Vec<_>>());
+                v
+            }],
+        ),
     ]
     .into_iter()
     .map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields}))
@@ -947,6 +984,9 @@ mod tests {
                     "form" => json!([{"label": "x"}]),
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
                     "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
+                    "profiles" => {
+                        json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
+                    }
                     _ => json!(["1"]),
                 };
                 let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();

@@ -555,6 +555,33 @@ impl Default for BackupsCfg {
     }
 }
 
+/// What the catch channel does to a writer; `Log` is the test mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum CatchAction {
+    #[default]
+    Ban,
+    Softban,
+    Kick,
+    Timeout,
+    Log,
+}
+
+/// Honeypot channel: hacked accounts spam every channel, so anyone writing here is punished.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct CatchCfg {
+    pub enabled: bool,
+    pub channel: Option<Id<ChannelMarker>>,
+    pub action: CatchAction,
+    /// DM the member first (with the appeal link for bans and timeouts).
+    pub dm: bool,
+    /// Move the channel back to the top when it is dragged down (set by the dashboard's setup).
+    pub keep_top: bool,
+    /// Never punished, besides bots, permit holders and owners.
+    pub roles: Vec<Id<RoleMarker>>,
+    pub users: Vec<Id<UserMarker>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +595,14 @@ mod tests {
         assert_eq!(w.regex.hits("hello"), 0);
         assert_eq!(WordsCfg::default().regex.hits("anything"), 0);
         assert!(serde_json::from_value::<WordsCfg>(json!({"regex": ["(unclosed"]})).is_err());
+    }
+
+    #[test]
+    fn catch_is_off_and_bans_by_default() {
+        let c: CatchCfg = serde_json::from_value(json!({})).unwrap();
+        assert!(!c.enabled && c.channel.is_none() && c.action == CatchAction::Ban);
+        let c: CatchCfg = serde_json::from_value(json!({"action": "Log"})).unwrap();
+        assert_eq!(c.action, CatchAction::Log);
     }
 
     #[test]

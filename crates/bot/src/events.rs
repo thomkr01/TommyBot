@@ -178,6 +178,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
     match ev {
         // Webhook posts count as bots but still carry heat, so they reach automod (never commands).
         Event::MessageCreate(m) if !m.author.bot || m.webhook_id.is_some() => {
+            if crate::catch::on_message(app, m).await? {
+                return Ok(());
+            }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
                 if let Some(parsed) = m.content.strip_prefix(&pfx).and_then(prefix::parse) {
@@ -193,7 +196,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             app.note_parent(&c.0);
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
         }
-        Event::ChannelUpdate(c) => c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g)),
+        Event::ChannelUpdate(c) => {
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::catch::keep_top(app, c).await?;
+        }
         Event::ChannelDelete(c) => {
             app.note_parent(&c.0);
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))

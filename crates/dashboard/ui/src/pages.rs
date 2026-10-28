@@ -40,7 +40,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             let dc = api("GET", &format!("/api/guilds/{g}/discord"), None).await.unwrap_or(Value::Null);
             let role = |k: &str| name_of(&dc, "roles", c[k].as_str().unwrap_or(""));
             let logs = strs(&c["logs"]).join(", #");
-            let logs = if logs.is_empty() { "the log channels were already set".into() } else { format!("Logs category with #{logs}") };
+            let logs = if logs.is_empty() { "the log channels were already set".into() } else { format!("log channels #{logs} (reports and appeals in a Staff category)") };
             let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
             let member = if c["staff"] == true { format!("{member}, Admins and Moderators roles with their permits") } else { member };
             let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
@@ -298,7 +298,7 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
     let part = format!("{tab}_{sub}");
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
-    // One click: a private "Logs" category with a channel per log type that has none yet.
+    // One click: private "Logs" and "Staff" categories with a channel per log type that has none yet.
     let setup = move |_| {
         let g = g.clone();
         run_act(async move {
@@ -318,6 +318,27 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
             <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
         </div>
         <Section guild=guild.clone() name="logging".to_string() part enrolled />
+    }
+}
+
+/// Catch channel: one click makes the honeypot channel and turns it on, then the settings form.
+#[component]
+pub fn Catch(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let g = guild.clone();
+    let setup = move |_| {
+        let sure = "This creates #do-not-write at the top of the server and turns the catch channel on: anyone without a permit who writes there gets the action below. Continue?";
+        if !web_sys::window().unwrap().confirm_with_message(sure).unwrap_or(false) { return; }
+        let g = g.clone();
+        run_act(async move {
+            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+            api("POST", &format!("/api/guilds/{g}/catch/setup"), Some(json!({"expected_version": c["version"]}))).await
+        }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
+    };
+    view! {
+        <div class="row"><button on:click=setup>"Set up channel"</button><span>{move || msg.get()}</span></div>
+        <StepUp need enrolled />
+        <Section guild=guild.clone() name="catch".to_string() enrolled />
     }
 }
 

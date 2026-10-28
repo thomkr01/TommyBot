@@ -295,7 +295,7 @@ pub async fn rollback(
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is.
 pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, LockdownCfg, MiscCfg, PanicCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
         TicketsCfg, WhitelistCfg,
     };
     if section == "logging" {
@@ -333,6 +333,8 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "appeals" => serde_json::from_value::<AppealsCfg>(v).map(drop),
         "tickets" => serde_json::from_value::<TicketsCfg>(v).map(drop),
         "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
+        "channel_profiles" => serde_json::from_value::<crate::channels::ProfilesCfg>(v).map(drop),
+        "catch" => serde_json::from_value::<CatchCfg>(v).map(drop),
         _ => Ok(()),
     };
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))

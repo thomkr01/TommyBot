@@ -83,7 +83,7 @@ fn num<T: std::str::FromStr + Default>(v: &Value) -> T {
 }
 
 /// Roles and channels as Discord's REST API returns them, in the shape backups use.
-fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
+pub(crate) fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
     let items = |v: &Value| v.as_array().cloned().unwrap_or_default();
     Image {
         guild: guild as u64,
