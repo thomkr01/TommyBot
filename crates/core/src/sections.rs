@@ -40,7 +40,7 @@ pub struct AntinukeCfg {
 impl Default for AntinukeCfg {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             limits: HashMap::new(),
             quarantine_role: None,
             prune: false,
@@ -547,17 +547,11 @@ impl Default for PanicCfg {
     }
 }
 
-/// Server backups: the 3-hour auto backup can be switched off per guild.
-#[derive(Clone, Deserialize)]
+/// Server backups: the 3-hour auto backup is off until a guild turns it on.
+#[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct BackupsCfg {
     pub auto: bool,
-}
-
-impl Default for BackupsCfg {
-    fn default() -> Self {
-        Self { auto: true }
-    }
 }
 
 /// What the catch channel does to a writer; `Log` is the test mode.
@@ -611,19 +605,19 @@ mod tests {
     }
 
     #[test]
-    fn antinuke_is_enabled_unless_saved_off() {
-        assert!(AntinukeCfg::default().enabled);
-        let on: AntinukeCfg = serde_json::from_value(json!({"quarantine_role": "7"})).unwrap();
-        assert!(on.enabled);
-        let off: AntinukeCfg = serde_json::from_value(json!({"enabled": false})).unwrap();
+    fn antinuke_is_off_until_saved_on() {
+        assert!(!AntinukeCfg::default().enabled);
+        let off: AntinukeCfg = serde_json::from_value(json!({"quarantine_role": "7"})).unwrap();
         assert!(!off.enabled);
+        let on: AntinukeCfg = serde_json::from_value(json!({"enabled": true})).unwrap();
+        assert!(on.enabled);
     }
 
     #[test]
-    fn backups_are_automatic_unless_saved_off() {
-        assert!(BackupsCfg::default().auto);
-        let off: BackupsCfg = serde_json::from_value(json!({"auto": false})).unwrap();
-        assert!(!off.auto);
+    fn backups_are_manual_until_saved_on() {
+        assert!(!BackupsCfg::default().auto);
+        let on: BackupsCfg = serde_json::from_value(json!({"auto": true})).unwrap();
+        assert!(on.auto);
     }
 
     #[test]
