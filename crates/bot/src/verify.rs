@@ -12,14 +12,14 @@ use tommybot_automod::join::{
 };
 use tommybot_core::jobs;
 use tommybot_logging::{
-    embed::{ALERT, DONE, NO, YES},
+    embed::{ALERT, DONE, GREEN, NO, RED, YES},
     Log, LogKind,
 };
 use twilight_model::{
     application::interaction::{modal::ModalInteractionComponent, Interaction, InteractionData},
     channel::message::{
         component::{ActionRow, Button, ButtonStyle, Component, TextInput, TextInputStyle},
-        MessageFlags,
+        Embed, MessageFlags,
     },
     http::{
         attachment::Attachment,
@@ -31,6 +31,7 @@ use twilight_model::{
     },
     user::User,
 };
+use twilight_util::builder::embed::{EmbedBuilder, EmbedFooterBuilder, ImageSource};
 
 use crate::{
     app::{now_secs, App},
@@ -50,6 +51,7 @@ pub struct VerificationCfg {
 }
 
 const START: &str = "verify:start";
+const HELP: &str = "verify:help";
 // The enter and code ids end in the guild id: a DM interaction has no guild of its own.
 const ENTER: &str = "verify:enter:";
 const CODE: &str = "verify:code:";
@@ -85,13 +87,17 @@ fn decide(cfg: &VerificationCfg, raid_active: bool, suspicious: bool, has_role: 
 }
 
 pub(crate) fn button(label: &str, id: &str) -> Component {
+    styled_button(label, id, ButtonStyle::Primary)
+}
+
+fn styled_button(label: &str, id: &str, style: ButtonStyle) -> Component {
     Component::Button(Button {
         id: None,
         custom_id: Some(id.into()),
         disabled: false,
         emoji: None,
         label: Some(label.into()),
-        style: ButtonStyle::Primary,
+        style,
         url: None,
         sku_id: None,
     })
@@ -110,21 +116,87 @@ pub async fn setup(app: &App, gid: Id<GuildMarker>) -> Result<String> {
     let Some(ch) = cfg.verification.channel else {
         return Ok("Set a verification channel on the dashboard first.".into());
     };
+    let embed = EmbedBuilder::new()
+        .color(GREEN)
+        .title("🧩 Verification Required!")
+        .description(format!(
+            "To access `{}`, you need to pass the verification first.\n› Press on the **Verify** button below.",
+            guild_name(app, gid).await
+        ))
+        .build();
+    let buttons = Component::ActionRow(ActionRow {
+        id: None,
+        components: vec![
+            styled_button("Verify", START, ButtonStyle::Success),
+            styled_button("Help", HELP, ButtonStyle::Secondary),
+        ],
+    });
     app.http
         .create_message(ch)
-        .content("Press the button to verify and get access to the server.")
-        .components(&[row(button("Verify", START))])
+        .embeds(&[embed])
+        .components(&[buttons])
         .await?;
     Ok(format!("Posted the verify button in <#{ch}>"))
 }
 
+async fn guild_name(app: &App, gid: Id<GuildMarker>) -> String {
+    async { anyhow::Ok(app.http.guild(gid).await?.model().await?.name) }
+        .await
+        .unwrap_or_else(|_| "the server".into())
+}
+
+/// Wick's "2 minutes" wording for the verification period.
+fn period(ms: i64) -> String {
+    let s = ms / 1000;
+    match s {
+        s if s % 60 == 0 && s >= 60 => {
+            format!("{} minute{}", s / 60, if s == 60 { "" } else { "s" })
+        }
+        s => format!("{s} seconds"),
+    }
+}
+
+/// Steps shown by the Help button, adapted to the mode.
+fn help_steps(v: &VerifyCfg) -> String {
+    let mut steps = vec!["Press the **Verify** button.".to_string()];
+    steps.extend(match v.mode {
+        VerifyMode::Button => vec!["You get access right away.".into()],
+        VerifyMode::Web | VerifyMode::ThirdParty => {
+            vec!["Open the link and finish the check on the website.".into()]
+        }
+        VerifyMode::SimpleCaptcha => vec![
+            "Solve the question you are shown.".into(),
+            "Press **Answer** and type the result.".into(),
+        ],
+        _ => vec![
+            "Read the captcha image you are shown.".into(),
+            "Press **Answer** and type the characters.".into(),
+        ],
+    });
+    if v.on_fail != FailAction::Nothing {
+        steps.push(format!("Finish within {}.", period(v.time_limit_ms)));
+    }
+    steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("**{}.** {s}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Gives a fresh joiner until the time limit to verify; see [`deadline`].
-pub async fn on_join(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, suspicious: bool) {
+pub async fn on_join(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    suspicious: bool,
+    is_bot: bool,
+) {
     let Ok(cfg) = app.cfg(gid.get()).await else {
         return;
     };
     let v = &cfg.verification;
-    if !v.enabled || !must_verify(&v.verify, suspicious, false) {
+    if is_bot || !v.enabled || !must_verify(&v.verify, suspicious, false) {
         return;
     }
     if v.verify.quarantine_on_join {
@@ -216,6 +288,27 @@ pub(crate) fn ephemeral(
         kind,
         data: Some(InteractionResponseData {
             content: content.map(Into::into),
+            flags: Some(MessageFlags::EPHEMERAL),
+            ..Default::default()
+        }),
+    }
+}
+
+fn passed_embed(server: &str) -> Embed {
+    EmbedBuilder::new()
+        .color(GREEN)
+        .title("You have been verified!")
+        .description(format!(
+            "✅ You passed the verification successfully. You can now access `{server}`!"
+        ))
+        .build()
+}
+
+fn embed_reply(embed: Embed) -> InteractionResponse {
+    InteractionResponse {
+        kind: InteractionResponseType::ChannelMessageWithSource,
+        data: Some(InteractionResponseData {
+            embeds: Some(vec![embed]),
             flags: Some(MessageFlags::EPHEMERAL),
             ..Default::default()
         }),
@@ -365,8 +458,26 @@ fn guild_of(i: &Interaction, id: &str) -> Option<Id<GuildMarker>> {
         .or_else(|| id.rsplit(':').next()?.parse().ok().map(Id::new))
 }
 
-const PROMPT: &str = "Type the characters you see.";
-const NOTES: &str = "Type the characters you see.\n-# Letters are not case sensitive. Ignore the dots and lines, they are only there to stop bots. Press Verify again for a new image.";
+const PROMPT: &str = "Please type the captcha below to be able to access this server!";
+const NOTES: &str = "\n\n**Additional Notes:**\n› Type out the traced colored characters from left to right.\n› Ignore the decoy characters spread-around.\n› You don't have to respect characters cases (upper/lower case)!";
+
+fn challenge_embed(body: &str, notes: bool, png: bool, limit_ms: i64) -> Embed {
+    let mut e = EmbedBuilder::new()
+        .color(GREEN)
+        .title("🧩 Hello! Are you human? Let's find out!")
+        .description(format!(
+            "```\n{body}\n```{}",
+            if notes { NOTES } else { "" }
+        ))
+        .footer(EmbedFooterBuilder::new(format!(
+            "Verification Period: {}",
+            period(limit_ms)
+        )));
+    if let (true, Ok(img)) = (png, ImageSource::attachment("captcha.png")) {
+        e = e.image(img);
+    }
+    e.build()
+}
 
 /// The text a member typed, wherever the modal nests the input.
 fn typed_text(c: &ModalInteractionComponent) -> Option<String> {
@@ -400,6 +511,18 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         )
     };
     match &i.data {
+        Some(InteractionData::MessageComponent(c)) if c.custom_id == HELP => {
+            let cfg = app.cfg(gid.get()).await?;
+            let help = EmbedBuilder::new()
+                .color(GREEN)
+                .title("🧩 Verification Help")
+                .description(help_steps(&cfg.verification.verify))
+                .build();
+            client
+                .create_response(i.id, &i.token, &embed_reply(help))
+                .await?;
+            Ok(true)
+        }
         Some(InteractionData::MessageComponent(c)) if c.custom_id == START => {
             let cfg = app.cfg(gid.get()).await?;
             let member = i.member.as_ref();
@@ -432,35 +555,42 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 }
                 Step::Grant => {
                     grant(app, gid, user, &cfg.verification).await?;
+                    let done = passed_embed(&guild_name(app, gid).await);
                     client
-                        .create_response(i.id, &i.token, &reply("Verified, welcome!"))
+                        .create_response(i.id, &i.token, &embed_reply(done))
                         .await?;
                 }
                 step => {
                     let v = &cfg.verification.verify;
-                    let (code, png, text) = match step {
+                    let (code, png, body) = match step {
                         Step::Simple => {
                             let (q, a) = new_sum();
                             (a, None, q)
                         }
                         _ => {
                             let (code, png) = new_captcha(&v.captcha);
-                            let note = if v.show_notes { NOTES } else { PROMPT };
-                            (code, Some(png), note.to_string())
+                            (code, Some(png), PROMPT.to_string())
                         }
                     };
+                    let embed = challenge_embed(
+                        &body,
+                        v.show_notes && png.is_some(),
+                        png.is_some(),
+                        v.time_limit_ms,
+                    );
                     app.captchas
                         .lock()
                         .unwrap()
                         .insert((gid.get(), user.get()), code);
-                    let enter = [row(button("Enter answer", &format!("{ENTER}{gid}")))];
+                    let enter = [row(button("Answer", &format!("{ENTER}{gid}")))];
+                    let embeds = [embed];
                     let file = png.map(|p| [Attachment::from_bytes("captcha.png".into(), p, 1)]);
                     if step == Step::Dm {
                         let ch = app.http.create_private_channel(user).await;
                         let sent = match ch {
                             Ok(ch) => {
                                 let ch = ch.model().await?;
-                                let mut m = app.http.create_message(ch.id).content(&text);
+                                let mut m = app.http.create_message(ch.id).embeds(&embeds);
                                 if let Some(f) = &file {
                                     m = m.attachments(f);
                                 }
@@ -479,7 +609,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                         client
                             .create_response(i.id, &i.token, &ephemeral(defer, None))
                             .await?;
-                        let mut u = client.update_response(&i.token).content(Some(&text));
+                        let mut u = client.update_response(&i.token).embeds(Some(&embeds));
                         if let Some(f) = &file {
                             u = u.attachments(f);
                         }
@@ -522,19 +652,50 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         }
         Some(InteractionData::ModalSubmit(m)) if m.custom_id.starts_with(CODE) => {
             let typed = m.components.iter().find_map(typed_text).unwrap_or_default();
+            // Kept until it is solved, so a wrong answer can be retried.
             let expected = app
                 .captchas
                 .lock()
                 .unwrap()
-                .remove(&(gid.get(), user.get()));
-            let text = if expected.is_some_and(|e| e.eq_ignore_ascii_case(typed.trim())) {
+                .get(&(gid.get(), user.get()))
+                .cloned();
+            if expected.is_some_and(|e| e.eq_ignore_ascii_case(typed.trim())) {
+                app.captchas
+                    .lock()
+                    .unwrap()
+                    .remove(&(gid.get(), user.get()));
                 let cfg = app.cfg(gid.get()).await?;
                 grant(app, gid, user, &cfg.verification).await?;
-                "Verified, welcome!"
+                // Turn the challenge message into "Verification done." when the modal came from it.
+                let edit = i.message.is_some();
+                let kind = if edit {
+                    InteractionResponseType::UpdateMessage
+                } else {
+                    InteractionResponseType::ChannelMessageWithSource
+                };
+                let mut resp = ephemeral(kind, Some("Verification done."));
+                if let (true, Some(d)) = (edit, resp.data.as_mut()) {
+                    d.embeds = Some(vec![]);
+                    d.components = Some(vec![]);
+                    d.attachments = Some(vec![]);
+                }
+                client.create_response(i.id, &i.token, &resp).await?;
+                let done = passed_embed(&guild_name(app, gid).await);
+                client
+                    .create_followup(&i.token)
+                    .embeds(&[done])
+                    .flags(MessageFlags::EPHEMERAL)
+                    .await?;
             } else {
-                "Wrong code. Press Verify to get a new one."
-            };
-            client.create_response(i.id, &i.token, &reply(text)).await?;
+                let fail = EmbedBuilder::new()
+                    .color(RED)
+                    .title("❎ Unsuccessful Operation!")
+                    .description("› Wrong answer, try again before it's too late.")
+                    .build();
+                client
+                    .create_response(i.id, &i.token, &embed_reply(fail))
+                    .await?;
+            }
             Ok(true)
         }
         _ => Ok(false),

@@ -176,13 +176,9 @@ impl Default for GateCfg {
 }
 
 impl GateCfg {
-    /// The account age filter's minimum, 0 while that filter is off.
+    /// The configured minimum account age; also the "young account" limit of Suspicious while the age filter is off.
     pub fn min_age_ms(&self) -> i64 {
-        if self.account_age.enabled {
-            i64::from(self.min_age_days) * DAY_MS
-        } else {
-            0
-        }
+        i64::from(self.min_age_days) * DAY_MS
     }
 
     pub fn name_matches(&self, name: &str) -> bool {
@@ -335,6 +331,7 @@ pub struct RaidCfg {
     pub flag_younger_than_ms: Option<i64>,
     pub flag_no_avatar: bool,
     /// Minimum accounts in one creation-time bucket to call it a bot farm; None disables.
+    #[serde(default = "default_id_min")]
     pub id_flag_min: Option<usize>,
     #[serde(default)]
     pub id_granularity: IdGranularity,
@@ -362,6 +359,10 @@ pub enum IdGranularity {
     Month,
 }
 
+fn default_id_min() -> Option<usize> {
+    Some(4)
+}
+
 fn default_raid_action() -> Action {
     Action::Kick
 }
@@ -377,7 +378,7 @@ impl Default for RaidCfg {
             string_patterns: vec![],
             flag_younger_than_ms: None,
             flag_no_avatar: false,
-            id_flag_min: None,
+            id_flag_min: default_id_min(),
             id_granularity: IdGranularity::Adaptive,
             id_margin: 0,
             action: Action::Kick,
@@ -819,6 +820,13 @@ mod tests {
         assert!(string_flag("user_bot", &pats));
         assert!(string_flag("xraidx", &pats));
         assert!(!string_flag("safe raid", &pats));
+    }
+
+    #[test]
+    fn id_flag_defaults_to_four_even_for_old_configs() {
+        assert_eq!(RaidCfg::default().id_flag_min, Some(4));
+        let old: RaidCfg = serde_json::from_str(r#"{"count":3,"span_ms":1,"suspicious_only":false,"active_ms":1,"string_patterns":[],"flag_younger_than_ms":null,"flag_no_avatar":false}"#).unwrap();
+        assert_eq!(old.id_flag_min, Some(4));
     }
 
     fn raid_cfg() -> RaidCfg {

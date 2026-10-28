@@ -509,7 +509,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         added_by_authorized: !user.bot || bot_added_by_authorized(app, gid, user.id).await,
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
-    verify::on_join(app, gid, user.id, suspicious).await;
+    verify::on_join(app, gid, user.id, suspicious, user.bot).await;
     let hits = gate(&j, &cfg.joingate, now);
     if let Some(action) = harshest(&hits) {
         let why = if hits.iter().any(|h| h.0 == Filter::AccountAge) {
@@ -576,23 +576,38 @@ async fn join_raid(
             .iter()
             .filter_map(|r| r.parse().ok().map(Id::new))
             .collect();
-        let mut log = Log::new("Join Raid Trigger!", ALERT)
-            .text(&format!("{YES} A weird join pattern has been identified."))
+        let mut log = Log::new("🕵 Join Raid Trigger!", ALERT)
             .text(&format!(
-                "{ARROW} Flagged accounts joining for the next `{}` will be **{:?}**.",
+                "{YES} TommyBot has identified a weird join pattern."
+            ))
+            .text(&format!(
+                "{ARROW} Flagged accounts joining for the next `{}` will be **{}**.",
                 duration(raid.active_ms / 1000),
-                raid.action
+                match raid.action {
+                    Action::Log => "logged",
+                    Action::Warn => "warned",
+                    Action::Timeout(_) => "timed out",
+                    Action::Kick => "kicked",
+                    Action::Ban => "banned",
+                }
+            ))
+            .text(&format!(
+                "{ARROW} A full report will be posted once the duration ends."
             ))
             .field(
                 "Initial Flags:",
                 // 40 IDs stay under Discord's 1024-character field limit; the page lists all
-                &(out.flagged.iter().take(40).map(|u| format!("`{u}`")))
-                    .chain(
-                        (out.flagged.len() > 40)
-                            .then(|| format!("+{} more", out.flagged.len() - 40)),
-                    )
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                &(out
+                    .flagged
+                    .iter()
+                    .zip(&names)
+                    .take(40)
+                    .map(|(u, n)| format!("`{u} | {n}`")))
+                .chain(
+                    (out.flagged.len() > 40).then(|| format!("+{} more", out.flagged.len() - 40)),
+                )
+                .collect::<Vec<_>>()
+                .join("\n"),
             );
         let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
         if !base.is_empty() {
