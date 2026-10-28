@@ -129,8 +129,11 @@ async fn report(
     else {
         return Ok("Reports are not set up on this server".into());
     };
-    if msg.author.bot || msg.author.id == reporter {
-        return Ok("You cannot report this message".into());
+    if msg.author.bot {
+        return Ok("Messages from bots and webhooks cannot be reported".into());
+    }
+    if msg.author.id == reporter {
+        return Ok("You cannot report your own message".into());
     }
     let banned: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM report_blacklist WHERE guild_id=$1 AND user_id=$2)",

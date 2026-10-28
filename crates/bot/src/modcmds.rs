@@ -31,7 +31,8 @@ use crate::{
     targets,
 };
 
-/// The clicked message of a purge menu. Both purge the newer messages; From Here also the clicked one.
+/// The clicked message of a purge menu: From Here purges it and the newer ones below it, Until Here
+/// the older ones above it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Anchor {
     From(u64),
@@ -540,13 +541,14 @@ async fn purge(
     from: Option<Anchor>,
 ) -> Result<usize> {
     let req = app.http.channel_messages(ch);
-    // `after` is exclusive, so From Here starts one id earlier to include the clicked message.
-    let after = from.map(|a| match a {
-        Anchor::From(m) => m.max(2) - 1,
-        Anchor::Until(m) => m,
-    });
-    let page = match after {
-        Some(m) => req.after(Id::new(m)).limit(PURGE_MAX as u16).await?,
+    let page = match from {
+        // `after` is exclusive, so start one id earlier to include the clicked message.
+        Some(Anchor::From(m)) => {
+            req.after(Id::new(m.max(2) - 1))
+                .limit(PURGE_MAX as u16)
+                .await?
+        }
+        Some(Anchor::Until(m)) => req.before(Id::new(m)).limit(PURGE_MAX as u16).await?,
         None => req.limit(PURGE_MAX as u16).await?,
     };
     let msgs: Vec<Msg> = page

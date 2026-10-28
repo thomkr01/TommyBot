@@ -217,9 +217,13 @@ fn changes(
         };
         let (old, new) = (v.get("old_value"), v.get("new_value"));
         log = match v["key"].as_str().unwrap_or("?") {
-            // Changes twilight cannot decode, and ids the target line and Additional Information show.
-            "other" | "id" => log,
-            "type" if overwrite => log,
+            // Changes twilight cannot decode, and ids the target line already shows (Wick keeps the overwrite's).
+            "other" => log,
+            "id" if !overwrite => log,
+            "type" if overwrite => {
+                let member = if deleted { old } else { new }.is_some_and(|v| v == 1 || v == "1");
+                log.line("Type", if member { "Member" } else { "Role" })
+            }
             "$add" => log.line("Roles Added", &roles(new)),
             "$remove" => log.line("Roles Removed", &roles(new)),
             key @ ("permissions" | "allow" | "deny") => {
@@ -451,13 +455,17 @@ mod tests {
         let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
             "action_type": 13, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
             "options": { "id": "40", "type": "0", "role_name": "Quarantine" },
-            "changes": [{ "key": "deny", "new_value": "2048" }]
+            "changes": [
+                { "key": "id", "new_value": "40" },
+                { "key": "type", "new_value": 0 },
+                { "key": "deny", "new_value": "2048" }
+            ]
         }))
         .unwrap();
         let entry = audit(&e).unwrap();
         let d = entry.embed.description.unwrap();
         assert!(d.contains("▸ **Channel:** <#30> *`30`*\n▸ **Target:** <@&40> *`40`*"));
-        assert!(d.contains("**Settings**\n❌ **Denied:**\n▸ **Additions:** Send Messages"));
+        assert!(d.contains("**Settings**\n▸ **Id:** 40\n▸ **Type:** Role\n❌ **Denied:**\n▸ **Additions:** Send Messages"));
         assert!(d.ends_with("**Additional Information**\n▸ **Id:** `40`\n▸ **Role Name:** `Quarantine`\n▸ **Type:** `Role`"));
         assert_eq!(entry.link.unwrap().1, "https://discord.com/channels/9/30");
     }
