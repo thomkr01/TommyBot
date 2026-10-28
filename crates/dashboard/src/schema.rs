@@ -236,7 +236,7 @@ pub fn schema() -> Vec<Value> {
         .collect::<Vec<_>>());
     log.push(pg(custom, "discord_customize"));
     let mut nuke = vec![
-        ti(dv(fg("Status", "enabled", "bool"), true), "Use the antinuke module"),
+        ti(fg("Status", "enabled", "bool"), "Use the antinuke module"),
         ti(fg("Status", "prune", "bool"), "Detect and react to member prunes"),
         ti(fg("Status", "vanity_guard", "bool"), "Have TommyBot guard your server's vanity url"),
         ti(dv(fg("Auto quarantine", "auto_quarantine", "bool"), true), "Use the auto quarantine module"),
@@ -499,10 +499,7 @@ pub fn schema() -> Vec<Value> {
         ),
     ]);
     let mut gate = vec![
-        ti(
-            dv(fg("General", "enabled", "bool"), true),
-            "Use the joingate module",
-        ),
+        ti(fg("General", "enabled", "bool"), "Use the joingate module"),
         ti(
             fg("General", "dm_punished", "bool"),
             "DM members when punished",
@@ -593,7 +590,7 @@ pub fn schema() -> Vec<Value> {
         ),
     ]);
     let raid = vec![
-        dv(fg("General", "enabled", "bool"), true),
+        fg("General", "enabled", "bool"),
         ti(f("count", "int"), "Minimum trigger (accounts)"),
         ti(f("span_ms", "int"), "Join history (milliseconds)"),
         f("suspicious_only", "bool"),
@@ -924,7 +921,7 @@ pub fn schema() -> Vec<Value> {
             ],
         ),
         ("panic", "Panic mode", panic),
-        ("backups", "Backups", vec![dv(f("auto", "bool"), true)]),
+        ("backups", "Backups", vec![f("auto", "bool")]),
         ("appeals", "Appeals", appeals),
         ("verification", "Verification", verification),
         ("tickets", "Tickets", tickets),

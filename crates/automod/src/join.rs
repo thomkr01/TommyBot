@@ -102,10 +102,6 @@ pub struct GateCfg {
     pub require_all: bool,
 }
 
-fn yes() -> bool {
-    true
-}
-
 /// One Join Gate card: its status switch and trigger action (None: the card's Wick default).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "GateFilterRepr")]
@@ -157,7 +153,7 @@ impl From<GateFilterRepr> for GateFilter {
 impl Default for GateCfg {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             dm_punished: false,
             no_avatar: GateFilter::default(),
             account_age: GateFilter::default(),
@@ -319,7 +315,7 @@ pub fn parse_pattern(p: &str) -> (StringOp, String) {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaidCfg {
-    #[serde(default = "yes")]
+    #[serde(default)]
     pub enabled: bool,
     pub count: usize,
     pub span_ms: i64,
@@ -370,7 +366,7 @@ fn default_raid_action() -> Action {
 impl Default for RaidCfg {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             count: 10,
             span_ms: 10 * 60_000,
             suspicious_only: false,
@@ -694,6 +690,7 @@ mod tests {
     #[test]
     fn gate_picks_harshest_and_age_timeout_is_remaining() {
         let cfg = GateCfg {
+            enabled: true,
             no_avatar: GateFilter::on(Action::Log),
             account_age: GateFilter::on(Action::Timeout(0)),
             min_age_days: 1,
@@ -725,6 +722,7 @@ mod tests {
             ]
         );
         let cfg = GateCfg {
+            enabled: true,
             username_filter: GateFilter::on(Action::Kick),
             username_strict: vec!["Admin".into()],
             ..Default::default()
@@ -745,7 +743,7 @@ mod tests {
         };
         assert!(gate(&joiner(id_aged(1000, 0), "a", false), &cfg, NOW).is_empty());
         assert!(
-            serde_json::from_str::<GateCfg>("{\"username_terms\":[],\"require_all\":false}")
+            !serde_json::from_str::<GateCfg>("{\"username_terms\":[],\"require_all\":false}")
                 .unwrap()
                 .enabled
         );
@@ -773,6 +771,7 @@ mod tests {
     #[test]
     fn require_all_needs_every_filter() {
         let mut cfg = GateCfg {
+            enabled: true,
             no_avatar: GateFilter::on(Action::Kick),
             account_age: GateFilter::on(Action::Kick),
             min_age_days: 1,
@@ -794,6 +793,7 @@ mod tests {
     #[test]
     fn bots_and_invite_names() {
         let cfg = GateCfg {
+            enabled: true,
             unauthorized_bot: GateFilter::on(Action::Kick),
             invite_in_name: GateFilter::on(Action::Ban),
             ..Default::default()

@@ -175,12 +175,12 @@ pub const JOINGATE: &[Card] = &[card("Join Gate status", "If you want to use ins
     ("joingate.invite_in_name.enabled", "Accounts with invite links in usernames"),
     ("joingate.suspicious.enabled", "Accounts TommyBot deems suspicious"),
     ("joingate.username_filter.enabled", "Accounts that have certain names"),
-], |c, _| text(if on(c, "joingate.enabled", true) { "New members are checked the moment they join." } else { "These don't matter now! Join Gate is off." }))];
+], |c, _| text(if on(c, "joingate.enabled", false) { "New members are checked the moment they join." } else { "These don't matter now! Join Gate is off." }))];
 
 pub const JOINRAID: &[Card] = &[card("Anti raid status", "If you want to keep your server safe and secure from bad raids, this is your saviour.", &[
     ("joinraid.enabled", "Enable Join Raid"),
-    ("joinraid.executors", "Joins that count as a raid"),
-    ("joinraid.window_secs", "Within"),
+    ("joinraid.count", "Joins that count as a raid"),
+    ("joinraid.span_ms", "Within (milliseconds)"),
     ("joinraid.lock", "Lock when a raid starts"),
 ], |_, _| bot(embed("var(--bad)", "Join raid detected!", vec!["▸ 30 accounts joined in 10 seconds".into(), "✅ Raiders removed".into()])))];
 
