@@ -335,15 +335,15 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 .chars()
                 .map(|b| b == '1')
                 .collect();
-            let had = current(&*app.cfg(gid.get()).await?, kind, id);
             let saved = save(app, gid, actor.get(), &["whitelist", "antinuke"], |doc| {
+                if !may_edit(&level, "whitelist") {
+                    return Err("You may not change the whitelist".into());
+                }
                 for t in (0..TYPES.len()).filter(|t| ok[*t]) {
                     let v = vec![json!(id.to_string())];
                     let want = picked.get(t).copied().unwrap_or(false);
-                    if want != had[t] {
-                        let p = path(t, kind).expect("allowed type has a path");
-                        apply(doc, &p, if want { Edit::Add(v) } else { Edit::Remove(v) });
-                    }
+                    let p = path(t, kind).expect("allowed type has a path");
+                    apply(doc, &p, if want { Edit::Add(v) } else { Edit::Remove(v) });
                 }
                 Ok(())
             })
