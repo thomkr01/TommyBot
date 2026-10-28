@@ -7,11 +7,17 @@ use twilight_http::request::AuditLogReason;
 use twilight_model::{
     gateway::payload::incoming::MemberUpdate,
     id::{marker::GuildMarker, Id},
+    util::Timestamp,
 };
 
 use crate::app::{now_secs, App};
 
 const KIND: &str = "restore_main_roles";
+
+/// The end of a timeout that has not run out yet.
+fn active(until: Option<Timestamp>) -> Option<i64> {
+    until.map(|t| t.as_secs()).filter(|&t| t > now_secs())
+}
 
 pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     let cfg = app.cfg(m.guild_id.get()).await?;
@@ -20,11 +26,7 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     }
     let main = &cfg.lockdown.main_roles;
     let g = m.guild_id.get() as i64;
-    let until = m
-        .communication_disabled_until
-        .map(|t| t.as_secs())
-        .filter(|&t| t > now_secs());
-    if let Some(until) = until {
+    if let Some(until) = active(m.communication_disabled_until) {
         let held: Vec<_> = main.iter().filter(|r| m.roles.contains(r)).collect();
         if held.is_empty() {
             return Ok(());
@@ -62,11 +64,7 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
 pub async fn restore(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(p["user"].as_u64().context("job payload has no user")?);
     let member = app.http.guild_member(gid, user).await?.model().await?;
-    if let Some(t) = member
-        .communication_disabled_until
-        .map(|t| t.as_secs())
-        .filter(|&t| t > now_secs())
-    {
+    if let Some(t) = active(member.communication_disabled_until) {
         return jobs::enqueue(&app.pool, gid.get() as i64, KIND, p.clone(), t).await;
     }
     for r in p["roles"].as_array().into_iter().flatten() {
