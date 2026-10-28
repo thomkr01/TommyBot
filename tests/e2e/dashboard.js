@@ -42,7 +42,15 @@ fs.mkdirSync(out, { recursive: true });
   await page.goto(`${base}/${embeds}`);
   await page.fill('input[placeholder="Name"]', 'e2e');
   await page.selectOption('select[aria-label="channel"]', { index: 1 });
-  await page.locator('.row', { hasText: 'Title' }).locator('input').first().fill('Hello');
+  // Toolbar shortcut: Ctrl+B on a selection wraps it in Discord's ** and the preview renders it bold.
+  const title = page.locator('.row', { hasText: 'Title' }).locator('input').first();
+  await title.fill('Hello');
+  await title.selectText();
+  await page.keyboard.press('Control+b');
+  if ((await title.inputValue()) !== '**Hello**') failed.push('embeds: Ctrl+B did not bold');
+  await page.locator('textarea[data-md]').fill('Welcome to the **server**!\n> Read the *rules* first\n- be __nice__\n- no ~~spam~~\n||secret|| and `code`');
+  if (!(await page.locator('.dmsg .embed b', { hasText: 'Hello' }).count())) failed.push('embeds: preview did not render bold');
+  await page.locator('.eb').screenshot({ path: `${out}/embed_builder.png` });
   await page.click('text=Post');
   await page.waitForSelector('text=Embed posted.', { timeout: 5000 }).catch(() => failed.push('embeds: post failed'));
   await page.click('text=Update message');
