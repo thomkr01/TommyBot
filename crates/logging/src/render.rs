@@ -465,7 +465,7 @@ mod tests {
         let entry = audit(&e).unwrap();
         let d = entry.embed.description.unwrap();
         assert!(d.contains("▸ **Channel:** <#30> *`30`*\n▸ **Target:** <@&40> *`40`*"));
-        assert!(d.contains("**Settings**\n▸ **Id:** 40\n▸ **Type:** Role\n❌ **Denied:**\n▸ **Additions:** Send Messages"));
+        assert!(d.contains("**Settings**\n▸ **Id:** 40\n▸ **Type:** Role\n❎ **Denied:**\n▸ **Additions:** Send Messages"));
         assert!(d.ends_with("**Additional Information**\n▸ **Id:** `40`\n▸ **Role Name:** `Quarantine`\n▸ **Type:** `Role`"));
         assert_eq!(entry.link.unwrap().1, "https://discord.com/channels/9/30");
     }

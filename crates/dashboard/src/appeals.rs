@@ -159,9 +159,20 @@ async fn submit(
     let kind = punishment(&st, guild, s.user_id)
         .await?
         .ok_or(ApiError::Forbidden("you are not banned or timed out here"))?;
+    let given: Vec<&str> = b
+        .answers
+        .iter()
+        .map(|a| {
+            if a.trim().is_empty() {
+                "Not answered."
+            } else {
+                a
+            }
+        })
+        .collect();
     let answers: Vec<Value> = fields
         .iter()
-        .zip(&b.answers)
+        .zip(&given)
         .map(|(f, a)| json!({"label": f.label, "answer": a}))
         .collect();
     let id: Option<i64> = sqlx::query_scalar(
@@ -177,7 +188,7 @@ async fn submit(
         .line("Member", &format!("{} [{}]", s.username, s.user_id))
         .line("Appeal", &format!("`#{id}`"))
         .text(&format!("{} Review it on the dashboard.", embed::ARROW));
-        for (f, a) in fields.iter().zip(&b.answers) {
+        for (f, a) in fields.iter().zip(&given) {
             log = log.field(&format!("{}:", f.label), a);
         }
         if let Err(e) = st.discord.post_log(&ch.to_string(), log).await {

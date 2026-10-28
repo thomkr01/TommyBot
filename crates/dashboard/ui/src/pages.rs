@@ -272,7 +272,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     view! {
         <div class="card">
             <p class="muted">{move || if has_key.get() { "A rescue key exists. Regenerating invalidates the old one." } else { "No rescue key yet." }}</p>
-            <button on:click=regen>"Regenerate key (owner)"</button>
+            <button style="background:var(--warn);color:#000" on:click=regen>"REGENERATE"</button>
             <Show when=move || !key.get().is_empty()>
                 <p><b>"Rescue Key (shown once, store it somewhere safe):"</b></p>
                 <div class="row"><pre class:blur=move || !shown.get()>{move || key.get()}</pre>
