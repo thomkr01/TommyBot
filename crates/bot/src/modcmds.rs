@@ -76,6 +76,14 @@ pub enum ModCmd {
         case: i32,
         reason: String,
     },
+    /// `closecase` / `opencase`: switch a case off or back on.
+    CaseSet {
+        case: i32,
+        active: bool,
+    },
+    ClearWarns {
+        user: u64,
+    },
     Verify {
         user: u64,
     },
@@ -101,6 +109,7 @@ pub enum ModCmd {
 const SMALL: u64 = 1_000_000;
 const MAX_SLOWMODE: u64 = 21_600;
 pub(crate) const PURGE_MAX: usize = 100;
+const NOTE_MIN: usize = 5;
 const NOTE_MAX: usize = 500;
 /// Discord refuses bulk deletes of messages older than 14 days (a minute of margin).
 const BULK_AGE_S: i64 = 14 * 86_400 - 60;
@@ -111,7 +120,7 @@ impl ModCmd {
         match self {
             Self::Unban { .. } | Self::Hackban { .. } => "ban",
             Self::Untimeout { .. } => "timeout",
-            Self::Unwarn { .. } => "warn",
+            Self::Unwarn { .. } | Self::ClearWarns { .. } => "warn",
             Self::Quarantine { .. } | Self::Unquarantine { .. } => "quarantine",
             Self::Purge { .. } => "purge",
             Self::NoteList { .. } => "notes_view",
@@ -119,7 +128,7 @@ impl ModCmd {
                 "notes_manage"
             }
             Self::Slowmode { .. } => "slowmode",
-            Self::CasesView { .. } | Self::CasesEdit { .. } => "cases",
+            Self::CasesView { .. } | Self::CasesEdit { .. } | Self::CaseSet { .. } => "cases",
             Self::Verify { .. } => "verify",
             Self::Sanitize { .. } => "sanitize",
         }
@@ -154,6 +163,7 @@ impl ModCmd {
             Self::Unban { user }
             | Self::Hackban { user }
             | Self::Untimeout { user }
+            | Self::ClearWarns { user }
             | Self::Quarantine { user }
             | Self::Unquarantine { user }
             | Self::Sanitize { user } => Some(user),
@@ -177,6 +187,20 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
         "hackban" => ModCmd::Hackban { user: need_user()? },
         "untimeout" | "unmute" => ModCmd::Untimeout { user: need_user()? },
         "unwarn" => ModCmd::Unwarn { case: case()? },
+        "clearwarns" => ModCmd::ClearWarns { user: need_user()? },
+        "closecase" | "caseoff" | "opencase" | "caseon" => ModCmd::CaseSet {
+            case: case()?,
+            active: matches!(p.command.as_str(), "opencase" | "caseon"),
+        },
+        // The words after the case number are the reason, no `?r` needed.
+        "editc" | "editreason" => ModCmd::CasesEdit {
+            case: case()?,
+            reason: p
+                .reason
+                .clone()
+                .or_else(|| Some(p.names.join(" ")).filter(|r| !r.is_empty()))
+                .ok_or("Give the new reason")?,
+        },
         "quarantine" => ModCmd::Quarantine { user: need_user()? },
         "unquarantine" => ModCmd::Unquarantine { user: need_user()? },
         "verify" => ModCmd::Verify { user: need_user()? },
@@ -214,17 +238,15 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                 _ => ModCmd::NoteList { user: need_user()? },
             }
         }
-        "cases" | "case" if p.names.first().is_some_and(|n| n == "edit") => ModCmd::CasesEdit {
+        "cases" | "case" if p.names.first().is_some_and(|n| n == "modify") => ModCmd::CasesEdit {
             case: case()?,
             reason: p.reason.clone().ok_or("Give a new reason with ?r")?,
         },
-        "cases" | "case" => {
-            let case = small.map(|n| n as i32);
-            if case.is_none() && user.is_none() {
-                return Err("Give a case number or a user".into());
-            }
-            ModCmd::CasesView { case, user }
-        }
+        // No case and no user lists the guild's latest cases.
+        "cases" | "case" => ModCmd::CasesView {
+            case: small.map(|n| n as i32),
+            user,
+        },
         _ => return Err("Unknown command".into()),
     })
 }
@@ -243,10 +265,12 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     let name = p.names.iter().find(|n| {
         !matches!(
             n.as_str(),
-            "edit" | "view" | "off" | "add" | "remove" | "sweep" | "list"
+            "modify" | "view" | "off" | "add" | "remove" | "sweep" | "list"
         )
     });
-    if let (Some(n), true) = (name, p.targets.iter().all(|t| *t < SMALL)) {
+    // `editc 3 new reason`: the words are the reason, not a member.
+    let free_text = matches!(p.command.as_str(), "editc" | "editreason");
+    if let (Some(n), true, false) = (name, p.targets.iter().all(|t| *t < SMALL), free_text) {
         match targets::resolve(app, gid, n).await? {
             Ok(id) => resolved = Some(id.get()),
             Err(e) => return commands::say(app, msg, &e).await,
@@ -300,7 +324,7 @@ pub async fn run(
         let above = target_above_bot(app, gid, target).await?;
         let actor_n = actor_id.get() as i64;
         if let Err(d) = permits::check(actor, perm, actor_n, &level, t as i64, above) {
-            return Ok(format!("Cannot {perm} <@{t}>: {d:?}"));
+            return Ok(commands::deny_text(perm, t, &d));
         }
     } else if !actor.has(perm) {
         return Ok(format!("Cannot use `{perm}`: no permit"));
@@ -309,12 +333,17 @@ pub async fn run(
         return Ok(msg);
     }
     let g = gid.get() as i64;
+    let reasonless = reason.is_none();
     // (case kind, case user, inverse, reason prefix, reply)
     let (kind, uid, inverse, note, reply): (&str, u64, Option<Value>, Option<String>, String) =
         match cmd {
             ModCmd::CasesView { case, user } => return view_cases(app, g, case, user).await,
             ModCmd::NoteAdd { user, text } => {
-                let text: String = text.chars().take(NOTE_MAX).collect();
+                if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
+                    return Ok(format!(
+                        "A note must be {NOTE_MIN} to {NOTE_MAX} characters long"
+                    ));
+                }
                 let (id,): (i64,) = sqlx::query_as(
                     "INSERT INTO notes (guild_id, user_id, author_id, text) VALUES ($1,$2,$3,$4) RETURNING id",
                 )
@@ -361,6 +390,25 @@ pub async fn run(
                     0 => format!("No case #{case}"),
                     _ => format!("Case #{case} reason updated"),
                 });
+            }
+            ModCmd::CaseSet { case, active } => {
+                let done =
+                    sqlx::query("UPDATE cases SET active=$3 WHERE guild_id=$1 AND case_no=$2")
+                        .bind(g)
+                        .bind(case)
+                        .bind(active)
+                        .execute(&app.pool)
+                        .await?
+                        .rows_affected();
+                return Ok(match (done, active) {
+                    (0, _) => format!("No case #{case}"),
+                    (_, true) => format!("Case #{case} is active again"),
+                    _ => format!("Case #{case} closed"),
+                });
+            }
+            ModCmd::ClearWarns { user } => {
+                cases::reset_warns(&app.pool, g, user as i64).await?;
+                return Ok(format!("Cleared the warns of <@{user}>"));
             }
             ModCmd::Unban { user } => {
                 app.http.delete_ban(gid, Id::new(user)).await?;
@@ -502,7 +550,12 @@ pub async fn run(
         },
     )
     .await?;
-    Ok(format!("Case #{case_no}: {reply}"))
+    let hint = if reasonless {
+        crate::reply::add_reason_hint(case_no.into())
+    } else {
+        String::new()
+    };
+    Ok(format!("Case #{case_no}: {reply}{hint}"))
 }
 
 fn sanitized(name: &str) -> String {
@@ -651,7 +704,7 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                 .ok_or("missing seconds")?
                 .clamp(0, MAX_SLOWMODE as i64) as u16,
         },
-        "note" => {
+        "notes" => {
             let Some(CommandDataOption {
                 name,
                 value: CommandOptionValue::SubCommand(s),
@@ -663,9 +716,9 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
             match name.as_str() {
                 "add" => ModCmd::NoteAdd {
                     user: u()?,
-                    text: string(s, "text").ok_or("missing text")?.into(),
+                    text: string(s, "msg").ok_or("missing msg")?.into(),
                 },
-                "list" => ModCmd::NoteList { user: u()? },
+                "view" => ModCmd::NoteList { user: u()? },
                 "remove" => ModCmd::NoteRemove {
                     id: int(s, "id").ok_or("missing id")?,
                 },
@@ -686,7 +739,7 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                     case: case(s).ok(),
                     user: user(s, "user").map(|u| u.get()),
                 },
-                "edit" => ModCmd::CasesEdit {
+                "modify" => ModCmd::CasesEdit {
                     case: case(s)?,
                     reason: string(s, "reason").ok_or("missing reason")?.into(),
                 },
@@ -761,14 +814,19 @@ pub fn definitions() -> Vec<Command> {
             )
             .option(reason())
             .build(),
-        chat("note", "Staff notes about members")
+        chat("notes", "Staff notes about members")
             .option(
                 SubCommandBuilder::new("add", "Add a note")
                     .option(user("Member"))
-                    .option(StringBuilder::new("text", "The note").required(true)),
+                    .option(
+                        StringBuilder::new("msg", "The note (5 to 500 characters)")
+                            .min_length(5)
+                            .max_length(500)
+                            .required(true),
+                    ),
             )
             .option(
-                SubCommandBuilder::new("list", "Show a member's latest notes")
+                SubCommandBuilder::new("view", "Show a member's latest notes")
                     .option(user("Member")),
             )
             .option(
@@ -790,7 +848,7 @@ pub fn definitions() -> Vec<Command> {
                     .option(UserBuilder::new("user", "Member")),
             )
             .option(
-                SubCommandBuilder::new("edit", "Change a case's reason")
+                SubCommandBuilder::new("modify", "Change a case's reason")
                     .option(case(true))
                     .option(StringBuilder::new("reason", "New reason").required(true)),
             )
@@ -833,7 +891,7 @@ mod tests {
         assert_eq!(pf("slowmode off", None), Ok(ModCmd::Slowmode { secs: 0 }));
         assert!(pf("slowmode 7h", None).is_err());
         assert_eq!(
-            pf("cases edit 3 ?r typo", None),
+            pf("cases modify 3 ?r typo", None),
             Ok(ModCmd::CasesEdit {
                 case: 3,
                 reason: "typo".into()
@@ -846,7 +904,39 @@ mod tests {
                 user: None
             })
         );
-        assert!(pf("cases", None).is_err());
+        assert_eq!(
+            pf("cases", None),
+            Ok(ModCmd::CasesView {
+                case: None,
+                user: None
+            })
+        );
+        assert_eq!(
+            pf("editc 3 fixed typo", None),
+            Ok(ModCmd::CasesEdit {
+                case: 3,
+                reason: "fixed typo".into()
+            })
+        );
+        assert!(pf("editreason 3", None).is_err());
+        assert_eq!(
+            pf("caseoff 4", None),
+            Ok(ModCmd::CaseSet {
+                case: 4,
+                active: false
+            })
+        );
+        assert_eq!(
+            pf("opencase 4", None),
+            Ok(ModCmd::CaseSet {
+                case: 4,
+                active: true
+            })
+        );
+        assert_eq!(
+            pf("clearwarns 5000000", None),
+            Ok(ModCmd::ClearWarns { user: 5_000_000 })
+        );
     }
 
     #[test]

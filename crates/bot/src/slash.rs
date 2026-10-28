@@ -147,8 +147,8 @@ pub fn parse(
             });
         }
         "unlock" => return Ok(Cmd::Unlock),
-        "backup" => return backup(o),
-        "Quarantine" | "Sanitize" => {
+        "backups" => return backup(o),
+        "Quarantine" | "Sanitize & Dehoist" => {
             let user = target_id.ok_or("missing user")?.get();
             let cmd = match name {
                 "Quarantine" => ModCmd::Quarantine { user },
@@ -157,7 +157,7 @@ pub fn parse(
             return Ok(Cmd::Ext(cmd, None));
         }
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
-        | "slowmode" | "cases" | "verify" | "sanitize" | "note" => {
+        | "slowmode" | "cases" | "verify" | "sanitize" | "notes" => {
             return modcmds::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
         }
         "revert" => {
@@ -175,11 +175,8 @@ pub fn parse(
         user(o, "user")
     }
     .ok_or("missing user")?;
-    let duration_s = match (kind, dur(o, "duration")?) {
-        (ModKind::Timeout, None) if !menu => return Err("missing duration".into()),
-        (ModKind::Timeout, None) => Some(600),
-        (_, d) => d,
-    };
+    // No duration: a timeout falls back to the configured default in `apply_dm`.
+    let duration_s = dur(o, "duration")?;
     Ok(Cmd::Mod {
         kind,
         target,
@@ -225,13 +222,16 @@ pub fn definitions() -> Vec<Command> {
         guild_only(
             chat("timeout", "Time a member out")
                 .option(user())
-                .option(StringBuilder::new("duration", "Length, e.g. 10m").required(true))
+                .option(StringBuilder::new(
+                    "duration",
+                    "Length, e.g. 10m (default from settings)",
+                ))
                 .option(reason()),
         ),
         guild_only(
             chat("warn", "Warn a member")
                 .option(user())
-                .option(reason())
+                .option(reason().required(true))
                 .option(IntegerBuilder::new("points", "Warn points (default 1)").min_value(1)),
         ),
         guild_only(
@@ -249,7 +249,7 @@ pub fn definitions() -> Vec<Command> {
                 .option(StringBuilder::new("since", "How far back, e.g. 2h").required(true)),
         ),
         guild_only(
-            chat("backup", "Server backups")
+            chat("backups", "Server backups")
                 .option(SubCommandBuilder::new("create", "Take a backup now"))
                 .option(SubCommandBuilder::new("list", "List saved backups"))
                 .option(
@@ -269,7 +269,7 @@ pub fn definitions() -> Vec<Command> {
         guild_only(menu("Kick")),
         guild_only(menu("Timeout")),
         guild_only(menu("Quarantine")),
-        guild_only(menu("Sanitize")),
+        guild_only(menu("Sanitize & Dehoist")),
         guild_only(CommandBuilder::new(
             "Purge 100 From Here",
             "",
@@ -362,7 +362,8 @@ async fn run(
     // Asks for a Confirm click when the server wants one; the buttons are handled in `commands`.
     let mut ask = async |action| -> Result<Option<String>> {
         let job = Pending::new(gid, actor_id, action);
-        if !(cfg_confirm && job.needs_confirm()) {
+        // User context menus act at once (Wick: no reason, no confirm).
+        if data.kind == CommandType::User || !(cfg_confirm && job.needs_confirm()) {
             return Ok(None);
         }
         let (text, row) = commands::stash_confirm(app, i.id.get(), job).await?;
@@ -468,7 +469,14 @@ mod tests {
                 flags: Flags::default()
             })
         );
-        assert!(parse("timeout", &o[..1], None).is_err()); // duration required
+        // No duration: left empty so the configured default applies.
+        assert!(matches!(
+            parse("timeout", &o[..1], None),
+            Ok(Cmd::Mod {
+                duration_s: None,
+                ..
+            })
+        ));
         let typed = [
             o[0].clone(),
             opt(
@@ -489,14 +497,14 @@ mod tests {
             None
         )
         .is_err());
-        // context menu: target comes from target_id, timeout defaults to 10m
+        // context menu: target comes from target_id, timeout uses the configured default
         assert_eq!(
             parse("Timeout", &[], Some(Id::new(9))),
             Ok(Cmd::Mod {
                 kind: ModKind::Timeout,
                 target: Id::new(9),
                 reason: None,
-                duration_s: Some(600),
+                duration_s: None,
                 points: 1,
                 flags: Flags::default()
             })
@@ -505,7 +513,7 @@ mod tests {
             parse("Quarantine", &[], Some(Id::new(9))),
             Ok(Cmd::Ext(ModCmd::Quarantine { user: 9 }, None))
         );
-        assert!(parse("Sanitize", &[], None).is_err());
+        assert!(parse("Sanitize & Dehoist", &[], None).is_err());
         assert!(matches!(
             parse("softban", &o[..1], None),
             Ok(Cmd::Mod {
@@ -552,12 +560,12 @@ mod tests {
             [opt(name, CommandOptionValue::SubCommand(args))]
         };
         assert_eq!(
-            parse("backup", &sub("create", vec![]), None),
+            parse("backups", &sub("create", vec![]), None),
             Ok(Cmd::Backup(BackupCmd::Create))
         );
         assert_eq!(
             parse(
-                "backup",
+                "backups",
                 &sub(
                     "load",
                     vec![
@@ -574,7 +582,7 @@ mod tests {
         );
         assert_eq!(
             parse(
-                "backup",
+                "backups",
                 &sub("load", vec![opt("id", CommandOptionValue::Integer(4))]),
                 None
             ),
@@ -583,6 +591,6 @@ mod tests {
                 confirm: false
             }))
         );
-        assert!(parse("backup", &sub("delete", vec![]), None).is_err()); // id required
+        assert!(parse("backups", &sub("delete", vec![]), None).is_err()); // id required
     }
 }

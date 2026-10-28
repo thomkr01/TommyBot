@@ -297,8 +297,8 @@ pub fn check(
     if actor_id == target_id {
         return Err(Denied::SelfTarget);
     }
-    // Any permit holder is protected from ban/kick/etc. unless the actor strictly outranks them.
-    if target.immune() || (*target != Level::None && target.order() >= actor.order()) {
+    // Any permit holder is protected, except from quarantine (Wick: permit holders can be quarantined).
+    if target.immune() || (*target != Level::None && perm != "quarantine") {
         return Err(Denied::TargetProtected);
     }
     if target_above_bot {
@@ -503,7 +503,16 @@ mod tests {
         );
         assert_eq!(
             check(&custom(2, &["ban"]), "ban", 1, &custom(1, &[]), 2, false),
+            Err(Denied::TargetProtected)
+        );
+        let q = custom(1, &["quarantine"]);
+        assert_eq!(
+            check(&q, "quarantine", 1, &custom(1, &[]), 2, false),
             Ok(())
+        );
+        assert_eq!(
+            check(&q, "quarantine", 1, &Level::TrustedAdmin, 2, false),
+            Err(Denied::TargetProtected)
         );
         assert_eq!(
             check(&mod_, "ban", 1, &Level::None, 2, true),

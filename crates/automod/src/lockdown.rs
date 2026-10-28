@@ -208,13 +208,14 @@ pub fn plan(
 
 pub fn kind_from(name: &str, channel: Option<u64>) -> Option<LockKind> {
     Some(match name {
-        "server" => LockKind::Server,
+        // Wick's codes: c channel, sc channels (server), k kick, b ban, r roles, s/all everything.
+        "server" | "sc" => LockKind::Server,
         "blind" => LockKind::Blind,
-        "role" => LockKind::Role,
-        "all" => LockKind::All,
-        "kick" => LockKind::Join(JoinLock::Kick),
-        "ban" => LockKind::Join(JoinLock::Ban),
-        "channel" => LockKind::Channel(channel?),
+        "role" | "roles" | "r" => LockKind::Role,
+        "all" | "s" => LockKind::All,
+        "kick" | "k" => LockKind::Join(JoinLock::Kick),
+        "ban" | "b" => LockKind::Join(JoinLock::Ban),
+        "channel" | "c" => LockKind::Channel(channel?),
         _ => return None,
     })
 }
@@ -486,6 +487,11 @@ mod tests {
             .id
             .starts_with("main_above_bot"));
         assert_eq!(kind_from("channel", None), None);
+        assert_eq!(kind_from("c", Some(7)), Some(LockKind::Channel(7)));
+        assert_eq!(kind_from("sc", None), Some(LockKind::Server));
+        assert_eq!(kind_from("r", None), Some(LockKind::Role));
+        assert_eq!(kind_from("s", None), Some(LockKind::All));
+        assert_eq!(kind_from("b", None), Some(LockKind::Join(JoinLock::Ban)));
         assert_eq!(
             kind_from("kick", None),
             Some(LockKind::Join(JoinLock::Kick))

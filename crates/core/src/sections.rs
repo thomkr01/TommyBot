@@ -491,9 +491,12 @@ impl Default for MiscCfg {
 }
 
 impl MiscCfg {
-    /// Discord allows timeouts up to 28 days.
+    /// Discord allows timeouts up to 28 days; 0 means the maximum (Wick's "permanent").
     pub fn timeout_secs(&self) -> u64 {
-        self.default_timeout_secs.clamp(1, 28 * 86_400)
+        match self.default_timeout_secs {
+            0 => 28 * 86_400,
+            n => n.min(28 * 86_400),
+        }
     }
 
     /// Discord allows purging up to 7 days of messages on a ban.
@@ -635,6 +638,8 @@ mod tests {
         assert_eq!(m.prefix, "w!");
         assert!(m.use_slash && m.auto_warn_actions);
         assert_eq!(m.timeout_secs(), 28 * 86_400);
+        let zero: MiscCfg = serde_json::from_value(json!({"default_timeout_secs": 0})).unwrap();
+        assert_eq!(zero.timeout_secs(), 28 * 86_400);
         assert_eq!(m.purge_secs(), 7 * 86_400);
     }
 
