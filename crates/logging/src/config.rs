@@ -201,7 +201,7 @@ pub struct LogConfig {
 impl LogConfig {
     /// The channel a log goes to, if any. A custom type beats an event route, which beats a kind route.
     pub fn target(&self, kind: LogKind, event: Option<LogEvent>) -> Option<Id<ChannelMarker>> {
-        event
+        let routed = event
             .and_then(|e| {
                 self.custom
                     .iter()
@@ -209,8 +209,13 @@ impl LogConfig {
                     .map(|c| c.channel)
                     .or_else(|| self.events.get(&e).copied())
             })
-            .or_else(|| self.routes.get(&kind).copied())
-            .or(self.fallback)
+            .or_else(|| self.routes.get(&kind).copied());
+        // Wick: mod logs never go to the general log channel.
+        if kind == LogKind::ModCommand {
+            routed
+        } else {
+            routed.or(self.fallback)
+        }
     }
 }
 
@@ -248,6 +253,15 @@ mod tests {
         );
         cfg.custom.clear();
         assert_eq!(cfg.target(LogKind::Member, kick), Some(Id::new(3)));
+    }
+
+    #[test]
+    fn mod_log_never_uses_fallback() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(1)),
+            ..Default::default()
+        };
+        assert_eq!(cfg.target(LogKind::ModCommand, None), None);
     }
 
     #[test]

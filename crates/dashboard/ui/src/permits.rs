@@ -65,7 +65,7 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     None => view! {
                         <Field f=json!({"path": format!("custom.{n}.roles"), "kind": "roles", "title": "Permit Roles"}) val=cfg dc />
                         <div class="row"><label>"Rank"</label><input prop:value=move || cfg.get()["custom"][n]["rank"].to_string() on:change=move |e| set_field(n, "rank", event_target_value(&e)) /></div>
-                        <p class="muted">"A lower rank number outranks a higher one."</p> }.into_any(),
+                        <p class="muted">"A higher rank number outranks a lower one."</p> }.into_any(),
                 }}
             </Show>
             <Show when=move || tab.get() == 1>

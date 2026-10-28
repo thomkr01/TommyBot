@@ -15,7 +15,10 @@ pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
 
 /// Level and step-up a write to `section` needs.
 pub fn write_bar(section: &str) -> (Level, bool) {
-    if SENSITIVE.contains(&section) {
+    // Wick: Trusted Admins cannot change Miscellaneous or Anti-Nuke (and Panic).
+    if matches!(section, "misc" | "antinuke" | "panic") {
+        (Level::Owner, SENSITIVE.contains(&section))
+    } else if SENSITIVE.contains(&section) {
         (Level::Admin, true)
     } else {
         (Level::Editor, false)
@@ -79,7 +82,13 @@ mod tests {
         for s in SECTIONS {
             let (min, step_up) = write_bar(s);
             assert_eq!(step_up, SENSITIVE.contains(s));
-            assert_eq!(min, if step_up { Level::Admin } else { Level::Editor });
+            let owner_only = matches!(*s, "misc" | "antinuke" | "panic");
+            let want = match (owner_only, step_up) {
+                (true, _) => Level::Owner,
+                (_, true) => Level::Admin,
+                _ => Level::Editor,
+            };
+            assert_eq!(min, want);
         }
         assert!(SENSITIVE.iter().all(|s| SECTIONS.contains(s)));
         // A viewer can never write, and an editor never touches anti-nuke.

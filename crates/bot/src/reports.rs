@@ -36,6 +36,7 @@ pub async fn message_menu(
     data: &CommandData,
     gid: Id<GuildMarker>,
     actor_id: Id<UserMarker>,
+    reporter: &str,
 ) -> Result<String> {
     let msg = data
         .target_id
@@ -47,7 +48,7 @@ pub async fn message_menu(
     let from = match data.name.as_str() {
         "Purge 100 From Here" => Anchor::From(msg.id.get()),
         "Purge 100 Until Here" => Anchor::Until(msg.id.get()),
-        _ => return report(app, gid, actor_id, msg).await,
+        _ => return report(app, gid, actor_id, msg, reporter).await,
     };
     let owner = app.guild_info(gid).await?.owner;
     let actor = app.level(gid, owner, actor_id).await?;
@@ -119,6 +120,7 @@ async fn report(
     gid: Id<GuildMarker>,
     reporter: Id<UserMarker>,
     msg: &Message,
+    reporter_name: &str,
 ) -> Result<String> {
     let g = gid.get() as i64;
     let Some(log) = app
@@ -179,10 +181,10 @@ async fn report(
         msg.author.id
     ))
     .text(&format!(
-        "**Member:** {} [{}]",
+        "👤 **Member:** {} [{}]",
         msg.author.name, msg.author.id
     ))
-    .text(&format!("**Creation:** <t:{created}:F>"))
+    .text(&format!("🎂 **Creation:** <t:{created}:F>"))
     .field(
         "Reported Message:",
         if content.is_empty() {
@@ -192,7 +194,7 @@ async fn report(
         },
     )
     .footer(&format!(
-        "Reported by {reporter} | TARGET: {}",
+        "Reported by {reporter_name} | TARGET: {}",
         msg.author.id
     ))
     .build();
@@ -210,7 +212,7 @@ async fn report(
             .await?;
         return Err(e.into());
     }
-    Ok(format!("Report #{id} sent to the staff, thank you"))
+    Ok("✅ This message has been flagged and sent to the staff team for a review!".into())
 }
 
 /// The pressed button's effect: the private answer, and for a success the verb for the history line.
@@ -354,7 +356,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             embed.color = Some(HANDLED);
             let embeds = [embed];
             let u = client.update_response(&i.token).embeds(Some(&embeds));
-            if action == "dismiss" {
+            if matches!(action, "dismiss" | "delete") {
                 u.components(Some(&[])).await?;
             } else {
                 u.await?;

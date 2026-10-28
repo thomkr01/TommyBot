@@ -229,12 +229,36 @@ pub const CATALOG: &[PermSection] = &[
         id: "whitelist",
         title: "Whitelist",
         items: &[
-            flag("wl_kick_ban", "Kick/Ban Whitelist", ""),
-            flag("wl_channel_create", "Channel Creations Whitelist", ""),
-            flag("wl_channel_delete", "Channel Deletions Whitelist", ""),
-            flag("wl_role_create", "Role Creations Whitelist", ""),
-            flag("wl_role_delete", "Role Deletions Whitelist", ""),
-            flag("wl_webhook_create", "Webhook Creations Whitelist", ""),
+            flag(
+                "wl_kick_ban",
+                "Kick/Ban Whitelist",
+                "Anyone with this can kick and ban without limitations",
+            ),
+            flag(
+                "wl_channel_create",
+                "Channel Creations Whitelist",
+                "Anyone with this can create channels without limitations",
+            ),
+            flag(
+                "wl_channel_delete",
+                "Channel Deletions Whitelist",
+                "Anyone with this can delete channels without limitations",
+            ),
+            flag(
+                "wl_role_create",
+                "Role Creations Whitelist",
+                "Anyone with this can create roles without limitations",
+            ),
+            flag(
+                "wl_role_delete",
+                "Role Deletions Whitelist",
+                "Anyone with this can delete roles without limitations",
+            ),
+            flag(
+                "wl_webhook_create",
+                "Webhook Creations Whitelist",
+                "Anyone with this can create webhooks without limitations",
+            ),
             flag(
                 "quarantine",
                 "Quarantine Whitelist",

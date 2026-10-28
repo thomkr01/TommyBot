@@ -344,7 +344,14 @@ async fn run(
         return Ok("Server only".into());
     };
     if data.kind == CommandType::Message {
-        return reports::message_menu(app, data, gid, actor_id).await;
+        return reports::message_menu(
+            app,
+            data,
+            gid,
+            actor_id,
+            &i.author().map_or_else(String::new, |u| u.name.clone()),
+        )
+        .await;
     }
     let cmd = match parse(&data.name, &data.options, data.target_id) {
         Ok(c) => c,

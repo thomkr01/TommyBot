@@ -19,7 +19,7 @@ pub const BLUE: u32 = 0x0D9DF8;
 /// Wick prefixes each line with a custom arrow emoji; this is the closest Unicode one.
 pub const ARROW: &str = "▸";
 pub const YES: &str = "✅";
-pub const NO: &str = "❌";
+pub const NO: &str = "❎";
 
 /// Discord's embed limits.
 const TITLE: usize = 256;

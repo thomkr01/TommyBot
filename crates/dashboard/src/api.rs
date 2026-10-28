@@ -30,6 +30,10 @@ pub(crate) async fn permit_perms(
         .bind(guild).bind(&roles).fetch_all(&st.db).await?.concat())
 }
 
+async fn is_discord_owner(st: &AppState, s: &Sess, guild: i64) -> Result<bool, ApiError> {
+    Ok(st.discord.guild_owner(guild).await? == s.user_id.to_string())
+}
+
 /// Re-resolved on every request, including writes (spec 3.1).
 pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Level, ApiError> {
     let flag = |table: &'static str| async move {
@@ -41,7 +45,7 @@ pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Leve
         .fetch_one(&st.db)
         .await
     };
-    let discord_owner = st.discord.guild_owner(guild).await? == s.user_id.to_string();
+    let discord_owner = is_discord_owner(st, s, guild).await?;
     let (extra_owner, trusted_admin) = (flag("extra_owners").await?, flag("trusted_admins").await?);
     let perms = if discord_owner || extra_owner || trusted_admin {
         vec![]
@@ -198,10 +202,13 @@ pub async fn put_permits(
     let level = require(&st, &s, guild, Level::Admin, true).await?;
     let mut tx = st.db.begin().await?;
     let old = store::read_permits(&mut tx, guild).await?;
-    // Only owners may change who owns or administers the bot.
-    if level < Level::Owner && (old["eo"] != b.value["eo"] || old["ta"] != b.value["ta"]) {
+    // Only owners may change who administers the bot, and only the server owner who owns it.
+    if level < Level::Owner && old["ta"] != b.value["ta"] {
+        return Err(ApiError::Forbidden("only owners can change the TA list"));
+    }
+    if old["eo"] != b.value["eo"] && !is_discord_owner(&st, &s, guild).await? {
         return Err(ApiError::Forbidden(
-            "only owners can change the EO and TA lists",
+            "only the server owner can change the Extra Owners list",
         ));
     }
     store::write_permits(&mut tx, guild, &b.value).await?;
@@ -271,9 +278,12 @@ pub async fn rollback(
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
     if let Some(p) = old.get("permits") {
-        if level < Level::Owner && (p["eo"] != cur["eo"] || p["ta"] != cur["ta"]) {
+        if level < Level::Owner && p["ta"] != cur["ta"] {
+            return Err(ApiError::Forbidden("only owners can roll back the TA list"));
+        }
+        if p["eo"] != cur["eo"] && !is_discord_owner(&st, &s, guild).await? {
             return Err(ApiError::Forbidden(
-                "only owners can roll back the EO and TA lists",
+                "only the server owner can roll back the Extra Owners list",
             ));
         }
         store::write_permits(&mut tx, guild, p).await?;
