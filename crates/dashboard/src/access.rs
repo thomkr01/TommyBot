@@ -16,12 +16,11 @@ pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
 /// Level and step-up a write to `section` needs.
 pub fn write_bar(section: &str) -> (Level, bool) {
     // Wick: Trusted Admins cannot change Miscellaneous or Anti-Nuke (and Panic).
-    if matches!(section, "misc" | "antinuke" | "panic") {
-        (Level::Owner, SENSITIVE.contains(&section))
-    } else if SENSITIVE.contains(&section) {
-        (Level::Admin, true)
-    } else {
-        (Level::Editor, false)
+    match section {
+        "misc" => (Level::Owner, false),
+        "antinuke" | "panic" => (Level::Owner, true),
+        s if SENSITIVE.contains(&s) => (Level::Admin, true),
+        _ => (Level::Editor, false),
     }
 }
 
