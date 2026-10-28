@@ -594,12 +594,15 @@ pub fn schema() -> Vec<Value> {
     ]);
     let raid = vec![
         dv(fg("General", "enabled", "bool"), true),
-        f("count", "int"),
-        f("span_ms", "int"),
+        ti(f("count", "int"), "Minimum trigger (accounts)"),
+        ti(f("span_ms", "int"), "Join history (milliseconds)"),
         f("suspicious_only", "bool"),
-        f("active_ms", "int"),
+        ti(f("active_ms", "int"), "Trigger duration (milliseconds)"),
         f("string_patterns", "list"),
-        f("flag_younger_than_ms", "int"),
+        ti(
+            f("flag_younger_than_ms", "int"),
+            "Flag accounts younger than (milliseconds)",
+        ),
         f("flag_no_avatar", "bool"),
         ti(
             fg("ID flag", "id_flag_min", "int"),
