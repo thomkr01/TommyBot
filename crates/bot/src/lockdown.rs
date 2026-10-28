@@ -247,6 +247,86 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
     Ok(lifted)
 }
 
+fn lock_name(k: &LockKind) -> String {
+    match k {
+        LockKind::Server => "channels".into(),
+        LockKind::Blind => "channels (blind)".into(),
+        LockKind::Channel(c) => format!("<#{c}>"),
+        LockKind::Role => "roles".into(),
+        LockKind::Join(j) => format!("joins ({j:?})").to_lowercase(),
+        LockKind::All => "everything".into(),
+        LockKind::Mixed {
+            channels,
+            roles,
+            joins,
+        } => [
+            (*channels, "channels"),
+            (*roles, "roles"),
+            (*joins, "joins"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(" + "),
+    }
+}
+
+pub const LOCK_TYPES: &str =
+    "Lock type: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s)";
+
+/// Lock or unlock the server; shared by the prefix and slash commands. `kind` overrides the dashboard's lock type.
+pub async fn command(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: &tommybot_core::permits::Level,
+    lift: bool,
+    kind: Option<LockKind>,
+    duration_s: Option<i64>,
+) -> Result<String> {
+    if !actor.has("lockdown") {
+        return Ok("Cannot lock: no permit".into());
+    }
+    if lift {
+        return Ok(match unlock(app, gid, kind.as_ref()).await? {
+            0 => "Nothing to unlock".into(),
+            1 => "Unlocked".into(),
+            n => format!("Lifted {n} locks"),
+        });
+    }
+    let kind = match kind {
+        Some(k) => k,
+        None => {
+            // Wick: a bare `lock` while locked shows what is locked.
+            let active = active(app, gid).await?;
+            if !active.is_empty() {
+                let list: Vec<String> = active.iter().map(lock_name).collect();
+                return Ok(format!("Active locks: {}", list.join(", ")));
+            }
+            app.cfg(gid.get()).await?.lockdown_prefs.kind()
+        }
+    };
+    let name = lock_name(&kind);
+    let done = lock(app, gid, kind.clone()).await?;
+    if done {
+        if let Some(d) = duration_s {
+            tommybot_core::jobs::enqueue(
+                &app.pool,
+                gid.get() as i64,
+                "unlock",
+                serde_json::json!({ "lock": kind }),
+                now_secs() + d,
+            )
+            .await?;
+        }
+    }
+    Ok(if done {
+        format!("Locked: {name}")
+    } else {
+        format!("Cannot lock {name}: an active lock already covers it")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

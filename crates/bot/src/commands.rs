@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tommybot_automod::lockdown::{kind_from, LockKind};
+use tommybot_automod::lockdown::kind_from;
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
 use tommybot_logging::{
     embed::{self, duration, ARROW, ORANGE, RED},
@@ -359,7 +359,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
                 match name.map(|n| kind_from(n, Some(*c))) {
                     Some(Some(k)) if !kinds.contains(&k) => kinds.push(k),
                     Some(Some(_)) => {}
-                    Some(None) => return say(app, msg, LOCK_TYPES).await,
+                    Some(None) => return say(app, msg, lockdown::LOCK_TYPES).await,
                     None => {}
                 }
             }
@@ -370,7 +370,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
                 .map(Some)
                 .chain(name.is_none().then_some(None))
             {
-                out.push(lockdown_cmd(app, gid, &actor, unlock, kind, p.duration_s).await?);
+                out.push(lockdown::command(app, gid, &actor, unlock, kind, p.duration_s).await?);
             }
             return say(app, msg, &out.join("\n")).await;
         }
@@ -809,86 +809,6 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
         }
     }
     Ok(())
-}
-
-fn lock_name(k: &LockKind) -> String {
-    match k {
-        LockKind::Server => "channels".into(),
-        LockKind::Blind => "channels (blind)".into(),
-        LockKind::Channel(c) => format!("<#{c}>"),
-        LockKind::Role => "roles".into(),
-        LockKind::Join(j) => format!("joins ({j:?})").to_lowercase(),
-        LockKind::All => "everything".into(),
-        LockKind::Mixed {
-            channels,
-            roles,
-            joins,
-        } => [
-            (*channels, "channels"),
-            (*roles, "roles"),
-            (*joins, "joins"),
-        ]
-        .iter()
-        .filter(|(on, _)| *on)
-        .map(|(_, n)| *n)
-        .collect::<Vec<_>>()
-        .join(" + "),
-    }
-}
-
-pub const LOCK_TYPES: &str =
-    "Lock type: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s)";
-
-/// Lock or unlock the server; shared by the prefix and slash commands. `kind` overrides the dashboard's lock type.
-pub async fn lockdown_cmd(
-    app: &App,
-    gid: Id<GuildMarker>,
-    actor: &permits::Level,
-    unlock: bool,
-    kind: Option<LockKind>,
-    duration_s: Option<i64>,
-) -> Result<String> {
-    if !actor.has("lockdown") {
-        return Ok("Cannot lock: no permit".into());
-    }
-    if unlock {
-        return Ok(match lockdown::unlock(app, gid, kind.as_ref()).await? {
-            0 => "Nothing to unlock".into(),
-            1 => "Unlocked".into(),
-            n => format!("Lifted {n} locks"),
-        });
-    }
-    let kind = match kind {
-        Some(k) => k,
-        None => {
-            // Wick: a bare `lock` while locked shows what is locked.
-            let active = lockdown::active(app, gid).await?;
-            if !active.is_empty() {
-                let list: Vec<String> = active.iter().map(lock_name).collect();
-                return Ok(format!("Active locks: {}", list.join(", ")));
-            }
-            app.cfg(gid.get()).await?.lockdown_prefs.kind()
-        }
-    };
-    let name = lock_name(&kind);
-    let done = lockdown::lock(app, gid, kind.clone()).await?;
-    if done {
-        if let Some(d) = duration_s {
-            jobs::enqueue(
-                &app.pool,
-                gid.get() as i64,
-                "unlock",
-                json!({ "lock": kind }),
-                now_secs() + d,
-            )
-            .await?;
-        }
-    }
-    Ok(if done {
-        format!("Locked: {name}")
-    } else {
-        format!("Cannot lock {name}: an active lock already covers it")
-    })
 }
 
 /// `/backup create|list|load|delete`. `load` previews unless `confirm` is set.

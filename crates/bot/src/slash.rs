@@ -149,7 +149,7 @@ pub fn parse(
         "warn" => ModKind::Warn,
         "lock" => {
             let kind = match string(o, "type") {
-                Some(n) => Some(kind_from(n, None).ok_or(commands::LOCK_TYPES)?),
+                Some(n) => Some(kind_from(n, None).ok_or(crate::lockdown::LOCK_TYPES)?),
                 None => None,
             };
             return Ok(Cmd::Lock {
@@ -159,7 +159,7 @@ pub fn parse(
         }
         "unlock" => {
             let kind = match string(o, "type") {
-                Some(n) => Some(kind_from(n, None).ok_or(commands::LOCK_TYPES)?),
+                Some(n) => Some(kind_from(n, None).ok_or(crate::lockdown::LOCK_TYPES)?),
                 None => None,
             };
             return Ok(Cmd::Unlock { kind });
@@ -215,7 +215,7 @@ pub fn definitions() -> Vec<Command> {
     let guild_only = |b: CommandBuilder| b.contexts([InteractionContextType::Guild]).build();
     let chat = |n: &str, d: &str| CommandBuilder::new(n, d, CommandType::ChatInput);
     let menu = |n: &str| CommandBuilder::new(n, "", CommandType::User);
-    let mut defs = modcmds::definitions();
+    let mut defs = crate::modslash::definitions();
     defs.extend([
         guild_only(
             chat("ban", "Ban a member")
@@ -426,9 +426,9 @@ async fn run(
             .await
         }
         Cmd::Lock { kind, duration_s } => {
-            commands::lockdown_cmd(app, gid, &actor, false, kind, duration_s).await
+            crate::lockdown::command(app, gid, &actor, false, kind, duration_s).await
         }
-        Cmd::Unlock { kind } => commands::lockdown_cmd(app, gid, &actor, true, kind, None).await,
+        Cmd::Unlock { kind } => crate::lockdown::command(app, gid, &actor, true, kind, None).await,
         Cmd::Revert { target, since_s } => {
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }

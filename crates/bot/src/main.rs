@@ -11,6 +11,7 @@ mod hierarchy;
 mod lockdown;
 mod metrics;
 mod modcmds;
+mod modslash;
 mod panic;
 mod prefix;
 mod purge;
