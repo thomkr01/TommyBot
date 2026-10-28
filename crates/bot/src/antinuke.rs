@@ -189,7 +189,8 @@ async fn guard_perms(
         || an.strict_member_roles
         || an.monitor_public_roles
         || an.monitor_channel_perms
-        || an.vanity_guard;
+        || an.vanity_guard
+        || an.quarantine_role == Some(target.cast());
     if !guarded || app.whitelisted(gid, actor, "antinuke").await? {
         return Ok(());
     }
@@ -199,7 +200,11 @@ async fn guard_perms(
         gained_dangerous(bits(old), bits(new)).then(|| old.unwrap_or(Permissions::empty()))
     };
     let why = match e.action_type {
-        A::RoleUpdate if an.strict_mode || (an.monitor_public_roles && public(target.get())) => {
+        A::RoleUpdate
+            if an.strict_mode
+                || (an.monitor_public_roles && public(target.get()))
+                || an.quarantine_role == Some(target.cast()) =>
+        {
             let Some(old) = e.changes.iter().find_map(|c| match c {
                 AuditLogChange::Permissions { old, new } => gained(*old, *new),
                 _ => None,

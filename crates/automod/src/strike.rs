@@ -69,7 +69,7 @@ pub fn strike(s: &mut StrikeState, cfg: &StrikeCfg, now: i64) -> StrikeAction {
     let capped = s.strikes >= cfg.cap;
     let timeout_ms = if capped {
         s.last_cap_duration_ms = if s.last_cap_duration_ms > 0 && cfg.multiply {
-            s.last_cap_duration_ms * i64::from(cfg.multiplier_pct) / 100
+            (s.last_cap_duration_ms * i64::from(cfg.multiplier_pct) / 100).min(28 * 86_400_000)
         } else {
             cfg.cap_timeout_ms
         };
@@ -115,6 +115,18 @@ mod tests {
             .map(|i| strike(&mut s, &flat, i).timeout_ms / M)
             .collect();
         assert_eq!(caps, [1, 1, 11, 11]);
+    }
+
+    #[test]
+    fn grown_cap_is_limited_to_28_days() {
+        let cfg = StrikeCfg::default();
+        let mut s = StrikeState {
+            last_cap_duration_ms: 20 * 86_400_000,
+            cap_end_ms: 1,
+            strikes: 5,
+            last_strike_ms: 0,
+        };
+        assert_eq!(strike(&mut s, &cfg, 2).timeout_ms, 28 * 86_400_000);
     }
 
     #[test]

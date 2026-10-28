@@ -142,13 +142,13 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     for step in panic_plan(cfg.lock_mod_commands) {
         match step {
             PanicStep::LockServer => {
-                lockdown::lock(app, gid, LockKind::Server).await?;
+                lockdown::lock(app, gid, LockKind::Role).await?;
             }
             PanicStep::PingWarnedRoles => {
                 let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
-                    .text(&format!("{NO} **An abnormal behaviour has been detected!**"))
+                    .text("🛑 **An abnormal behaviour has been detected!**")
                     .text(&format!(
-                        "{ARROW} Several accounts were quarantined at once, the server will be locked down."
+                        "{ARROW} TommyBot will lockdown the server and run a scan."
                     ));
                 send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
             }

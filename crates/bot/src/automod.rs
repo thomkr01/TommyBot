@@ -68,9 +68,6 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     };
     let listed =
         |l: &WhitelistList| l.covers(m.author.id, roles, m.channel_id, category, m.webhook_id);
-    if listed(&wl.spam) {
-        return Ok(());
-    }
     let partner = wl.partner_channels.contains(&m.channel_id);
     let now = now_ms();
     let content = m.content.as_str();
@@ -112,9 +109,15 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .or_default()
             .on_message(now, f.inactive_messages, f.inactive_hours),
         invite_link: f.invites.enabled
-            && ["discord.gg/", "discord.com/invite/"]
-                .iter()
-                .any(|p| content.to_lowercase().contains(p)),
+            && [
+                "discord.gg/",
+                "discord.com/invite/",
+                "discordapp.com/invite/",
+                "discord.me/",
+                "dsc.gg/",
+            ]
+            .iter()
+            .any(|p| content.to_lowercase().contains(p)),
         malicious_link: bad_site || f.scam_links.enabled && filters::is_nitro_steam_scam(content),
         nsfw_link: f.nsfw_links.enabled && app.sites.nsfw(&checked),
         blacklisted_link: f.links.enabled
@@ -129,7 +132,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         lower_chars,
         from_webhook: m.webhook_id.is_some(),
         whitelist: Whitelist {
-            spam: partner,
+            spam: partner || listed(&wl.spam),
             mention_spam: listed(&wl.mentions),
             advertising: partner || listed(&wl.invites),
             everyone: partner || listed(&wl.everyone),
@@ -154,16 +157,17 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .entry(gid.get())
             .or_default()
             .on_mentions(pings, now, lock.mention_count, lock.mention_window_ms);
-    let over_hour_cap = am.anti_spam && f.mentions.enabled && pings > 0 && {
-        let mut map = app.pings.lock().unwrap();
-        // shortcut: dropped wholesale past 100k members, move to a TTL cache when that bites.
-        if map.len() > 100_000 {
-            map.clear();
-        }
-        map.entry((gid.get(), m.author.id.get()))
-            .or_default()
-            .on_mentions(pings, now, f.mention_hour_cap + 1, 3_600_000)
-    };
+    let over_hour_cap =
+        am.anti_spam && f.mentions.enabled && !listed(&wl.mentions) && pings > 0 && {
+            let mut map = app.pings.lock().unwrap();
+            // shortcut: dropped wholesale past 100k members, move to a TTL cache when that bites.
+            if map.len() > 100_000 {
+                map.clear();
+            }
+            map.entry((gid.get(), m.author.id.get()))
+                .or_default()
+                .on_mentions(pings, now, f.mention_hour_cap + 1, 3_600_000)
+        };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
     let (triggered, breakdown) = {
@@ -227,7 +231,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         h.take_msgs()
     });
     app.http.delete_message(m.channel_id, m.id).await.ok();
-    if cfg.misc.purge_last_100 {
+    if cfg.misc.purge_last_100 || act.purge {
         reply::purge_user(app, m.channel_id, m.author.id).await.ok();
         let others: Vec<_> = tracked
             .unwrap_or_default()
@@ -658,6 +662,9 @@ async fn native_action(
 ) -> Result<()> {
     const WHY: &str = "discord automod rule";
     let (gid, uid) = (e.guild_id, e.user_id);
+    if app.whitelisted(gid, uid, "automod").await? {
+        return Ok(());
+    }
     match action {
         BotAction::Report => {
             let log = Log::new("Discord AutoMod Report", ORANGE)

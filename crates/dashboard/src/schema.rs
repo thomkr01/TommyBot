@@ -651,8 +651,8 @@ pub fn schema() -> Vec<Value> {
         ),
         dv(fg("Trigger", "window_secs", "int"), 600),
         dv(fg("Response", "duration_secs", "int"), 600),
-        fg("Response", "lock_mod_commands", "bool"),
-        fg("Response", "unlock_when_ending", "bool"),
+        dv(fg("Response", "lock_mod_commands", "bool"), true),
+        dv(fg("Response", "unlock_when_ending", "bool"), true),
         fg("Response", "warned_roles", "roles"),
         fg("Response", "whitelisted_categories", "categories"),
     ];

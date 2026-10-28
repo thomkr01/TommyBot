@@ -313,6 +313,28 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
             }
         }
     }
+    if section == "automod" {
+        // Discord's own domains can never be blacklisted (it would block every invite).
+        const OWN: [&str; 7] = [
+            "discord.com",
+            "discord.gg",
+            "discordapp.com",
+            "discord.media",
+            "discordapp.net",
+            "discord.new",
+            "discord.gift",
+        ];
+        for d in v["filters"]["blacklisted_domains"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let d = d.as_str().unwrap_or("").trim().to_lowercase();
+            if OWN.iter().any(|o| d == *o || d.ends_with(&format!(".{o}"))) {
+                return Err(ApiError::BadRequest(format!("{d} cannot be blacklisted")));
+            }
+        }
+    }
     let v = v.clone();
     let r = match section {
         "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),
@@ -344,6 +366,14 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
 mod logging_validate_tests {
     use super::validate;
     use serde_json::json;
+
+    #[test]
+    fn discord_domains_cannot_be_blacklisted() {
+        let bad = |d| validate("automod", &json!({"filters": {"blacklisted_domains": [d]}}));
+        assert!(bad("Discord.gg").is_err());
+        assert!(bad("cdn.discordapp.com").is_err());
+        assert!(bad("evil.example").is_ok());
+    }
 
     #[test]
     fn custom_type_needs_channel_and_events() {
