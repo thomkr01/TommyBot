@@ -105,9 +105,9 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 app,
                 gid.get(),
                 LogKind::JoinRaid,
-                Log::new("Join Raid Report!", DONE)
-                    .text(&format!("{YES} **The join raid has ended.**"))
-                    .line("Caught", &format!("`{caught}`")),
+                Log::new("🕵 Join Raid Report!", DONE).text(&format!(
+                    "{YES} `{caught}` users have been caught by the join raid."
+                )),
             )
             .await?
         }
