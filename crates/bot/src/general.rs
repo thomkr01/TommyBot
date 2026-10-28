@@ -3,11 +3,10 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use tommybot_antinuke::DANGEROUS_PERMS;
 use tommybot_core::{cases, permits::Level};
 use tommybot_logging::embed::{self, Log, BLUE, GREEN, NO, YES};
 use twilight_model::{
-    channel::message::{AllowedMentions, Component, Embed},
+    channel::message::{Component, Embed},
     gateway::payload::incoming::MessageCreate,
     guild::Permissions,
     id::{
@@ -18,7 +17,9 @@ use twilight_model::{
 
 use crate::{
     app::{now_secs, App},
-    metrics, settings, targets, welcome,
+    metrics,
+    settings::{self, send},
+    targets, welcome,
 };
 
 /// (name, aliases, permit, usage, what). Permit "" is anyone, "*" any permit, "owner" Owner or Extra Owner.
@@ -432,7 +433,7 @@ fn dangerous(perms: u64) -> String {
     ];
     let names: Vec<_> = NAMES
         .iter()
-        .filter(|(b, _)| perms & b & DANGEROUS_PERMS != 0)
+        .filter(|(b, _)| perms & b != 0)
         .map(|(_, n)| *n)
         .collect();
     if names.is_empty() {
@@ -696,24 +697,6 @@ async fn tshoot_lockdown(app: &App, gid: Id<GuildMarker>) -> Result<String> {
         0 => "No roles needed changes. You are clear!".into(),
         n => format!("{YES} {n} roles were tweaked"),
     })
-}
-
-async fn send(
-    app: &App,
-    msg: &MessageCreate,
-    text: &str,
-    embed: Option<Embed>,
-    rows: Vec<Component>,
-) -> Result<()> {
-    let embeds: Vec<Embed> = embed.into_iter().collect();
-    app.http
-        .create_message(msg.channel_id)
-        .content(text)
-        .embeds(&embeds)
-        .components(&rows)
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .await?;
-    Ok(())
 }
 
 /// Handles the commands above and `COMMAND -h`; false for anything else.
