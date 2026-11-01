@@ -65,6 +65,8 @@ pub fn routes() -> Router<AppState> {
     let g = "/api/guilds/{guild}/appeals";
     Router::new()
         .route("/api/appeal/{guild}", get(form).post(submit))
+        .route("/api/appeal/{guild}/mine", get(mine))
+        .route("/api/appeal/{guild}/withdraw", post(withdraw))
         .route(g, get(list))
         .route(&format!("{g}/{{id}}/decide"), post(decide))
         .route(
@@ -228,11 +230,55 @@ async fn submit(
             button("Deny + Blacklist", "blacklist", 4),
             button("Dismiss", "dismiss", 2),
         ]}]);
-        if let Err(e) = st.discord.post_log_with(&ch.to_string(), log, row).await {
-            tracing::warn!(?e, "appeal notice failed");
+        match st.discord.post_log_with(&ch.to_string(), log, row).await {
+            Ok(msg) => {
+                sqlx::query("update appeals set log_channel = $2, log_message = $3 where id = $1")
+                    .bind(id)
+                    .bind(ch.get() as i64)
+                    .bind(msg.parse::<i64>().unwrap_or_default())
+                    .execute(&st.db)
+                    .await?;
+            }
+            Err(e) => tracing::warn!(?e, "appeal notice failed"),
         }
     }
     Ok(Json(json!({"id": id})))
+}
+
+/// The member's own appeals with their status and the staff reply.
+async fn mine(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "select id, kind, status, reply, created_at from appeals
+         where guild_id = $1 and user_id = $2 order by created_at desc limit 20",
+    )
+    .bind(guild)
+    .bind(s.user_id)
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(json!(rows
+        .into_iter()
+        .map(|(id, kind, status, reply, at)| json!({"id": id, "kind": kind, "status": status, "reply": reply, "at": at}))
+        .collect::<Vec<_>>())))
+}
+
+/// The member takes back their open appeal.
+async fn withdraw(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    let id: Option<i64> = sqlx::query_scalar(
+        "update appeals set status = 'withdrawn' where guild_id = $1 and user_id = $2 and status = 'open' returning id",
+    )
+    .bind(guild)
+    .bind(s.user_id)
+    .fetch_optional(&st.db)
+    .await?;
+    let id = id.ok_or(ApiError::NotFound)?;
+    close_log(&st, id, "Withdrawn by the member").await;
+    Ok(Json(json!({"ok": true})))
 }
 
 #[derive(Deserialize)]
@@ -323,6 +369,17 @@ async fn decide(
         add_blacklist(&mut tx, guild, user, s.user_id).await?;
     }
     tx.commit().await?;
+    let word = match status {
+        "dismissed" => "Dismissed",
+        "accepted" => "Approved",
+        _ if b.blacklist => "Denied and blacklisted",
+        _ => "Denied",
+    };
+    let mut decision = format!("{word} by <@{}>", s.user_id);
+    if !reply.is_empty() {
+        decision.push_str(&format!("\n{reply}"));
+    }
+    close_log(&st, id, &decision).await;
     if !b.dismiss {
         let verdict = if b.accept { "approved" } else { "denied" };
         let mut text = format!("Your {kind} appeal (#{id}) was {verdict}.");
@@ -366,6 +423,32 @@ async fn lift(
         Ok(_) => Ok(()),
         Err(e) if not_found(&e) => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Closes the Discord log of an appeal decided elsewhere: buttons off, a Decision field added.
+async fn close_log(st: &AppState, id: i64, decision: &str) {
+    let row: Option<(Option<i64>, Option<i64>)> =
+        sqlx::query_as("select log_channel, log_message from appeals where id = $1")
+            .bind(id)
+            .fetch_optional(&st.db)
+            .await
+            .ok()
+            .flatten();
+    let Some((Some(ch), Some(msg))) = row else {
+        return;
+    };
+    let path = format!("/channels/{ch}/messages/{msg}");
+    let Ok(mut m) = st.discord.call(Method::GET, &path, None).await else {
+        return;
+    };
+    let mut embeds = m["embeds"].take();
+    if let Some(fields) = embeds[0]["fields"].as_array_mut() {
+        fields.push(json!({"name": "Decision", "value": decision, "inline": false}));
+    }
+    let body = json!({"embeds": embeds, "components": []});
+    if let Err(e) = st.discord.call(Method::PATCH, &path, Some(body)).await {
+        tracing::warn!(?e, "closing the appeal log failed");
     }
 }
 

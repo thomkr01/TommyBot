@@ -103,6 +103,19 @@ pub fn AppealForm(guild: String) -> impl IntoView {
     let info = RwSignal::new(Value::Null);
     let (answers, msg, done) = (RwSignal::new(Vec::<String>::new()), RwSignal::new(String::new()), RwSignal::new(false));
     let g = StoredValue::new(guild);
+    let mine = RwSignal::new(Vec::<Value>::new());
+    let load_mine = move || spawn_local(async move {
+        if let Ok(v) = api("GET", &format!("/api/appeal/{}/mine", g.get_value()), None).await {
+            mine.set(v.as_array().cloned().unwrap_or_default());
+        }
+    });
+    load_mine();
+    let withdraw = move |_| spawn_local(async move {
+        match api("POST", &format!("/api/appeal/{}/withdraw", g.get_value()), None).await {
+            Ok(_) => load_mine(),
+            Err(e) => msg.set(e),
+        }
+    });
     spawn_local(async move {
         match api("GET", &format!("/api/appeal/{}", g.get_value()), None).await {
             Ok(v) => { answers.set(vec![String::new(); v["fields"].as_array().map_or(0, Vec::len)]); info.set(v) }
@@ -118,6 +131,16 @@ pub fn AppealForm(guild: String) -> impl IntoView {
     view! {
         <h1>"Appeal"</h1>
         <p class="err">{move || msg.get()}</p>
+        <For each=move || mine.get() key=|r| (r["id"].as_i64(), r["status"].as_str().map(String::from)) let:r>
+            {
+                let open = r["status"] == "open";
+                view! { <div class="card row">
+                    <b>{format!("Appeal #{}", r["id"])}</b><span class="muted">{format!("{} appeal, {}", s(&r["kind"]), s(&r["status"]))}</span>
+                    {r["reply"].as_str().map(|t| view! { <span>{format!("Staff reply: {t}")}</span> })}
+                    <Show when=move || open><button class="ghost" on:click=withdraw>"Withdraw"</button></Show>
+                </div> }
+            }
+        </For>
         <Show when=move || done.get() fallback=move || view! {
             <Show when=move || !info.get().is_null()>
                 {move || {

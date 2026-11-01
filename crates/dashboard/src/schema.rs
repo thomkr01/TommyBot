@@ -920,6 +920,10 @@ pub fn schema() -> Vec<Value> {
                     "Lock server joins",
                 ),
                 ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
+                ti(
+                    dv(fg("Lock scope", "pause_invites", "bool"), true),
+                    "Pause invites when kicking new members",
+                ),
             ],
         ),
         (

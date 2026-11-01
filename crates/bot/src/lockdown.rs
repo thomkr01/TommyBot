@@ -131,6 +131,10 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
             .map(|o| (c, o.id.get(), o.allow.bits(), o.deny.bits()))
             .collect();
     }
+    if !cfg.lockdown_prefs.pause_invites {
+        plan.ops.retain(|o| *o != Op::PauseInvites);
+        plan.snapshot.invites_paused = false;
+    }
     // Saved first so a failure halfway can still be unlocked exactly.
     store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
     for op in &plan.ops {

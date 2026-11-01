@@ -70,7 +70,22 @@ async fn decide(
         ));
     }
     let user_id = Id::new(user as u64);
+    // What the lift can be undone with, as in the dashboard's action log.
+    let mut inverse = Some(serde_json::json!({"op": "ban", "user": user}));
     if act == "accept" {
+        if kind == "timeout" {
+            let until = app.http.guild_member(gid, user_id).await;
+            let until = match until {
+                Ok(m) => m
+                    .model()
+                    .await?
+                    .communication_disabled_until
+                    .map(|t| t.as_secs()),
+                Err(_) => None,
+            };
+            inverse = until
+                .map(|until| serde_json::json!({"op": "timeout", "user": user, "until": until}));
+        }
         let lifted = if kind == "ban" {
             app.http.delete_ban(gid, user_id).await.map(drop)
         } else {
@@ -105,6 +120,16 @@ async fn decide(
     .rows_affected();
     if done == 0 {
         return Ok(Err("This appeal was already handled".into()));
+    }
+    if act == "accept" {
+        sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+            .bind(gid.get() as i64)
+            .bind(actor_id.get() as i64)
+            .bind(if kind == "ban" { "unban" } else { "untimeout" })
+            .bind(user)
+            .bind(inverse)
+            .execute(&app.pool)
+            .await?;
     }
     if act == "blacklist" {
         sqlx::query("INSERT INTO appeal_blacklist (guild_id, user_id, added_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")

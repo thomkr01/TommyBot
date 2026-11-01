@@ -24,6 +24,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/guilds/{guild}/lockdown/lock", post(lock))
         .route("/api/guilds/{guild}/lockdown/unlock", post(unlock))
         .route("/api/guilds/{guild}/lockdown/update", post(send_update))
+        .route("/api/guilds/{guild}/lockdown/channels", get(channels))
         .route("/api/guilds/{guild}/lockdown/check", get(check))
         .route("/api/guilds/{guild}/lockdown/fix", post(fix))
         .route(
@@ -139,6 +140,53 @@ async fn unlock(
     .await?;
     audit(&st, &s, guild, "unlocked the server".into()).await?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// Text-like channels with whether a server lock already denies sending there ("locked") and
+/// whether @everyone cannot see them ("private"); Wick flags both in its channel list.
+async fn channels(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    require(&st, &s, guild, Level::Viewer, false).await?;
+    let (_, c) = crate::store::current(&st.db, guild).await?;
+    let main: Vec<String> = c["lockdown"]["main_roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str().map(String::from))
+        .chain([guild.to_string()])
+        .collect();
+    let all = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+        .await?;
+    let denies = |ch: &Value, bit: u64, roles: &[String]| {
+        ch["permission_overwrites"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|o| {
+                o["type"] == 0
+                    && o["id"]
+                        .as_str()
+                        .is_some_and(|id| roles.iter().any(|r| r == id))
+                    && o["deny"]
+                        .as_str()
+                        .and_then(|d| d.parse::<u64>().ok())
+                        .is_some_and(|d| d & bit != 0)
+            })
+    };
+    let everyone = [guild.to_string()];
+    let list: Vec<Value> = all
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|ch| matches!(ch["type"].as_u64(), Some(0 | 5 | 15)))
+        .map(|ch| {
+            json!({"id": ch["id"], "name": ch["name"],
+            "locked": denies(ch, tommybot_automod::lockdown::SEND_MESSAGES, &main),
+            "private": denies(ch, tommybot_automod::lockdown::VIEW_CHANNEL, &everyone)})
+        })
+        .collect();
+    Ok(Json(json!(list)))
 }
 
 #[derive(Deserialize)]
