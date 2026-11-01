@@ -1,5 +1,4 @@
 //! Prefix mod commands: permit check -> action -> case (+ undo data). ban/kick/timeout/warn.
-use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -12,15 +11,10 @@ use tommybot_logging::{
 };
 use twilight_http::{request::AuditLogReason, Client};
 use twilight_model::{
-    application::interaction::{Interaction, InteractionData},
-    channel::message::{
-        component::{ActionRow, Button, ButtonStyle, Component},
-        AllowedMentions, MessageFlags,
-    },
+    channel::{message::AllowedMentions, ChannelType},
     gateway::payload::incoming::MessageCreate,
-    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
-        marker::{ChannelMarker, GuildMarker, UserMarker},
+        marker::{GuildMarker, UserMarker},
         Id,
     },
     util::Timestamp,
@@ -30,10 +24,10 @@ use crate::{
     antinuke,
     app::{now_secs, App},
     appeals, backup,
+    confirm::{ask_confirm, Action, Pending},
     events::send_log,
     hierarchy::top_position,
-    lockdown,
-    modcmds::{self, ModCmd},
+    lockdown, modcmds,
     prefix::{Flags, Parsed},
     reply,
     slash::BackupCmd,
@@ -137,6 +131,7 @@ pub async fn apply(
         duration_s,
         points,
         Flags::default(),
+        None,
     )
     .await
 }
@@ -154,6 +149,7 @@ pub async fn apply_dm(
     duration_s: Option<i64>,
     points: i32,
     flags: Flags,
+    proof: Option<&str>,
 ) -> Result<String> {
     let perm = kind.name();
     let target_level = app.level(gid, owner, target).await?;
@@ -175,7 +171,7 @@ pub async fn apply_dm(
     let cfg = app.cfg(gid.get()).await?;
     let soft = flags.soft && kind == ModKind::Ban;
     // One DM before the action: a banned user can't be DMed afterwards.
-    let note = appeals::note(&cfg.appeals, gid)
+    let note = appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
         .filter(|_| matches!(kind, ModKind::Ban | ModKind::Timeout) && !soft);
     let told = (flags.dm || cfg.misc.always_dm).then(|| {
         let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());
@@ -188,14 +184,7 @@ pub async fn apply_dm(
     {
         reply::dm(app, target, &text).await;
     }
-    // Wick also writes the case into Discord's audit log, which caps reasons at 512 characters.
-    let audit = embed::clip(
-        &format!(
-            "{} | Moderator: {actor_id}",
-            reason.unwrap_or("No reason provided")
-        ),
-        500,
-    );
+    let audit = audit_reason(reason, actor_id);
     let (inverse, points) = match kind {
         ModKind::Ban if soft => {
             // A softban exists to purge messages, so purge a day when the server default is none.
@@ -249,24 +238,21 @@ pub async fn apply_dm(
             reason,
             points,
             duration_s,
+            proof,
             inverse,
         },
     )
     .await?;
     let name = if soft { "softban" } else { perm };
-    // Wick's mod log: no title, Case / Type / Moderator columns, then Target and Reason.
-    let mut log = Log::new("", case_color(name))
-        .inline("Case:", &format!("`{case_no}`"))
-        .inline("Type:", &format!("`{}`", case_title(name)))
-        .inline("Moderator:", &embed::user(actor_id.get()))
-        .field("Target:", &format!("{ARROW} {}", embed::user(t)));
-    if let Some(d) = duration_s {
-        log = log.field("Duration:", &format!("`{}`", duration(d)));
-    }
-    let log = log.field("Reason:", reason.unwrap_or("No reason provided"));
-    if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
-        tracing::warn!(?e, "mod log failed");
-    }
+    mod_log(
+        app,
+        gid,
+        (case_no, name),
+        (actor_id, target),
+        duration_s,
+        reason,
+    )
+    .await;
     let mut text = reply::case_text(
         cfg.misc.compact_replies || flags.compact,
         (case_no.into(), if soft { "softban" } else { perm }, t),
@@ -279,6 +265,34 @@ pub async fn apply_dm(
         }
     }
     Ok(text)
+}
+
+/// Wick stays silent for quarantined members and in a voice channel's chat (purge excepted).
+pub async fn ignored(
+    app: &App,
+    msg: &MessageCreate,
+    gid: Id<GuildMarker>,
+    rest: &str,
+) -> Result<bool> {
+    let held: Option<(i64,)> =
+        sqlx::query_as("SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+            .bind(gid.get() as i64)
+            .bind(msg.author.id.get() as i64)
+            .fetch_optional(&app.pool)
+            .await?;
+    if held.is_some() {
+        return Ok(true);
+    }
+    if crate::prefix::parse(rest).is_some_and(|p| p.command == "purge") {
+        return Ok(false);
+    }
+    let Ok(ch) = app.http.channel(msg.channel_id).await else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        ch.model().await?.kind,
+        ChannelType::GuildVoice | ChannelType::GuildStageVoice
+    ))
 }
 
 /// Every command name [`run`] answers; the invoking message is deleted for these when `delete_invocation` is on.
@@ -346,6 +360,13 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         "lock" | "unlock" => {
             let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;
+            if p.kind.as_deref() == Some("update") {
+                let text = p.input.clone().unwrap_or_else(|| p.names.join(", "));
+                let text =
+                    lockdown::update(app, gid, msg.channel_id, (msg.author.id, &actor), &text)
+                        .await?;
+                return say(app, msg, &text).await;
+            }
             // `lock role`, `lock server`, `lock channel`...: one-off type instead of the dashboard default.
             // Channel mentions lock (or unlock) those channels instead of this one.
             let channels = match p.channels.as_slice() {
@@ -378,6 +399,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
         | "editreason" | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns"
         | "warns" | "modcases" => return modcmds::run_prefix(app, msg, p).await,
+        "backups" => return backup_prefix(app, msg, gid, &p).await,
         _ => return Ok(()),
     };
     let owner = app.guild_info(gid).await?.owner;
@@ -404,6 +426,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             reason: p.reason,
             duration_s: p.duration_s,
             flags: p.flags,
+            proof: None,
         },
     );
     if cfg.misc.confirm && job.needs_confirm() {
@@ -411,6 +434,10 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
     }
     let texts = job.run(app, owner, cfg.misc.warn_base_points).await?;
     let compact = cfg.misc.compact_replies || p.flags.compact;
+    if !compact {
+        let e = reply::result_embeds(kind.name(), &texts, reason.as_deref(), msg.author.id.get());
+        return say_embeds(app, msg, "", &e).await;
+    }
     let text = reply::summary(
         kind.name(),
         compact,
@@ -421,277 +448,38 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
     say(app, msg, &text).await
 }
 
-/// What a [`Pending`] does once confirmed.
-#[derive(Serialize, Deserialize)]
-pub enum Action {
-    Mod {
-        kind: ModKind,
-        targets: Vec<Id<UserMarker>>,
-        reason: Option<String>,
-        duration_s: Option<i64>,
-        flags: Flags,
-    },
-    Ext {
-        cmd: ModCmd,
-        channel: Id<ChannelMarker>,
-        reason: Option<String>,
-    },
-}
-
-/// A command waiting for its Confirm click, stored in `pending_confirms` so it survives a restart.
-pub struct Pending {
-    gid: Id<GuildMarker>,
-    actor: Id<UserMarker>,
-    action: Action,
-}
-
-const CONFIRM_TTL: Duration = Duration::from_secs(60);
-
-impl Pending {
-    pub fn new(gid: Id<GuildMarker>, actor: Id<UserMarker>, action: Action) -> Self {
-        Self { gid, actor, action }
-    }
-
-    /// Warns and non-destructive commands run straight away.
-    pub fn needs_confirm(&self) -> bool {
-        match &self.action {
-            Action::Mod { kind, targets, .. } => *kind != ModKind::Warn && !targets.is_empty(),
-            Action::Ext { cmd, .. } => cmd.destructive(),
-        }
-    }
-
-    fn question(&self) -> String {
-        match &self.action {
-            Action::Mod {
-                kind,
-                targets,
-                flags,
-                ..
-            } => {
-                let what = if flags.soft && *kind == ModKind::Ban {
-                    "softban"
-                } else {
-                    kind.name()
-                };
-                let who: Vec<String> = targets.iter().map(|t| format!("<@{t}>")).collect();
-                format!("Really {what} {}?", who.join(", "))
-            }
-            Action::Ext { cmd, .. } => format!("Really {}?", cmd.describe()),
-        }
-    }
-
-    /// One reply per target.
-    async fn run(&self, app: &App, owner: Id<UserMarker>, points: i32) -> Result<Vec<String>> {
-        let (kind, targets, reason, duration_s, flags) = match &self.action {
-            Action::Mod {
-                kind,
-                targets,
-                reason,
-                duration_s,
-                flags,
-            } => (*kind, targets, reason, *duration_s, *flags),
-            Action::Ext {
-                cmd,
-                channel,
-                reason,
-            } => {
-                let actor = app.level(self.gid, owner, self.actor).await?;
-                let text = modcmds::run(
-                    app,
-                    self.gid,
-                    owner,
-                    (self.actor, &actor),
-                    *channel,
-                    cmd.clone(),
-                    reason.as_deref(),
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(?e, "mod command failed");
-                    format!("Command failed: {}", why(&e))
-                });
-                return Ok(vec![text]);
-            }
-        };
-        let mut out = vec![];
-        for &t in targets {
-            // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
-            let actor = app.level(self.gid, owner, self.actor).await?;
-            let text = match apply_dm(
-                app,
-                self.gid,
-                owner,
-                (self.actor, &actor),
-                kind,
-                t,
-                reason.as_deref(),
-                duration_s,
-                points,
-                flags,
-            )
-            .await
-            {
-                Ok(text) => text,
-                Err(e) => {
-                    tracing::warn!(?e, "mod command failed");
-                    format!("Failed to {} <@{t}>: {}", kind.name(), why(&e))
-                }
-            };
-            out.push(text);
-        }
-        Ok(out)
-    }
-}
-
-/// Discord's reason for a failed mod action, for the reply.
-pub fn why(e: &anyhow::Error) -> String {
-    use twilight_http::{api_error::ApiError, error::ErrorType};
-    match e.downcast_ref::<twilight_http::Error>().map(|e| e.kind()) {
-        Some(ErrorType::Response {
-            error: ApiError::General(g),
-            ..
-        }) => match g.code {
-            50013 => {
-                "missing permissions (their top role is above mine, or they have Administrator)"
-                    .into()
-            }
-            _ => g.message.clone(),
-        },
-        _ => "see logs".into(),
-    }
-}
-
-fn confirm_button(label: &str, id: String, style: ButtonStyle) -> Component {
-    Component::Button(Button {
-        id: None,
-        custom_id: Some(id),
-        disabled: false,
-        emoji: None,
-        label: Some(label.into()),
-        style,
-        url: None,
-        sku_id: None,
-    })
-}
-
-/// Stores `job` for its buttons and returns the question with the Confirm / Cancel row.
-/// `nonce` is the command message or interaction id.
-pub async fn stash_confirm(app: &App, nonce: u64, job: Pending) -> Result<(String, Component)> {
-    let row = Component::ActionRow(ActionRow {
-        id: None,
-        components: vec![
-            confirm_button(
-                "Confirm",
-                format!("{CONFIRM}{nonce}:{}:y", job.actor),
-                ButtonStyle::Danger,
-            ),
-            confirm_button(
-                "Cancel",
-                format!("{CONFIRM}{nonce}:{}:n", job.actor),
-                ButtonStyle::Secondary,
-            ),
-        ],
-    });
-    // Expired rows are dropped on the way in, so the table stays small without a sweeper.
-    sqlx::query(
-        "WITH gone AS (DELETE FROM pending_confirms WHERE created_at < now() - make_interval(secs => $4))
-         INSERT INTO pending_confirms (nonce, guild_id, action) VALUES ($1, $2, $3)",
+/// Discord's audit log caps reasons at 512 characters.
+pub(crate) fn audit_reason(reason: Option<&str>, actor: Id<UserMarker>) -> String {
+    embed::clip(
+        &format!(
+            "{} | Moderator: {actor}",
+            reason.unwrap_or("No reason provided")
+        ),
+        500,
     )
-    .bind(nonce as i64)
-    .bind(job.gid.get() as i64)
-    .bind(serde_json::to_value(&job.action)?)
-    .bind(CONFIRM_TTL.as_secs_f64())
-    .execute(&app.pool)
-    .await?;
-    Ok((job.question(), row))
 }
 
-pub async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()> {
-    let (text, row) = stash_confirm(app, msg.id.get(), job).await?;
-    app.http
-        .create_message(msg.channel_id)
-        .content(&text)
-        .components(&[row])
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .await?;
-    Ok(())
-}
-
-const CONFIRM: &str = "confirm:";
-
-/// Handles the Confirm / Cancel buttons. Returns false for other interactions.
-pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
-    let Some(InteractionData::MessageComponent(c)) = &i.data else {
-        return Ok(false);
-    };
-    let Some((nonce, actor, yes)) = c.custom_id.strip_prefix(CONFIRM).and_then(|r| {
-        let mut it = r.splitn(3, ':');
-        let (n, actor, a) = (it.next()?, it.next()?, it.next()?);
-        Some((n.parse::<i64>().ok()?, actor.parse::<u64>().ok()?, a == "y"))
-    }) else {
-        return Ok(false);
-    };
-    let client = app.http.interaction(Id::new(app.me.get()));
-    let respond = |kind, content: Option<&str>, flags| InteractionResponse {
-        kind,
-        data: Some(InteractionResponseData {
-            content: content.map(Into::into),
-            flags,
-            ..Default::default()
-        }),
-    };
-    const EXPIRED: &str = "This confirmation expired, type the command again.";
-    let taken = if i.author_id().map(Id::get) != Some(actor) {
-        Err("Only the staff member who typed the command can answer.")
-    } else {
-        let row: Option<(i64, serde_json::Value, bool)> = sqlx::query_as(
-            "DELETE FROM pending_confirms WHERE nonce = $1
-             RETURNING guild_id, action, created_at < now() - make_interval(secs => $2)",
-        )
-        .bind(nonce)
-        .bind(CONFIRM_TTL.as_secs_f64())
-        .fetch_optional(&app.pool)
-        .await?;
-        match row {
-            Some((gid, action, false)) => Ok(Pending::new(
-                Id::new(gid as u64),
-                Id::new(actor),
-                serde_json::from_value(action)?,
-            )),
-            _ => Err(EXPIRED),
-        }
-    };
-    let job = match taken {
-        Ok(j) => j,
-        Err(e) => {
-            let r = respond(
-                InteractionResponseType::ChannelMessageWithSource,
-                Some(e),
-                Some(MessageFlags::EPHEMERAL),
-            );
-            client.create_response(i.id, &i.token, &r).await?;
-            return Ok(true);
-        }
-    };
-    // Several HTTP calls can exceed the 3s answer window, so acknowledge first.
-    let ack = respond(InteractionResponseType::DeferredUpdateMessage, None, None);
-    client.create_response(i.id, &i.token, &ack).await?;
-    let text = if yes {
-        let owner = app.guild_info(job.gid).await?.owner;
-        let points = app.cfg(job.gid.get()).await?.misc.warn_base_points;
-        let mut t = job.run(app, owner, points).await?.join("\n");
-        t.truncate(t.floor_char_boundary(2000));
-        t
-    } else {
-        "Cancelled.".into()
-    };
-    client
-        .update_response(&i.token)
-        .content(Some(&text))
-        .components(Some(&[]))
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .await?;
-    Ok(true)
+/// Wick's mod log: no title, Case / Type / Moderator columns, then Target, Duration and Reason.
+pub(crate) async fn mod_log(
+    app: &App,
+    gid: Id<GuildMarker>,
+    (case_no, name): (i32, &str),
+    (actor, target): (Id<UserMarker>, Id<UserMarker>),
+    duration_s: Option<i64>,
+    reason: Option<&str>,
+) {
+    let mut log = Log::new("", case_color(name))
+        .inline("Case:", &format!("`{case_no}`"))
+        .inline("Type:", &format!("`{}`", case_title(name)))
+        .inline("Moderator:", &embed::user(actor.get()))
+        .field("Target:", &format!("{ARROW} {}", embed::user(target.get())));
+    if let Some(d) = duration_s {
+        log = log.field("Duration:", &format!("`{}`", duration(d)));
+    }
+    let log = log.field("Reason:", reason.unwrap_or("No reason provided"));
+    if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
+        tracing::warn!(?e, "mod log failed");
+    }
 }
 
 fn case_title(kind: &str) -> String {
@@ -724,15 +512,45 @@ pub(crate) async fn apply_warn_actions(
         return Ok(warn::next(&misc.warn_actions, after)
             .map(|n| format!("`{}` points away from `{:?}`", n.points - after, n.action)));
     };
-    match t.action {
+    let why = format!("Reached {} warn points", t.points);
+    let (kind, secs) = match t.action {
         warn::Action::Ban => {
-            app.http.create_ban(g, u).await?;
+            app.http.create_ban(g, u).reason(&why).await?;
+            ("ban", None)
         }
         warn::Action::Kick => {
-            app.http.remove_guild_member(g, u).await?;
+            app.http.remove_guild_member(g, u).reason(&why).await?;
+            ("kick", None)
         }
-        warn::Action::Timeout { secs } => timeout(&app.http, g, u, secs).await?,
-    }
+        warn::Action::Timeout { secs } => {
+            timeout(&app.http, g, u, secs, &why).await?;
+            ("timeout", Some(secs))
+        }
+    };
+    let case_no = cases::create(
+        &app.pool,
+        cases::NewCase {
+            guild_id: gid,
+            kind,
+            user_id: uid,
+            mod_id: app.me.get() as i64,
+            reason: Some(&why),
+            points: 0,
+            duration_s: secs,
+            proof: None,
+            inverse: None,
+        },
+    )
+    .await?;
+    mod_log(
+        app,
+        g,
+        (case_no, kind),
+        (app.me.cast(), u),
+        secs,
+        Some(&why),
+    )
+    .await;
     cases::reset_warns(&app.pool, gid, uid).await?;
     Ok(Some(format!(
         "<@{uid}> reached {} warn points: {:?}",
@@ -754,10 +572,12 @@ pub async fn timeout(
     g: Id<GuildMarker>,
     u: Id<UserMarker>,
     secs: i64,
+    reason: &str,
 ) -> Result<()> {
     let until = Timestamp::from_secs(now_secs() + timeout_chunk(secs).0)?;
     http.update_guild_member(g, u)
         .communication_disabled_until(Some(until))
+        .reason(reason)
         .await?;
     Ok(())
 }
@@ -796,10 +616,20 @@ pub async fn timeout_until(
 }
 
 pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()> {
+    say_embeds(app, msg, text, &[]).await
+}
+
+pub(crate) async fn say_embeds(
+    app: &App,
+    msg: &MessageCreate,
+    text: &str,
+    embeds: &[twilight_model::channel::message::Embed],
+) -> Result<()> {
     let sent = app
         .http
         .create_message(msg.channel_id)
         .content(text)
+        .embeds(embeds)
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?
         .model()
@@ -812,7 +642,49 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
     Ok(())
 }
 
-/// `/backup create|list|load|delete`. `load` previews unless `confirm` is set.
+/// `w!backups take|load ID|delete ID|clear` and its Wick aliases.
+async fn backup_prefix(
+    app: &App,
+    msg: &MessageCreate,
+    gid: Id<GuildMarker>,
+    p: &Parsed,
+) -> Result<()> {
+    let owner = app.guild_info(gid).await?.owner;
+    let actor = app.level(gid, owner, msg.author.id).await?;
+    if actor == permits::Level::None {
+        return Ok(());
+    }
+    let mut args = msg.content.split_whitespace().skip(1);
+    // `bload dh0mfu`-style aliases carry the subcommand in `p.kind`.
+    let sub = p
+        .kind
+        .clone()
+        .or_else(|| args.next().map(str::to_lowercase));
+    let id = args.next().map(str::to_owned);
+    let cmd = match (sub.as_deref().unwrap_or("list"), id) {
+        ("take" | "create", _) => BackupCmd::Create,
+        ("list", _) => BackupCmd::List,
+        ("clear", _) => BackupCmd::Clear,
+        ("load", Some(id)) => BackupCmd::Load {
+            id,
+            confirm: msg.content.contains("?confirm"),
+        },
+        ("delete", Some(id)) => BackupCmd::Delete { id },
+        _ => {
+            return say(
+                app,
+                msg,
+                "Usage: `backups [take | load ID | delete ID | clear]`",
+            )
+            .await
+        }
+    };
+    let text = backup_cmd(app, gid, (msg.author.id, &actor), cmd).await?;
+    say(app, msg, &text).await
+}
+
+/// `/backups create|list|load|delete|purge` and `w!backups take|load|delete|clear`. `load`
+/// previews unless `confirm` is set.
 pub async fn backup_cmd(
     app: &App,
     gid: Id<GuildMarker>,
@@ -826,23 +698,33 @@ pub async fn backup_cmd(
         return Ok(msg);
     }
     Ok(match cmd {
-        BackupCmd::Create => format!("Saved backup #{}", backup::save(app, gid).await?),
+        BackupCmd::Create => match backup::save(app, gid, Some(actor_id.get())).await {
+            Ok(code) => format!("Saved backup `{code}`"),
+            Err(e) => e.to_string(),
+        },
         BackupCmd::List => {
             let rows = backup::list(app, gid).await?;
             if rows.is_empty() {
                 "No backups yet".into()
             } else {
                 rows.iter()
-                    .map(|(id, at, r, c)| format!("`#{id}` <t:{at}:R>: {r} roles, {c} channels"))
+                    .map(|(code, at, r, c, by)| {
+                        let by = by.map_or("TommyBot".into(), |u| format!("<@{u}>"));
+                        format!("`{code}` {by} <t:{at}:R>: {r} roles, {c} channels")
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
         }
-        BackupCmd::Load { id, confirm } => backup::load(app, gid, id, confirm).await?,
-        BackupCmd::Delete { id } => match backup::delete(app, gid, id).await? {
-            true => format!("Deleted backup #{id}"),
-            false => format!("No backup #{id}"),
+        BackupCmd::Load { id, confirm } => backup::load(app, gid, &id, confirm).await?,
+        BackupCmd::Delete { id } => match backup::delete(app, gid, Some(&id)).await? {
+            true => format!("Deleted backup `{id}`"),
+            false => format!("No backup `{id}`"),
         },
+        BackupCmd::Clear => {
+            backup::delete(app, gid, None).await?;
+            "Deleted all backups".into()
+        }
     })
 }
 
@@ -877,7 +759,9 @@ pub async fn revert_cmd(
 
 #[cfg(test)]
 mod tests {
-    use super::{above_bot, timeout_chunk, Action, Flags, Id, ModCmd, ModKind, MAX_TIMEOUT_S};
+    use super::{above_bot, timeout_chunk, Flags, Id, ModKind, MAX_TIMEOUT_S};
+    use crate::confirm::Action;
+    use crate::modcmds::ModCmd;
 
     #[test]
     fn pending_action_survives_the_database_round_trip() {
@@ -892,13 +776,19 @@ mod tests {
             reason: Some("spam".into()),
             duration_s: Some(60),
             flags,
+            proof: Some("https://x/y.png".into()),
         };
-        let Action::Mod { kind, targets, .. } =
-            serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap()
+        let Action::Mod {
+            kind,
+            targets,
+            proof,
+            ..
+        } = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap()
         else {
             panic!("variant changed")
         };
         assert_eq!((kind, targets), (ModKind::Ban, vec![Id::new(42)]));
+        assert_eq!(proof.as_deref(), Some("https://x/y.png"));
         let purge = ModCmd::Purge {
             count: 5,
             user: None,
@@ -909,6 +799,7 @@ mod tests {
             cmd: purge.clone(),
             channel: Id::new(7),
             reason: None,
+            proof: None,
         };
         let Action::Ext { cmd, channel, .. } =
             serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap()

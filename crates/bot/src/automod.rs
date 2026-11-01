@@ -53,6 +53,17 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !am.enabled || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
     }
+    if crate::panic::is_raider(app, gid, m.author.id) {
+        app.http.delete_message(m.channel_id, m.id).await.ok();
+        return timeout(
+            &app.http,
+            gid,
+            m.author.id,
+            am.strike.strike_timeout_ms / 1000,
+            "Automod",
+        )
+        .await;
+    }
     let wl = &cfg.whitelist;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
     let any_categories = [&wl.spam, &wl.invites, &wl.mentions, &wl.everyone]
@@ -80,10 +91,12 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .union(Permissions::MANAGE_MESSAGES)
             .union(Permissions::MANAGE_ROLES)
             .union(Permissions::MANAGE_WEBHOOKS);
-        let info = app.guild_info(gid).await?;
-        roles
-            .iter()
-            .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
+        // A failed lookup must not switch automod off for this message.
+        app.guild_info(gid).await.is_ok_and(|info| {
+            roles
+                .iter()
+                .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
+        })
     };
     let now = now_ms();
     let content = m.content.as_str();
@@ -272,13 +285,16 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         } else {
             String::new()
         };
+        let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
+            .filter(|_| act.timeout_ms > 300_000)
+            .map_or(String::new(), |n| format!("\n{n}"));
         reply::dm(
             app,
             m.author.id,
-            &format!("You were timed out by automod{why}"),
+            &format!("You were timed out by automod{why}{note}"),
         )
         .await;
-        timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
+        timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000, "Automod").await?;
         auto_case(
             app,
             gid,
@@ -414,6 +430,7 @@ async fn auto_case(
             points: 0,
             duration_s,
             inverse: None,
+            proof: None,
         },
     )
     .await?;
@@ -450,6 +467,7 @@ async fn filter_action(
                     reason: Some("automod filter"),
                     points: cfg.misc.warn_base_points,
                     duration_s: None,
+                    proof: None,
                     inverse: None,
                 },
             )
@@ -457,7 +475,7 @@ async fn filter_action(
             warn_actions(app, cfg, gid, uid).await?;
         }
         FilterAction::Timeout => {
-            timeout(&app.http, gid, uid, secs).await?;
+            timeout(&app.http, gid, uid, secs, "Automod").await?;
             auto_case(app, gid, uid, "timeout", factor, Some(secs)).await?;
         }
         FilterAction::Kick => {
@@ -790,13 +808,23 @@ async fn native_action(
                     reason: Some(WHY),
                     points: cfg.misc.warn_base_points,
                     duration_s: None,
+                    proof: None,
                     inverse: None,
                 },
             )
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        BotAction::Timeout => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
+        BotAction::Timeout => {
+            timeout(
+                &app.http,
+                gid,
+                uid,
+                cfg.misc.timeout_secs() as i64,
+                "Automod",
+            )
+            .await?
+        }
         BotAction::Kick => punish(app, cfg, gid, uid.get(), Action::Kick, WHY).await?,
         BotAction::Ban => punish(app, cfg, gid, uid.get(), Action::Ban, WHY).await?,
         BotAction::Lock => {
@@ -891,8 +919,13 @@ async fn punish(
             let min = duration(cfg.joingate.min_age_ms() / 1000);
             text.push_str(&format!("\nMinimum account age: `{min}`"));
         }
-        let note = crate::appeals::note(&cfg.appeals, gid)
-            .filter(|_| matches!(action, Action::Ban | Action::Timeout(_)));
+        let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid).filter(|_| match action {
+            Action::Ban => true,
+            // Wick: short automatic timeouts (5 minutes or less) get no appeal link.
+            Action::Timeout(0) => cfg.misc.timeout_secs() > 300,
+            Action::Timeout(ms) => ms > 300_000,
+            _ => false,
+        });
         reply::dm(
             app,
             uid,
@@ -913,14 +946,24 @@ async fn punish(
                     reason: Some(why),
                     points: cfg.misc.warn_base_points,
                     duration_s: None,
+                    proof: None,
                     inverse: None,
                 },
             )
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        Action::Timeout(0) => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
-        Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000).await?,
+        Action::Timeout(0) => {
+            timeout(
+                &app.http,
+                gid,
+                uid,
+                cfg.misc.timeout_secs() as i64,
+                "Automod",
+            )
+            .await?
+        }
+        Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000, "Automod").await?,
         Action::Timeout(_) => return Ok(()),
         Action::Kick => {
             app.http.remove_guild_member(gid, uid).await?;

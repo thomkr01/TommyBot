@@ -20,6 +20,7 @@ use tommybot_core::jobs;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/guilds/{guild}/backups", get(list).post(create))
+        .route("/api/guilds/{guild}/backups/{id}", get(detail))
         .route("/api/guilds/{guild}/backups/{id}/preview", get(preview))
         .route("/api/guilds/{guild}/backups/{id}/load", post(load))
         .route("/api/guilds/{guild}/backups/{id}/delete", post(delete))
@@ -30,9 +31,9 @@ pub fn routes() -> Router<AppState> {
 
 async fn list(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
-    let rows: Vec<(i64, i64, i32, i32)> = sqlx::query_as(
+    let rows: Vec<(i64, i64, i32, i32, String, Option<i64>)> = sqlx::query_as(
         "SELECT id, EXTRACT(EPOCH FROM created_at)::BIGINT, jsonb_array_length(image->'roles')::INT, \
-         jsonb_array_length(image->'channels')::INT FROM backups \
+         jsonb_array_length(image->'channels')::INT, code, created_by FROM backups \
          WHERE guild_id = $1 ORDER BY created_at DESC, id DESC",
     )
     .bind(guild)
@@ -40,7 +41,7 @@ async fn list(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Re
     .await?;
     Ok(Json(Value::Array(
         rows.into_iter()
-            .map(|(id, at, roles, channels)| json!({"id": id, "at": at, "roles": roles, "channels": channels}))
+            .map(|(id, at, roles, channels, code, by)| json!({"id": id, "at": at, "roles": roles, "channels": channels, "code": code, "by": by}))
             .collect(),
     )))
 }
@@ -63,7 +64,7 @@ async fn announce(st: &AppState, s: &Sess, guild: i64, what: &str) -> Result<(),
 
 async fn create(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
-    queue(&st, guild, "backup_create", json!({})).await?;
+    queue(&st, guild, "backup_create", json!({"by": s.user_id})).await?;
     announce(&st, &s, guild, "took a backup").await?;
     Ok(Json(json!({"queued": true})))
 }
@@ -78,6 +79,27 @@ async fn owned_image(st: &AppState, guild: i64, id: i64) -> Result<Image, ApiErr
     row.map(|(i,)| i.0).ok_or(ApiError::NotFound)
 }
 
+/// What a backup holds, for the detail view: server settings, roles, the channel tree, webhooks.
+async fn detail(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i64, i64)>) -> Res {
+    require(&st, &s, guild, Level::Viewer, false).await?;
+    let img = owned_image(&st, guild, id).await?;
+    let name = |id: Option<u64>| {
+        img.channels
+            .iter()
+            .find(|c| Some(c.id) == id)
+            .map(|c| c.name.clone())
+    };
+    let mut channels = img.channels.clone();
+    channels.sort_by_key(|c| (c.parent.or(Some(c.id)), c.kind != 4, c.position));
+    Ok(Json(json!({
+        "name": img.name,
+        "settings": img.settings,
+        "roles": img.roles.iter().map(|r| json!({"name": r.name, "color": r.color, "permissions": r.permissions.to_string()})).collect::<Vec<_>>(),
+        "channels": channels.iter().map(|c| json!({"name": c.name, "kind": c.kind, "parent": name(c.parent), "overwrites": c.overwrites.len()})).collect::<Vec<_>>(),
+        "webhooks": img.webhooks.iter().flatten().map(|w| json!({"name": w.name, "channel": name(Some(w.channel))})).collect::<Vec<_>>(),
+    })))
+}
+
 fn num<T: std::str::FromStr + Default>(v: &Value) -> T {
     v.as_str().and_then(|s| s.parse().ok()).unwrap_or_default()
 }
@@ -89,6 +111,7 @@ pub(crate) fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
         guild: guild as u64,
         name: String::new(),
         settings: None,
+        webhooks: None,
         roles: items(roles)
             .iter()
             .map(|r| RoleImg {

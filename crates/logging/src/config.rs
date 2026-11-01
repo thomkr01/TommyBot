@@ -31,6 +31,7 @@ pub enum LogKind {
     JoinRaid,
     Panic,
     ModCommand,
+    Appeal,
 }
 
 /// A Discord event type that can get its own log channel. Names are the dashboard's option keys.

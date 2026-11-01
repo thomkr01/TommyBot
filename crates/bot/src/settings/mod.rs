@@ -510,6 +510,21 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
     if level == Level::None {
         return Ok(true);
     }
+    if word == "setup" && matches!(args.trim(), "run" | "auto") {
+        if level.immune() {
+            crate::setup::run(app, msg, gid).await?;
+        } else {
+            send(
+                app,
+                msg,
+                "Only the owner, Extra Owners and Trusted Admins can run setup",
+                None,
+                vec![],
+            )
+            .await?;
+        }
+        return Ok(true);
+    }
     let op = match parse_op(args) {
         Ok(op) => op,
         Err(e) => {
@@ -631,6 +646,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             let level = app.level(gid, owner, Id::new(invoker.unwrap_or(1))).await?;
             crate::general::commands_page(&level, &cfg.misc.prefix, page)
         }
+        None if kind == "ginfo" => crate::info::server_page(app, gid, page).await?,
         None => return Ok(true),
     };
     let r = InteractionResponse {

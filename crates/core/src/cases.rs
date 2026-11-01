@@ -13,6 +13,8 @@ pub struct NewCase<'a> {
     pub reason: Option<&'a str>,
     pub points: i32,
     pub duration_s: Option<i64>,
+    /// Attachment URL from the slash `proof:` option.
+    pub proof: Option<&'a str>,
     /// Inverse operation, e.g. `{"op":"unban","user":123}`; stored in action_log.
     pub inverse: Option<Value>,
 }
@@ -26,9 +28,9 @@ pub async fn create(pool: &PgPool, c: NewCase<'_>) -> Result<i32> {
         .execute(&mut *tx)
         .await?;
     let (case_no,): (i32,) = sqlx::query_as(
-        "INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id, reason, points, duration_s, expires_at)
+        "INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id, reason, points, duration_s, proof, expires_at)
          VALUES ($1, (SELECT COALESCE(MAX(case_no), 0) + 1 FROM cases WHERE guild_id = $1),
-                 $2, $3, $4, $5, $6, $7,
+                 $2, $3, $4, $5, $6, $7, $8,
                  CASE WHEN $2 IN ('warn') THEN now() + interval '1 month' END)
          RETURNING case_no",
     )
@@ -39,6 +41,7 @@ pub async fn create(pool: &PgPool, c: NewCase<'_>) -> Result<i32> {
     .bind(c.reason)
     .bind(c.points)
     .bind(c.duration_s)
+    .bind(c.proof)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(

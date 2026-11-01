@@ -18,7 +18,8 @@ use twilight_model::{
 };
 
 use crate::{
-    antinuke, app::App, automod, commands, metrics, prefix, reports, slash, tickets, verify,
+    antinuke, app::App, automod, commands, confirm, metrics, prefix, reports, slash, tickets,
+    verify,
 };
 
 fn guild_of(ev: &Event) -> Option<u64> {
@@ -205,7 +206,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
-                if let Some(rest) = m.content.strip_prefix(&pfx) {
+                if let Some(rest) = m.content.strip_prefix(&pfx).filter(|r| !r.is_empty()) {
+                    if commands::ignored(app, m, gid, rest).await? {
+                        return Ok(());
+                    }
                     if !crate::general::try_run(app, m, rest).await?
                         && !crate::settings::try_run(app, m, rest).await?
                     {
@@ -222,10 +226,12 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
         Event::ChannelCreate(c) => {
             app.note_parent(&c.0);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::setup::enforce_quarantine(app, c).await.ok();
         }
         Event::ChannelUpdate(c) => {
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::setup::enforce_quarantine(app, c).await.ok();
             crate::catch::keep_top(app, c).await?;
         }
         Event::ChannelDelete(c) => {
@@ -248,8 +254,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?
-                && !commands::handle_confirm(app, &i.0).await?
+                && !confirm::handle_confirm(app, &i.0).await?
                 && !reports::handle(app, &i.0).await?
+                && !crate::appeals::handle(app, &i.0).await?
                 && !crate::settings::handle(app, &i.0).await?
                 && !crate::whitelist::handle(app, &i.0).await?
             {

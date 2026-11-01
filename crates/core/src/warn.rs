@@ -76,6 +76,8 @@ mod tests {
             },
         ];
         assert_eq!(crossed(&ts, 0, 2), None);
+        assert_eq!(next(&ts, 4).map(|t| t.points), Some(6));
+        assert!(next(&ts, 9).is_none());
         assert_eq!(
             crossed(&ts, 0, 3).unwrap().action,
             Action::Timeout { secs: 600 }

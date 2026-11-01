@@ -27,9 +27,10 @@ const LOCKS: [(&str, &str, &str, Covers); 4] = [
 #[component]
 pub fn LockdownManage(guild: String) -> impl IntoView {
     let status = RwSignal::new(json!({}));
-    let (msg, dc) = (RwSignal::new(String::new()), RwSignal::new(json!({})));
+    let msg = RwSignal::new(String::new());
     let (secs, single) = (RwSignal::new(0i64), RwSignal::new(false));
     let channel = RwSignal::new(String::new());
+    let chans = RwSignal::new(Vec::<Value>::new());
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/lockdown", g.get_value()), None).await {
@@ -39,7 +40,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
     });
     load();
     spawn_local(async move {
-        if let Ok(d) = api("GET", &format!("/api/guilds/{}/discord", g.get_value()), None).await { dc.set(d); }
+        if let Ok(v) = api("GET", &format!("/api/guilds/{}/lockdown/channels", g.get_value()), None).await { chans.set(v.as_array().cloned().unwrap_or_default()); }
     });
     let act = move |path: &'static str, body: Value| spawn_local(async move {
         match api("POST", &format!("/api/guilds/{}/lockdown/{path}", g.get_value()), Some(body)).await {
@@ -48,7 +49,10 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
         }
     });
     let lock = move |kind: &'static str, channel: Option<String>| act("lock", json!({"kind": kind, "channel": channel, "duration_s": (secs.get_untracked() > 0).then(|| secs.get_untracked())}));
-    let locked = move || Some(status.get()["locked"].clone()).filter(|l| !l.is_null());
+    // Every active lock; kinds are independent, but only one of them may be a join lock.
+    let locks = move || status.get()["locks"].as_array().cloned().unwrap_or_default();
+    let join_locked = move || locks().iter().any(|l| !l["join"].is_null());
+    let (hide, note, update) = (RwSignal::new(false), RwSignal::new(false), RwSignal::new(String::new()));
     view! {
         <div class="stack narrow">
         <div class="card row">
@@ -60,24 +64,51 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
             <button class="ghost" on:click=move |_| load()>"Refresh"</button>
         </div>
         {LOCKS.iter().map(|(title, what, kind, covers)| {
-            let is_on = move || locked().is_some_and(|l| covers(&l));
+            let is_on = move || locks().iter().any(covers);
+            let join = matches!(*kind, "kick" | "ban");
+            let hidden = move || locks().iter().any(|l| l["hidden"] == true);
+            let paused = move || *kind == "kick" && locks().iter().any(|l| l["invites_paused"] == true);
             view! { <div class="card row lockrow">
                 <h3 title=*what>{*title}</h3><span class="sp"></span>
+                <Show when=move || *kind == "server" && hidden()><span class="chip">"CHANNELS HIDDEN"</span></Show>
+                <Show when=paused><span class="chip">"PAUSE INVITES"</span></Show>
+                <Show when=move || join && !is_on()><span class="chip">"ONLY 1 JOIN LOCK ALLOWED"</span></Show>
                 <Show when=move || *kind == "server" && !is_on()><button class="ghost" title="Individual Channels" on:click=move |_| single.update(|x| *x = !*x)>"Individual channels"</button></Show>
-                <Show when=is_on fallback=move || view! { <span class="chip ok">"Already Unlocked"</span><button class="danger" disabled=move || locked().is_some() on:click=move |_| lock(kind, None)>"Lock"</button> }>
+                <Show when=is_on fallback=move || view! { <span class="chip ok">"Already Unlocked"</span><button class="danger" disabled=move || join && join_locked() on:click=move |_| if *kind == "server" { hide.set(true) } else { lock(kind, None) }>"Lock"</button> }>
                     <span class="chip">{move || status.get()["unlock_at"].as_str().map_or("Locked".to_string(), |t| format!("Locked until {}", t.replace('T', " ").split('.').next().unwrap_or("")))}</span>
-                    <button class="go" on:click=move |_| act("unlock", json!({}))>"Unlock"</button>
+                    <button class="go" on:click=move |_| act("unlock", json!({"kind": kind}))>"Unlock"</button>
                 </Show>
             </div> }
         }).collect_view()}
+        <Show when=move || hide.get()>
+            <div class="card row">
+                <label>"Hide the channels from members while they are locked?"</label>
+                <button class="danger" on:click=move |_| { hide.set(false); lock("blind", None) }>"Hide all channels"</button>
+                <button on:click=move |_| { hide.set(false); lock("server", None) }>"Keep them visible"</button>
+                <button class="ghost" on:click=move |_| hide.set(false)>"Cancel"</button>
+            </div>
+        </Show>
+        <Show when=move || !locks().is_empty()>
+            <div class="card row">
+                <button class="ghost" on:click=move |_| note.update(|x| *x = !*x)>"Send an update"</button>
+                <Show when=move || note.get()>
+                    <input placeholder="What members should know" prop:value=update on:input=move |e| update.set(event_target_value(&e)) />
+                    <button on:click=move |_| { act("update", json!({"text": update.get_untracked()})); update.set(String::new()); note.set(false) }>"Send"</button>
+                </Show>
+            </div>
+        </Show>
         <Show when=move || single.get()>
             <div class="card row">
                 <label>"Lock a single channel"</label>
                 <select on:change=move |e| channel.set(event_target_value(&e))>
                     <option value="">"Choose a channel"</option>
-                    {move || dc.get()["channels"].as_array().cloned().unwrap_or_default().into_iter().map(|c| view! { <option value=s(&c["id"])>{format!("#{}", s(&c["name"]))}</option> }).collect_view()}
+                    {move || chans.get().into_iter().map(|c| {
+                        let flags = [("locked", "locked"), ("private", "private")].iter().filter(|(k, _)| c[*k] == true).map(|(_, t)| *t).collect::<Vec<_>>().join(", ");
+                        let label = if flags.is_empty() { format!("#{}", s(&c["name"])) } else { format!("#{} ({flags})", s(&c["name"])) };
+                        view! { <option value=s(&c["id"]) disabled=c["locked"] == true>{label}</option> }
+                    }).collect_view()}
                 </select>
-                <button class="danger" disabled=move || channel.get().is_empty() || locked().is_some() on:click=move |_| lock("channel", Some(channel.get_untracked()))>"Lock"</button>
+                <button class="danger" disabled=move || channel.get().is_empty() on:click=move |_| lock("channel", Some(channel.get_untracked()))>"Lock"</button>
             </div>
         </Show>
         <p class="info">{move || msg.get()}</p>
@@ -101,7 +132,8 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
     view! {
         <div class="card">
             <div class="row"><h2>"Compatibility check"</h2>
-                <button on:click=move |_| fix() disabled=move || !problems.get().is_some_and(|p| p.iter().any(|p| !p["fix"].is_null()))>"Apply Fix"</button></div>
+                <Show when=move || problems.get().is_some_and(|p| !p.is_empty())><span class="chip">{move || format!("{} ISSUES", problems.get().map_or(0, |p| p.len()))}</span></Show>
+                <button on:click=move |_| fix() disabled=move || !problems.get().is_some_and(|p| p.iter().any(|p| !p["fix"].is_null()))>"Fix issues"</button></div>
             <p class="muted">"Checks that only the main roles can view and send, so a lockdown works in a few calls. Apply Fix corrects the role and channel permissions."</p>
             <Show when=move || problems.get().is_some_and(|p| p.is_empty())><p class="ok">"No lockdown compatibility issues found."</p></Show>
             {move || problems.get().unwrap_or_default().into_iter().map(|p| view! { <div class="row"><span class="warn">{s(&p["text"]).replace("<@&", "role ").replace("<#", "channel ").replace('>', "")}</span></div> }).collect_view()}

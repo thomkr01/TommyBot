@@ -104,6 +104,13 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         }
         return guard_perms(app, &cfg, e, actor).await;
     }
+    match e.action_type {
+        A::MemberUpdate | A::MemberKick | A::MemberBanAdd if cfg.antinuke.quarantine_hold => {
+            hold(app, e, actor).await?
+        }
+        A::RoleCreate => guard_perms(app, &cfg, e, actor).await?,
+        _ => {}
+    }
     let Some(action) = watched(e.action_type) else {
         return Ok(());
     };
@@ -114,7 +121,13 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if matches!(action, Action::ChannelCreate | Action::ChannelDelete)
         && e.target_id
             .and_then(|t| app.channel_parents.lock().unwrap().remove(&t.get()))
-            .is_some_and(|p| cfg.antinuke.ticket_categories.iter().any(|c| c.get() == p))
+            .is_some_and(|p| {
+                cfg.antinuke
+                    .ticket_categories
+                    .iter()
+                    .chain(&cfg.panic.whitelisted_categories)
+                    .any(|c| c.get() == p)
+            })
     {
         return Ok(());
     }
@@ -201,6 +214,16 @@ async fn guard_perms(
         gained_dangerous(bits(old), bits(new)).then(|| old.unwrap_or(Permissions::empty()))
     };
     let why = match e.action_type {
+        A::RoleCreate if an.strict_mode => {
+            if !e.changes.iter().any(|c| matches!(c, AuditLogChange::Permissions { new, .. } if gained(None, *new).is_some())) {
+                return Ok(());
+            }
+            app.http
+                .update_role(gid, target.cast())
+                .permissions(Permissions::empty())
+                .await?;
+            "created a role with dangerous permissions"
+        }
         A::RoleUpdate
             if an.strict_mode
                 || (an.monitor_public_roles && public(target.get()))
@@ -421,6 +444,7 @@ async fn open_case(
             reason: Some(why),
             points: 0,
             duration_s: None,
+            proof: None,
             inverse: Some(json!({"op": "unquarantine", "user": actor.get()})),
         },
     )
@@ -690,6 +714,9 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         || app.whitelisted(gid, actor, "quarantine").await?;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
         return Ok(());
+    }
+    if e.action_type != A::MemberRoleUpdate {
+        return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
     }
     let roles: Vec<_> = cfg.antinuke.quarantine_role.into_iter().collect();
     app.http

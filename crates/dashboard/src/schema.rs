@@ -28,6 +28,7 @@ const LOG_KINDS: &[&str] = &[
     "join_raid",
     "panic",
     "mod_command",
+    "appeal",
 ];
 
 fn f(path: &str, kind: &str) -> Value {
@@ -202,8 +203,19 @@ pub fn schema() -> Vec<Value> {
         ),
     ];
     log.extend(LOG_KINDS.iter().filter(|k| **k != "mod_command").map(|k| {
+        let help = match *k {
+            "report" => "Message reports by your members will go to this channel where you and your moderators can interact and deal with them.",
+            "auto_mod" => "All of Wick's automod actions will be sent to this channel.",
+            "anti_nuke" => "All of Wick's antinuke actions will be sent to this channel.",
+            "verification" => "All of Wick's verification results will be sent to this channel.",
+            "join_gate" => "Logs of Wick's join filters will go to this channel.",
+            "join_raid" => "Join raid triggers and results will be sent to this channel.",
+            "panic" => "Panic mode triggers and results will be sent to this channel.",
+            "appeal" => "New ban and timeout appeals will be sent to this channel.",
+            _ => "Logs of this type will go to this channel instead of the Wick Logs channel.",
+        };
         pg(
-            fg("Log types", &format!("routes.{k}"), "channel"),
+            hp(fg("Log types", &format!("routes.{k}"), "channel"), help),
             "wick_customize",
         )
     }));
@@ -238,6 +250,7 @@ pub fn schema() -> Vec<Value> {
     let mut nuke = vec![
         ti(fg("Status", "enabled", "bool"), "Use the antinuke module"),
         ti(fg("Status", "prune", "bool"), "Detect and react to member prunes"),
+        ti(dv(fg("Status", "quarantine_hold", "bool"), true), "Punish anyone who touches a quarantined member"),
         ti(fg("Status", "vanity_guard", "bool"), "Have TommyBot guard your server's vanity url"),
         ti(dv(fg("Auto quarantine", "auto_quarantine", "bool"), true), "Use the auto quarantine module"),
         ti(fg("Auto quarantine", "quarantine_role", "role"), "Quarantine role"),
@@ -668,7 +681,12 @@ pub fn schema() -> Vec<Value> {
         fg("Response", "warned_roles", "roles"),
         fg("Response", "whitelisted_categories", "categories"),
     ];
-    let mut backups = vec![f("auto", "bool")];
+    let mut backups = vec![
+        dv(f("enabled", "bool"), true),
+        f("auto", "bool"),
+        dv(f("max_images", "int"), 10),
+        dv(f("interval_hours", "int"), 3),
+    ];
     for (path, title) in [
         ("restore", "Restore after a nuke"),
         ("restore_roles", "Restore deleted roles"),
@@ -702,8 +720,9 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("General", "use_slash", "bool"), true), "Use slash commands"),
         ti(fg("General", "compact_replies", "bool"), "Minify TommyBot's message replies to compact embeds"),
         ti(fg("General", "delete_replies_secs", "int"), "Delete TommyBot's auto messages after few seconds"),
-        ti(fg("General", "enforce_quarantine_perms", "bool"), "Always enforce the proper permissions of Quarantine role in channels"),
+        ti(dv(fg("General", "enforce_quarantine_perms", "bool"), true), "Always enforce the proper permissions of Quarantine role in channels"),
         ti(fg("General", "ignore_no_permit", "bool"), "Always ignore commands issued by members without any permits"),
+        ti(fg("General", "ban_appeal_message", "text"), "Message shown to banned members with the appeal link"),
         ti(fg("General", "enforce_permits", "bool"), "Remove roles with dangerous permissions from members without any permits"),
         sx(
             "logging",
@@ -920,6 +939,10 @@ pub fn schema() -> Vec<Value> {
                     "Lock server joins",
                 ),
                 ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
+                ti(
+                    dv(fg("Lock scope", "pause_invites", "bool"), true),
+                    "Pause invites when kicking new members",
+                ),
             ],
         ),
         (

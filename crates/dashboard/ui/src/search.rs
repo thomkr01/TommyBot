@@ -106,7 +106,7 @@ pub fn SearchBox(guild: Signal<Option<String>>, pages: Vec<(&'static str, &'stat
     let hits = move || {
         let q = s.q.get();
         let mut v: Vec<(u32, String, Value)> = s.index.get().into_iter().filter_map(|(r, f)| Some((field_score(&f, &q), r, f)).filter(|h| h.0 > 0)).collect();
-        v.sort_by(|a, b| b.0.cmp(&a.0));
+        v.sort_by_key(|b| std::cmp::Reverse(b.0));
         v.truncate(8);
         v
     };

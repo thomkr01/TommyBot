@@ -3,6 +3,8 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tommybot_core::jobs;
+use tommybot_logging::embed::{Log, ARROW, BLUE, GREEN, NO, YES};
+use twilight_model::channel::message::Embed;
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
     Id,
@@ -60,6 +62,55 @@ pub fn summary(
 /// Wick's "Add Reason" pointer for actions run without a reason.
 pub fn add_reason_hint(case_no: i64) -> String {
     format!("\nAdd Reason: `/cases modify case:{case_no} reason:`")
+}
+
+/// Wick's two result embeds: "Timeout Result:" and its kin, and a pointer to add a reason when none was given.
+pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: u64) -> Vec<Embed> {
+    let (title, done) = match kind {
+        "ban" => ("Ban Result:", "Banned:"),
+        "kick" => ("Kick Result:", "Kicked:"),
+        "warn" => ("Warn Result:", "Warned:"),
+        _ => ("Timeout Result:", "Timed out:"),
+    };
+    let mut result = Log::new(title, BLUE)
+        .text(&format!(
+            "📄 **Reason:** {}",
+            reason.unwrap_or("No reason.")
+        ))
+        .text(&format!("👤 **Moderator:** <@{actor}>"))
+        .text(&format!("**{done}**"));
+    let mut cases = vec![];
+    for t in texts {
+        let first = t.lines().next().unwrap_or_default();
+        let case = first
+            .strip_prefix("Case #")
+            .and_then(|r| r.split(':').next());
+        match (case, first.rsplit(' ').next()) {
+            (Some(n), Some(who)) => {
+                cases.push(n);
+                let id = who.trim_matches(|c: char| !c.is_ascii_digit());
+                result = result.text(&format!("{YES} {who} [`{id}`]"));
+                // Warn threshold notes; the embed already shows moderator and reason.
+                for extra in t.lines().skip(1).filter(|l| {
+                    !["Moderator:", "Reason:", "Add Reason"]
+                        .iter()
+                        .any(|p| l.starts_with(p))
+                }) {
+                    result = result.text(extra);
+                }
+            }
+            _ => result = result.text(&format!("{NO} {first}")),
+        }
+    }
+    let mut out = vec![result.build()];
+    if reason.is_none() {
+        let mut add = Log::new("Add Reason", GREEN);
+        for n in cases {
+            add = add.text(&format!("{ARROW} `/cases modify (Case: {n})`"));
+        }
+        out.push(add.build());
+    }
+    out
 }
 
 /// What the target is told; `actor` is None when staff identity is hidden.
@@ -180,6 +231,20 @@ mod tests {
         );
         assert_eq!(summary("kick", false, &t, None, 9), t.join("\n"));
         assert_eq!(summary("kick", true, &t[..1], None, 9), t[0]);
+    }
+
+    #[test]
+    fn timeout_embeds_list_results_and_add_reason() {
+        let t = [
+            "Case #4: timeout <@5>".to_string(),
+            "Cannot timeout <@6>: they are immune".into(),
+        ];
+        let e = result_embeds("timeout", &t, None, 9);
+        assert_eq!(e.len(), 2);
+        let d = e[0].description.clone().unwrap();
+        assert!(d.contains("No reason.") && d.contains("✅ <@5> [`5`]") && d.contains("❎ Cannot"));
+        assert!(e[1].description.clone().unwrap().contains("(Case: 4)"));
+        assert_eq!(result_embeds("timeout", &t, Some("x"), 9).len(), 1);
     }
 
     #[test]
