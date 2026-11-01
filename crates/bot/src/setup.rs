@@ -6,6 +6,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use tommybot_logging::{
     embed::{BLUE, NO, YES},
+    emoji::{RUNNING, WAITING},
     Log,
 };
 use twilight_model::{
@@ -76,8 +77,8 @@ fn progress(done: usize, failed: Option<&str>) -> Log {
         let mark = match i {
             _ if i < done => YES,
             _ if i == done && failed.is_some() => NO,
-            _ if i == done => "▶",
-            _ => "▫",
+            _ if i == done => RUNNING,
+            _ => WAITING,
         };
         log = log.text(&format!("{mark} {s}"));
     }

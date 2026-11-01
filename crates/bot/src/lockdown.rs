@@ -1,4 +1,5 @@
 //! Runs automod lockdown plans against Discord and restores them from the stored snapshot.
+use tommybot_logging::emoji::{LOCKDOWN};
 use anyhow::Result;
 use tommybot_automod::{
     discord_api::MAX_INVITE_PAUSE_MS,
@@ -71,7 +72,7 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .await?;
             app.http
                 .create_message(ch.id)
-                .content("🔒 **The server is locked down.** Staff are on it; channels open again when the lock ends.")
+                .content(&format!("{LOCKDOWN} **The server is locked down.** Staff are on it; channels open again when the lock ends."))
                 .await?;
             return Ok(Some(ch.id.get()));
         }

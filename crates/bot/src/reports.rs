@@ -1,5 +1,7 @@
 //! Message context menus: Report Message (anyone) and the two purges (staff). A report is logged with
 //! action buttons; the staff who press them need the Manage Reports permit plus the permit of the action.
+use tommybot_logging::emoji::{Emoji, CLOSE, LINK, PAGE_FIRST, PAGE_LAST, PAGE_NEXT, PAGE_PREV};
+use tommybot_logging::emoji::{AGE, MEMBER, NO, YES};
 use anyhow::Result;
 use tommybot_logging::{
     embed::{BLUE, GREEN, HANDLED, ORANGE},
@@ -91,7 +93,7 @@ fn rows(id: i64, jump: String, deletable: bool) -> Vec<Component> {
             components,
         })
     };
-    let link = Component::Button(Button {
+    let link = Component::Button(LINK.on(Button {
         id: None,
         custom_id: None,
         disabled: false,
@@ -100,7 +102,7 @@ fn rows(id: i64, jump: String, deletable: bool) -> Vec<Component> {
         style: ButtonStyle::Link,
         url: Some(jump),
         sku_id: None,
-    });
+    }));
     vec![
         row(std::iter::once(link)
             .chain(deletable.then(|| button("Delete Message", id, "delete", ButtonStyle::Success)))
@@ -189,10 +191,10 @@ async fn report(
             msg.author.id
         ))
         .text(&format!(
-            "👤 **Member:** {} [{}]",
+            "{MEMBER} **Member:** {} [{}]",
             msg.author.name, msg.author.id
         ))
-        .text(&format!("🎂 **Creation:** <t:{created}:F>"))
+        .text(&format!("{AGE} **Creation:** <t:{created}:F>"))
         .field(
             "Reported Message:",
             &if content.is_empty() {
@@ -361,9 +363,9 @@ async fn submit_report(app: &App, i: &Interaction, ids: &str, reason: &str) -> R
         None => {
             let done = [EmbedBuilder::new()
                 .color(GREEN)
-                .description(
-                    "✅ This message has been flagged and sent to the staff team for a review!",
-                )
+                .description(format!(
+                    "{YES} This message has been flagged and sent to the staff team for a review!"
+                ))
                 .build()];
             up.embeds(Some(&done)).await?
         }
@@ -518,7 +520,7 @@ fn paging(page: i64, total: i64) -> (i64, i64) {
     (page.clamp(0, pages - 1), pages)
 }
 
-/// "User Info": an overview embed and the member's cases, paged with ⏮ ◀ ▶ ⏭ ✖. `arg` is empty for
+/// "User Info": an overview embed and the member's cases, paged with the page buttons. `arg` is empty for
 /// the first press (needs the Manage Reports permit) or `page:slot` / `x` from the pager.
 async fn user_info(
     app: &App,
@@ -591,7 +593,7 @@ async fn user_info(
         .map(|(n, k, active, at)| {
             format!(
                 "{} {n} [+{}] <t:{at}:R>",
-                if *active { "✅" } else { "❎" },
+                if *active { YES } else { NO },
                 k.to_uppercase()
             )
         })
@@ -625,22 +627,19 @@ async fn user_info(
 
 fn pager(id: i64, page: i64, pages: i64) -> Component {
     let last = pages - 1;
-    let b = |label: &str, to: i64, slot: &str, style, off| {
-        let mut c = button(label, id, &format!("cases:{to}:{slot}"), style);
-        if let Component::Button(b) = &mut c {
-            b.disabled = off;
-        }
-        c
+    let b = |icon: Emoji, to: i64, slot: &str, style, off| match button(icon.fallback, id, &format!("cases:{to}:{slot}"), style) {
+        Component::Button(b) => Component::Button(icon.on(Button { disabled: off, ..b })),
+        c => c,
     };
     let grey = ButtonStyle::Secondary;
     Component::ActionRow(ActionRow {
         id: None,
         components: vec![
-            b("⏮", 0, "f", grey, page == 0),
-            b("◀", (page - 1).max(0), "p", grey, page == 0),
-            b("▶", (page + 1).min(last), "n", grey, page >= last),
-            b("⏭", last, "l", grey, page >= last),
-            b("✖", 0, "x", ButtonStyle::Danger, false),
+            b(PAGE_FIRST, 0, "f", grey, page == 0),
+            b(PAGE_PREV, (page - 1).max(0), "p", grey, page == 0),
+            b(PAGE_NEXT, (page + 1).min(last), "n", grey, page >= last),
+            b(PAGE_LAST, last, "l", grey, page >= last),
+            b(CLOSE, 0, "x", ButtonStyle::Danger, false),
         ],
     })
 }

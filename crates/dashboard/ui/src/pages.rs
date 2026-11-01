@@ -174,7 +174,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     view! { <button on:click=move |_| { let (g, role, load) = (g.clone(), role.clone(), load.clone());
                         run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(json!({"role_id": role}))).await }, msg, need, move |_| load()) }>{l}</button> }
                 });
-                view! { <div class="row note"><b class=class>{if class == "ok" { "✓" } else { "!" }}" "{s(&r["title"])}</b><span class="muted">{s(&r["detail"])}</span>{fix}</div> }
+                view! { <div class="row note"><b class=class>{crate::icons::icon(if class == "ok" { "success" } else { "warning" })}" "{s(&r["title"])}</b><span class="muted">{s(&r["detail"])}</span>{fix}</div> }
             }
         </For></div>
         <h2 style="text-align:center">"Quick Systems Overview"</h2>

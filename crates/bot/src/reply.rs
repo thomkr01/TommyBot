@@ -1,4 +1,5 @@
 //! Reply-shaping helpers driven by `MiscCfg`: compact text, DMs, delayed deletes, message purges.
+use tommybot_logging::emoji::{MODERATOR, REASON};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -43,14 +44,14 @@ pub fn summary(
     let mut s = if compact && texts.len() > 1 {
         let (ok, failed): (Vec<_>, Vec<_>) = texts.iter().partition(|t| t.starts_with("Case #"));
         let mut s = format!(
-            "✅ Successful {kind}s: `{}`\n❎ Unsuccessful {kind}s: `{}`",
+            "{YES} Successful {kind}s: `{}`\n{NO} Unsuccessful {kind}s: `{}`",
             ok.len(),
             failed.len()
         );
         if let Some(r) = reason {
-            s += format!("\n📄 Reason: {r}").as_str();
+            s += format!("\n{REASON} Reason: {r}").as_str();
         }
-        s += format!("\n👤 Moderator: <@{actor}>").as_str();
+        s += format!("\n{MODERATOR} Moderator: <@{actor}>").as_str();
         failed.iter().fold(s, |s, f| s + "\n" + f.as_str())
     } else {
         texts.join("\n")
@@ -82,10 +83,10 @@ pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: 
     };
     let mut result = Log::new(title, BLUE)
         .text(&format!(
-            "📄 **Reason:** {}",
+            "{REASON} **Reason:** {}",
             reason.unwrap_or("No reason.")
         ))
-        .text(&format!("👤 **Moderator:** <@{actor}>"))
+        .text(&format!("{MODERATOR} **Moderator:** <@{actor}>"))
         .text(&format!("**{done}**"));
     let mut cases = vec![];
     for t in texts {

@@ -1,4 +1,5 @@
 //! Panic mode (spec 4.2): runs the antinuke crate's plans when several accounts get quarantined at once.
+use tommybot_logging::emoji::{PANIC, QUARANTINED};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
@@ -177,7 +178,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             }
             PanicStep::PingWarnedRoles => {
                 let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
-                    .text("🛑 **An abnormal behaviour has been detected!**")
+                    .text(&format!("{PANIC} **An abnormal behaviour has been detected!**"))
                     .text(&format!(
                         "{ARROW} TommyBot will lockdown the server and run a scan."
                     ));
@@ -226,16 +227,16 @@ async fn report(app: &App, gid: Id<GuildMarker>, sum: &backup::Summary) -> Log {
     .unwrap_or_default();
     let mut log = Log::new("Panic Mode Report:", DONE);
     if let Some((id, data)) = &case {
-        log = log.text(&format!("› CASE: `{id}`"));
+        log = log.text(&format!("{ARROW} CASE: `{id}`"));
         let who = data["quarantined"].as_array().cloned().unwrap_or_default();
         log = log.text(&format!(
-            "🧍 Members Quarantined: {} {YES} | 0 {NO}",
+            "{QUARANTINED} Members Quarantined: {} {YES} | 0 {NO}",
             who.len()
         ));
         for u in who.iter().filter_map(Value::as_u64) {
             let frags = data["fragments"][u.to_string()].as_u64().unwrap_or(0);
             log = log.text(&format!(
-                "{ARROW} {} [{frags} fragments] 🧍",
+                "{ARROW} {} [{frags} fragments] {QUARANTINED}",
                 embed::user(u)
             ));
         }

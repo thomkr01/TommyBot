@@ -302,7 +302,7 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
                         <button class="ghost" title="Rename" on:click=move |_| {
                             let name = web_sys::window().and_then(|w| w.prompt_with_message_and_default("Rule name", &s(&r3["name"])).ok().flatten());
                             if let Some(name) = name.filter(|n| !n.trim().is_empty()) { let mut v = r3.clone(); v["name"] = json!(name); call("PUT", format!("/{id4}"), Some(v)); }
-                        }>"✎"</button>
+                        }>{crate::icons::icon("edit")}</button>
                         {words.map(|n| format!(" ({n} words)"))}</h3>
                         <span class="muted">{format!("trigger: {}", s(&r["trigger"]))}</span>
                         {discord.into_iter().map(|b| view! { <span class="chip">{b}</span> }).collect_view()}

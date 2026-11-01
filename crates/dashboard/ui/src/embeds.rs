@@ -139,7 +139,7 @@ pub fn Embeds(guild: String) -> impl IntoView {
             <div class="card" on:keydown=on_key>
                 <div class="tools">
                     {WRAPS.map(|(l, tip, o, c, ..)| view! { <button class="ghost" title=tip aria-label=tip on:mousedown=move |e| { e.prevent_default(); apply(|v, a, b| wrap(v, a, b, o, c)) }>{l}</button> }).collect_view()}
-                    <button class="ghost" title="Link (Ctrl+K)" aria-label="Link (Ctrl+K)" on:mousedown=|e| { e.prevent_default(); link() }>"🔗"</button>
+                    <button class="ghost" title="Link (Ctrl+K)" aria-label="Link (Ctrl+K)" on:mousedown=|e| { e.prevent_default(); link() }>{crate::icons::icon("link")}</button>
                     {LINES.map(|(l, tip, p)| view! { <button class="ghost" title=tip aria-label=tip on:mousedown=move |e| { e.prevent_default(); apply(|v, a, b| line(v, a, b, p)) }>{l}</button> }).collect_view()}
                 </div>
                 {text("Author", "author.name", 256, false)}

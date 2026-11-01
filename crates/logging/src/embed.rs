@@ -16,10 +16,7 @@ pub const DONE: u32 = 0x08E36B;
 pub const HANDLED: u32 = 0x00CB73;
 pub const BLUE: u32 = 0x0D9DF8;
 
-/// Wick prefixes each line with a custom arrow emoji; this is the closest Unicode one.
-pub const ARROW: &str = "▸";
-pub const YES: &str = "✅";
-pub const NO: &str = "❎";
+pub use crate::emoji::{ARROW, NO, YES};
 
 /// Discord's embed limits.
 const TITLE: usize = 256;
@@ -50,7 +47,7 @@ impl Log {
     }
 
     /// `▸ **label:** value`
-    pub fn line(mut self, label: &str, value: &str) -> Self {
+    pub fn line(mut self, label: &str, value: impl std::fmt::Display) -> Self {
         self.lines.push(format!("{ARROW} **{label}:** {value}"));
         self
     }

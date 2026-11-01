@@ -1,5 +1,6 @@
 //! Wick's Interactive Whitelist: `w!whitelist TARGET` posts a multi-select of whitelist types with
 //! Save / Cancel. The ids carry executor, target and the picked types, so nothing is stored until Save.
+use tommybot_logging::emoji::{MODERATOR, TARGET};
 use anyhow::Result;
 use serde_json::json;
 use tommybot_core::permits::Level;
@@ -356,8 +357,8 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                         e = e.text(&format!("{} {label}", if now[t] { YES } else { NO }));
                     }
                     let e = e
-                        .inline("👤 Executor", &embed::user(actor.get()))
-                        .inline("🎟️ Target", &mention(kind, id));
+                        .inline(&format!("{MODERATOR} Executor"), &embed::user(actor.get()))
+                        .inline(&format!("{TARGET} Target"), &mention(kind, id));
                     InteractionResponseData {
                         embeds: Some(vec![e.build()]),
                         components: Some(vec![]),

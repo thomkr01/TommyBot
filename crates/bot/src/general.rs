@@ -1,5 +1,6 @@
 //! Wick's general commands: about, commands, help (and `-h` after any command), invite, ping, info,
 //! ncases and tshoot.
+use tommybot_logging::emoji::{CHEVRON, HELP, ONLINE};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -424,7 +425,7 @@ pub fn commands_page(level: &Level, prefix: &str, page: usize) -> (Embed, usize)
         .filter_map(|n| lookup(n))
         .filter(|c| allowed(level, c.2))
     {
-        e = e.text(&format!("❯ `{prefix}{}` {}", name.0, name.4));
+        e = e.text(&format!("{CHEVRON} `{prefix}{}` {}", name.0, name.4));
     }
     let e = e.footer(&format!(
         "Need more? {prefix}COMMAND -h · Page: {}/{}",
@@ -763,7 +764,7 @@ async fn answer(
         }
         "help" => {
             let e = Log::new("TommyBot's Help Panel:", BLUE)
-                .text("🫴 **General Help:**")
+                .text(&format!("{HELP} **General Help:**"))
                 .text(&format!("{ARROW} To view the commands you can use, do: `{pfx}commands`"))
                 .text(&format!("{ARROW} To see how one command works, do: `{pfx}COMMAND -h`"))
                 .text(&format!("{ARROW} To set things up, do: `{pfx}setup`, then `{pfx}heat`, `{pfx}an`, `{pfx}jg`..."))
@@ -811,7 +812,7 @@ async fn answer(
             );
             embed(
                 Log::new("TommyBot Status:", GREEN)
-                    .inline("🟢 Shard [0 -Current-]:", &shard)
+                    .inline(&format!("{ONLINE} Shard [0 -Current-]:"), &shard)
                     .build(),
             )
         }

@@ -155,6 +155,9 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "https://discord.com/api/v10".into()),
         },
     };
+    if let Err(e) = st.discord.load_emojis().await {
+        tracing::warn!(?e, "custom emojis not loaded, using Unicode fallbacks");
+    }
     let dist =
         std::env::var("DASHBOARD_DIST").unwrap_or_else(|_| "crates/dashboard/ui/dist".into());
     if !std::path::Path::new(&dist).join("index.html").is_file() {

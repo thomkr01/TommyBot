@@ -1,5 +1,6 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
 //! Web and third-party modes hand the member to the dashboard's /verify page, which queues a `verify_grant` job.
+use tommybot_logging::emoji::{ARROW};
 use anyhow::Result;
 use captcha::{
     filters::{Dots, Noise, Wave},
@@ -123,7 +124,7 @@ pub async fn setup(app: &App, gid: Id<GuildMarker>) -> Result<String> {
         .color(GREEN)
         .title("🧩 Verification Required!")
         .description(format!(
-            "To access `{}`, you need to pass the verification first.\n› Press on the **Verify** button below.",
+            "To access `{}`, you need to pass the verification first.\n{ARROW} Press on the **Verify** button below.",
             guild_name(app, gid).await
         ))
         .build();
@@ -356,7 +357,7 @@ fn passed_embed(server: &str) -> Embed {
         .color(GREEN)
         .title("You have been verified!")
         .description(format!(
-            "✅ You passed the verification successfully. You can now access `{server}`!"
+            "{YES} You passed the verification successfully. You can now access `{server}`!"
         ))
         .build()
 }
@@ -854,7 +855,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 let fail = EmbedBuilder::new()
                     .color(RED)
                     .title("❎ Unsuccessful Operation!")
-                    .description("› Wrong answer, try again before it's too late.")
+                    .description(format!("{ARROW} Wrong answer, try again before it's too late."))
                     .build();
                 client
                     .create_response(i.id, &i.token, &embed_reply(fail))

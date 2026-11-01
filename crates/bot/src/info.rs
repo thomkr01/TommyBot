@@ -20,7 +20,7 @@ fn created_secs(id: u64) -> i64 {
     (((id >> 22) + 1_420_070_400_000) / 1000) as i64
 }
 
-fn yes(b: bool) -> &'static str {
+fn yes(b: bool) -> tommybot_logging::emoji::Emoji {
     if b {
         YES
     } else {
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn dangerous_names() {
-        assert_eq!(dangerous(0), NO);
+        assert_eq!(dangerous(0), NO.to_string());
         assert_eq!(
             dangerous((1 << 3) | (1 << 2) | (1 << 10)),
             "Administrator, Ban Members"

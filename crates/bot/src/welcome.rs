@@ -1,4 +1,5 @@
 //! Thank-you message posted once when the bot joins a server.
+use tommybot_logging::emoji::{YES};
 use anyhow::Result;
 use twilight_model::{
     channel::{
@@ -85,7 +86,7 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
     let embed = EmbedBuilder::new()
         .title("Thank you for choosing TommyBot!")
         .description(format!(
-            "✅ `TommyBot` has been added to `{}` successfully!\n\n{wizard} Every feature is free.",
+            "{YES} `TommyBot` has been added to `{}` successfully!\n\n{wizard} Every feature is free.",
             g.name
         ))
         .build();

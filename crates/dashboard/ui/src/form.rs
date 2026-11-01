@@ -289,8 +289,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                         <div class="row">
                             <input aria-label="profile name" prop:value=move || show(&get()[i]["name"]) on:change=move |e| upd(i, "name", json!(event_target_value(&e))) />
                             <label><input type="checkbox" prop:checked=move || get()[i]["private"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "private", json!(event_target_checked(&e))) />" hide from @everyone"</label>
-                            <button class="ghost" aria-label="move up" on:click=move |_| { if i > 0 { swap(i - 1, i) } }>"↑"</button>
-                            <button class="ghost" aria-label="move down" on:click=move |_| swap(i, i + 1)>"↓"</button>
+                            <button class="ghost" aria-label="move up" on:click=move |_| { if i > 0 { swap(i - 1, i) } }>{crate::icons::icon("arrow_up")}</button>
+                            <button class="ghost" aria-label="move down" on:click=move |_| swap(i, i + 1)>{crate::icons::icon("arrow_down")}</button>
                             <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
                         </div>
                         <Field f=sub("roles", "roles", "Roles") val dc />
@@ -430,7 +430,7 @@ pub fn Section(
             run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.set("Done".into()); reload(r["version"].as_i64().unwrap_or(0)) });
         };
         view! { <div class="card wiz">
-            <button class="nav back" aria-label="previous" disabled=move || at.get() == 0 on:click=move |_| at.update(|i| *i = i.saturating_sub(1))>"‹"</button>
+            <button class="nav back" aria-label="previous" disabled=move || at.get() == 0 on:click=move |_| at.update(|i| *i = i.saturating_sub(1))>{crate::icons::icon("page_prev")}</button>
             <div class="wizbody">
                 {move || { let c = &cs[at.get()]; let all = fields.get();
                     let fs: Vec<Value> = c.fields.iter().filter_map(|(p, l)| all.iter().find(|f| f["path"] == *p).map(|f| { let mut f = f.clone(); if !l.is_empty() { f["title"] = json!(l); } f })).collect();
@@ -444,7 +444,7 @@ pub fn Section(
                     } }}
                 <p class="muted">{move || format!("{} / {}", at.get() + 1, cs.len())}</p>
             </div>
-            <button class="nav" aria-label="next" on:click=move |_| if at.get() + 1 < cs.len() { at.update(|i| *i += 1) } else if let Some(n) = next { n.run(()) }>"›"</button>
+            <button class="nav" aria-label="next" on:click=move |_| if at.get() + 1 < cs.len() { at.update(|i| *i += 1) } else if let Some(n) = next { n.run(()) }>{crate::icons::icon("page_next")}</button>
         </div> }
     });
     let save = move |_| {

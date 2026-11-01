@@ -1,4 +1,5 @@
 //! Polls `scheduled_jobs` and runs what is due; failures are logged, never fatal.
+use tommybot_logging::emoji::{ARROW};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
@@ -111,7 +112,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let code = job.payload["code"].as_str().unwrap_or_default();
             match crate::invites::raid_url(code).filter(|_| caught > 0) {
                 Some(url) => {
-                    log = log.text(&format!("› `{code}`"));
+                    log = log.text(&format!("{ARROW} `{code}`"));
                     send_log_link(
                         app,
                         gid.get(),
