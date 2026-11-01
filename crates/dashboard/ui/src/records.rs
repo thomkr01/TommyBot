@@ -102,15 +102,16 @@ pub fn NoteList(guild: String) -> impl IntoView {
             <span class="err">{move || msg.get()}</span>
         </div>
         <Show when=move || rows.get().is_empty()><div class="banner">"No notes found.."</div></Show>
-        <For each=move || rows.get() key=|r| (r["id"].as_i64(), r["text"].as_str().map(String::from)) let:r>
+        <For each=move || rows.get() key=|r| (s(&r["id"]), s(&r["text"])) let:r>
             {
-                let id = r["id"].as_i64().unwrap_or(0);
+                let id = s(&r["id"]);
+                let del = id.clone();
                 let body = RwSignal::new(s(&r["text"]));
                 view! { <div class="card">
-                    <div class="row"><b>{format!("#{id}")}</b><code>{s(&r["user_id"])}</code><span class="muted">{format!("by {}, {}", s(&r["author_id"]), s(&r["at"]))}</span></div>
+                    <div class="row"><b>{id.clone()}</b><code>{s(&r["user_id"])}</code><span class="muted">{format!("by {}, {}", s(&r["author_id"]), s(&r["at"]))}</span></div>
                     <div class="row"><input maxlength="500" prop:value=body on:input=move |e| body.set(event_target_value(&e)) />
                         <button on:click=move |_| post(format!("/{id}"), json!({"text": body.get_untracked()}))>"Save"</button>
-                        <button class="ghost" on:click=move |_| post(format!("/{id}/delete"), json!({}))>"Delete"</button></div>
+                        <button class="ghost" on:click=move |_| post(format!("/{del}/delete"), json!({}))>"Delete"</button></div>
                 </div> }
             }
         </For>

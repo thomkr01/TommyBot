@@ -1,7 +1,12 @@
 //! Read-only helpers of the `modcmds` commands: case and note listings and nickname cleanup.
 use anyhow::Result;
 
+use tommybot_logging::embed::{Log, BLUE};
+use twilight_model::channel::message::Embed;
+
 use crate::app::App;
+
+const PER_PAGE: usize = 10;
 
 /// Wick's `?t` codes (B, UB, K, TIMEOUT, WA, Q, UQ) and plain kind names, singular or plural.
 pub(crate) fn case_kind(t: Option<&str>) -> Result<Option<String>, String> {
@@ -59,7 +64,8 @@ fn fmt_case((no, kind, user, moderator, reason, active, at): &CaseRow) -> String
     )
 }
 
-/// One case by number, or the 10 latest (optionally of one user, by one moderator, of one kind).
+/// One case by number, or the 10 latest (optionally of one user, by one moderator, of one kind);
+/// `page` skips that many pages of 10.
 pub(crate) async fn view_cases(
     app: &App,
     g: i64,
@@ -67,18 +73,20 @@ pub(crate) async fn view_cases(
     user: Option<u64>,
     by: Option<u64>,
     kind: Option<String>,
+    page: usize,
 ) -> Result<String> {
     let rows: Vec<CaseRow> = sqlx::query_as(
         "SELECT case_no, kind, user_id, mod_id, reason, active, EXTRACT(EPOCH FROM created_at)::bigint
          FROM cases WHERE guild_id=$1 AND ($2::int IS NULL OR case_no=$2) AND ($3::bigint IS NULL OR user_id=$3)
          AND ($4::bigint IS NULL OR mod_id=$4) AND ($5::text IS NULL OR kind=$5)
-         ORDER BY case_no DESC LIMIT 10",
+         ORDER BY case_no DESC LIMIT 10 OFFSET $6",
     )
     .bind(g)
     .bind(case)
     .bind(user.map(|u| u as i64))
     .bind(by.map(|u| u as i64))
     .bind(kind)
+    .bind((page * PER_PAGE) as i64)
     .fetch_all(&app.pool)
     .await?;
     Ok(if rows.is_empty() {
@@ -88,33 +96,79 @@ pub(crate) async fn view_cases(
     })
 }
 
+/// One member's cases, a page at a time, with the page count (`w!cases NAME`).
+pub(crate) async fn cases_page(
+    app: &App,
+    g: i64,
+    user: u64,
+    page: usize,
+) -> Result<(Embed, usize)> {
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM cases WHERE guild_id=$1 AND user_id=$2")
+            .bind(g)
+            .bind(user as i64)
+            .fetch_one(&app.pool)
+            .await?;
+    let pages = (n as usize).div_ceil(PER_PAGE).max(1);
+    let page = page.min(pages - 1);
+    let text = view_cases(app, g, None, Some(user), None, None, page).await?;
+    let e = Log::new("Cases:", BLUE)
+        .text(&text)
+        .footer(&format!("Page: {}/{pages}", page + 1))
+        .build();
+    Ok((e, pages))
+}
+
+/// A single note as text; `note_embed` turns the same text into Wick's card.
+pub(crate) fn note_text(id: &str, user: u64, by: u64, text: &str) -> String {
+    format!("Note: {id} ✅\nMember: <@{user}>\nModerator: <@{by}>\nContent: {text}")
+}
+
+pub(crate) fn note_embed(text: &str) -> Embed {
+    let mut lines = text.lines();
+    let mut e = Log::new(lines.next().unwrap_or("Note"), BLUE);
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    // Content comes last and may span lines, so split on the labels only up to there.
+    let (head, content) = rest.split_once("\nContent: ").unwrap_or((&rest, ""));
+    for l in head.lines() {
+        if let Some((k, v)) = l.split_once(": ") {
+            e = e.field(k, v);
+        }
+    }
+    e.field("Content", content).build()
+}
+
+/// One note as `note_text`, or the notes as Wick's "Mod Notes (N):" list, newest first.
 pub(crate) async fn view_notes(
     app: &App,
     g: i64,
     user: Option<u64>,
-    id: Option<i64>,
+    id: Option<String>,
     by: Option<u64>,
 ) -> Result<String> {
-    let rows: Vec<(i64, i64, i64, String, i64)> = sqlx::query_as(
-        "SELECT id, user_id, author_id, text, EXTRACT(EPOCH FROM created_at)::bigint FROM notes
-         WHERE guild_id=$1 AND ($2::bigint IS NULL OR user_id=$2) AND ($3::bigint IS NULL OR id=$3)
+    let rows: Vec<(String, i64, i64, String, i64)> = sqlx::query_as(
+        "SELECT short_id, user_id, author_id, text, EXTRACT(EPOCH FROM created_at)::bigint FROM notes
+         WHERE guild_id=$1 AND ($2::bigint IS NULL OR user_id=$2) AND ($3::text IS NULL OR short_id=$3)
          AND ($4::bigint IS NULL OR author_id=$4) ORDER BY id DESC LIMIT 10",
     )
     .bind(g)
     .bind(user.map(|u| u as i64))
-    .bind(id)
+    .bind(id.as_deref())
     .bind(by.map(|u| u as i64))
     .fetch_all(&app.pool)
     .await?;
-    Ok(if rows.is_empty() {
-        "No matching notes".into()
-    } else {
-        rows.iter()
-            .map(|(id, about, by, text, at)| {
-                format!("`#{id}` <@{about}> by <@{by}> <t:{at}:R>: {text}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    Ok(match (rows.as_slice(), id) {
+        ([], _) => "No matching notes".into(),
+        ([(id, about, by, text, _)], Some(_)) => note_text(id, *about as u64, *by as u64, text),
+        _ => format!(
+            "{}Mod Notes ({}):\n{}",
+            by.map_or(String::new(), |m| format!("<@{m}> ")),
+            rows.len(),
+            rows.iter()
+                .map(|(id, about, _, _, at)| format!("`{id}` <@{about}> <t:{at}:R>"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
     })
 }
 
@@ -129,6 +183,25 @@ mod tests {
         assert_eq!(sanitized("𝓽𝓲𝓶𝓶𝔂"), "timmy");
         assert_eq!(sanitized("Ann-Marie 2"), "Ann-Marie 2");
         assert_eq!(sanitized("⚡⚡"), "Moderated Nickname");
+    }
+
+    #[test]
+    fn note_card_round_trips() {
+        let e = note_embed(&note_text("q413p9", 7, 8, "rude\nin vc"));
+        assert_eq!(e.title.as_deref(), Some("Note: q413p9 ✅"));
+        let f: Vec<_> = e
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            f,
+            [
+                ("Member", "<@7>"),
+                ("Moderator", "<@8>"),
+                ("Content", "rude\nin vc")
+            ]
+        );
     }
 
     #[test]

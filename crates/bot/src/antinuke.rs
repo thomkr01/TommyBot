@@ -20,6 +20,7 @@ use tommybot_logging::{
     embed::{ALERT, NO, YES},
     Log, LogKind,
 };
+use twilight_http::request::{Method, RequestBuilder};
 use twilight_model::{
     gateway::payload::incoming::MemberUpdate,
     guild::{
@@ -318,14 +319,22 @@ async fn guard_perms(
             "gave @everyone or a main role dangerous channel permissions"
         }
         A::GuildUpdate if an.vanity_guard => {
-            let changed = e
-                .changes
-                .iter()
-                .any(|c| matches!(c, AuditLogChange::VanityUrlCode { .. }));
-            if !changed {
+            let Some(old) = e.changes.iter().find_map(|c| match c {
+                AuditLogChange::VanityUrlCode { old, .. } => Some(old.clone()),
+                _ => None,
+            }) else {
                 return Ok(());
+            };
+            // twilight has no vanity route, so this is a raw PATCH (needs Manage Server).
+            if let Some(code) = old {
+                let req = RequestBuilder::raw(Method::Patch, format!("guilds/{gid}/vanity-url"))
+                    .json(&json!({ "code": code }))
+                    .build()?;
+                if let Err(err) = app.http.request::<()>(req).await {
+                    tracing::warn!(?err, "could not restore the vanity URL");
+                }
             }
-            "changed the vanity URL (bots cannot set it back, do it by hand)"
+            "changed the vanity URL"
         }
         _ => return Ok(()),
     };

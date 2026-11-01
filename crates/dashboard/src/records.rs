@@ -244,8 +244,8 @@ async fn notes(
     Query(f): Query<NoteFilter>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_view", "notes_manage"]).await?;
-    let rows: Vec<(i64, String, String, String, At)> = sqlx::query_as(
-        "select id, user_id::text, author_id::text, text, created_at from notes
+    let rows: Vec<(String, String, String, String, At)> = sqlx::query_as(
+        "select short_id, user_id::text, author_id::text, text, created_at from notes
          where guild_id = $1 and ($2 = '' or user_id::text = $2) order by id desc limit 200",
     )
     .bind(guild)
@@ -286,11 +286,11 @@ async fn note_add(
 async fn note_edit(
     State(st): State<AppState>,
     s: Sess,
-    Path((guild, id)): Path<(i64, i64)>,
+    Path((guild, id)): Path<(i64, String)>,
     Json(b): Json<NoteBody>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_manage"]).await?;
-    let n = sqlx::query("update notes set text = $3 where guild_id = $1 and id = $2")
+    let n = sqlx::query("update notes set text = $3 where guild_id = $1 and short_id = $2")
         .bind(guild)
         .bind(id)
         .bind(clip(&b.text, NOTE_MAX)?)
@@ -306,10 +306,10 @@ async fn note_edit(
 async fn note_delete(
     State(st): State<AppState>,
     s: Sess,
-    Path((guild, id)): Path<(i64, i64)>,
+    Path((guild, id)): Path<(i64, String)>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_manage"]).await?;
-    sqlx::query("delete from notes where guild_id = $1 and id = $2")
+    sqlx::query("delete from notes where guild_id = $1 and short_id = $2")
         .bind(guild)
         .bind(id)
         .execute(&st.db)

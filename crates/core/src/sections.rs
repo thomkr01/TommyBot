@@ -21,7 +21,7 @@ pub struct AntinukeCfg {
     pub prune: bool,
     /// Punish anyone who touches a quarantined member (roles, nickname, timeout, kick, ban).
     pub quarantine_hold: bool,
-    /// Quarantine whoever changes the vanity URL (bots cannot set it back).
+    /// Quarantine whoever changes the vanity URL and put the old code back.
     pub vanity_guard: bool,
     /// Off: a reached limit is only logged and reverted.
     pub auto_quarantine: bool,
