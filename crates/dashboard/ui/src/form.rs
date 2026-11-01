@@ -141,19 +141,22 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 </select></div>
                 <span class="chip">{move || { let s = secs(); let u = best_unit(s); let n = s / UNITS[u].1; format!("{n} {}{}", UNITS[u].0, if n == 1.0 { "" } else { "s" }) }}</span> }.into_any()
         }
-        "int" | "float" => {
-            let float = kind == "float";
+        "int" | "float" | "pct" => {
+            let float = kind != "int";
+            // "pct" is stored as a fraction (0.05) and shown as a percent (5).
+            let k = if kind == "pct" { 100.0 } else { 1.0 };
+            let shown = move || if k == 1.0 { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
             let step = move |d: f64| {
-                let x = get().as_f64().unwrap_or(0.0) + d;
-                set(if float { json!(x) } else { json!(x as i64) })
+                let x = get().as_f64().unwrap_or(0.0) * k + d;
+                set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!(x) } else { json!(x as i64) })
             };
-            let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
+            let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
             view! { <div class="step"><button class="ghost" on:click=move |_| step(-1.0)>"-"</button>
-                <input prop:value=move || show(&get()) on:change=move |e| {
+                <input prop:value=shown on:change=move |e| {
                     let s = event_target_value(&e);
                     let s = s.trim();
                     if s.is_empty() { set(Value::Null) }
-                    else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x)) } }
+                    else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x / k)) } }
                     else if let Ok(x) = s.parse::<i64>() { set(json!(x)) }
                 } />
                 <button class="ghost" on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div> }.into_any()

@@ -476,7 +476,12 @@ async fn filter_action(
                 },
             )
             .await?;
-            warn_actions(app, cfg, gid, uid).await?;
+            // The threshold's timeout is the punishment; the strikes only keep count of it.
+            if warn_actions(app, cfg, gid, uid).await? {
+                let mut st = store::load_strikes(&app.pool, gid.get(), uid.get()).await?;
+                strike(&mut st, &cfg.automod.strike, now_ms());
+                store::save_strikes(&app.pool, gid.get(), uid.get(), &st).await?;
+            }
         }
         FilterAction::Timeout => {
             timeout(&app.http, gid, uid, secs, "Automod").await?;
@@ -738,15 +743,18 @@ pub(crate) async fn warn_actions(
     cfg: &GuildCfg,
     gid: Id<GuildMarker>,
     uid: Id<UserMarker>,
-) -> Result<()> {
+) -> Result<bool> {
     let added = cfg.misc.warn_base_points;
-    if let Some(text) = commands::apply_warn_actions(app, &cfg.misc, gid, uid, added).await? {
-        let log = Log::new("Warn Action", ORANGE)
-            .user("Member", uid.get())
-            .line("Result", &text);
-        send_log(app, gid.get(), LogKind::AutoMod, log).await?;
-    }
-    Ok(())
+    let Some((text, timed_out)) =
+        commands::apply_warn_actions(app, &cfg.misc, gid, uid, added).await?
+    else {
+        return Ok(false);
+    };
+    let log = Log::new("Warn Action", ORANGE)
+        .user("Member", uid.get())
+        .line("Result", &text);
+    send_log(app, gid.get(), LogKind::AutoMod, log).await?;
+    Ok(timed_out)
 }
 
 /// Custom plus unicode emoji; a ZWJ sequence counts per symbol.

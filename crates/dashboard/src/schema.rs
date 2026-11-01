@@ -315,7 +315,7 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), true), "Multiply timeouts"),
         ti(dv(fg("Auto timeouts", "strike.multiplier_pct", "int"), 200), "Multiplier percentage"),
         ti(dv(fg("Heat settings", "heat.max", "float"), 100.0), "Max heat"),
-        ti(dv(fg("Heat settings", "heat.decay_per_sec", "float"), 0.05), "Heat degradation (every second)"),
+        ti(dv(fg("Heat settings", "heat.decay_per_sec", "pct"), 0.05), "Heat degradation (every second)"),
         dv(fg("Heat settings", "heat.webhook_multiplier", "float"), 1.5),
         hp(
             ti(dv(fg("Heat settings", "strike.reset_heat_on_timeout", "bool"), false), "Set current heat to 0 after punishment"),
@@ -1028,7 +1028,7 @@ mod tests {
                 let sample = match fd["kind"].as_str().unwrap() {
                     "bool" => json!(true),
                     "int" => json!(5),
-                    "float" => json!(1.5),
+                    "float" | "pct" => json!(1.5),
                     "text" | "color" => json!("x"),
                     "list" => json!(["1"]),
                     "choice" => fd["options"]
