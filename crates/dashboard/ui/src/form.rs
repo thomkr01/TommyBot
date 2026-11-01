@@ -263,7 +263,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                         <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
                     </div> }
                 }).collect_view()}
-                <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); } if let Some(a) = cur.as_array_mut() { a.push(json!({"events": [], "channel": null})); } set(cur) }>"Add a new logging type"</button>
+                <button class="ghost" on:click=move |_| { let mut cur = get(); if !cur.is_array() { cur = json!([]); }
+ if let Some(a) = cur.as_array_mut() { a.push(json!({"events": [], "channel": null})); } set(cur) }>"Add a new logging type"</button>
             </div> }.into_any()
         }
         "profiles" => {

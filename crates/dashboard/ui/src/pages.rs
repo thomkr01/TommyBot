@@ -317,7 +317,27 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
             <a class:on=sub == "essential" href=format!("#/{guild}/logging/{tab}/essential")>"essential"</a>
             <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
         </div>
+        {(tab == "wick").then(|| view! { <RouteNote guild=guild.clone() customize=sub == "customize" /> })}
         <Section guild=guild.clone() name="logging".to_string() part enrolled />
+    }
+}
+
+/// Wick's note under Wick Logs listing the types that have their own channel, and the empty state on
+/// the customize tab.
+#[component]
+fn RouteNote(guild: String, customize: bool) -> impl IntoView {
+    let moved = RwSignal::new(None::<Vec<String>>);
+    spawn_local(async move {
+        if let Ok(v) = api("GET", &format!("/api/guilds/{guild}/config"), None).await {
+            let routes = v["config"]["logging"]["routes"].as_object().cloned().unwrap_or_default();
+            let mut names: Vec<String> = routes.iter().filter(|(k, r)| *k != "mod_command" && !r.is_null()).map(|(k, _)| k.replace('_', " ")).collect();
+            names.sort();
+            moved.set(Some(names));
+        }
+    });
+    view! {
+        {move || moved.get().filter(|n| !n.is_empty() && !customize).map(|n| view! { <p class="info">{format!("There are some types that won't be logged here as you have custom logs set below, these types are: [{}]. All other logs (besides modlogs) will still go to this channel.", n.join(", "))}</p> })}
+        {move || moved.get().filter(|n| n.is_empty() && customize).map(|_| view! { <p class="muted">"There are no customizable log channels set, add your own."</p> })}
     }
 }
 
