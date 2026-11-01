@@ -224,7 +224,7 @@ pub(super) static RESTORE: Module = Module {
     ],
 };
 
-static JOINGATE_ROWS: [Row; 24] = {
+static JOINGATE_ROWS: [Row; 26] = {
     let [a1, a2, a3] = gate_filter!("2", "No PfP Filter", no_avatar);
     let [b1, b2, b3] = gate_filter!("3", "Account Age Filter", account_age);
     let [c1, c2, c3] = gate_filter!("4", "Bot Addition Filter", unauthorized_bot);
@@ -236,6 +236,8 @@ static JOINGATE_ROWS: [Row; 24] = {
         r!("1", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
         a1, a2, a3, b1, b2, b3,
         r!("3c", "Minimum Age", "joingate.min_age_days", Kind::Int(1, 3650), |c| format!("{}d", c.joingate.min_age_days)),
+        r!("3e", "Minimum Age (precise)", "joingate.min_age_override_ms", Kind::Ms, |c| ms(c.joingate.min_age_ms())),
+        r!("3d", "Expose Minimum Age", "joingate.expose_min_age", Kind::Bool, |c| on(c.joingate.expose_min_age)),
         c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3,
         r!("9", "DM Punished Members", "joingate.dm_punished", Kind::Bool, |c| on(c.joingate.dm_punished)),
     ]
@@ -288,6 +290,8 @@ pub(super) static VERIFICATION: Module = Module {
         r!("4", "Verified Roles", "verification.roles", Kind::Roles, |c| roles(&c.verification.roles)),
         r!("5", "Duration", "verification.time_limit_ms", Kind::Ms, |c| ms(c.verification.verify.time_limit_ms)),
         r!("6", "Mode", "verification.mode", Kind::Choice(&[("captcha", "\"Captcha\""), ("rucaptcha", "\"SimpleCaptcha\""), ("none", "\"Button\""), ("web", "\"Web\""), ("dm", "\"Dm\"")]), |c| format!("{:?}", c.verification.verify.mode)),
+        r!("12", "Regeneration", "verification.regen_ms", Kind::Ms, |c| c.verification.verify.regen_ms.map_or(NO.into(), ms)),
+        r!("12a", "Regeneration Status", "verification.regen_ms", Kind::Switch("12000", "null"), |c| on(c.verification.verify.regen_ms.is_some())),
         r!("13", "Notes", "verification.show_notes", Kind::Bool, |c| on(c.verification.verify.show_notes)),
     ],
 };

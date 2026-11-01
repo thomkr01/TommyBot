@@ -273,7 +273,7 @@ impl Default for FiltersCfg {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct WordsCfg {
     pub filter: FilterCfg,
@@ -288,6 +288,25 @@ pub struct WordsCfg {
     pub premade_racist: bool,
     /// Keep the words in a native Discord AutoMod rule instead.
     pub use_discord_automod: bool,
+}
+
+impl Default for WordsCfg {
+    fn default() -> Self {
+        Self {
+            // Wick's word blacklist warns by default.
+            filter: FilterCfg {
+                action: Some(FilterAction::Warn),
+                ..FilterCfg::default()
+            },
+            strict: vec![],
+            wildcard: vec![],
+            regex: Patterns::default(),
+            premade_profane: false,
+            premade_vulgar: false,
+            premade_racist: false,
+            use_discord_automod: false,
+        }
+    }
 }
 
 /// Regex word patterns, compiled once when the config loads, so a bad one fails the dashboard save.

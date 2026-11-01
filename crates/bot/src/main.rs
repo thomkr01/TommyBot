@@ -10,6 +10,7 @@ mod events;
 mod general;
 mod hierarchy;
 mod info;
+mod invites;
 mod lockdown;
 mod metrics;
 mod modcmds;

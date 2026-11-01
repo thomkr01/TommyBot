@@ -84,13 +84,19 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
 
 impl GuildCfg {
     pub(crate) fn parse(cfg: &Value) -> Self {
+        let lockdown: LockdownCfg = section(cfg, "lockdown");
+        let mut verification: VerificationCfg = section(cfg, "verification");
+        // Verified members get the Statics main roles unless verification names its own.
+        if verification.roles.is_empty() {
+            verification.roles = lockdown.main_roles.clone();
+        }
         Self {
             logging: section(cfg, "logging"),
             antinuke: section(cfg, "antinuke"),
             automod: section(cfg, "automod"),
             joingate: section(cfg, "joingate"),
             joinraid: section(cfg, "joinraid"),
-            lockdown: section(cfg, "lockdown"),
+            lockdown,
             lockdown_prefs: section(cfg, "lockdown"),
             discord_automod: section(cfg, "discord_automod"),
             panic: section(cfg, "panic"),
@@ -98,7 +104,7 @@ impl GuildCfg {
             misc: section(cfg, "misc"),
             appeals: section(cfg, "appeals"),
             whitelist: section(cfg, "whitelist"),
-            verification: section(cfg, "verification"),
+            verification,
             tickets: section(cfg, "tickets"),
             catch: section(cfg, "catch"),
         }
@@ -120,8 +126,10 @@ pub struct App {
     /// Phishing and NSFW domain lists, refreshed in the background.
     pub sites: tommybot_automod::sites::Sites,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
-    /// Pending image-captcha answers per (guild, user); lost on restart, the member just clicks again.
-    pub captchas: Mutex<HashMap<(u64, u64), String>>,
+    /// Pending image-captcha answers and their expiry (ms) per (guild, user); lost on restart, the member just clicks again.
+    pub captchas: Mutex<HashMap<(u64, u64), (String, i64)>>,
+    /// Invite uses per guild at the last join, to see which invite the next joiner used.
+    pub invites: Mutex<HashMap<u64, HashMap<String, u64>>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
     /// Mentions per (guild, user) for the mentions filter's hour cap.
     pub pings: Mutex<HashMap<(u64, u64), MentionWatch>>,
@@ -171,6 +179,7 @@ impl App {
             sites: Default::default(),
             raids: Default::default(),
             captchas: Default::default(),
+            invites: Default::default(),
             mentions: Default::default(),
             pings: Default::default(),
             channels: Default::default(),

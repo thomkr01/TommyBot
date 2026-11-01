@@ -345,6 +345,9 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
             }
         }
     }
+    if section == "misc" && v["warn_actions"].as_array().is_some_and(|a| a.len() > 5) {
+        return Err(ApiError::BadRequest("at most 5 warn actions".into()));
+    }
     let v = v.clone();
     let r = match section {
         "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),

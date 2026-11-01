@@ -49,6 +49,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn next_is_the_nearest_threshold_above() {
+        let t = |points| Threshold {
+            points,
+            action: Action::Kick,
+        };
+        let ts = [t(10), t(5), t(20)];
+        assert_eq!(next(&ts, 5).map(|t| t.points), Some(10));
+        assert_eq!(next(&ts, 20), None);
+    }
+
+    #[test]
     fn harshest_crossed_wins() {
         let ts = [
             Threshold {

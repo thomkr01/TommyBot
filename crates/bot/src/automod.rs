@@ -6,7 +6,7 @@ use tommybot_automod::{
     discord_api::BotAction,
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
-    join::{gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
+    join::{account_created_ms, gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
     lockdown::JoinLock,
     store,
     strike::strike,
@@ -17,7 +17,7 @@ use tommybot_core::{
     sections::{AutomodCfg, FilterAction, FilterCfg, FiltersCfg, WhitelistList},
 };
 use tommybot_logging::{
-    embed::{channel, clip, duration, ALERT, ARROW, ORANGE, RED, YES},
+    embed::{channel, clip, duration, ALERT, ARROW, DONE, ORANGE, RED, YES},
     Log, LogKind,
 };
 use twilight_model::{
@@ -25,6 +25,7 @@ use twilight_model::{
         AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
     },
     guild::auto_moderation::AutoModerationActionType,
+    guild::Permissions,
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -80,6 +81,23 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let listed =
         |l: &WhitelistList| l.covers(m.author.id, roles, m.channel_id, category, m.webhook_id);
     let partner = wl.partner_channels.contains(&m.channel_id);
+    // Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
+    let dangerous = !cfg.misc.staff_only_permitted && {
+        const BITS: Permissions = Permissions::ADMINISTRATOR
+            .union(Permissions::KICK_MEMBERS)
+            .union(Permissions::BAN_MEMBERS)
+            .union(Permissions::MANAGE_CHANNELS)
+            .union(Permissions::MANAGE_GUILD)
+            .union(Permissions::MANAGE_MESSAGES)
+            .union(Permissions::MANAGE_ROLES)
+            .union(Permissions::MANAGE_WEBHOOKS);
+        // A failed lookup must not switch automod off for this message.
+        app.guild_info(gid).await.is_ok_and(|info| {
+            roles
+                .iter()
+                .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
+        })
+    };
     let now = now_ms();
     let content = m.content.as_str();
     let f = &am.filters;
@@ -142,13 +160,15 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         upper_chars,
         lower_chars,
         from_webhook: m.webhook_id.is_some(),
+        // Wick's hidden factor: no avatar, or younger than the join gate's minimum age.
+        suspicious_account: m.author.avatar.is_none()
+            || now - account_created_ms(m.author.id.get()) < cfg.joingate.min_age_ms(),
         whitelist: Whitelist {
-            spam: partner || listed(&wl.spam),
+            spam: partner || dangerous || listed(&wl.spam),
             mention_spam: listed(&wl.mentions),
             advertising: partner || listed(&wl.invites),
             everyone: partner || listed(&wl.everyone),
         },
-        ..Default::default()
     };
     if facts.blacklisted_words > 0 && app.whitelisted(gid, m.author.id, "words").await? {
         facts.blacklisted_words = 0;
@@ -228,7 +248,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     crate::panic::note(app, gid, m.author.id, true).await?;
     let tripped = tripped_filter(&breakdown, f, bad_site);
     if let Some((fc, factor)) = tripped {
-        if let Some(action) = fc.action {
+        // Timeout without its own duration uses the Auto Timeouts, so it goes through the strikes.
+        let own =
+            |a: &FilterAction| *a != FilterAction::Timeout || fc.duration_secs.unwrap_or(0) > 0;
+        if let Some(action) = fc.action.filter(own) {
             return filter_action(app, &cfg, gid, m, action, (factor, fc.duration_secs)).await;
         }
     }
@@ -251,18 +274,26 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .collect();
         reply::purge_ids(app, &others).await;
     }
+    let reason = if act.purge {
+        "Message spam (strike cap)"
+    } else {
+        tripped.map_or("Message spam", |t| t.1)
+    };
     if am.strike.enabled {
-        if cfg.misc.show_reason_on_auto {
-            let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
-                .filter(|_| act.timeout_ms > 300_000);
-            let text = "You were timed out by automod: message spam";
-            reply::dm(
-                app,
-                m.author.id,
-                &note.map_or(text.into(), |n| format!("{text}\n{n}")),
-            )
-            .await;
-        }
+        let why = if cfg.misc.show_reason_on_auto {
+            format!(": {reason}")
+        } else {
+            String::new()
+        };
+        let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
+            .filter(|_| act.timeout_ms > 300_000)
+            .map_or(String::new(), |n| format!("\n{n}"));
+        reply::dm(
+            app,
+            m.author.id,
+            &format!("You were timed out by automod{why}{note}"),
+        )
+        .await;
         timeout(
             &app.http,
             gid,
@@ -271,12 +302,16 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             "Automod",
         )
         .await?;
+        auto_case(
+            app,
+            gid,
+            m.author.id,
+            "timeout",
+            reason,
+            Some(act.timeout_ms / 1000),
+        )
+        .await?;
     }
-    let reason = if act.purge {
-        "Message spam (strike cap)"
-    } else {
-        tripped.map_or("Message spam", |t| t.1)
-    };
     let log = Log::new(&format!("*{} has been timed out!*", m.author.name), ORANGE)
         .line("Reason", &format!("*{reason}*"))
         .user("Member", m.author.id.get())
@@ -382,6 +417,33 @@ fn tripped_filter<'a>(
     })
 }
 
+/// The case an automod punishment leaves on the cases page, filed by the bot.
+async fn auto_case(
+    app: &App,
+    gid: Id<GuildMarker>,
+    uid: Id<UserMarker>,
+    kind: &str,
+    reason: &str,
+    duration_s: Option<i64>,
+) -> Result<()> {
+    cases::create(
+        &app.pool,
+        NewCase {
+            guild_id: gid.get() as i64,
+            kind,
+            user_id: uid.get() as i64,
+            mod_id: app.me.get() as i64,
+            reason: Some(reason),
+            points: 0,
+            duration_s,
+            inverse: None,
+            proof: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 /// A filter's own action replaces the strike system: no strike is recorded.
 async fn filter_action(
     app: &App,
@@ -419,12 +481,17 @@ async fn filter_action(
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        FilterAction::Timeout => timeout(&app.http, gid, uid, secs, "Automod").await?,
+        FilterAction::Timeout => {
+            timeout(&app.http, gid, uid, secs, "Automod").await?;
+            auto_case(app, gid, uid, "timeout", factor, Some(secs)).await?;
+        }
         FilterAction::Kick => {
             app.http.remove_guild_member(gid, uid).await?;
+            auto_case(app, gid, uid, "kick", factor, None).await?;
         }
         FilterAction::Ban => {
             app.http.create_ban(gid, uid).await?;
+            auto_case(app, gid, uid, "ban", factor, None).await?;
         }
     }
     send_log(
@@ -523,8 +590,26 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         };
         return punish(app, &cfg, gid, user.id.get(), action, "join lock").await;
     }
+    // One invites call per join: only when something shows the result.
+    let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
+        || cfg.logging.target(LogKind::Member, None).is_some()
+    {
+        crate::invites::used_invite(app, gid).await
+    } else {
+        None
+    };
+    if let Some((code, inviter)) = &invite {
+        let log = Log::new("Invite Used", DONE)
+            .user("Member", user.id.get())
+            .line("Invite", &format!("`{code}`"))
+            .line("Inviter", inviter);
+        if let Err(e) = send_log(app, gid.get(), LogKind::Member, log).await {
+            tracing::warn!(?e, "invite log failed");
+        }
+    }
     let name = cure(&user.name);
     let j = Joiner {
+        invite: invite.as_ref().map(|i| i.0.as_str()),
         id: user.id.get(),
         name: &name,
         has_avatar: user.avatar.is_some(),
@@ -561,27 +646,38 @@ async fn join_raid(
     suspicious: bool,
     now: i64,
 ) -> Result<()> {
-    let (out, started, names) = {
+    let (out, started, names, invites, code) = {
         let mut raids = app.raids.lock().unwrap();
         let d = raids.entry(gid.get()).or_default();
         let out = d.on_join(j, suspicious, raid, now);
+        if out.triggered || d.code.is_empty() {
+            d.code = crate::invites::raid_code(gid.get());
+        }
         let names: Vec<String> = out
             .flagged
             .iter()
             .map(|id| d.name_of(*id).unwrap_or_default().to_string())
             .collect();
-        (out, d.started, names)
+        let invites: Vec<String> = out
+            .flagged
+            .iter()
+            .map(|id| d.invite_of(*id).unwrap_or_default().to_string())
+            .collect();
+        (out, d.started, names, invites, d.code.clone())
     };
     if !out.flagged.is_empty() {
         let ids: Vec<i64> = out.flagged.iter().map(|&id| id as i64).collect();
         let logged = sqlx::query(
-            "insert into raid_log (guild_id, raid_ms, user_id, name)
-             select $1, $2, * from unnest($3::bigint[], $4::text[]) on conflict do nothing",
+            "insert into raid_log (guild_id, raid_ms, user_id, name, invite_code, code)
+             select $1, $2, u, n, nullif(i, ''), $6
+             from unnest($3::bigint[], $4::text[], $5::text[]) as t(u, n, i) on conflict do nothing",
         )
         .bind(gid.get() as i64)
         .bind(started)
         .bind(&ids)
         .bind(&names)
+        .bind(&invites)
+        .bind(&code)
         .execute(&app.pool)
         .await;
         if let Err(e) = logged {
@@ -593,7 +689,7 @@ async fn join_raid(
             &app.pool,
             gid.get() as i64,
             "raid_end",
-            serde_json::json!({ "until_ms": now + raid.active_ms, "started_ms": started }),
+            serde_json::json!({ "until_ms": now + raid.active_ms, "started_ms": started, "code": code }),
             (now / 1000) + raid.active_ms / 1000,
         )
         .await?;
@@ -628,19 +724,16 @@ async fn join_raid(
                     .iter()
                     .zip(&names)
                     .take(40)
-                    .map(|(u, n)| format!("`{u} | {n}`")))
+                    .map(|(u, n)| format!("`{} | {n}`", crate::invites::short_id(*u))))
                 .chain(
                     (out.flagged.len() > 40).then(|| format!("+{} more", out.flagged.len() - 40)),
                 )
                 .collect::<Vec<_>>()
                 .join("\n"),
             );
-        let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
-        if !base.is_empty() {
-            log = log.text(&format!(
-                "{ARROW} [Every caught account]({}/#/{gid}/raid_log)",
-                base.trim_end_matches('/')
-            ));
+        log = log.field("Code:", &format!("`{code}`"));
+        if let Some(url) = crate::invites::raid_url(&code) {
+            log = log.text(&format!("{ARROW} [Every caught account]({url})"));
         }
         send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
     }
@@ -824,11 +917,15 @@ async fn punish(
     let uid = Id::new(user);
     let punishing = !matches!(action, Action::Log | Action::Timeout(..=-1));
     if punishing && cfg.joingate.dm_punished {
-        let text = if cfg.misc.show_reason_on_auto {
+        let mut text = if cfg.misc.show_reason_on_auto {
             format!("Automod action: {action:?} ({why})")
         } else {
             format!("Automod action: {action:?}")
         };
+        if cfg.joingate.expose_min_age && why.starts_with("join gate") {
+            let min = duration(cfg.joingate.min_age_ms() / 1000);
+            text.push_str(&format!("\nMinimum account age: `{min}`"));
+        }
         let note =
             crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid).filter(|_| {
                 match action {

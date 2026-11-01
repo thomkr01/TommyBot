@@ -115,6 +115,28 @@ pub async fn send_log_pinging(
     send(app, ch, pings.trim_end(), &embed.build(), None, &mentions).await
 }
 
+/// Like [`send_log`] with a link button under the embed.
+pub async fn send_log_link(
+    app: &App,
+    guild: u64,
+    kind: LogKind,
+    embed: Log,
+    link: (&str, String),
+) -> Result<()> {
+    let Some(ch) = app.cfg(guild).await?.logging.target(kind, None) else {
+        return Ok(());
+    };
+    send(
+        app,
+        ch,
+        "",
+        &embed.build(),
+        Some(&link),
+        &AllowedMentions::default(),
+    )
+    .await
+}
+
 /// Sends held delete logs once their wait is over. `handle` only flushes when an event arrives,
 /// so a quiet guild would otherwise never log its deletes.
 pub async fn flush_logs(app: Arc<App>) {

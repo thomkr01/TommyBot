@@ -87,6 +87,10 @@ pub struct GateCfg {
     pub no_avatar: GateFilter,
     pub account_age: GateFilter,
     pub min_age_days: u32,
+    /// Minimum age in ms (`jg 3c 3d`, minutes to days); wins over `min_age_days`.
+    pub min_age_override_ms: Option<i64>,
+    /// Tell a punished member the minimum age in the DM (`jg 3d`).
+    pub expose_min_age: bool,
     pub unauthorized_bot: GateFilter,
     pub unverified_bot: GateFilter,
     pub invite_in_name: GateFilter,
@@ -158,6 +162,8 @@ impl Default for GateCfg {
             no_avatar: GateFilter::default(),
             account_age: GateFilter::default(),
             min_age_days: 7,
+            min_age_override_ms: None,
+            expose_min_age: false,
             unauthorized_bot: GateFilter::default(),
             unverified_bot: GateFilter::default(),
             invite_in_name: GateFilter::default(),
@@ -174,7 +180,8 @@ impl Default for GateCfg {
 impl GateCfg {
     /// The configured minimum account age; also the "young account" limit of Suspicious while the age filter is off.
     pub fn min_age_ms(&self) -> i64 {
-        i64::from(self.min_age_days) * DAY_MS
+        self.min_age_override_ms
+            .unwrap_or(i64::from(self.min_age_days) * DAY_MS)
     }
 
     pub fn name_matches(&self, name: &str) -> bool {
@@ -196,6 +203,8 @@ pub struct Joiner<'a> {
     pub bot_verified: bool,
     /// For bots: whoever added it is Owner/EO/TA or above the bot.
     pub added_by_authorized: bool,
+    /// The invite code the member joined with, when known.
+    pub invite: Option<&'a str>,
 }
 
 /// `*`-wildcard match, case-insensitive. A term without `*` matches as a substring.
@@ -391,6 +400,7 @@ struct JoinRec {
     name: String,
     has_avatar: bool,
     suspicious: bool,
+    invite: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -399,6 +409,8 @@ pub struct RaidDetector {
     active_until: i64,
     /// When the current (or last) raid started; it names the raid in the raid log.
     pub started: i64,
+    /// Public report code of the current raid, `<10 random>_<last 10 digits of the guild id>`.
+    pub code: String,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -412,9 +424,10 @@ pub struct RaidOutcome {
 impl RaidDetector {
     /// A raid that was still running at restart; the joins that started it are gone but the
     /// algorithms keep flagging until `until_ms`.
-    pub fn restored(started_ms: i64, until_ms: i64) -> Self {
+    pub fn restored(started_ms: i64, until_ms: i64, code: String) -> Self {
         Self {
             started: started_ms,
+            code,
             active_until: until_ms,
             ..Self::default()
         }
@@ -438,6 +451,7 @@ impl RaidDetector {
             name: j.name.to_lowercase(),
             has_avatar: j.has_avatar,
             suspicious,
+            invite: j.invite.map(Into::into),
         });
         let counted = self
             .joins
@@ -469,6 +483,14 @@ impl RaidDetector {
             .iter()
             .find(|r| r.id == id)
             .map(|r| r.name.as_str())
+    }
+
+    /// The invite a joiner still in the window used.
+    pub fn invite_of(&self, id: u64) -> Option<&str> {
+        self.joins
+            .iter()
+            .find(|r| r.id == id)
+            .and_then(|r| r.invite.as_deref())
     }
 
     /// Accounts in the window that any enabled algorithm flags.
@@ -585,6 +607,8 @@ pub struct VerifyCfg {
     pub replace_roles: bool,
     /// Helpful notes next to the captcha.
     pub show_notes: bool,
+    /// Send a new captcha image every this many ms while a member is solving one (`v 12`); None is off.
+    pub regen_ms: Option<i64>,
     pub captcha: CaptchaCfg,
 }
 
@@ -633,8 +657,9 @@ impl Default for VerifyCfg {
             time_limit_ms: 120_000,
             on_fail: FailAction::Nothing,
             quarantine_on_join: false,
-            replace_roles: true,
+            replace_roles: false,
             show_notes: true,
+            regen_ms: None,
             captcha: CaptchaCfg::default(),
         }
     }
@@ -866,7 +891,7 @@ mod tests {
             flag_no_avatar: true,
             ..raid_cfg()
         };
-        let mut d = RaidDetector::restored(NOW - 1000, NOW + 5000);
+        let mut d = RaidDetector::restored(NOW - 1000, NOW + 5000, String::new());
         let out = d.on_join(&joiner(9, "z", false), false, &cfg, NOW);
         assert_eq!((out.triggered, out.flagged), (false, vec![9]));
         assert!(!d.active(NOW + 5000));

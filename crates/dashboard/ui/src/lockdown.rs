@@ -186,7 +186,10 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
                 <select on:change=move |e| val.update(|v| v["trigger"] = json!(event_target_value(&e)))>
                     {[("keyword", "Keywords"), ("spam", "Spam"), ("mention", "Mention spam"), ("preset", "Keyword preset")].into_iter().map(|(k, t)| view! { <option value=k selected=move || trigger() == k>{t}</option> }).collect_view()}
                 </select></div>
-            <Show when=move || trigger() == "keyword"><h3>"1 Words"</h3>{fld("keywords", "list", "Add Word")}</Show>
+            <Show when=move || trigger() == "keyword"><h3>"1 Words"</h3>{fld("keywords", "list", "Add Word")}
+                <details><summary>"Need help?"</summary>
+                    <p><code>"world"</code>" matches the whole word, "<code>"*world*"</code>" anywhere inside a word, "<code>"*world"</code>" at the end of a word and "<code>"world*"</code>" at the start."</p>
+                </details></Show>
             <Show when=move || trigger() == "mention">{fld("mention_limit", "int", "mentions per message")}</Show>
             <Show when=move || trigger() == "preset"><div class="row"><label>"Presets"</label>
                 {[(1, "Profanity"), (2, "Sexual content"), (3, "Slurs")].into_iter().map(|(n, t)| view! { <label><input type="checkbox" prop:checked=move || val.get()["presets"].as_array().is_some_and(|a| a.contains(&json!(n)))

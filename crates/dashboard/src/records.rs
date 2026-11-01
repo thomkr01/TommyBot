@@ -2,6 +2,7 @@
 use crate::{api, auth::Sess, ApiError, AppState};
 use axum::{
     extract::{Path, Query, State},
+    response::Html,
     routing::{get, post},
     Json, Router,
 };
@@ -31,6 +32,7 @@ fn ok() -> Res {
 pub fn routes() -> Router<AppState> {
     let g = "/api/guilds/{guild}";
     Router::new()
+        .route("/raid/{code}", get(raid_page))
         .route(&format!("{g}/cases"), get(cases))
         .route(&format!("{g}/cases/{{no}}"), post(case_edit))
         .route(&format!("{g}/cases/{{no}}/delete"), post(case_delete))
@@ -91,6 +93,55 @@ async fn raid_log(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -
         accounts.push(json!({"user_id": user, "name": name, "at": at}));
     }
     Ok(Json(json!(raids)))
+}
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// The public report of one join raid, open to anyone who has its code.
+async fn raid_page(State(st): State<AppState>, Path(code): Path<String>) -> Html<String> {
+    let rows: Vec<(i64, i64, String, Option<String>, i64)> = sqlx::query_as(
+        "select guild_id, user_id, name, invite_code, raid_ms from raid_log where code = $1 order by created_at",
+    )
+    .bind(&code)
+    .fetch_all(&st.db)
+    .await
+    .unwrap_or_default();
+    let body = match rows.first() {
+        None => "<h1>Raid not found</h1>".to_string(),
+        Some(first) => {
+            let ids = rows
+                .iter()
+                .map(|r| r.1.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let list: String = rows
+                .iter()
+                .map(|(_, id, name, inv, _)| {
+                    let inv = inv
+                        .as_deref()
+                        .map_or(String::new(), |i| format!(" via <code>{}</code>", esc(i)));
+                    format!("<li><code>{id}</code> {}{inv}</li>", esc(name))
+                })
+                .collect();
+            format!(
+                "<h1>Join Raid Report</h1><p><code>{}</code></p><p>Server <code>{}</code> &middot; {}</p>\
+                 <h2>{} flagged accounts</h2><button onclick=\"navigator.clipboard.writeText(this.dataset.ids)\" data-ids=\"{ids}\">Copy IDs</button><ul>{list}</ul>",
+                esc(&code),
+                first.0,
+                chrono::DateTime::from_timestamp_millis(first.4).map_or_else(String::new, |d| d.format("%Y-%m-%d %H:%M UTC").to_string()),
+                rows.len()
+            )
+        }
+    };
+    Html(format!(
+        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Join Raid Report</title><style>body{{background:#1c1c1c;color:#eee;font:16px system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem}}code{{background:#2f2f2f;padding:.1rem .4rem;border-radius:.3rem}}li{{margin:.3rem 0}}button{{background:#1be725;border:0;border-radius:.5rem;padding:.5rem 1rem;font-weight:600;cursor:pointer}}</style>{body}"#
+    ))
 }
 
 #[derive(Deserialize)]
