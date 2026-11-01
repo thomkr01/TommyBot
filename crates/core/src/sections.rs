@@ -557,6 +557,12 @@ impl Default for PanicCfg {
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct BackupsCfg {
+    /// Allows taking backups at all, manual and automatic.
+    pub enabled: bool,
+    /// Backups kept per guild; older ones are dropped on save.
+    pub max_images: i64,
+    /// Hours between automatic backups.
+    pub interval_hours: u64,
     pub auto: bool,
     pub restore: bool,
     pub restore_roles: bool,
@@ -569,6 +575,9 @@ pub struct BackupsCfg {
 impl Default for BackupsCfg {
     fn default() -> Self {
         Self {
+            enabled: true,
+            max_images: 10,
+            interval_hours: 3,
             auto: false,
             restore: true,
             restore_roles: true,

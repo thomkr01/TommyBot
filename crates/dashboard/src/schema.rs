@@ -660,7 +660,12 @@ pub fn schema() -> Vec<Value> {
         fg("Response", "warned_roles", "roles"),
         fg("Response", "whitelisted_categories", "categories"),
     ];
-    let mut backups = vec![f("auto", "bool")];
+    let mut backups = vec![
+        dv(f("enabled", "bool"), true),
+        f("auto", "bool"),
+        dv(f("max_images", "int"), 10),
+        dv(f("interval_hours", "int"), 3),
+    ];
     for (path, title) in [
         ("restore", "Restore after a nuke"),
         ("restore_roles", "Restore deleted roles"),

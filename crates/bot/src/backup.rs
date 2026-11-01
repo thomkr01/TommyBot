@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tommybot_antinuke::{
     describe, map_overwrites, plan, Action, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
-    Settings,
+    Settings, WebhookImg, CATEGORY,
 };
 use twilight_http::Client;
 use twilight_model::{
@@ -25,9 +25,8 @@ use twilight_model::{
 use crate::app::App;
 use tommybot_core::sections::BackupsCfg;
 
-/// Backups kept per guild; older ones are dropped on save.
-const KEEP: i64 = 10;
-pub const INTERVAL: Duration = Duration::from_secs(3 * 3600);
+/// How often the auto-backup loop looks at each guild; the guild's own interval decides.
+const TICK: Duration = Duration::from_secs(600);
 
 // Role::color is deprecated upstream in favour of `colors`, but create/update_role still take it.
 #[allow(deprecated)]
@@ -71,8 +70,27 @@ pub async fn snapshot(http: &Client, gid: Id<GuildMarker>) -> Result<Image> {
     let g = http.guild(gid).await?.model().await?;
     let roles = http.roles(gid).await?.models().await?;
     let channels = http.guild_channels(gid).await?.models().await?;
+    // Needs Manage Webhooks; without it the image has none and restores leave webhooks alone.
+    let webhooks = match http.guild_webhooks(gid).await {
+        Ok(r) => Some(
+            r.models()
+                .await?
+                .into_iter()
+                .map(|w| WebhookImg {
+                    id: w.id.get(),
+                    name: w.name.unwrap_or_default(),
+                    channel: w.channel_id.get(),
+                })
+                .collect(),
+        ),
+        Err(e) => {
+            tracing::warn!(?e, "backup: listing webhooks failed");
+            None
+        }
+    };
     Ok(Image {
         guild: gid.get(),
+        webhooks,
         settings: Some(Settings {
             name: g.name.clone(),
             verification: u8::from(g.verification_level),
@@ -124,23 +142,30 @@ pub async fn track_created(app: &App, gid: Id<GuildMarker>, action: Action, id: 
     Ok(tx.commit().await?)
 }
 
-pub async fn save(app: &App, gid: Id<GuildMarker>) -> Result<i64> {
+/// Takes a backup (`by` is None for automatic ones) and returns its 6-char code.
+pub async fn save(app: &App, gid: Id<GuildMarker>, by: Option<u64>) -> Result<String> {
+    let cfg = app.cfg(gid.get()).await?.backups.clone();
+    if !cfg.enabled {
+        anyhow::bail!("Backups are turned off for this server");
+    }
     let image = snapshot(&app.http, gid).await?;
-    let (id,): (i64,) =
-        sqlx::query_as("INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id")
-            .bind(gid.get() as i64)
-            .bind(Json(&image))
-            .fetch_one(&app.pool)
-            .await?;
+    let (code,): (String,) = sqlx::query_as(
+        "INSERT INTO backups (guild_id, image, created_by) VALUES ($1, $2, $3) RETURNING code",
+    )
+    .bind(gid.get() as i64)
+    .bind(Json(&image))
+    .bind(by.map(|u| u as i64))
+    .fetch_one(&app.pool)
+    .await?;
     sqlx::query(
         "DELETE FROM backups WHERE guild_id = $1 AND id NOT IN \
          (SELECT id FROM backups WHERE guild_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2)",
     )
     .bind(gid.get() as i64)
-    .bind(KEEP)
+    .bind(cfg.max_images.max(1))
     .execute(&app.pool)
     .await?;
-    Ok(id)
+    Ok(code)
 }
 
 pub async fn latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<Image>> {
@@ -174,7 +199,7 @@ async fn keep_set(app: &App, gid: Id<GuildMarker>) -> Result<HashSet<u64>> {
 
 /// Panic-mode restore: sync to the latest image and keep the server lock. `None` means there is
 /// no backup yet.
-pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<usize>> {
+pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<Summary>> {
     let Some(image) = latest(app, gid).await? else {
         return Ok(None);
     };
@@ -185,11 +210,14 @@ pub async fn restore_latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<us
     ))
 }
 
-/// The 10 latest backups as `(id, created_at unix secs, roles, channels)`, newest first.
-pub async fn list(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(i64, i64, i32, i32)>> {
+/// The 10 latest backups as `(code, created_at unix secs, roles, channels, author)`, newest first.
+pub async fn list(
+    app: &App,
+    gid: Id<GuildMarker>,
+) -> Result<Vec<(String, i64, i32, i32, Option<i64>)>> {
     Ok(sqlx::query_as(
-        "SELECT id, EXTRACT(EPOCH FROM created_at)::BIGINT, jsonb_array_length(image->'roles')::INT, \
-         jsonb_array_length(image->'channels')::INT FROM backups \
+        "SELECT code, EXTRACT(EPOCH FROM created_at)::BIGINT, jsonb_array_length(image->'roles')::INT, \
+         jsonb_array_length(image->'channels')::INT, created_by FROM backups \
          WHERE guild_id = $1 ORDER BY created_at DESC, id DESC LIMIT 10",
     )
     .bind(gid.get() as i64)
@@ -197,30 +225,35 @@ pub async fn list(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(i64, i64, i32,
     .await?)
 }
 
-pub async fn delete(app: &App, gid: Id<GuildMarker>, id: i64) -> Result<bool> {
-    let r = sqlx::query("DELETE FROM backups WHERE guild_id = $1 AND id = $2")
-        .bind(gid.get() as i64)
-        .bind(id)
+/// Deletes the backup with this code (or numeric dashboard id); `None` deletes all of them.
+pub async fn delete(app: &App, gid: Id<GuildMarker>, key: Option<&str>) -> Result<bool> {
+    let r = sqlx::query(
+        "DELETE FROM backups WHERE guild_id = $1 AND ($2::text IS NULL OR code = $2 OR id::text = $2)",
+    )
+    .bind(gid.get() as i64)
+    .bind(key.map(|k| k.trim_start_matches('#').to_lowercase()))
         .execute(&app.pool)
         .await?;
     Ok(r.rows_affected() > 0)
 }
 
-/// `/backup load`: without `confirm` only describes what would change; with it, syncs the server
-/// to backup `id`.
-pub async fn load(app: &App, gid: Id<GuildMarker>, id: i64, confirm: bool) -> Result<String> {
-    let row: Option<(Json<Image>,)> =
-        sqlx::query_as("SELECT image FROM backups WHERE guild_id = $1 AND id = $2")
-            .bind(gid.get() as i64)
-            .bind(id)
-            .fetch_optional(&app.pool)
-            .await?;
+/// `/backups load`: without `confirm` only describes what would change; with it, syncs the server
+/// to the backup with this code (or numeric dashboard id).
+pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> Result<String> {
+    let id = id.trim_start_matches('#').to_lowercase();
+    let row: Option<(Json<Image>,)> = sqlx::query_as(
+        "SELECT image FROM backups WHERE guild_id = $1 AND (code = $2 OR id::text = $2)",
+    )
+    .bind(gid.get() as i64)
+    .bind(&id)
+    .fetch_optional(&app.pool)
+    .await?;
     let Some((Json(image),)) = row else {
         return Ok(format!("No backup #{id}"));
     };
     let keep = keep_set(app, gid).await?;
     if confirm {
-        let n = restore(app, gid, &image, &keep, None).await?;
+        let n = restore(app, gid, &image, &keep, None).await?.total();
         return Ok(format!("Restored backup #{id} ({n} changes)"));
     }
     let live = snapshot(&app.http, gid).await?;
@@ -272,7 +305,7 @@ pub async fn recreate(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    Ok(execute(app, gid, &image, p, true).await)
+    Ok(execute(app, gid, (&image, &live), p, true).await.total())
 }
 
 fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
@@ -319,7 +352,7 @@ pub async fn restore(
     image: &Image,
     keep: &HashSet<u64>,
     filters: Option<&BackupsCfg>,
-) -> Result<usize> {
+) -> Result<Summary> {
     let respect_lock = filters.is_some();
     let http = &app.restore_http;
     let live = snapshot(http, gid).await?;
@@ -335,19 +368,36 @@ pub async fn restore(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    Ok(execute(app, gid, image, p, respect_lock).await)
+    let mut sum = execute(app, gid, (image, &live), p, respect_lock).await;
+    // Webhooks that did not exist in the image were made since (old images have no list).
+    if let (Some(f), Some(old)) = (filters, &image.webhooks) {
+        if f.restore && f.delete_webhooks {
+            let known: HashSet<u64> = old.iter().map(|w| w.id).collect();
+            for w in live.webhooks.iter().flatten().filter(|w| !known.contains(&w.id)) {
+                let r = http.delete_webhook(Id::new(w.id)).await.map(drop);
+                sum.webhooks_deleted += usize::from(count(r.map_err(Into::into), "webhook"));
+            }
+        }
+    }
+    Ok(sum)
 }
 
 /// Applies a plan. A failed step is logged and skipped, so one missing permission can't abort it.
 async fn execute(
     app: &App,
     gid: Id<GuildMarker>,
-    image: &Image,
+    (image, live): (&Image, &Image),
     mut p: Plan,
     respect_lock: bool,
-) -> usize {
+) -> Summary {
     let http = &app.restore_http;
-    let mut done = 0;
+    let mut done = Summary::default();
+    let live_cats: HashSet<u64> = live
+        .channels
+        .iter()
+        .filter(|c| c.kind == CATEGORY)
+        .map(|c| c.id)
+        .collect();
     let mut id_map = std::mem::take(&mut p.id_map);
 
     for ch in &p.roles {
@@ -382,7 +432,9 @@ async fn execute(
             Ok(())
         }
         .await;
-        count(r, &mut done, "role");
+        if count(r, "role") {
+            done.roles.bump(ch);
+        }
     }
 
     for ch in &p.channels {
@@ -428,7 +480,14 @@ async fn execute(
             Ok(())
         }
         .await;
-        count(r, &mut done, "channel");
+        if count(r, "channel") {
+            let cat = match ch {
+                Change::Create(c) => c.kind == CATEGORY,
+                Change::Update { to, .. } => to.kind == CATEGORY,
+                Change::Delete(id) => live_cats.contains(id),
+            };
+            if cat { &mut done.categories } else { &mut done.channels }.bump(ch);
+        }
     }
 
     if let Some(w) = p.settings.take() {
@@ -449,11 +508,7 @@ async fn execute(
             .system_channel(map(w.system_channel))
             .preferred_locale(Some(&w.locale))
             .await;
-        count(
-            r.map(drop).map_err(Into::into),
-            &mut done,
-            "server settings",
-        );
+        done.settings = count(r.map(drop).map_err(Into::into), "server settings");
     }
 
     // Recreated roles land at the bottom; put every restored role back in its image order.
@@ -475,25 +530,74 @@ async fn execute(
     done
 }
 
-fn count(r: Result<()>, done: &mut usize, what: &str) {
-    match r {
-        Ok(()) => *done += 1,
-        Err(e) => tracing::warn!(?e, what, "restore step failed"),
+fn count(r: Result<()>, what: &str) -> bool {
+    r.map_err(|e| tracing::warn!(?e, what, "restore step failed"))
+        .is_ok()
+}
+
+/// Successful changes of one object type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub created: usize,
+    pub deleted: usize,
+    pub updated: usize,
+}
+
+impl Counts {
+    fn bump<T>(&mut self, c: &Change<T>) {
+        match c {
+            Change::Create(_) => self.created += 1,
+            Change::Delete(_) => self.deleted += 1,
+            Change::Update { .. } => self.updated += 1,
+        }
     }
 }
 
-/// Backs up every guild the bot is in, every 3 hours, unless its backups setting turned that off.
+/// What a restore changed, for the panic report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub roles: Counts,
+    pub channels: Counts,
+    pub categories: Counts,
+    pub webhooks_deleted: usize,
+    pub settings: bool,
+}
+
+impl Summary {
+    pub fn total(&self) -> usize {
+        [self.roles, self.channels, self.categories]
+            .iter()
+            .map(|c| c.created + c.deleted + c.updated)
+            .sum::<usize>()
+            + self.webhooks_deleted
+            + usize::from(self.settings)
+    }
+}
+
+/// Backs up every guild whose backups setting is on, once its own interval has passed since the
+/// last backup.
 pub async fn auto_backup(app: std::sync::Arc<App>) {
-    let mut tick = tokio::time::interval(INTERVAL);
+    let mut tick = tokio::time::interval(TICK);
     loop {
         tick.tick().await;
         match app.http.current_user_guilds().await {
             Ok(r) => {
                 for g in r.models().await.unwrap_or_default() {
-                    if !app.cfg(g.id.get()).await.map_or(true, |c| c.backups.auto) {
+                    let Ok(cfg) = app.cfg(g.id.get()).await else {
+                        continue;
+                    };
+                    if !cfg.backups.auto || !cfg.backups.enabled {
                         continue;
                     }
-                    if let Err(e) = save(&app, g.id).await {
+                    match due(&app, g.id, cfg.backups.interval_hours).await {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(e) => {
+                            tracing::warn!(?e, guild = g.id.get(), "backup due check failed");
+                            continue;
+                        }
+                    }
+                    if let Err(e) = save(&app, g.id, None).await {
                         tracing::warn!(?e, guild = g.id.get(), "auto backup failed");
                     }
                 }
@@ -501,6 +605,18 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
             Err(e) => tracing::warn!(?e, "listing guilds for backup failed"),
         }
     }
+}
+
+/// True when the newest backup is older than `hours` (or there is none).
+async fn due(app: &App, gid: Id<GuildMarker>, hours: u64) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM backups WHERE guild_id = $1 \
+         AND created_at > now() - make_interval(hours => $2))",
+    )
+    .bind(gid.get() as i64)
+    .bind(hours.max(1) as i32)
+    .fetch_one(&app.pool)
+    .await?)
 }
 
 #[cfg(test)]

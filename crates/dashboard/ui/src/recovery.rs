@@ -42,14 +42,14 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         <Section guild=guild.clone() name="backups".to_string() enrolled />
         <div class="card">
             <div class="row"><h2>"Backups"</h2><span class="sp"></span><button on:click=create>"Create backup"</button></div>
-            <p class="muted">"TommyBot also saves one every 3 hours and keeps the last 10. Loading a backup syncs the server to it: it recreates what is missing, fixes what changed and removes what was added since."</p>
+            <p class="muted">"TommyBot also saves one on the interval set above and keeps the newest ones (Max Images). Loading a backup syncs the server to it: it recreates what is missing, fixes what changed and removes what was added since."</p>
             <For each=move || rows.get() key=|r| r["id"].as_i64() let:r>
                 {
                     let id = r["id"].as_i64().unwrap_or(0);
                     view! {
                         <div class="row">
-                            <b>{format!("#{id}")}</b>
-                            <span class="muted">{format!("{} · {} roles · {} channels", when(r["at"].as_i64().unwrap_or(0)), r["roles"], r["channels"])}</span>
+                            <b>{format!("#{}", r["code"].as_str().unwrap_or_default())}</b>
+                            <span class="muted">{format!("{} · {} · {} roles · {} channels", if r["by"].is_null() { "TommyBot".to_string() } else { format!("user {}", r["by"]) }, when(r["at"].as_i64().unwrap_or(0)), r["roles"], r["channels"])}</span>
                             <span class="sp"></span>
                             <button class="ghost" on:click=move |_| show.run(id)>"Load"</button>
                             <button class="ghost" on:click=move |_| remove.run(id)>"Delete"</button>

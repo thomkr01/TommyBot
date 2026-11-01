@@ -30,9 +30,9 @@ pub fn routes() -> Router<AppState> {
 
 async fn list(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
-    let rows: Vec<(i64, i64, i32, i32)> = sqlx::query_as(
+    let rows: Vec<(i64, i64, i32, i32, String, Option<i64>)> = sqlx::query_as(
         "SELECT id, EXTRACT(EPOCH FROM created_at)::BIGINT, jsonb_array_length(image->'roles')::INT, \
-         jsonb_array_length(image->'channels')::INT FROM backups \
+         jsonb_array_length(image->'channels')::INT, code, created_by FROM backups \
          WHERE guild_id = $1 ORDER BY created_at DESC, id DESC",
     )
     .bind(guild)
@@ -40,7 +40,7 @@ async fn list(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Re
     .await?;
     Ok(Json(Value::Array(
         rows.into_iter()
-            .map(|(id, at, roles, channels)| json!({"id": id, "at": at, "roles": roles, "channels": channels}))
+            .map(|(id, at, roles, channels, code, by)| json!({"id": id, "at": at, "roles": roles, "channels": channels, "code": code, "by": by}))
             .collect(),
     )))
 }
@@ -63,7 +63,7 @@ async fn announce(st: &AppState, s: &Sess, guild: i64, what: &str) -> Result<(),
 
 async fn create(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
-    queue(&st, guild, "backup_create", json!({})).await?;
+    queue(&st, guild, "backup_create", json!({"by": s.user_id})).await?;
     announce(&st, &s, guild, "took a backup").await?;
     Ok(Json(json!({"queued": true})))
 }
@@ -89,6 +89,7 @@ pub(crate) fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
         guild: guild as u64,
         name: String::new(),
         settings: None,
+        webhooks: None,
         roles: items(roles)
             .iter()
             .map(|r| RoleImg {

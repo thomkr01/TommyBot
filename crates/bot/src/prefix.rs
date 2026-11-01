@@ -36,6 +36,12 @@ fn alias(cmd: &str) -> (&str, Option<&str>) {
         "sweep" | "clear" | "p" | "c" => ("purge", None),
         "san" | "sanitise" | "dehoist" => ("sanitize", None),
         "sm" => ("slowmode", None),
+        "backup" | "bcreate" | "bsave" | "btake" | "createbackup" => ("backups", Some("take")),
+        "bload" | "bapply" | "loadbackup" => ("backups", Some("load")),
+        "bdel" | "bdelete" | "deletebackup" | "delbackup" | "backupdelete" => {
+            ("backups", Some("delete"))
+        }
+        "iclear" | "imgclear" | "ipurge" | "imgp" | "imgpurge" | "ic" => ("backups", Some("clear")),
         c => (c, None),
     }
 }

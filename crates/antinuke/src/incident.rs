@@ -26,6 +26,9 @@ pub struct NukeCase {
     pub id: String,
     pub quarantined: Vec<u64>,
     pub reverted: Vec<Inverse>,
+    /// Undone actions per culprit, for the panic report.
+    #[serde(default)]
+    pub fragments: HashMap<u64, u32>,
 }
 
 impl NukeCase {
@@ -34,6 +37,7 @@ impl NukeCase {
             id: case_id(seed),
             quarantined: vec![],
             reverted: vec![],
+            fragments: HashMap::new(),
         }
     }
 
@@ -41,7 +45,9 @@ impl NukeCase {
         if !self.quarantined.contains(&executor) {
             self.quarantined.push(executor);
         }
+        let before = self.reverted.len();
         self.reverted.extend(ops);
+        *self.fragments.entry(executor).or_default() += (self.reverted.len() - before) as u32;
     }
 }
 
