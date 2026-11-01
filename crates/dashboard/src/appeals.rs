@@ -22,6 +22,14 @@ type Row = (
     chrono::DateTime<chrono::Utc>,
 );
 
+type MineRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    chrono::DateTime<chrono::Utc>,
+);
+
 const MAX_ANSWER: usize = 1000;
 
 /// Validates one answer with Wick's texts and returns what is stored. A multi choice answer is the
@@ -247,13 +255,7 @@ async fn submit(
 
 /// The member's own appeals with their status and the staff reply.
 async fn mine(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
-    let rows: Vec<(
-        i64,
-        String,
-        String,
-        Option<String>,
-        chrono::DateTime<chrono::Utc>,
-    )> = sqlx::query_as(
+    let rows: Vec<MineRow> = sqlx::query_as(
         "select id, kind, status, reply, created_at from appeals
          where guild_id = $1 and user_id = $2 order by created_at desc limit 20",
     )
