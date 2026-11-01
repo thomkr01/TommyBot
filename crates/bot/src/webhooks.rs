@@ -75,6 +75,10 @@ pub(crate) async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Resu
     for id in &doomed {
         app.http.delete_webhook(Id::new(*id)).await.ok();
     }
+    // Every message of a flood lands here; only the one that found hooks to delete is logged.
+    if doomed.is_empty() {
+        return Ok(());
+    }
     let log = Log::new("Webhooks Deleted", RED)
         .line("Count", &format!("`{}`", doomed.len()))
         .line("Reason", "Webhook spam");

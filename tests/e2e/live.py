@@ -110,9 +110,9 @@ def spam():
     call("DELETE", f"/webhooks/{hook['id']}", soft=True)
     for i in left:
         call("DELETE", f"/channels/{chan}/messages/{i}", soft=True)
-    # The first few messages stay below the heat limit and survive.
+    # Once heat trips, the messages that built it go too, so nothing of the flood is left.
     print(f"cleaned: webhook e2e-spammer and {len(left)} leftover messages in #general")
-    return check(hook_gone and len(left) <= 6 and logged("auto_mod", since),
+    return check(hook_gone and not left and logged("auto_mod", since),
                  f"spam: webhook deleted={hook_gone}, {len(left)}/{len(ids)} messages left, automod logged")
 
 
