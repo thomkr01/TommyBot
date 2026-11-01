@@ -375,6 +375,16 @@ pub struct AppealField {
     pub long: bool,
     #[serde(default = "yes")]
     pub required: bool,
+    /// Non-empty makes it a choice question: single choice, or multi choice with `multi`.
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub multi: bool,
+    /// Text length limits; the maximum defaults to 1000.
+    #[serde(default)]
+    pub min: Option<usize>,
+    #[serde(default)]
+    pub max: Option<usize>,
 }
 
 fn yes() -> bool {
@@ -425,6 +435,10 @@ impl Default for AppealsCfg {
                 label: "Appeal Message".into(),
                 long: true,
                 required: true,
+                options: vec![],
+                multi: false,
+                min: None,
+                max: None,
             }],
             channel: None,
         }

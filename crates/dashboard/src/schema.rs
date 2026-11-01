@@ -28,6 +28,7 @@ const LOG_KINDS: &[&str] = &[
     "join_raid",
     "panic",
     "mod_command",
+    "appeal",
 ];
 
 fn f(path: &str, kind: &str) -> Value {
@@ -202,8 +203,19 @@ pub fn schema() -> Vec<Value> {
         ),
     ];
     log.extend(LOG_KINDS.iter().filter(|k| **k != "mod_command").map(|k| {
+        let help = match *k {
+            "report" => "Message reports by your members will go to this channel where you and your moderators can interact and deal with them.",
+            "auto_mod" => "All of Wick's automod actions will be sent to this channel.",
+            "anti_nuke" => "All of Wick's antinuke actions will be sent to this channel.",
+            "verification" => "All of Wick's verification results will be sent to this channel.",
+            "join_gate" => "Logs of Wick's join filters will go to this channel.",
+            "join_raid" => "Join raid triggers and results will be sent to this channel.",
+            "panic" => "Panic mode triggers and results will be sent to this channel.",
+            "appeal" => "New ban and timeout appeals will be sent to this channel.",
+            _ => "Logs of this type will go to this channel instead of the Wick Logs channel.",
+        };
         pg(
-            fg("Log types", &format!("routes.{k}"), "channel"),
+            hp(fg("Log types", &format!("routes.{k}"), "channel"), help),
             "wick_customize",
         )
     }));
@@ -915,6 +927,10 @@ pub fn schema() -> Vec<Value> {
                     "Lock server joins",
                 ),
                 ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
+                ti(
+                    dv(fg("Lock scope", "pause_invites", "bool"), true),
+                    "Pause invites when kicking new members",
+                ),
             ],
         ),
         (

@@ -480,7 +480,7 @@ fn challenge_embed(body: &str, notes: bool, png: bool, limit_ms: i64) -> Embed {
 }
 
 /// The text a member typed, wherever the modal nests the input.
-fn typed_text(c: &ModalInteractionComponent) -> Option<String> {
+pub(crate) fn typed_text(c: &ModalInteractionComponent) -> Option<String> {
     match c {
         ModalInteractionComponent::TextInput(t) => Some(t.value.clone()),
         ModalInteractionComponent::ActionRow(r) => r.components.iter().find_map(typed_text),

@@ -174,14 +174,28 @@ impl Discord {
 
     /// Posts a log embed with mentions disabled.
     pub async fn post_log(&self, channel: &str, log: tommybot_logging::Log) -> Result<()> {
-        self.http
+        self.post_log_with(channel, log, serde_json::json!([]))
+            .await
+            .map(drop)
+    }
+
+    /// [`Self::post_log`] with message components (raw JSON action rows).
+    pub async fn post_log_with(
+        &self,
+        channel: &str,
+        log: tommybot_logging::Log,
+        components: serde_json::Value,
+    ) -> Result<String> {
+        let sent: serde_json::Value = self.http
             .post(format!("{}/channels/{channel}/messages", self.api))
             .header("Authorization", format!("Bot {}", self.bot_token))
-            .json(&serde_json::json!({"embeds": [log.build()], "allowed_mentions": {"parse": []}}))
+            .json(&serde_json::json!({"embeds": [log.build()], "components": components, "allowed_mentions": {"parse": []}}))
             .send()
             .await?
-            .error_for_status()?;
-        Ok(())
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(sent["id"].as_str().unwrap_or_default().to_string())
     }
 }
 

@@ -237,6 +237,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
                 && !tickets::handle(app, &i.0).await?
                 && !commands::handle_confirm(app, &i.0).await?
                 && !reports::handle(app, &i.0).await?
+                && !crate::appeals::handle(app, &i.0).await?
                 && !crate::settings::handle(app, &i.0).await?
                 && !crate::whitelist::handle(app, &i.0).await?
             {

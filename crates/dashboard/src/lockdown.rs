@@ -23,6 +23,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/guilds/{guild}/lockdown", get(status))
         .route("/api/guilds/{guild}/lockdown/lock", post(lock))
         .route("/api/guilds/{guild}/lockdown/unlock", post(unlock))
+        .route("/api/guilds/{guild}/lockdown/update", post(send_update))
+        .route("/api/guilds/{guild}/lockdown/channels", get(channels))
         .route("/api/guilds/{guild}/lockdown/check", get(check))
         .route("/api/guilds/{guild}/lockdown/fix", post(fix))
         .route(
@@ -45,26 +47,32 @@ fn now() -> i64 {
 
 async fn status(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
-    let row: Option<(sqlx::types::Json<Snapshot>, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as("select snapshot, created_at from lock_snapshots where guild_id = $1")
-            .bind(guild)
-            .fetch_optional(&st.db)
-            .await?;
+    let rows: Vec<(sqlx::types::Json<Snapshot>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "select snapshot, created_at from lock_snapshots where guild_id = $1 order by created_at",
+    )
+    .bind(guild)
+    .fetch_all(&st.db)
+    .await?;
     let unlock_at: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
         "select run_at from scheduled_jobs where guild_id = $1 and kind = 'unlock' order by run_at limit 1",
     )
     .bind(guild)
     .fetch_optional(&st.db)
     .await?;
-    Ok(Json(json!({
-        "locked": row.as_ref().map(|(snap, at)| {
+    let locks: Vec<Value> = rows
+        .iter()
+        .map(|(snap, at)| {
             let kind = snap.0.kind.as_ref();
             let (channels, roles, join) = kind.map(LockKind::covers).unwrap_or_default();
             json!({"channels": channels, "roles": roles, "join": join.map(|j| format!("{j:?}")),
-                   "channel": matches!(kind, Some(LockKind::Channel(_))), "since": at})
-        }),
-        "unlock_at": unlock_at.map(|(t,)| t),
-    })))
+                   "channel": matches!(kind, Some(LockKind::Channel(_))), "since": at,
+                   "hidden": matches!(kind, Some(LockKind::Blind)),
+                   "invites_paused": snap.0.invites_paused})
+        })
+        .collect();
+    Ok(Json(
+        json!({"locks": locks, "unlock_at": unlock_at.map(|(t,)| t)}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -96,14 +104,127 @@ async fn lock(
     Ok(Json(json!({"ok": true})))
 }
 
-async fn unlock(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+#[derive(Deserialize, Default)]
+struct UnlockBody {
+    /// Lifts only the locks overlapping this kind; absent lifts everything.
+    kind: Option<String>,
+}
+
+async fn unlock(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    body: Option<Json<UnlockBody>>,
+) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
-    sqlx::query("delete from scheduled_jobs where guild_id = $1 and kind = 'unlock'")
+    let which = match body.and_then(|b| b.0.kind) {
+        Some(k) => Some(
+            kind_from(&k, None).ok_or_else(|| ApiError::BadRequest("unknown lock kind".into()))?,
+        ),
+        None => None,
+    };
+    let payload = which.as_ref().map(|k| json!({"lock": k}));
+    sqlx::query("delete from scheduled_jobs where guild_id = $1 and kind = 'unlock' and ($2::jsonb is null or payload = $2)")
         .bind(guild)
+        .bind(&payload)
         .execute(&st.db)
         .await?;
-    jobs::enqueue(&st.db, guild, "unlock", Value::Null, now()).await?;
+    jobs::enqueue(
+        &st.db,
+        guild,
+        "unlock",
+        payload.unwrap_or(Value::Null),
+        now(),
+    )
+    .await?;
     audit(&st, &s, guild, "unlocked the server".into()).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+/// Text-like channels with whether a server lock already denies sending there ("locked") and
+/// whether @everyone cannot see them ("private"); Wick flags both in its channel list.
+async fn channels(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    require(&st, &s, guild, Level::Viewer, false).await?;
+    let (_, c) = crate::store::current(&st.db, guild).await?;
+    let main: Vec<String> = c["lockdown"]["main_roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str().map(String::from))
+        .chain([guild.to_string()])
+        .collect();
+    let all = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+        .await?;
+    let denies = |ch: &Value, bit: u64, roles: &[String]| {
+        ch["permission_overwrites"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|o| {
+                o["type"] == 0
+                    && o["id"]
+                        .as_str()
+                        .is_some_and(|id| roles.iter().any(|r| r == id))
+                    && o["deny"]
+                        .as_str()
+                        .and_then(|d| d.parse::<u64>().ok())
+                        .is_some_and(|d| d & bit != 0)
+            })
+    };
+    let everyone = [guild.to_string()];
+    let list: Vec<Value> = all
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|ch| matches!(ch["type"].as_u64(), Some(0 | 5 | 15)))
+        .map(|ch| {
+            json!({"id": ch["id"], "name": ch["name"],
+            "locked": denies(ch, tommybot_automod::lockdown::SEND_MESSAGES, &main),
+            "private": denies(ch, tommybot_automod::lockdown::VIEW_CHANNEL, &everyone)})
+        })
+        .collect();
+    Ok(Json(json!(list)))
+}
+
+#[derive(Deserialize)]
+struct UpdateBody {
+    text: String,
+}
+
+/// Wick's "Send an update": a message to the people locked out, posted in the `#server-locked`
+/// channel of a hidden-channels lock, else in the Mod Logs channel.
+async fn send_update(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Json(b): Json<UpdateBody>,
+) -> Res {
+    require(&st, &s, guild, Level::Editor, false).await?;
+    let text = b.text.trim();
+    if text.is_empty() || text.chars().count() > 1900 {
+        return Err(ApiError::BadRequest("write 1 to 1900 characters".into()));
+    }
+    let locked: Option<(sqlx::types::Json<Snapshot>,)> = sqlx::query_as(
+        "select snapshot from lock_snapshots where guild_id = $1 and snapshot->>'locked_channel' is not null limit 1",
+    )
+    .bind(guild)
+    .fetch_optional(&st.db)
+    .await?;
+    let (_, c) = crate::store::current(&st.db, guild).await?;
+    let mod_logs = c["logging"]["routes"]["mod_command"]
+        .as_str()
+        .map(String::from);
+    let channel = locked
+        .and_then(|(snap,)| snap.0.locked_channel.map(|c| c.to_string()))
+        .or(mod_logs)
+        .ok_or_else(|| {
+            ApiError::BadRequest("no lock channel or Mod Logs channel to post in".into())
+        })?;
+    let log =
+        tommybot_logging::Log::new("Lockdown Update", tommybot_logging::embed::ALERT).text(text);
+    st.discord.post_log(&channel, log).await?;
     Ok(Json(json!({"ok": true})))
 }
 
