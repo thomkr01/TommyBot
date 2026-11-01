@@ -16,6 +16,11 @@ pub fn definitions() -> Vec<Command> {
             .min_value(1)
             .required(req)
     };
+    let note_id = |req| {
+        IntegerBuilder::new("note_id", "Note number")
+            .min_value(1)
+            .required(req)
+    };
     let chat = |n, d| {
         CommandBuilder::new(n, d, CommandType::ChatInput).contexts([InteractionContextType::Guild])
     };
@@ -121,16 +126,14 @@ pub fn definitions() -> Vec<Command> {
                     ),
             )
             .option(
-                SubCommandBuilder::new("view", "Show a member's latest notes")
-                    .option(user("Member")),
+                SubCommandBuilder::new("view", "Show the latest notes")
+                    .option(note_id(false))
+                    .option(UserBuilder::new("user", "Notes about this member"))
+                    .option(UserBuilder::new("mod", "Notes written by this moderator")),
             )
             .option(
                 SubCommandBuilder::new("modify", "Change a note")
-                    .option(
-                        IntegerBuilder::new("id", "Note number")
-                            .min_value(1)
-                            .required(true),
-                    )
+                    .option(note_id(true))
                     .option(
                         StringBuilder::new("msg", "The new text (5 to 500 characters)")
                             .min_length(5)
@@ -139,15 +142,17 @@ pub fn definitions() -> Vec<Command> {
                     ),
             )
             .option(
-                SubCommandBuilder::new("remove", "Remove one note").option(
-                    IntegerBuilder::new("id", "Note number")
-                        .min_value(1)
-                        .required(true),
-                ),
+                SubCommandBuilder::new("remove", "Remove one note")
+                    .option(note_id(true))
+                    .option(UserBuilder::new(
+                        "user",
+                        "Only if the note is about this member",
+                    )),
             )
             .option(
-                SubCommandBuilder::new("sweep", "Remove all notes of a member")
-                    .option(user("Member")),
+                SubCommandBuilder::new("sweep", "Remove notes in bulk, all without a filter")
+                    .option(UserBuilder::new("user", "Notes about this member"))
+                    .option(UserBuilder::new("mod", "Notes written by this moderator")),
             )
             .build(),
         chat("cases", "View or edit cases")

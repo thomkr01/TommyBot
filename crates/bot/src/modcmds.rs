@@ -69,6 +69,9 @@ pub enum ModCmd {
     },
     Slowmode {
         secs: u16,
+        /// Empty means the current channel.
+        #[serde(default)]
+        channels: Vec<u64>,
     },
     CasesView {
         case: Option<i32>,
@@ -100,18 +103,25 @@ pub enum ModCmd {
         user: u64,
         text: String,
     },
+    /// Every filter is optional; none lists the latest notes.
     NoteList {
-        user: u64,
+        user: Option<u64>,
+        id: Option<i64>,
+        by: Option<u64>,
     },
     NoteRemove {
         id: i64,
+        /// Only if the note is about this member.
+        user: Option<u64>,
     },
     NoteModify {
         id: i64,
         text: String,
     },
+    /// Without filters: every note of the server.
     NoteSweep {
-        user: u64,
+        user: Option<u64>,
+        by: Option<u64>,
     },
 }
 
@@ -169,7 +179,9 @@ impl ModCmd {
             } => format!("purge {count} messages of <@{u}>"),
             Self::Purge { count, .. } => format!("purge {count} messages"),
             Self::Hackban { user } => format!("ban <@{user}>"),
-            Self::NoteSweep { user } => format!("remove all notes of <@{user}>"),
+            Self::NoteSweep { user: Some(u), .. } => format!("remove all notes of <@{u}>"),
+            Self::NoteSweep { by: Some(m), .. } => format!("remove all notes written by <@{m}>"),
+            Self::NoteSweep { .. } => "remove all notes".into(),
             _ => self.perm().into(),
         }
     }
@@ -282,7 +294,13 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                 .collect(),
         },
         "slowmode" => {
-            let off = p.names.iter().any(|n| n == "off");
+            let channels: Vec<u64> = p
+                .channels
+                .iter()
+                .copied()
+                .chain(p.targets.iter().copied().filter(|t| *t >= SMALL))
+                .collect();
+            let off = p.names.iter().any(|n| n == "off") || !channels.is_empty();
             let secs = p
                 .duration_s
                 .map(|d| d as u64)
@@ -293,6 +311,7 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                     .filter(|s| *s <= MAX_SLOWMODE)
                     .ok_or("Give a delay up to 6h (e.g. 10s) or `off`")?
                     as u16,
+                channels,
             }
         }
         "note" | "notes" => {
@@ -302,9 +321,19 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                     user: need_user()?,
                     text: text.ok_or("Give the note with ?r")?,
                 },
-                Some("remove") => ModCmd::NoteRemove { id: case()? as i64 },
-                Some("sweep") => ModCmd::NoteSweep { user: need_user()? },
-                _ => ModCmd::NoteList { user: need_user()? },
+                Some("remove") => ModCmd::NoteRemove {
+                    id: case()? as i64,
+                    user,
+                },
+                Some("sweep") => ModCmd::NoteSweep {
+                    user: Some(need_user()?),
+                    by: None,
+                },
+                _ => ModCmd::NoteList {
+                    user,
+                    id: None,
+                    by: None,
+                },
             }
         }
         "cases" | "case" if p.names.first().is_some_and(|n| n == "modify") => ModCmd::CasesEdit {
@@ -534,11 +563,14 @@ pub async fn run(
                     _ => format!("Note #{id} updated"),
                 });
             }
-            ModCmd::NoteList { user } => return view_notes(app, g, user).await,
-            ModCmd::NoteRemove { id } => {
-                let n = sqlx::query("DELETE FROM notes WHERE guild_id=$1 AND id=$2")
-                    .bind(g)
-                    .bind(id)
+            ModCmd::NoteList { user, id, by } => return view_notes(app, g, user, id, by).await,
+            ModCmd::NoteRemove { id, user } => {
+                let n = sqlx::query(
+                    "DELETE FROM notes WHERE guild_id=$1 AND id=$2 AND ($3::bigint IS NULL OR user_id=$3)",
+                )
+                .bind(g)
+                .bind(id)
+                .bind(user.map(|u| u as i64))
                     .execute(&app.pool)
                     .await?
                     .rows_affected();
@@ -547,14 +579,17 @@ pub async fn run(
                     _ => format!("Removed note #{id}"),
                 });
             }
-            ModCmd::NoteSweep { user } => {
-                let n = sqlx::query("DELETE FROM notes WHERE guild_id=$1 AND user_id=$2")
-                    .bind(g)
-                    .bind(user as i64)
-                    .execute(&app.pool)
-                    .await?
-                    .rows_affected();
-                return Ok(format!("Removed {n} notes of <@{user}>"));
+            ModCmd::NoteSweep { user, by } => {
+                let n = sqlx::query(
+                    "DELETE FROM notes WHERE guild_id=$1 AND ($2::bigint IS NULL OR user_id=$2) AND ($3::bigint IS NULL OR author_id=$3)",
+                )
+                .bind(g)
+                .bind(user.map(|u| u as i64))
+                .bind(by.map(|u| u as i64))
+                .execute(&app.pool)
+                .await?
+                .rows_affected();
+                return Ok(format!("Removed {n} notes"));
             }
             ModCmd::CasesEdit { case, reason } => {
                 let done =
@@ -673,7 +708,18 @@ pub async fn run(
             }
             ModCmd::Verify { user } => {
                 let cfg = app.cfg(gid.get()).await?;
-                if cfg.verification.roles.is_empty() {
+                // Wick's verify also ends a quarantine.
+                let held: Option<(i64,)> = sqlx::query_as(
+                    "SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2",
+                )
+                .bind(g)
+                .bind(user as i64)
+                .fetch_optional(&app.pool)
+                .await?;
+                if held.is_some() {
+                    antinuke::run_inverse(app, gid, &Inverse::Unquarantine { user }).await?;
+                }
+                if cfg.verification.roles.is_empty() && held.is_none() {
                     return Ok("Set the verification roles on the dashboard first".into());
                 }
                 crate::verify::grant(app, gid, Id::new(user), &cfg.verification).await?;
@@ -720,13 +766,20 @@ pub async fn run(
                     format!("Deleted {n} messages"),
                 )
             }
-            ModCmd::Slowmode { secs } => {
-                app.http
-                    .update_channel(channel)
-                    .rate_limit_per_user(secs)
-                    .reason(&audit)
-                    .await?;
-                let note = format!("{secs}s in <#{channel}>");
+            ModCmd::Slowmode { secs, channels } => {
+                let channels = match channels.as_slice() {
+                    [] => vec![channel.get()],
+                    c => c.to_vec(),
+                };
+                for c in &channels {
+                    app.http
+                        .update_channel(Id::new(*c))
+                        .rate_limit_per_user(secs)
+                        .reason(&audit)
+                        .await?;
+                }
+                let list: Vec<_> = channels.iter().map(|c| format!("<#{c}>")).collect();
+                let note = format!("{secs}s in {}", list.join(" "));
                 (
                     "slowmode",
                     actor_id.get(),
@@ -837,20 +890,31 @@ async fn view_cases(
     })
 }
 
-async fn view_notes(app: &App, g: i64, user: u64) -> Result<String> {
-    let rows: Vec<(i64, i64, String, i64)> = sqlx::query_as(
-        "SELECT id, author_id, text, EXTRACT(EPOCH FROM created_at)::bigint FROM notes
-         WHERE guild_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 10",
+async fn view_notes(
+    app: &App,
+    g: i64,
+    user: Option<u64>,
+    id: Option<i64>,
+    by: Option<u64>,
+) -> Result<String> {
+    let rows: Vec<(i64, i64, i64, String, i64)> = sqlx::query_as(
+        "SELECT id, user_id, author_id, text, EXTRACT(EPOCH FROM created_at)::bigint FROM notes
+         WHERE guild_id=$1 AND ($2::bigint IS NULL OR user_id=$2) AND ($3::bigint IS NULL OR id=$3)
+         AND ($4::bigint IS NULL OR author_id=$4) ORDER BY id DESC LIMIT 10",
     )
     .bind(g)
-    .bind(user as i64)
+    .bind(user.map(|u| u as i64))
+    .bind(id)
+    .bind(by.map(|u| u as i64))
     .fetch_all(&app.pool)
     .await?;
     Ok(if rows.is_empty() {
-        format!("No notes for <@{user}>")
+        "No matching notes".into()
     } else {
         rows.iter()
-            .map(|(id, by, text, at)| format!("`#{id}` by <@{by}> <t:{at}:R>: {text}"))
+            .map(|(id, about, by, text, at)| {
+                format!("`#{id}` <@{about}> by <@{by}> <t:{at}:R>: {text}")
+            })
             .collect::<Vec<_>>()
             .join("\n")
     })
@@ -891,6 +955,7 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
             secs: int(o, "seconds")
                 .ok_or("missing seconds")?
                 .clamp(0, MAX_SLOWMODE as i64) as u16,
+            channels: vec![],
         },
         "notes" => {
             let Some(CommandDataOption {
@@ -906,15 +971,23 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                     user: u()?,
                     text: string(s, "msg").ok_or("missing msg")?.into(),
                 },
-                "view" => ModCmd::NoteList { user: u()? },
+                "view" => ModCmd::NoteList {
+                    user: user(s, "user").map(|u| u.get()),
+                    id: int(s, "note_id"),
+                    by: user(s, "mod").map(|u| u.get()),
+                },
                 "remove" => ModCmd::NoteRemove {
-                    id: int(s, "id").ok_or("missing id")?,
+                    id: int(s, "note_id").ok_or("missing note_id")?,
+                    user: user(s, "user").map(|u| u.get()),
                 },
                 "modify" => ModCmd::NoteModify {
-                    id: int(s, "id").ok_or("missing id")?,
+                    id: int(s, "note_id").ok_or("missing note_id")?,
                     text: string(s, "msg").ok_or("missing msg")?.into(),
                 },
-                "sweep" => ModCmd::NoteSweep { user: u()? },
+                "sweep" => ModCmd::NoteSweep {
+                    user: user(s, "user").map(|u| u.get()),
+                    by: user(s, "mod").map(|u| u.get()),
+                },
                 _ => return Err("Unknown subcommand".into()),
             }
         }
@@ -977,9 +1050,28 @@ mod tests {
             })
         );
         assert!(pf("purge 5000", None).is_err());
-        assert_eq!(pf("slowmode 10s", None), Ok(ModCmd::Slowmode { secs: 10 }));
-        assert_eq!(pf("slowmode off", None), Ok(ModCmd::Slowmode { secs: 0 }));
+        assert_eq!(
+            pf("slowmode 10s", None),
+            Ok(ModCmd::Slowmode {
+                secs: 10,
+                channels: vec![]
+            })
+        );
+        assert_eq!(
+            pf("slowmode off", None),
+            Ok(ModCmd::Slowmode {
+                secs: 0,
+                channels: vec![]
+            })
+        );
         assert!(pf("slowmode 7h", None).is_err());
+        assert_eq!(
+            pf("sm <#5000000> <#6000000> 1h", None),
+            Ok(ModCmd::Slowmode {
+                secs: 3600,
+                channels: vec![5_000_000, 6_000_000]
+            })
+        );
         assert_eq!(
             pf("cases modify 3 ?r typo", None),
             Ok(ModCmd::CasesEdit {
@@ -1037,7 +1129,14 @@ mod tests {
     fn multi_target_and_purge_aliases() {
         let cmd = ModCmd::Unban { user: 1 };
         assert_eq!(cmd.with_user(2), Some(ModCmd::Unban { user: 2 }));
-        assert_eq!(ModCmd::Slowmode { secs: 1 }.with_user(2), None);
+        assert_eq!(
+            ModCmd::Slowmode {
+                secs: 1,
+                channels: vec![]
+            }
+            .with_user(2),
+            None
+        );
         let big = 123_456_789_012_345_678u64;
         let c = pf(&format!("bc 20 {big}"), None).unwrap();
         let ModCmd::Purge { filters, .. } = c else {
@@ -1066,12 +1165,27 @@ mod tests {
             })
         );
         assert!(pf(&format!("note add {big}"), None).is_err()); // text required
-        assert_eq!(pf("note remove 4", None), Ok(ModCmd::NoteRemove { id: 4 }));
+        assert_eq!(
+            pf("note remove 4", None),
+            Ok(ModCmd::NoteRemove { id: 4, user: None })
+        );
         assert_eq!(
             pf(&format!("note {big}"), None),
-            Ok(ModCmd::NoteList { user: big })
+            Ok(ModCmd::NoteList {
+                user: Some(big),
+                id: None,
+                by: None
+            })
         );
-        assert_eq!(ModCmd::NoteList { user: 1 }.perm(), "notes_view");
+        assert_eq!(
+            ModCmd::NoteList {
+                user: None,
+                id: None,
+                by: None
+            }
+            .perm(),
+            "notes_view"
+        );
     }
 
     #[test]
