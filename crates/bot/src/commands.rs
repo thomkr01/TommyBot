@@ -260,7 +260,7 @@ pub async fn apply_dm(
         actor_id.get(),
     );
     if kind == ModKind::Warn {
-        if let Some(extra) = apply_warn_actions(app, &cfg.misc, gid, target, points).await? {
+        if let Some((extra, _)) = apply_warn_actions(app, &cfg.misc, gid, target, points).await? {
             text += format!("\n{extra}").as_str();
         }
     }
@@ -520,15 +520,19 @@ pub(crate) async fn apply_warn_actions(
     g: Id<GuildMarker>,
     u: Id<UserMarker>,
     added: i32,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, bool)>> {
     if !misc.auto_warn_actions {
         return Ok(None);
     }
     let (gid, uid) = (g.get() as i64, u.get() as i64);
     let after = cases::warn_points(&app.pool, gid, uid).await?;
     let Some(t) = warn::crossed(&misc.warn_actions, after - added, after) else {
-        return Ok(warn::next(&misc.warn_actions, after)
-            .map(|n| format!("`{}` points away from `{:?}`", n.points - after, n.action)));
+        return Ok(warn::next(&misc.warn_actions, after).map(|n| {
+            (
+                format!("`{}` points away from `{:?}`", n.points - after, n.action),
+                false,
+            )
+        }));
     };
     let why = format!("Reached {} warn points", t.points);
     let (kind, secs) = match t.action {
@@ -569,10 +573,11 @@ pub(crate) async fn apply_warn_actions(
         Some(&why),
     )
     .await;
+    // Wick clears the warns once the punishment is applied.
     cases::reset_warns(&app.pool, gid, uid).await?;
-    Ok(Some(format!(
-        "<@{uid}> reached {} warn points: {:?}",
-        t.points, t.action
+    Ok(Some((
+        format!("<@{uid}> reached {} warn points: {:?}", t.points, t.action),
+        kind == "timeout",
     )))
 }
 
