@@ -42,6 +42,8 @@ pub enum Kind {
     /// Header for the lettered rows below it.
     Group,
     Dashboard,
+    /// User ids kept in the permits tables, not the config document (Trusted Admins).
+    Users,
 }
 
 pub struct Row {
@@ -131,7 +133,9 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
     let label = format!("[{}] {}", row.code.to_uppercase(), row.name);
     let ids_json = || ids.iter().map(|i| json!(i.to_string())).collect::<Vec<_>>();
     match (row.kind, op) {
-        (Kind::Dashboard, _) => Err(format!("{label} can only be changed on the dashboard")),
+        (Kind::Dashboard | Kind::Users, _) => {
+            Err(format!("{label} can only be changed on the dashboard"))
+        }
         (Kind::Group, _) => Err(format!(
             "{label} has sub-settings, use {}a, {}b...",
             row.code, row.code
@@ -194,6 +198,57 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
         }
         (_, Op::Show(_)) => Err(USAGE.into()),
     }
+}
+
+/// User ids in `<@1> 2` form; anything else is ignored.
+fn user_ids(v: &str) -> Vec<i64> {
+    v.split_whitespace()
+        .filter_map(|t| t.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+        .collect()
+}
+
+/// `statics 10 ?add/?remove USER`: writes the `trusted_admins` table the dashboard permits page uses.
+async fn edit_trusted_admins(
+    app: &App,
+    gid: Id<GuildMarker>,
+    level: &Level,
+    op: &Op,
+) -> Result<String> {
+    let (Op::Set(_, v) | Op::Add(_, v) | Op::Remove(_, v)) = op else {
+        return Ok("[10] Trusted Admins: use `USER ?add 10` or `USER ?remove 10`".into());
+    };
+    if !matches!(level, Level::Owner | Level::ExtraOwner) {
+        return Ok("Only the owner and Extra Owners can change Trusted Admins".into());
+    }
+    let ids = user_ids(v);
+    if ids.is_empty() {
+        return Ok("Give at least one user mention or ID".into());
+    }
+    let sql = if matches!(op, Op::Remove(..)) {
+        "delete from trusted_admins where guild_id = $1 and user_id = any($2)"
+    } else {
+        "insert into trusted_admins (guild_id, user_id) select $1, unnest($2::bigint[]) on conflict do nothing"
+    };
+    sqlx::query(sql)
+        .bind(gid.get() as i64)
+        .bind(&ids)
+        .execute(&app.pool)
+        .await?;
+    let now: Vec<i64> = sqlx::query_scalar(
+        "select user_id from trusted_admins where guild_id = $1 order by user_id",
+    )
+    .bind(gid.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    let list: Vec<_> = now.iter().map(|u| format!("<@{u}>")).collect();
+    Ok(format!(
+        "✅ [10] Trusted Admins: {}",
+        if list.is_empty() {
+            "none".into()
+        } else {
+            list.join(" ")
+        }
+    ))
 }
 
 fn id_of(v: &Value) -> Option<u64> {
@@ -266,7 +321,7 @@ fn entries(m: &Module, cfg: &GuildCfg, dash: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = vec![];
     for row in m.rows {
         let val = match row.kind {
-            Kind::Dashboard => dash.to_string(),
+            Kind::Dashboard | Kind::Users => dash.to_string(),
             Kind::Role | Kind::Channel | Kind::Roles | Kind::Channels => (row.get)(cfg),
             _ => format!("*`{}`*", (row.get)(cfg)),
         };
@@ -570,6 +625,11 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         .await?;
         return Ok(true);
     };
+    if matches!(row.kind, Kind::Users) {
+        let text = edit_trusted_admins(app, gid, &level, &op).await?;
+        send(app, msg, &text, None, vec![]).await?;
+        return Ok(true);
+    }
     let section = row.path.split('.').next().unwrap_or_default();
     if !row.path.is_empty() && !may_edit(&level, section) {
         send(app, msg, "You may not change this setting", None, vec![]).await?;
@@ -686,6 +746,11 @@ mod tests {
     }
 
     #[test]
+    fn reads_user_ids() {
+        assert_eq!(user_ids("<@12> 34 junk"), vec![12, 34]);
+    }
+
+    #[test]
     fn parses_wick_syntax() {
         assert_eq!(parse_op(""), Ok(Op::Show(0)));
         assert_eq!(parse_op("2"), Ok(Op::Show(1)));
@@ -733,7 +798,7 @@ mod tests {
         for m in MODULES {
             for r in m.rows {
                 let op = match r.kind {
-                    Kind::Group | Kind::Dashboard => continue,
+                    Kind::Group | Kind::Dashboard | Kind::Users => continue,
                     Kind::Bool | Kind::Switch(..) => Op::Toggle(r.code.into(), true),
                     Kind::Int(min, _) => Op::Set(r.code.into(), min.to_string()),
                     Kind::Num(_) => Op::Set(r.code.into(), "50".into()),

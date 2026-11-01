@@ -105,7 +105,7 @@ pub(super) static STATICS: Module = Module {
         r!("6", "Logging Channel", "logging.fallback", Kind::Channel, |c| mentions(c.logging.fallback.map(|r| r.get()), "#")),
         r!("7", "Mod-Logging Channel", "logging.routes.mod_command", Kind::Channel, |c| mentions(c.logging.routes.get(&LogKind::ModCommand).map(|r| r.get()), "#")),
         r!("8", "Partnering Channels", "whitelist.partner_channels", Kind::Channels, |c| chans(&c.whitelist.partner_channels)),
-        dash!("10", "Trusted Admins"),
+        Row { code: "10", name: "Trusted Admins", path: "", kind: Kind::Users, get: |_| String::new() },
         dash!("11", "Extra Owners"),
         r!("12", "Verification Channel", "verification.channel", Kind::Channel, |c| mentions(c.verification.channel.map(|r| r.get()), "#")),
     ],
