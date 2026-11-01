@@ -721,7 +721,8 @@ pub(crate) async fn apply_warn_actions(
     let (gid, uid) = (g.get() as i64, u.get() as i64);
     let after = cases::warn_points(&app.pool, gid, uid).await?;
     let Some(t) = warn::crossed(&misc.warn_actions, after - added, after) else {
-        return Ok(None);
+        return Ok(warn::next(&misc.warn_actions, after)
+            .map(|n| format!("`{}` points away from `{:?}`", n.points - after, n.action)));
     };
     match t.action {
         warn::Action::Ban => {
