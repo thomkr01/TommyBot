@@ -315,7 +315,14 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             &format!("You were timed out by automod{why}{note}"),
         )
         .await;
-        timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000, "Automod").await?;
+        timeout(
+            &app.http,
+            gid,
+            m.author.id,
+            act.timeout_ms / 1000,
+            "Automod",
+        )
+        .await?;
         auto_case(
             app,
             gid,
