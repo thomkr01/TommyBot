@@ -565,7 +565,14 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         };
         return punish(app, &cfg, gid, user.id.get(), action, "join lock").await;
     }
-    let invite = used_invite(app, gid).await;
+    // One invites call per join: only when something shows the result.
+    let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
+        || cfg.logging.target(LogKind::Member, None).is_some()
+    {
+        crate::invites::used_invite(app, gid).await
+    } else {
+        None
+    };
     if let Some((code, inviter)) = &invite {
         let log = Log::new("Invite Used", DONE)
             .user("Member", user.id.get())
@@ -605,66 +612,6 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     Ok(())
 }
 
-/// The invite the next joiner used: the one whose use count grew since the last join, or the
-/// only one that vanished (a last use deletes it). Needs Manage Server; without it nothing is
-/// tracked. Returns (code, inviter name).
-async fn used_invite(app: &App, gid: Id<GuildMarker>) -> Option<(String, String)> {
-    let list = app
-        .http
-        .guild_invites(gid)
-        .await
-        .ok()?
-        .models()
-        .await
-        .ok()?;
-    let now: HashMap<String, u64> = list
-        .iter()
-        .map(|i| (i.code.clone(), i.uses.unwrap_or(0)))
-        .collect();
-    let old = app.invites.lock().unwrap().insert(gid.get(), now.clone())?;
-    let who = |code: &str| {
-        list.iter()
-            .find(|i| i.code == code)
-            .and_then(|i| i.inviter.as_ref())
-            .map_or("unknown".into(), |u| u.name.clone())
-    };
-    if let Some((code, _)) = now
-        .iter()
-        .find(|(c, n)| **n > old.get(*c).copied().unwrap_or(0))
-    {
-        return Some((code.clone(), who(code)));
-    }
-    let mut gone = old.keys().filter(|c| !now.contains_key(*c));
-    match (gone.next(), gone.next()) {
-        (Some(code), None) => Some((code.clone(), "unknown".into())),
-        _ => None,
-    }
-}
-
-/// The public report page of a raid, when the dashboard URL is configured.
-pub fn raid_url(code: &str) -> Option<String> {
-    let base = std::env::var("DASHBOARD_URL")
-        .ok()
-        .filter(|b| !b.is_empty())?;
-    Some(format!("{}/raid/{code}", base.trim_end_matches('/')))
-}
-
-/// Wick shows the first 8 digits of the id next to the name.
-fn short_id(id: u64) -> String {
-    id.to_string().chars().take(8).collect()
-}
-
-/// `<10 random>_<last 10 digits of the guild id>`: names a raid on the public report page.
-fn raid_code(gid: u64) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let random: String = (0..10)
-        .map(|_| char::from(b"abcdefghijklmnopqrstuvwxyz0123456789"[rng.gen_range(0..36)]))
-        .collect();
-    let id = gid.to_string();
-    format!("{random}_{}", &id[id.len().saturating_sub(10)..])
-}
-
 async fn join_raid(
     app: &App,
     cfg: &GuildCfg,
@@ -679,7 +626,7 @@ async fn join_raid(
         let d = raids.entry(gid.get()).or_default();
         let out = d.on_join(j, suspicious, raid, now);
         if out.triggered || d.code.is_empty() {
-            d.code = raid_code(gid.get());
+            d.code = crate::invites::raid_code(gid.get());
         }
         let names: Vec<String> = out
             .flagged
@@ -752,7 +699,7 @@ async fn join_raid(
                     .iter()
                     .zip(&names)
                     .take(40)
-                    .map(|(u, n)| format!("`{} | {n}`", short_id(*u))))
+                    .map(|(u, n)| format!("`{} | {n}`", crate::invites::short_id(*u))))
                 .chain(
                     (out.flagged.len() > 40).then(|| format!("+{} more", out.flagged.len() - 40)),
                 )
@@ -760,7 +707,7 @@ async fn join_raid(
                 .join("\n"),
             );
         log = log.field("Code:", &format!("`{code}`"));
-        if let Some(url) = raid_url(&code) {
+        if let Some(url) = crate::invites::raid_url(&code) {
             log = log.text(&format!("{ARROW} [Every caught account]({url})"));
         }
         send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
@@ -997,13 +944,6 @@ async fn punish(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn raid_code_ends_in_the_guild_id() {
-        let c = raid_code(123_456_789_012_345_678);
-        let (random, id) = c.split_once('_').unwrap();
-        assert_eq!((random.len(), id), (10, "9012345678"));
-    }
 
     #[test]
     fn disabled_filters_lose_their_weight() {

@@ -8,6 +8,7 @@ mod commands;
 mod events;
 mod general;
 mod hierarchy;
+mod invites;
 mod lockdown;
 mod metrics;
 mod modcmds;

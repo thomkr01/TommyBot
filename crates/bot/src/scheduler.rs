@@ -109,7 +109,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 "{YES} `{caught}` users have been caught by the join raid."
             ));
             let code = job.payload["code"].as_str().unwrap_or_default();
-            match crate::automod::raid_url(code).filter(|_| caught > 0) {
+            match crate::invites::raid_url(code).filter(|_| caught > 0) {
                 Some(url) => {
                     log = log.text(&format!("› `{code}`"));
                     send_log_link(
