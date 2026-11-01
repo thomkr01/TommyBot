@@ -582,6 +582,7 @@ async fn run(
                 return Ok(q);
             }
             let target = c.target().map(Id::new);
+            let paged = c.paged_user();
             let dm_name = c.dm_name();
             let result_kind = c.result_kind();
             let text = modcmds::run(
@@ -595,6 +596,12 @@ async fn run(
                 proof.as_deref(),
             )
             .await?;
+            if let Some((e, row)) =
+                modcmds::cases_pager(app, gid, actor_id.get(), paged, &text).await?
+            {
+                (*out, *confirm) = (vec![e], Some(row));
+                return Ok(String::new());
+            }
             if let (Some(t), true, true) = (
                 target,
                 text.starts_with("Case #"),

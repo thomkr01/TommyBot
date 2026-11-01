@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|nuke|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
+Usage: live.py spam|lock|mention_lock|nuke|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
@@ -64,9 +64,13 @@ def check(ok, what):
 
 def spam():
     """Webhook floods #general; automod must delete the flood and the new webhook."""
-    set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True})
+    # New servers start with every heat filter off, so switch on the two a flood trips.
+    set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True,
+                           "filters": {"regular": {"enabled": True}, "similar": {"enabled": True}}})
     chan = text_channel("general")
-    hook = call("POST", f"/channels/{chan}/webhooks", body={"name": "e2e-spammer"})
+    # Hooks of an immune owner (TommyBot itself) are exempt, so the attacker makes this one.
+    hook = call("POST", f"/channels/{chan}/webhooks", os.environ.get("ATTACKER_TOKEN"),
+                {"name": "e2e-spammer"})
     url = f"/webhooks/{hook['id']}/{hook['token']}?wait=true"
     ids = []
     for _ in range(12):
@@ -112,7 +116,57 @@ def nuke():
     return check(int(after) > int(before), f"nuke: incidents {before} -> {after}")
 
 
-SCENARIOS = {"spam": spam, "nuke": nuke}
+def wait_for(q, want, tries=20):
+    """Polls a SQL count until `want(count)` holds; returns the last count."""
+    for _ in range(tries):
+        n = int(sql(q))
+        if want(n):
+            break
+        time.sleep(2)
+    return n
+
+
+def lock():
+    """A timed channel lock via the scheduler: #general loses Send Messages, then gets it back."""
+    chan = text_channel("general")
+    locks = f"select count(*) from lock_snapshots where guild_id = {GUILD}"
+    sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+            values ({GUILD}, 'lock', '{{"kind": "channel", "channel": {chan}, "duration_s": 15}}', now())""")
+    locked = wait_for(locks, lambda n: n > 0)
+    send = 1 << 11
+    everyone = [o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == GUILD]
+    denied = bool(everyone) and int(everyone[0]["deny"]) & send != 0
+    unlocked = wait_for(locks, lambda n: n == 0)
+    everyone = [o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == GUILD]
+    back = not everyone or int(everyone[0]["deny"]) & send == 0
+    return check(locked > 0 and denied and unlocked == 0 and back,
+                 f"lock: locked={locked > 0}, send denied={denied}, timed unlock={unlocked == 0 and back}")
+
+
+def mention_lock():
+    """Auto lockdown: a webhook pings past the mention limit; the server locks, then we lift it."""
+    set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True,
+                           "auto_lockdown": {"enabled": True, "mentions": True,
+                                             "mention_count": 4, "mention_window_ms": 10000}})
+    chan = text_channel("general")
+    me = call("GET", "/users/@me")["id"]
+    hook = call("POST", f"/channels/{chan}/webhooks", body={"name": "e2e-pinger"})
+    url = f"/webhooks/{hook['id']}/{hook['token']}?wait=true"
+    # Discord lists each mentioned user once per message, so every message counts one ping.
+    for _ in range(5):
+        call("POST", url, body={"content": f"hi <@{me}>"}, auth=False, soft=True)
+    locks = f"select count(*) from lock_snapshots where guild_id = {GUILD}"
+    locked = wait_for(locks, lambda n: n > 0, 10)
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    # An unlock job without a lock name lifts every lock, like the dashboard's button.
+    sql(f"insert into scheduled_jobs (guild_id, kind, run_at) values ({GUILD}, 'unlock', now())")
+    unlocked = wait_for(locks, lambda n: n == 0)
+    set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True})
+    return check(locked > 0 and unlocked == 0,
+                 f"mention lock: locked={locked > 0}, lifted={unlocked == 0}")
+
+
+SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]

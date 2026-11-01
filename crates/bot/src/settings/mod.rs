@@ -255,8 +255,11 @@ fn id_of(v: &Value) -> Option<u64> {
     v.as_u64().or_else(|| v.as_str()?.parse().ok())
 }
 
+/// A numeric key indexes into a list (`misc.warn_actions.0.points`).
 pub fn get_path<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').try_fold(doc, |v, k| v.get(k))
+    path.split('.').try_fold(doc, |v, k| {
+        v.get(k).or_else(|| v.get(k.parse::<usize>().ok()?))
+    })
 }
 
 /// Writes `e` at `path`, creating objects on the way. Lists compare ids, so `"5"` and `5` are one entry.
@@ -265,8 +268,17 @@ pub fn apply(doc: &mut Value, path: &str, e: Edit) {
     if path.starts_with("joinraid.") && doc.get("joinraid").is_none_or(Value::is_null) {
         doc["joinraid"] = serde_json::to_value(RaidCfg::default()).expect("raid defaults");
     }
+    // A new first warn action needs both fields: timeout at 3 warns until the user changes them.
+    if path.starts_with("misc.warn_actions.0.") && get_path(doc, "misc.warn_actions.0").is_none() {
+        doc["misc"]["warn_actions"] = json!([{"points": 3, "action": "timeout"}]);
+    }
     let mut v = doc;
     for k in path.split('.') {
+        let len = v.as_array().map_or(0, Vec::len);
+        if let Some(i) = k.parse::<usize>().ok().filter(|&i| i < len) {
+            v = &mut v[i];
+            continue;
+        }
         if !v.is_object() {
             *v = json!({});
         }
@@ -753,6 +765,33 @@ mod tests {
 
     fn row(m: &'static Module, code: &str) -> &'static Row {
         m.rows.iter().find(|r| r.code == code).unwrap()
+    }
+
+    #[test]
+    fn prefix_edits_the_first_warn_action() {
+        let mut doc = json!({});
+        apply(&mut doc, "misc.warn_actions.0.points", Edit::Put(json!(5)));
+        assert_eq!(
+            doc["misc"]["warn_actions"],
+            json!([{"points": 5, "action": "timeout"}])
+        );
+        doc["misc"]["warn_actions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"points": 9, "action": "ban"}));
+        apply(
+            &mut doc,
+            "misc.warn_actions.0.action",
+            Edit::Put(json!("kick")),
+        );
+        assert_eq!(doc["misc"]["warn_actions"][0]["action"], "kick");
+        assert_eq!(doc["misc"]["warn_actions"][1]["points"], 9);
+        assert_eq!(
+            get_path(&doc, "misc.warn_actions.1.action"),
+            Some(&json!("ban"))
+        );
+        let c = GuildCfg::parse(&doc);
+        assert_eq!(c.misc.warn_actions.len(), 2);
     }
 
     #[test]
