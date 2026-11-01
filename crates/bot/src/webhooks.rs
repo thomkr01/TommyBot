@@ -24,6 +24,9 @@ pub(crate) async fn webhook_exempt(
     hook: Id<WebhookMarker>,
     listed: bool,
 ) -> bool {
+    if listed {
+        return true;
+    }
     let fetched = async { anyhow::Ok(app.http.webhook(hook).await?.model().await?) }.await;
     let cached = match fetched.map(|h| h.user) {
         Ok(Some(owner)) => app

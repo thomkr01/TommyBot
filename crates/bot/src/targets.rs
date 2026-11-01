@@ -35,6 +35,7 @@ pub async fn resolve_banned(
     gid: Id<GuildMarker>,
     name: &str,
 ) -> Result<Result<Id<UserMarker>, String>> {
+    // shortcut: only the first 1000 bans are searched; page with `after` if a server needs more.
     let bans = app.http.bans(gid).limit(1000).await?.models().await?;
     let cands: Vec<_> = bans
         .into_iter()

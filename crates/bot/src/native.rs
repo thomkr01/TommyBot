@@ -47,7 +47,11 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
         let key = (gid.get(), e.rule_id.get(), who);
         let tripped = {
             let mut hits = MENTION_HITS.lock().unwrap();
-            discord_api::scope_tripped(hits.entry(key).or_default(), now_secs(), sc)
+            let tripped = discord_api::scope_tripped(hits.entry(key).or_default(), now_secs(), sc);
+            if tripped {
+                hits.remove(&key);
+            }
+            tripped
         };
         if !tripped {
             return Ok(());
