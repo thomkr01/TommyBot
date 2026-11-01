@@ -169,16 +169,17 @@ def purge():
     time.sleep(1)
     call("POST", f"/channels/{chan}/messages/bulk-delete", body={"messages": ids})
     time.sleep(3)
-    msgs = [m for m in log_messages("message", since)
-            if any(a["filename"] == "messages.txt" for a in m["attachments"])]
-    files = [a for m in msgs for a in m["attachments"]]
-    noted = any("3/3" in json.dumps(m["embeds"]) for m in msgs)
+    msgs = log_messages("message", since)  # newest first
+    files = [a for m in msgs for a in m["attachments"] if a["filename"] == "messages.txt"]
+    # The file comes as its own message right after (below) the embed that says how many it holds.
+    at = next((i for i, m in enumerate(msgs) if m["attachments"]), None)
+    noted = at is not None and at + 1 < len(msgs) and "3/3" in json.dumps(msgs[at + 1]["embeds"])
     # The CDN refuses urllib's default user agent.
     get = urllib.request.Request(files[0]["url"], headers={"User-Agent": "tommybot-e2e"}) if files else None
     text = urllib.request.urlopen(get).read().decode() if get else ""
     print("cleaned: nothing left, the test messages were the ones purged")
     return check(noted and all(f"e2e purge {i}" in text for i in range(3)),
-                 f"purge: messages.txt attached={bool(files)} with all 3 messages, embed says 3/3={noted}")
+                 f"purge: messages.txt attached={bool(files)} with all 3 messages, embed above says 3/3={noted}")
 
 
 SCENARIOS = {"spam": spam, "nuke": nuke, "logchan": logchan, "purge": purge}

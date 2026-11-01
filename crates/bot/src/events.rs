@@ -49,12 +49,7 @@ async fn send(
     embed: &Embed,
     link: Option<&(&str, String)>,
     mentions: &AllowedMentions,
-    file: Option<&str>,
 ) -> Result<()> {
-    let files: Vec<Attachment> = file
-        .map(|t| Attachment::from_bytes("messages.txt".into(), t.as_bytes().to_vec(), 0))
-        .into_iter()
-        .collect();
     let rows: Vec<Component> = link
         .map(|(label, url)| {
             Component::ActionRow(ActionRow {
@@ -78,7 +73,6 @@ async fn send(
         .content(pings)
         .embeds(std::slice::from_ref(embed))
         .components(&rows)
-        .attachments(&files)
         .allowed_mentions(Some(mentions))
         .await?;
     Ok(())
@@ -86,8 +80,16 @@ async fn send(
 
 async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     let mentions = AllowedMentions::default();
-    let (link, file) = (m.link.as_ref(), m.file.as_deref());
-    send(app, m.channel_id, "", &m.embed, link, &mentions, file).await
+    send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await?;
+    // Discord shows attachments above the embed, so the file is its own message below it.
+    if let Some(text) = &m.file {
+        let file = Attachment::from_bytes("messages.txt".into(), text.as_bytes().to_vec(), 0);
+        app.http
+            .create_message(m.channel_id)
+            .attachments(&[file])
+            .await?;
+    }
+    Ok(())
 }
 
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
@@ -100,7 +102,6 @@ pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Resul
                 &embed.build(),
                 None,
                 &AllowedMentions::default(),
-                None,
             )
             .await
         }
@@ -124,16 +125,7 @@ pub async fn send_log_pinging(
         roles: roles.to_vec(),
         ..Default::default()
     };
-    send(
-        app,
-        ch,
-        pings.trim_end(),
-        &embed.build(),
-        None,
-        &mentions,
-        None,
-    )
-    .await
+    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions).await
 }
 
 /// Like [`send_log`] with a link button under the embed.
@@ -154,7 +146,6 @@ pub async fn send_log_link(
         &embed.build(),
         Some(&link),
         &AllowedMentions::default(),
-        None,
     )
     .await
 }
