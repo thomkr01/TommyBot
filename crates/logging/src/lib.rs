@@ -41,8 +41,8 @@ pub struct LogMessage {
     pub embed: Embed,
     /// Wick's link button under the log ("Go to Message").
     pub link: Option<render::Link>,
-    /// Text attached as `messages.txt`: the cached content of a bulk delete. Discord stores it, the bot keeps nothing.
-    pub file: Option<String>,
+    /// File name and text: the cached content of a bulk delete. Discord stores it, the bot keeps nothing.
+    pub file: Option<(String, String)>,
 }
 
 pub(crate) struct Entry {
@@ -150,12 +150,17 @@ impl Logger {
                 .collect();
             if let Some(log) = cfg.target(LogKind::Message, Some(LogEvent::MessageDeleteBulk)) {
                 if !ignored(cfg, Some(m.channel_id), None) {
+                    let name = ids
+                        .first()
+                        .map(|i| render::bulk_file(*i))
+                        .unwrap_or_default();
+                    let embed = render::bulk_delete(m.channel_id, m.ids.len(), lines.len(), &name);
                     out.push(LogMessage {
                         channel_id: log,
                         kind: LogKind::Message,
-                        embed: render::bulk_delete(m.channel_id, m.ids.len(), lines.len()),
+                        embed,
                         link: None,
-                        file: (!lines.is_empty()).then(|| lines.concat()),
+                        file: (!lines.is_empty()).then(|| (name, lines.concat())),
                     });
                 }
             }
@@ -568,8 +573,13 @@ mod tests {
             )
         };
         let out = logger.handle(&cfg, &bulk(vec![8, 99, 7]), now);
-        assert_eq!(out[0].file.as_deref(), Some("20: first\n20: second\n"));
-        assert!(format!("{:?}", out[0].embed).contains("`2/3` saved in `messages.txt`"));
+        let (name, text) = out[0].file.clone().unwrap();
+        assert_eq!(
+            (name.as_str(), text.as_str()),
+            ("bulk-7.txt", "20: first\n20: second\n")
+        );
+        assert!(format!("{:?}", out[0].embed).contains("`2/3` saved in `bulk-7.txt` below"));
+        assert_eq!(render::bulk_file(Id::new(36 * 36 + 35)), "bulk-10z.txt");
         // Already removed from the cache, so a repeat has nothing to attach.
         assert_eq!(logger.handle(&cfg, &bulk(vec![7]), now)[0].file, None);
     }

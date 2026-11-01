@@ -16,7 +16,7 @@ use twilight_model::{
     },
     http::attachment::Attachment,
     id::{
-        marker::{ChannelMarker, GuildMarker, RoleMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker},
         Id,
     },
 };
@@ -49,7 +49,7 @@ async fn send(
     embed: &Embed,
     link: Option<&(&str, String)>,
     mentions: &AllowedMentions,
-) -> Result<()> {
+) -> Result<Id<MessageMarker>> {
     let rows: Vec<Component> = link
         .map(|(label, url)| {
             Component::ActionRow(ActionRow {
@@ -68,24 +68,30 @@ async fn send(
         })
         .into_iter()
         .collect();
-    app.http
+    Ok(app
+        .http
         .create_message(channel)
         .content(pings)
         .embeds(std::slice::from_ref(embed))
         .components(&rows)
         .allowed_mentions(Some(mentions))
-        .await?;
-    Ok(())
+        .await?
+        .model()
+        .await?
+        .id)
 }
 
 async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     let mentions = AllowedMentions::default();
-    send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await?;
-    // Discord shows attachments above the embed, so the file is its own message below it.
-    if let Some(text) = &m.file {
-        let file = Attachment::from_bytes("messages.txt".into(), text.as_bytes().to_vec(), 0);
+    let id = send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await?;
+    // Discord shows attachments above the embed, so the file is its own message below it, replying to it.
+    if let Some((name, text)) = &m.file {
+        let file = Attachment::from_bytes(name.clone(), text.as_bytes().to_vec(), 0);
         app.http
             .create_message(m.channel_id)
+            .reply(id)
+            .fail_if_not_exists(false)
+            .allowed_mentions(Some(&mentions))
             .attachments(&[file])
             .await?;
     }
@@ -94,17 +100,16 @@ async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
 
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
     match app.cfg(guild).await?.logging.target(kind, None) {
-        Some(ch) => {
-            send(
-                app,
-                ch,
-                "",
-                &embed.build(),
-                None,
-                &AllowedMentions::default(),
-            )
-            .await
-        }
+        Some(ch) => send(
+            app,
+            ch,
+            "",
+            &embed.build(),
+            None,
+            &AllowedMentions::default(),
+        )
+        .await
+        .map(drop),
         None => Ok(()),
     }
 }
@@ -125,7 +130,9 @@ pub async fn send_log_pinging(
         roles: roles.to_vec(),
         ..Default::default()
     };
-    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions).await
+    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions)
+        .await
+        .map(drop)
 }
 
 /// Like [`send_log`] with a link button under the embed.
@@ -148,6 +155,7 @@ pub async fn send_log_link(
         &AllowedMentions::default(),
     )
     .await
+    .map(drop)
 }
 
 /// A deleted log channel leaves the config, so its logs reach the main log channel, which says so.

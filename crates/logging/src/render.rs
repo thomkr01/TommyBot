@@ -71,18 +71,26 @@ pub fn message_delete(
     log.build()
 }
 
-/// `saved` is how many of the deleted messages are in the attached messages.txt.
-pub fn bulk_delete(channel: Id<ChannelMarker>, count: usize, saved: usize) -> Embed {
+/// The name of a bulk delete's file, from its oldest message id, so the embed and file match.
+pub fn bulk_file(oldest: Id<MessageMarker>) -> String {
+    let (mut n, mut code) = (oldest.get(), Vec::new());
+    while n > 0 {
+        code.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize]);
+        n /= 36;
+    }
+    code.reverse();
+    format!("bulk-{}.txt", String::from_utf8(code).expect("ascii"))
+}
+
+/// `saved` is how many of the deleted messages are in the file named `file`.
+pub fn bulk_delete(channel: Id<ChannelMarker>, count: usize, saved: usize, file: &str) -> Embed {
     let log = Log::new("Message Delete Bulk", RED)
         .line("Channel", &embed::channel(channel.get()))
         .time()
         .line("Count", &count.to_string());
     match saved {
         0 => log.line("Content", "not cached"),
-        n => log.line(
-            "Content",
-            &format!("`{n}/{count}` saved in `messages.txt` below"),
-        ),
+        n => log.line("Content", &format!("`{n}/{count}` saved in `{file}` below")),
     }
     .build()
 }

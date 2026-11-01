@@ -212,7 +212,7 @@ def logchan():
 
 
 def purge():
-    """A bulk delete must log with the deleted messages attached as messages.txt."""
+    """A bulk delete must log, then post its messages as a bulk-<code>.txt that replies to that log."""
     since = snowflake_now()
     chan = text_channel("general")
     ids = [call("POST", f"/channels/{chan}/messages", body={"content": f"e2e purge {i}"})["id"]
@@ -220,17 +220,18 @@ def purge():
     time.sleep(1)
     call("POST", f"/channels/{chan}/messages/bulk-delete", body={"messages": ids})
     time.sleep(3)
-    msgs = log_messages("message", since)  # newest first
-    files = [a for m in msgs for a in m["attachments"] if a["filename"] == "messages.txt"]
-    # The file comes as its own message right after (below) the embed that says how many it holds.
-    at = next((i for i, m in enumerate(msgs) if m["attachments"]), None)
-    noted = at is not None and at + 1 < len(msgs) and "3/3" in json.dumps(msgs[at + 1]["embeds"])
+    msgs = log_messages("message", since)
+    hit = next((m for m in msgs if m["attachments"]), None)
+    files = hit["attachments"] if hit else []
+    # The file replies to the embed it belongs to, and that embed names the same file.
+    parent = hit and next((m for m in msgs if m["id"] == hit.get("message_reference", {}).get("message_id")), None)
+    noted = bool(parent) and f"3/3` saved in `{files[0]['filename']}`" in json.dumps(parent["embeds"])
     # The CDN refuses urllib's default user agent.
     get = urllib.request.Request(files[0]["url"], headers={"User-Agent": "tommybot-e2e"}) if files else None
     text = urllib.request.urlopen(get).read().decode() if get else ""
     print("cleaned: nothing left, the test messages were the ones purged")
     return check(noted and all(f"e2e purge {i}" in text for i in range(3)),
-                 f"purge: messages.txt attached={bool(files)} with all 3 messages, embed above says 3/3={noted}")
+                 f"purge: file attached={bool(files)} with all 3 messages, embed it replies to names it={noted}")
 
 
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
