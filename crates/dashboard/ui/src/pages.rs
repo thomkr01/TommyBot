@@ -250,8 +250,8 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let has_key = RwSignal::new(false);
     let key = RwSignal::new(String::new());
+    let qr = RwSignal::new(String::new());
     let shown = RwSignal::new(false);
-    let claim = RwSignal::new(String::new());
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
     spawn_local(async move {
@@ -263,11 +263,10 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let g = guild.clone();
     let regen = move |_| {
         let g = g.clone();
-        run_act(async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await }, msg, need, move |v| { key.set(s(&v["key"])); has_key.set(true); });
-    };
-    let claim_it = move |_| {
-        let (g, k) = (guild.clone(), claim.get_untracked());
-        run_act(async move { api("POST", "/api/rescue/claim", Some(json!({"guild_id": g, "key": k.trim()}))).await }, msg, need, move |_| msg.set("Claimed.".into()));
+        run_act(async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await }, msg, need, move |v| {
+            key.set(s(&v["key"])); has_key.set(true);
+            qr.set(qrcode::QrCode::new(v["uri"].as_str().unwrap_or("")).map(|q| q.render::<qrcode::render::svg::Color>().min_dimensions(200, 200).build()).unwrap_or_default());
+        });
     };
     view! {
         <div class="card">
@@ -278,14 +277,39 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 <div class="row"><pre class:blur=move || !shown.get()>{move || key.get()}</pre>
                     <button class="danger" on:click=move |_| shown.update(|v| *v = !*v)>{move || if shown.get() { "Hide" } else { "Show" }}</button>
                     <button class="ghost" on:click=move |_| { if let Some(w) = web_sys::window() { let _ = w.navigator().clipboard().write_text(&key.get_untracked()); } }>"Copy"</button></div>
-                <ul class="checks warn"><li>"View this rescue key alone!"</li><li>"Anyone with this rescue key can get dangerous TommyBot permissions."</li><li>"This rescue key is used ONLY when you lose physical owner account access."</li><li>"It grants TommyBot owner permissions, not Discord ownership."</li></ul>
+                <p><b>"Or scan this with Google Authenticator or Authy and use its 6-digit code instead of the key:"</b></p>
+                <div class="qr" class:blur=move || !shown.get() inner_html=move || qr.get()></div>
+                <ul class="checks warn"><li>"View this rescue key alone!"</li><li>"Never share a screenshot of this QR code."</li><li>"Anyone with this rescue key can get dangerous TommyBot permissions."</li><li>"This rescue key is used ONLY when you lose physical owner account access."</li><li>"It grants TommyBot owner permissions, not Discord ownership."</li></ul>
             </Show>
         </div>
-        <div class="card">
-            <b>"Claim ownership with a key"</b>
-            <div class="row"><input placeholder="Rescue key" prop:value=claim on:input=move |e| claim.set(event_target_value(&e)) /><button on:click=claim_it>"Claim"</button></div>
-        </div>
         <p>{move || msg.get()}</p>
+        <StepUp need enrolled />
+    }
+}
+
+/// "Lost control over TommyBot in a server?": claims Extra Owner with the rescue key or the
+/// authenticator's 6-digit code. Works from the Servers page, before any server is open.
+#[component]
+pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
+    let (open, guild, secret) = (RwSignal::new(false), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let claim = move |_| {
+        let (g, k) = (guild.get_untracked(), secret.get_untracked());
+        let k = k.trim().to_string();
+        // A 6-digit number is an authenticator code, anything else is the key.
+        let body = if k.len() == 6 && k.chars().all(|c| c.is_ascii_digit()) { json!({"guild_id": g, "code": k}) } else { json!({"guild_id": g, "key": k}) };
+        run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.set("Claimed. Refresh your servers.".into()));
+    };
+    view! {
+        <a class="danger" href="#/" on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</a>
+        <Show when=move || open.get()>
+            <div class="card">
+                <h2>"RESCUE PROCESS"</h2>
+                <p class="muted">"You have lost access to your physical owner account. Enter the server ID and either the rescue key or the 6-digit code from your authenticator."</p>
+                <div class="row"><input placeholder="Server ID" prop:value=guild on:input=move |e| guild.set(event_target_value(&e)) /><input placeholder="Rescue key or 6-digit code" prop:value=secret on:input=move |e| secret.set(event_target_value(&e)) /><button on:click=claim>"CONFIRM"</button></div>
+                <p>{move || msg.get()}</p>
+            </div>
+        </Show>
         <StepUp need enrolled />
     }
 }

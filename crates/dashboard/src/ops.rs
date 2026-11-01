@@ -13,6 +13,12 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
+use totp_rs::Secret;
 use tommybot_antinuke::Inverse;
 
 type ActionRow = (
@@ -434,35 +440,80 @@ async fn rescue_status(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
 async fn rescue_regenerate(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Owner, true).await?;
     let key = auth::token();
+    let secret = Secret::generate_secret().to_encoded().to_string();
     sqlx::query(
-        "insert into rescue_key (guild_id, key_hash) values ($1, $2)
-                 on conflict (guild_id) do update set key_hash = $2, created_at = now()",
+        "insert into rescue_key (guild_id, key_hash, totp_secret) values ($1, $2, $3)
+                 on conflict (guild_id) do update set key_hash = $2, totp_secret = $3, created_at = now()",
     )
     .bind(guild)
     .bind(hash(&key))
+    .bind(&secret)
     .execute(&st.db)
     .await?;
-    Ok(Json(json!({"key": key})))
+    let uri = auth::totp(&secret, &format!("rescue {guild}"))?.get_url();
+    Ok(Json(json!({"key": key, "uri": uri})))
 }
 
+/// Either the rescue key or a current 6-digit code from the key's authenticator.
 #[derive(Deserialize)]
 struct Claim {
     guild_id: String,
-    key: String,
+    key: Option<String>,
+    code: Option<String>,
 }
 
-async fn claim_key(db: &sqlx::PgPool, guild: i64, user: i64, key: &str) -> Result<(), ApiError> {
+/// Claim attempts per user in the last 10 minutes.
+static CLAIMS: LazyLock<Mutex<HashMap<i64, Vec<Instant>>>> = LazyLock::new(Default::default);
+const MAX_CLAIMS: usize = 5;
+
+fn claim_allowed(user: i64) -> bool {
+    let mut m = CLAIMS.lock().unwrap();
+    let v = m.entry(user).or_default();
+    v.retain(|t| t.elapsed() < Duration::from_secs(600));
+    v.push(Instant::now());
+    v.len() <= MAX_CLAIMS
+}
+
+async fn claim_key(
+    db: &sqlx::PgPool,
+    guild: i64,
+    user: i64,
+    (key, code): (Option<&str>, Option<&str>),
+) -> Result<(), ApiError> {
     let mut tx = db.begin().await?;
     // The delete is the single-use gate: a concurrent claim sees zero rows.
-    if sqlx::query("delete from rescue_key where guild_id = $1 and key_hash = $2")
-        .bind(guild)
-        .bind(hash(key))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-        == 0
-    {
-        return Err(ApiError::Forbidden("invalid rescue key"));
+    let ok = match (key, code) {
+        (Some(key), _) => {
+            sqlx::query("delete from rescue_key where guild_id = $1 and key_hash = $2")
+                .bind(guild)
+                .bind(hash(key))
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                > 0
+        }
+        (None, Some(code)) => {
+            let secret: Option<Option<String>> = sqlx::query_scalar(
+                "select totp_secret from rescue_key where guild_id = $1 for update",
+            )
+            .bind(guild)
+            .fetch_optional(&mut *tx)
+            .await?;
+            match secret.flatten() {
+                Some(s) if auth::totp(&s, "rescue")?.check_current(code).unwrap_or(false) => {
+                    sqlx::query("delete from rescue_key where guild_id = $1")
+                        .bind(guild)
+                        .execute(&mut *tx)
+                        .await?;
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    if !ok {
+        return Err(ApiError::Forbidden("invalid rescue key or code"));
     }
     sqlx::query(
         "insert into extra_owners (guild_id, user_id) values ($1, $2) on conflict do nothing",
@@ -478,9 +529,17 @@ async fn claim_key(db: &sqlx::PgPool, guild: i64, user: i64, key: &str) -> Resul
 async fn rescue_claim(State(st): State<AppState>, s: Sess, Json(b): Json<Claim>) -> Res {
     let guild: i64 = b
         .guild_id
+        .trim()
         .parse()
         .map_err(|_| ApiError::BadRequest("bad guild id".into()))?;
-    claim_key(&st.db, guild, s.user_id, &b.key).await?;
+    if !claim_allowed(s.user_id) {
+        return Err(ApiError::Forbidden("too many attempts, try again in 10 minutes"));
+    }
+    let (_, config) = crate::store::current(&st.db, guild).await?;
+    let r = claim_key(&st.db, guild, s.user_id, (b.key.as_deref().map(str::trim), b.code.as_deref().map(str::trim))).await;
+    let what = if r.is_ok() { "claimed Extra Owner with the rescue key" } else { "failed a rescue claim" };
+    log_change(&st, &config, format!("{} (<@{}>) {what}", s.username, s.user_id)).await;
+    r?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -565,6 +624,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticator_code_claims_once() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_200_000_000 + std::process::id() as i64;
+        let secret = Secret::generate_secret().to_encoded().to_string();
+        sqlx::query("insert into rescue_key (guild_id, key_hash, totp_secret) values ($1, 'x', $2) on conflict (guild_id) do update set totp_secret = $2")
+            .bind(g).bind(&secret).execute(&db).await.unwrap();
+        assert!(claim_key(&db, g, 6, (None, Some("000000"))).await.is_err());
+        let code = auth::totp(&secret, "rescue").unwrap().generate_current().unwrap();
+        claim_key(&db, g, 6, (None, Some(&code))).await.unwrap();
+        assert!(claim_key(&db, g, 6, (None, Some(&code))).await.is_err());
+        sqlx::query("delete from extra_owners where guild_id = $1").bind(g).execute(&db).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn claim_is_single_use() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
@@ -573,12 +649,12 @@ mod tests {
         let g = 9_100_000_000 + std::process::id() as i64;
         sqlx::query("insert into rescue_key (guild_id, key_hash) values ($1, $2) on conflict (guild_id) do update set key_hash = $2").bind(g).bind(hash("k")).execute(&db).await.unwrap();
         assert!(matches!(
-            claim_key(&db, g, 5, "bad").await,
+            claim_key(&db, g, 5, (Some("bad"), None)).await,
             Err(ApiError::Forbidden(_))
         ));
-        claim_key(&db, g, 5, "k").await.unwrap();
+        claim_key(&db, g, 5, (Some("k"), None)).await.unwrap();
         assert!(matches!(
-            claim_key(&db, g, 5, "k").await,
+            claim_key(&db, g, 5, (Some("k"), None)).await,
             Err(ApiError::Forbidden(_))
         ));
         let n: i64 = sqlx::query_scalar(
