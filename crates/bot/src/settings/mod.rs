@@ -7,7 +7,7 @@ use tommybot_automod::join::RaidCfg;
 use tommybot_core::{duration, permits::Level};
 use tommybot_logging::embed::{self, ARROW};
 use tommybot_logging::emoji::YES;
-use tommybot_logging::emoji::{Emoji, CLOSE, PAGE_FIRST, PAGE_LAST, PAGE_NEXT, PAGE_PREV};
+use tommybot_logging::emoji::{Emoji, CLOSE, OFF, ON, PAGE_FIRST, PAGE_LAST, PAGE_NEXT, PAGE_PREV};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::message::{
@@ -356,7 +356,13 @@ fn entries(m: &Module, cfg: &GuildCfg, dash: &str) -> Vec<(String, String)> {
                     Kind::Group => String::new(),
                     _ => format!("{ARROW} {val}"),
                 };
-                out.push((format!("[{}] {}:", row.code, row.name), lines));
+                // Wick shows a module's on/off state as a toggle next to the Status title.
+                let toggle = match (row.kind, row.name) {
+                    (Kind::Bool, "Status") if (row.get)(cfg) == "Enabled" => format!(" {ON}"),
+                    (Kind::Bool, "Status") => format!(" {OFF}"),
+                    _ => String::new(),
+                };
+                out.push((format!("[{}] {}:{toggle}", row.code, row.name), lines));
             }
         }
     }
@@ -917,7 +923,7 @@ mod tests {
         let f = &e.fields;
         assert_eq!(
             (f[0].name.as_str(), f[0].value.as_str()),
-            ("[1] Status:", "▸ *`Disabled`*")
+            ("[1] Status: 🔴", "▸ *`Disabled`*")
         );
         let t = f.iter().find(|f| f.name == "[7] Auto Timeouts:").unwrap();
         assert!(t

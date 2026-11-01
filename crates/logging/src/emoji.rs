@@ -87,6 +87,21 @@ pub const PAGE_PREV: Emoji = e("page_prev", "‹");
 pub const PAGE_NEXT: Emoji = e("page_next", "›");
 pub const PAGE_LAST: Emoji = e("page_last", "≫");
 pub const CLOSE: Emoji = e("close", "✖");
+pub const ON: Emoji = e("toggle_on", "🟢");
+pub const OFF: Emoji = e("toggle_off", "🔴");
+pub const ANTI_NUKE: Emoji = e("anti_nuke", "▸");
+pub const HEAT: Emoji = e("heat", "▸");
+pub const VERIFICATION: Emoji = e("verification", "▸");
+pub const JOIN_GATE: Emoji = e("join_gate", "▸");
+pub const JOIN_RAID: Emoji = e("join_raid", "▸");
+pub const PERSISTENCE: Emoji = e("quarantine", "▸");
+pub const LATENCY: Emoji = e("duration", "▸");
+pub const UPTIME: Emoji = e("pending", "▸");
+pub const RESOURCES: Emoji = e("settings", "▸");
+pub const RAM: Emoji = e("database", "▸");
+pub const CPU: Emoji = e("loading", "▸");
+pub const SIZE: Emoji = e("stats", "▸");
+pub const SERVERS: Emoji = e("server", "▸");
 
 #[cfg(test)]
 mod tests {

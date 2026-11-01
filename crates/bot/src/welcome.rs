@@ -26,7 +26,7 @@ fn wizard_url(base: &str, guild: impl std::fmt::Display) -> String {
 }
 
 pub(crate) fn link(label: &str, url: String) -> Component {
-    Component::Button(Button {
+    Component::Button(tommybot_logging::emoji::LINK.on(Button {
         id: None,
         custom_id: None,
         disabled: false,
@@ -35,7 +35,7 @@ pub(crate) fn link(label: &str, url: String) -> Component {
         style: ButtonStyle::Link,
         url: Some(url),
         sku_id: None,
-    })
+    }))
 }
 
 pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
