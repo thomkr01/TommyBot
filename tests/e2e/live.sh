@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the real bot against the test server and fires the attack scenarios in live.py at it.
 # Needs DISCORD_TOKEN and TEST_GUILD_ID (ATTACKER_TOKEN for nuke), postgresql-16, cargo.
-# Usage: tests/e2e/live.sh [spam|lock|mention_lock|nuke|emojis|all]. Run from anywhere; never prints the tokens.
+# Usage: tests/e2e/live.sh [spam|lock|mention_lock|nuke|logchan|purge|emojis|all]. Run from anywhere; never prints the tokens.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@localhost:5432/postgres}

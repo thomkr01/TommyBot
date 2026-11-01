@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|emojis|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
+Usage: live.py spam|lock|mention_lock|nuke|logchan|purge|emojis|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
@@ -52,6 +52,11 @@ def set_config(section, value):
     time.sleep(2)
 
 
+def logging_cfg():
+    return json.loads(sql(f"select coalesce(config->'logging', '{{}}') from guild_config "
+                          f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
+
+
 def text_channel(name):
     chans = call("GET", f"/guilds/{GUILD}/channels")
     return next(c["id"] for c in chans if c["type"] == 0 and c["name"] == name)
@@ -62,11 +67,27 @@ def check(ok, what):
     return ok
 
 
+def snowflake_now():
+    return str((int(time.time() * 1000) - 1420070400000) << 22)
+
+
+def log_messages(kind, since):
+    """Messages after `since` in the log channel for `kind`: its route, else the main one."""
+    log = logging_cfg()
+    chan = log.get("routes", {}).get(kind) or log.get("fallback")
+    return call("GET", f"/channels/{chan}/messages?after={since}&limit=50", soft=True) or []
+
+
+def logged(kind, since, title=None):
+    return any(title in (None, e.get("title")) for m in log_messages(kind, since) for e in m["embeds"])
+
+
 def spam():
     """Webhook floods #general; automod must delete the flood and the new webhook."""
     # New servers start with every heat filter off, so switch on the two a flood trips.
     set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True,
                            "filters": {"regular": {"enabled": True}, "similar": {"enabled": True}}})
+    since = snowflake_now()
     chan = text_channel("general")
     # Hooks of an immune owner (TommyBot itself) are exempt, so the attacker makes this one.
     hook = call("POST", f"/channels/{chan}/webhooks", os.environ.get("ATTACKER_TOKEN"),
@@ -78,16 +99,26 @@ def spam():
         if sent is None:
             break
         ids.append(sent["id"])
-    time.sleep(5)
+    # The bot's deletes queue behind Discord's rate limit, so give it a while.
+    for _ in range(10):
+        time.sleep(3)
+        if call("GET", f"/webhooks/{hook['id']}/{hook['token']}", auth=False, soft=True) is None:
+            break
     recent = {m["id"] for m in call("GET", f"/channels/{chan}/messages?limit=50")}
     left = [i for i in ids if i in recent]
     hook_gone = call("GET", f"/webhooks/{hook['id']}/{hook['token']}", auth=False, soft=True) is None
     call("DELETE", f"/webhooks/{hook['id']}", soft=True)
     for i in left:
         call("DELETE", f"/channels/{chan}/messages/{i}", soft=True)
-    # The first few messages stay below the heat limit and survive.
-    return check(hook_gone and len(left) <= 6,
-                 f"spam: webhook deleted={hook_gone}, {len(left)}/{len(ids)} messages left")
+    # Once heat trips, the messages that built it go too, so nothing of the flood is left.
+    print(f"cleaned: webhook e2e-spammer and {len(left)} leftover messages in #general")
+    # Hooks of verified bots are exempt (Wick's popular bots), and Discord flags the attacker as one.
+    owner = call("GET", f"/users/{hook['user']['id']}")
+    if owner.get("public_flags", 0) & 1 << 16:
+        print("SKIP spam webhook delete: the attacker is a verified bot, so its hook is exempt")
+        return check(not left, f"spam: {len(left)}/{len(ids)} messages left")
+    return check(hook_gone and not left and logged("auto_mod", since, "Webhooks Deleted"),
+                 f"spam: webhook deleted={hook_gone}, {len(left)}/{len(ids)} messages left, automod logged")
 
 
 def nuke():
@@ -96,7 +127,12 @@ def nuke():
     if not attacker:
         print("SKIP nuke: ATTACKER_TOKEN not set")
         return True
+    # New servers start with anti-nuke off.
+    current = json.loads(sql(f"select coalesce(config->'antinuke', '{{}}') from guild_config "
+                             f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
+    set_config("antinuke", {**current, "enabled": True})
     before = sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}")
+    since = snowflake_now()
     # Soft: once the bot quarantines the attacker its calls fail, which is the point.
     made = [call("POST", f"/guilds/{GUILD}/channels", attacker, {"name": f"nuke-{i}"}, soft=True)
             for i in range(6)]
@@ -109,11 +145,14 @@ def nuke():
         if int(after) > int(before):
             break
     # Restored channels come back under the same names; clean them up.
-    for c in call("GET", f"/guilds/{GUILD}/channels"):
-        if c["name"].startswith("nuke-"):
-            call("DELETE", f"/channels/{c['id']}", soft=True)
+    restored = [c for c in call("GET", f"/guilds/{GUILD}/channels") if c["name"].startswith("nuke-")]
+    for c in restored:
+        call("DELETE", f"/channels/{c['id']}", soft=True)
+    print(f"cleaned: {len(restored)} restored nuke-* channels")
     # A bot cannot be quarantined (managed role), so the attacker gets kicked: re-invite it to rerun.
-    return check(int(after) > int(before), f"nuke: incidents {before} -> {after}")
+    print("not reversible here: the attacker bot was kicked, re-invite it to rerun")
+    return check(int(after) > int(before) and logged("anti_nuke", since),
+                 f"nuke: incidents {before} -> {after}, antinuke logged")
 
 
 def wait_for(q, want, tries=20):
@@ -191,10 +230,53 @@ def emojis():
                  f"emojis: uploaded {len(icons) - len(missing)}/{len(icons)}, in lock log={in_log}, buttons={buttons}")
 
 
-SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke, "emojis": emojis}
+def logchan():
+    """Deleting a routed log channel must drop it from the config and say so in the main log channel."""
+    since = snowflake_now()
+    chan = call("POST", f"/guilds/{GUILD}/channels", body={"name": "e2e-logs"})["id"]
+    log = logging_cfg()
+    log.setdefault("routes", {})["sticker"] = chan
+    set_config("logging", log)
+    call("DELETE", f"/channels/{chan}")
+    time.sleep(4)
+    gone = chan not in logging_cfg().get("routes", {}).values()
+    print("cleaned: e2e-logs channel deleted by the test; the bot removed its route")
+    return check(gone and logged("server", since, "Log Channel Deleted"),
+                 f"logchan: route removed={gone}, notice logged")
+
+
+def purge():
+    """A bulk delete must log, then post its messages as a bulk-<code>.txt that replies to that log."""
+    since = snowflake_now()
+    chan = text_channel("general")
+    ids = [call("POST", f"/channels/{chan}/messages", body={"content": f"e2e purge {i}"})["id"]
+           for i in range(3)]
+    time.sleep(1)
+    call("POST", f"/channels/{chan}/messages/bulk-delete", body={"messages": ids})
+    time.sleep(3)
+    msgs = log_messages("message", since)
+    hit = next((m for m in msgs if m["attachments"]), None)
+    files = hit["attachments"] if hit else []
+    # The file replies to the embed it belongs to, and that embed names the same file.
+    parent = hit and next((m for m in msgs if m["id"] == hit.get("message_reference", {}).get("message_id")), None)
+    noted = bool(parent) and f"3/3` saved in `{files[0]['filename']}`" in json.dumps(parent["embeds"])
+    # The CDN refuses urllib's default user agent.
+    get = urllib.request.Request(files[0]["url"], headers={"User-Agent": "tommybot-e2e"}) if files else None
+    text = urllib.request.urlopen(get).read().decode() if get else ""
+    print("cleaned: nothing left, the test messages were the ones purged")
+    return check(noted and all(f"e2e purge {i}" in text for i in range(3)),
+                 f"purge: file attached={bool(files)} with all 3 messages, embed it replies to names it={noted}")
+
+
+SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
+             "logchan": logchan, "purge": purge, "emojis": emojis}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
     names = list(SCENARIOS) if picked == ["all"] else picked
+    # Log checks need a main log channel; a fresh database has none.
+    log = logging_cfg()
+    if not log.get("fallback"):
+        set_config("logging", {**log, "fallback": text_channel("tommybot-logs")})
     results = [SCENARIOS[n]() for n in names]
     sys.exit(0 if all(results) else 1)

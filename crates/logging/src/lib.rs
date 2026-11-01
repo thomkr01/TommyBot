@@ -42,6 +42,8 @@ pub struct LogMessage {
     pub embed: Embed,
     /// Wick's link button under the log ("Go to Message").
     pub link: Option<render::Link>,
+    /// File name and text: the cached content of a bulk delete. Discord stores it, the bot keeps nothing.
+    pub file: Option<(String, String)>,
 }
 
 pub(crate) struct Entry {
@@ -135,6 +137,36 @@ impl Logger {
             }
             return out;
         }
+        if let Event::MessageDeleteBulk(m) = event {
+            let Some(guild) = m.guild_id else {
+                return out;
+            };
+            let mut ids = m.ids.clone();
+            ids.sort();
+            // Each line is "author id: content", oldest first; uncached messages are skipped.
+            let lines: Vec<String> = ids
+                .iter()
+                .filter_map(|id| self.cache.remove(guild, *id))
+                .map(|c| format!("{}: {}\n", c.author, c.content))
+                .collect();
+            if let Some(log) = cfg.target(LogKind::Message, Some(LogEvent::MessageDeleteBulk)) {
+                if !ignored(cfg, Some(m.channel_id), None) {
+                    let name = ids
+                        .first()
+                        .map(|i| render::bulk_file(*i))
+                        .unwrap_or_default();
+                    let embed = render::bulk_delete(m.channel_id, m.ids.len(), lines.len(), &name);
+                    out.push(LogMessage {
+                        channel_id: log,
+                        kind: LogKind::Message,
+                        embed,
+                        link: None,
+                        file: (!lines.is_empty()).then(|| (name, lines.concat())),
+                    });
+                }
+            }
+            return out;
+        }
         if let Event::MemberRemove(m) = event {
             if !self.removed_by_audit(m.user.id, now) {
                 if let Some(log) = cfg.target(LogKind::Member, None) {
@@ -160,6 +192,7 @@ impl Logger {
                     kind: entry.kind,
                     embed: entry.embed,
                     link: entry.link,
+                    file: None,
                 });
             }
         }
@@ -199,6 +232,7 @@ impl Logger {
                     kind: LogKind::Member,
                     embed: h.embed,
                     link: None,
+                    file: None,
                 });
             }
         }
@@ -215,6 +249,7 @@ impl Logger {
             kind: LogKind::Message,
             embed: render::message_delete(h.id, h.channel, h.cached.as_ref(), deleter),
             link: None,
+            file: None,
         }
     }
 
@@ -250,14 +285,6 @@ impl Logger {
                     link,
                 })
             }
-            Event::MessageDeleteBulk(m) => Some(Entry {
-                kind: LogKind::Message,
-                event: Some(LogEvent::MessageDeleteBulk),
-                channel: Some(m.channel_id),
-                user: None,
-                embed: render::bulk_delete(m.channel_id, m.ids.len()),
-                link: None,
-            }),
             Event::MemberAdd(m) => Some(Entry {
                 kind: LogKind::Member,
                 event: None,
@@ -523,6 +550,39 @@ mod tests {
         let mut logger = Logger::new(Id::new(1));
         assert!(logger.handle(&cfg, &leave(), t0).is_empty());
         assert_eq!(logger.flush(t0 + HOLD).len(), 1);
+    }
+
+    #[test]
+    fn bulk_delete_attaches_cached_content_oldest_first() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(5)),
+            ..Default::default()
+        };
+        let now = Instant::now();
+        let mut logger = Logger::new(Id::new(1));
+        for (id, text) in [(7, "first"), (8, "second")] {
+            let c = CachedMessage::new(Id::new(20), text.into(), now);
+            logger.cache.insert(Id::new(9), Id::new(id), c, now);
+        }
+        let bulk = |ids: Vec<u64>| {
+            Event::MessageDeleteBulk(
+                twilight_model::gateway::payload::incoming::MessageDeleteBulk {
+                    channel_id: Id::new(3),
+                    guild_id: Some(Id::new(9)),
+                    ids: ids.into_iter().map(Id::new).collect(),
+                },
+            )
+        };
+        let out = logger.handle(&cfg, &bulk(vec![8, 99, 7]), now);
+        let (name, text) = out[0].file.clone().unwrap();
+        assert_eq!(
+            (name.as_str(), text.as_str()),
+            ("bulk-7.txt", "20: first\n20: second\n")
+        );
+        assert!(format!("{:?}", out[0].embed).contains("`2/3` saved in `bulk-7.txt` below"));
+        assert_eq!(render::bulk_file(Id::new(36 * 36 + 35)), "bulk-10z.txt");
+        // Already removed from the cache, so a repeat has nothing to attach.
+        assert_eq!(logger.handle(&cfg, &bulk(vec![7]), now)[0].file, None);
     }
 
     #[test]

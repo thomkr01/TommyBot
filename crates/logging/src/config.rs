@@ -218,6 +218,20 @@ impl LogConfig {
             routed.or(self.fallback)
         }
     }
+
+    /// Drops a deleted channel from every route, so its logs fall back to the general channel.
+    /// Returns whether anything pointed at it.
+    pub fn forget(&mut self, channel: Id<ChannelMarker>) -> bool {
+        let before = (self.routes.len(), self.events.len(), self.custom.len());
+        self.routes.retain(|_, c| *c != channel);
+        self.events.retain(|_, c| *c != channel);
+        self.custom.retain(|c| c.channel != channel);
+        let was_fallback = self.fallback == Some(channel);
+        if was_fallback {
+            self.fallback = None;
+        }
+        was_fallback || before != (self.routes.len(), self.events.len(), self.custom.len())
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +277,34 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.target(LogKind::ModCommand, None), None);
+    }
+
+    #[test]
+    fn forget_drops_deleted_channel_everywhere() {
+        let (gone, kept) = (Id::new(9), Id::new(1));
+        let mut cfg = LogConfig {
+            fallback: Some(kept),
+            routes: HashMap::from([(LogKind::Role, gone), (LogKind::Member, kept)]),
+            events: HashMap::from([(LogEvent::MessageDelete, gone)]),
+            custom: vec![CustomLog {
+                events: vec![LogEvent::RoleDelete],
+                channel: gone,
+            }],
+            ..Default::default()
+        };
+        assert!(cfg.forget(gone));
+        assert_eq!(
+            cfg.target(LogKind::Role, Some(LogEvent::RoleDelete)),
+            Some(kept)
+        );
+        assert_eq!(
+            cfg.target(LogKind::Message, Some(LogEvent::MessageDelete)),
+            Some(kept)
+        );
+        assert_eq!(cfg.routes.len(), 1);
+        assert!(!cfg.forget(Id::new(77)));
+        assert!(cfg.forget(kept));
+        assert_eq!(cfg.fallback, None);
     }
 
     #[test]
