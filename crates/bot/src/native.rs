@@ -63,7 +63,7 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
         Some(c) => app.guild_info(gid).await?.parents.get(&c).copied(),
         None => None,
     } {
-        let rules = app.api.list_rules(gid.get()).await?;
+        let rules = app.api.list_rules(gid.get()).await.unwrap_or_default();
         let id = e.rule_id.to_string();
         if rules
             .iter()
