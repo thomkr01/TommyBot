@@ -28,6 +28,7 @@ const LOG_KINDS: &[&str] = &[
     "join_raid",
     "panic",
     "mod_command",
+    "appeal",
 ];
 
 fn f(path: &str, kind: &str) -> Value {

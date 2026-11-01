@@ -8,7 +8,7 @@ use axum::{
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tommybot_core::sections::{AppealsCfg, MAX_APPEAL_FIELDS};
+use tommybot_core::sections::{AppealField, AppealsCfg, MAX_APPEAL_FIELDS};
 
 type Res = Result<Json<Value>, ApiError>;
 
@@ -23,6 +23,43 @@ type Row = (
 );
 
 const MAX_ANSWER: usize = 1000;
+
+/// Validates one answer with Wick's texts and returns what is stored. A multi choice answer is the
+/// picked options, one per line.
+fn check(f: &AppealField, a: &str) -> Result<String, String> {
+    let a = a.trim();
+    let none = || {
+        if f.required {
+            Err("This field must have a selected item.".to_string())
+        } else {
+            Ok("Not answered.".to_string())
+        }
+    };
+    if !f.options.is_empty() {
+        let picked: Vec<&str> = a.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        if picked.is_empty() {
+            return none();
+        }
+        if (picked.len() > 1 && !f.multi)
+            || picked.iter().any(|p| !f.options.iter().any(|o| o == p))
+        {
+            return Err("Check what is highlighted in red.".into());
+        }
+        return Ok(picked.join(", "));
+    }
+    let min = f.min.unwrap_or(usize::from(f.required));
+    let max = f.max.unwrap_or(MAX_ANSWER).min(MAX_ANSWER);
+    let n = a.chars().count();
+    if n == 0 && !f.required {
+        return Ok("Not answered.".into());
+    }
+    if n < min || n > max {
+        return Err(format!(
+            "This content has to be between {min} and {max} characters long."
+        ));
+    }
+    Ok(a.into())
+}
 
 pub fn routes() -> Router<AppState> {
     let g = "/api/guilds/{guild}/appeals";
@@ -111,7 +148,7 @@ async fn form(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Re
         .fields
         .iter()
         .take(MAX_APPEAL_FIELDS)
-        .map(|f| json!({"label": f.label, "long": f.long, "required": f.required}))
+        .map(|f| json!({"label": f.label, "long": f.long, "required": f.required, "options": f.options, "multi": f.multi, "min": f.min, "max": f.max}))
         .collect();
     Ok(Json(
         json!({"fields": fields, "kind": kind, "blacklisted": blacklisted(&st, guild, s.user_id).await?}),
@@ -139,17 +176,9 @@ async fn submit(
             "answer count does not match the form".into(),
         ));
     }
-    let bad = |m: String| ApiError::BadRequest(m);
+    let mut given = Vec::new();
     for (f, a) in fields.iter().zip(&b.answers) {
-        if a.chars().count() > MAX_ANSWER {
-            return Err(bad(format!(
-                "\"{}\" is longer than {MAX_ANSWER} characters",
-                f.label
-            )));
-        }
-        if f.required && a.trim().is_empty() {
-            return Err(bad(format!("\"{}\" is required", f.label)));
-        }
+        given.push(check(f, a).map_err(|m| ApiError::BadRequest(format!("{}: {m}", f.label)))?);
     }
     if blacklisted(&st, guild, s.user_id).await? {
         return Err(ApiError::Forbidden(
@@ -159,17 +188,6 @@ async fn submit(
     let kind = punishment(&st, guild, s.user_id)
         .await?
         .ok_or(ApiError::Forbidden("you are not banned or timed out here"))?;
-    let given: Vec<&str> = b
-        .answers
-        .iter()
-        .map(|a| {
-            if a.trim().is_empty() {
-                "Not answered."
-            } else {
-                a
-            }
-        })
-        .collect();
     let answers: Vec<Value> = fields
         .iter()
         .zip(&given)
@@ -179,7 +197,19 @@ async fn submit(
         "insert into appeals (guild_id, user_id, username, kind, answers) values ($1,$2,$3,$4,$5) on conflict do nothing returning id")
         .bind(guild).bind(s.user_id).bind(&s.username).bind(kind).bind(Value::Array(answers)).fetch_optional(&st.db).await?;
     let id = id.ok_or(ApiError::Forbidden("you already have an open appeal"))?;
-    if let Some(ch) = c.channel {
+    let (_, config) = crate::store::current(&st.db, guild).await?;
+    let lc: tommybot_logging::LogConfig = config
+        .get("logging")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let channel = lc
+        .routes
+        .get(&tommybot_logging::LogKind::Appeal)
+        .copied()
+        .or(c.channel)
+        .or(lc.fallback);
+    if let Some(ch) = channel {
         use tommybot_logging::{embed, Log};
         let mut log = Log::new(
             &format!("A {kind} appeal by {} has been sent!", s.username),
@@ -191,7 +221,14 @@ async fn submit(
         for (f, a) in fields.iter().zip(&given) {
             log = log.field(&format!("{}:", f.label), a);
         }
-        if let Err(e) = st.discord.post_log(&ch.to_string(), log).await {
+        let button = |label: &str, act: &str, style: u8| json!({"type": 2, "style": style, "label": label, "custom_id": format!("appeal:{id}:{act}")});
+        let row = json!([{"type": 1, "components": [
+            button("Approve", "accept", 3),
+            button("Deny", "deny", 4),
+            button("Deny + Blacklist", "blacklist", 4),
+            button("Dismiss", "dismiss", 2),
+        ]}]);
+        if let Err(e) = st.discord.post_log_with(&ch.to_string(), log, row).await {
             tracing::warn!(?e, "appeal notice failed");
         }
     }
@@ -240,9 +277,16 @@ async fn has_perm(st: &AppState, s: &Sess, guild: i64, perm: &str) -> Result<boo
 
 #[derive(Deserialize)]
 struct Decide {
+    #[serde(default)]
     accept: bool,
     #[serde(default)]
     blacklist: bool,
+    /// Closes the appeal without telling the appellant.
+    #[serde(default)]
+    dismiss: bool,
+    /// Optional staff reply, sent to the appellant.
+    #[serde(default)]
+    reply: String,
 }
 
 /// Accepting lifts the ban or timeout; denying can also blacklist the user from appealing again.
@@ -256,19 +300,58 @@ async fn decide(
     let mut tx = st.db.begin().await?;
     let (user, kind): (i64, String) = sqlx::query_as("select user_id, kind from appeals where id = $1 and guild_id = $2 and status = 'open' for update")
         .bind(id).bind(guild).fetch_optional(&mut *tx).await?.ok_or(ApiError::NotFound)?;
-    if b.accept {
-        accept(&st, &s, guild, user, &kind, &mut tx).await?;
+    let accept = b.accept && !b.dismiss;
+    if accept {
+        accept_appeal(&st, &s, guild, user, &kind, &mut tx).await?;
     }
-    sqlx::query("update appeals set status = $2, decided_by = $3 where id = $1")
-        .bind(id)
-        .bind(if b.accept { "accepted" } else { "denied" })
-        .bind(s.user_id)
-        .execute(&mut *tx)
-        .await?;
-    if b.blacklist && !b.accept {
+    let status = match (b.dismiss, b.accept) {
+        (true, _) => "dismissed",
+        (_, true) => "accepted",
+        _ => "denied",
+    };
+    let reply = b.reply.trim().chars().take(1000).collect::<String>();
+    sqlx::query(
+        "update appeals set status = $2, decided_by = $3, reply = nullif($4, '') where id = $1",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(s.user_id)
+    .bind(&reply)
+    .execute(&mut *tx)
+    .await?;
+    if b.blacklist && status == "denied" {
         add_blacklist(&mut tx, guild, user, s.user_id).await?;
     }
     tx.commit().await?;
+    if !b.dismiss {
+        let verdict = if b.accept { "approved" } else { "denied" };
+        let mut text = format!("Your {kind} appeal (#{id}) was {verdict}.");
+        if !reply.is_empty() {
+            text += &format!("\nReply from the staff: {reply}");
+        }
+        let dm = st
+            .discord
+            .call(
+                Method::POST,
+                "/users/@me/channels",
+                Some(json!({"recipient_id": user.to_string()})),
+            )
+            .await;
+        if let Some(ch) = dm.ok().and_then(|c| c["id"].as_str().map(String::from)) {
+            let body = json!({"content": text, "allowed_mentions": {"parse": []}});
+            if let Err(e) = st
+                .discord
+                .call(
+                    Method::POST,
+                    &format!("/channels/{ch}/messages"),
+                    Some(body),
+                )
+                .await
+            {
+                tracing::warn!(?e, "appeal verdict DM failed");
+            }
+        }
+    }
     Ok(Json(json!({"ok": true})))
 }
 
@@ -287,7 +370,7 @@ async fn lift(
 }
 
 /// Lifts the ban or timeout and logs it with its undo.
-async fn accept(
+async fn accept_appeal(
     st: &AppState,
     s: &Sess,
     guild: i64,
@@ -399,4 +482,50 @@ async fn blacklist_purge(State(st): State<AppState>, s: Sess, Path(guild): Path<
         .await?
         .rows_affected();
     Ok(Json(json!({"removed": n})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(options: &[&str], multi: bool, required: bool) -> AppealField {
+        AppealField {
+            label: "q".into(),
+            long: false,
+            required,
+            options: options.iter().map(|o| o.to_string()).collect(),
+            multi,
+            min: Some(4),
+            max: Some(10),
+        }
+    }
+
+    #[test]
+    fn text_length_and_optional() {
+        let f = field(&[], false, true);
+        assert_eq!(check(&f, "abcd").unwrap(), "abcd");
+        assert_eq!(
+            check(&f, "abc").unwrap_err(),
+            "This content has to be between 4 and 10 characters long."
+        );
+        assert_eq!(
+            check(&field(&[], false, false), " ").unwrap(),
+            "Not answered."
+        );
+    }
+
+    #[test]
+    fn choices() {
+        let single = field(&["a", "b"], false, true);
+        assert_eq!(
+            check(&single, "").unwrap_err(),
+            "This field must have a selected item."
+        );
+        assert!(check(&single, "a\nb").is_err());
+        assert_eq!(
+            check(&field(&["a", "b"], true, true), "a\nb").unwrap(),
+            "a, b"
+        );
+        assert!(check(&single, "c").is_err());
+    }
 }

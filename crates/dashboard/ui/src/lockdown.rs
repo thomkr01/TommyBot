@@ -48,7 +48,10 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
         }
     });
     let lock = move |kind: &'static str, channel: Option<String>| act("lock", json!({"kind": kind, "channel": channel, "duration_s": (secs.get_untracked() > 0).then(|| secs.get_untracked())}));
-    let locked = move || Some(status.get()["locked"].clone()).filter(|l| !l.is_null());
+    // Every active lock; kinds are independent, but only one of them may be a join lock.
+    let locks = move || status.get()["locks"].as_array().cloned().unwrap_or_default();
+    let join_locked = move || locks().iter().any(|l| !l["join"].is_null());
+    let (hide, note, update) = (RwSignal::new(false), RwSignal::new(false), RwSignal::new(String::new()));
     view! {
         <div class="stack narrow">
         <div class="card row">
@@ -60,16 +63,39 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
             <button class="ghost" on:click=move |_| load()>"Refresh"</button>
         </div>
         {LOCKS.iter().map(|(title, what, kind, covers)| {
-            let is_on = move || locked().is_some_and(|l| covers(&l));
+            let is_on = move || locks().iter().any(covers);
+            let join = matches!(*kind, "kick" | "ban");
+            let hidden = move || locks().iter().any(|l| l["hidden"] == true);
+            let paused = move || *kind == "kick" && locks().iter().any(|l| l["invites_paused"] == true);
             view! { <div class="card row lockrow">
                 <h3 title=*what>{*title}</h3><span class="sp"></span>
+                <Show when=move || *kind == "server" && hidden()><span class="chip">"CHANNELS HIDDEN"</span></Show>
+                <Show when=paused><span class="chip">"PAUSE INVITES"</span></Show>
+                <Show when=move || join && !is_on()><span class="chip">"ONLY 1 JOIN LOCK ALLOWED"</span></Show>
                 <Show when=move || *kind == "server" && !is_on()><button class="ghost" title="Individual Channels" on:click=move |_| single.update(|x| *x = !*x)>"Individual channels"</button></Show>
-                <Show when=is_on fallback=move || view! { <span class="chip ok">"Already Unlocked"</span><button class="danger" disabled=move || locked().is_some() on:click=move |_| lock(kind, None)>"Lock"</button> }>
+                <Show when=is_on fallback=move || view! { <span class="chip ok">"Already Unlocked"</span><button class="danger" disabled=move || join && join_locked() on:click=move |_| if *kind == "server" { hide.set(true) } else { lock(kind, None) }>"Lock"</button> }>
                     <span class="chip">{move || status.get()["unlock_at"].as_str().map_or("Locked".to_string(), |t| format!("Locked until {}", t.replace('T', " ").split('.').next().unwrap_or("")))}</span>
-                    <button class="go" on:click=move |_| act("unlock", json!({}))>"Unlock"</button>
+                    <button class="go" on:click=move |_| act("unlock", json!({"kind": kind}))>"Unlock"</button>
                 </Show>
             </div> }
         }).collect_view()}
+        <Show when=move || hide.get()>
+            <div class="card row">
+                <label>"Hide the channels from members while they are locked?"</label>
+                <button class="danger" on:click=move |_| { hide.set(false); lock("blind", None) }>"Hide all channels"</button>
+                <button on:click=move |_| { hide.set(false); lock("server", None) }>"Keep them visible"</button>
+                <button class="ghost" on:click=move |_| hide.set(false)>"Cancel"</button>
+            </div>
+        </Show>
+        <Show when=move || !locks().is_empty()>
+            <div class="card row">
+                <button class="ghost" on:click=move |_| note.update(|x| *x = !*x)>"Send an update"</button>
+                <Show when=move || note.get()>
+                    <input placeholder="What members should know" prop:value=update on:input=move |e| update.set(event_target_value(&e)) />
+                    <button on:click=move |_| { act("update", json!({"text": update.get_untracked()})); update.set(String::new()); note.set(false) }>"Send"</button>
+                </Show>
+            </div>
+        </Show>
         <Show when=move || single.get()>
             <div class="card row">
                 <label>"Lock a single channel"</label>
@@ -77,7 +103,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
                     <option value="">"Choose a channel"</option>
                     {move || dc.get()["channels"].as_array().cloned().unwrap_or_default().into_iter().map(|c| view! { <option value=s(&c["id"])>{format!("#{}", s(&c["name"]))}</option> }).collect_view()}
                 </select>
-                <button class="danger" disabled=move || channel.get().is_empty() || locked().is_some() on:click=move |_| lock("channel", Some(channel.get_untracked()))>"Lock"</button>
+                <button class="danger" disabled=move || channel.get().is_empty() on:click=move |_| lock("channel", Some(channel.get_untracked()))>"Lock"</button>
             </div>
         </Show>
         <p class="info">{move || msg.get()}</p>

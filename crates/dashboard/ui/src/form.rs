@@ -204,9 +204,13 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 {move || (0..count()).map(|i| view! { <div class="row">
                     <input prop:value=move || get()[i]["label"].as_str().unwrap_or("").to_string() on:change=move |e| upd(i, "label", json!(event_target_value(&e))) />
                     <Show when=move || get()[i]["required"].as_bool().unwrap_or(true)><b class="err">"*"</b></Show>
-                    <span class="chip blue">{move || if get()[i]["long"].as_bool().unwrap_or(false) { "Textarea" } else { "Text" }}</span>
+                    <span class="chip blue">{move || if !strs(&get()[i]["options"]).is_empty() { if get()[i]["multi"].as_bool().unwrap_or(false) { "Multi choice" } else { "Single choice" } } else if get()[i]["long"].as_bool().unwrap_or(false) { "Textarea" } else { "Text" }}</span>
                     <Show when=move || get()[i]["label"] == "Appeal Message"><span class="chip">"default"</span></Show>
                     <label><input type="checkbox" prop:checked=move || get()[i]["long"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "long", json!(event_target_checked(&e))) /> "long"</label>
+                    <input aria-label="choices, comma separated" placeholder="choices (comma separated)" prop:value=move || strs(&get()[i]["options"]).join(", ") on:change=move |e| upd(i, "options", json!(event_target_value(&e).split(',').map(str::trim).filter(|o| !o.is_empty()).collect::<Vec<_>>())) />
+                    <label><input type="checkbox" prop:checked=move || get()[i]["multi"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "multi", json!(event_target_checked(&e))) /> "multi"</label>
+                    <input aria-label="min length" placeholder="min" prop:value=move || show(&get()[i]["min"]) on:change=move |e| upd(i, "min", event_target_value(&e).trim().parse::<u32>().map_or(Value::Null, |x| json!(x))) />
+                    <input aria-label="max length" placeholder="max" prop:value=move || show(&get()[i]["max"]) on:change=move |e| upd(i, "max", event_target_value(&e).trim().parse::<u32>().map_or(Value::Null, |x| json!(x))) />
                     <label><input type="checkbox" prop:checked=move || get()[i]["required"].as_bool().unwrap_or(true) on:change=move |e| upd(i, "required", json!(event_target_checked(&e))) /> "required"</label>
                     <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
                 </div> }).collect_view()}

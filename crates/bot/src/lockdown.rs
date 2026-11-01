@@ -37,11 +37,15 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .iter()
                 .find(|p| p.0 == *channel && p.1 == *role)
                 .map_or((0, 0), |p| (p.2, p.3));
+            // Forums are written to through threads, so those bits go too.
+            let silenced = SEND_MESSAGES
+                | (Permissions::SEND_MESSAGES_IN_THREADS | Permissions::CREATE_PUBLIC_THREADS)
+                    .bits();
             let o = PermissionOverwrite {
                 id: Id::new(*role),
                 kind: PermissionOverwriteType::Role,
-                allow: Some(Permissions::from_bits_truncate(allow & !SEND_MESSAGES)),
-                deny: Some(Permissions::from_bits_truncate(deny | SEND_MESSAGES)),
+                allow: Some(Permissions::from_bits_truncate(allow & !silenced)),
+                deny: Some(Permissions::from_bits_truncate(deny | silenced)),
             };
             app.http
                 .update_channel_permission(Id::new(*channel), &o)

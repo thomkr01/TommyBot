@@ -20,9 +20,11 @@ pub fn AppealList(guild: String) -> impl IntoView {
         }
     });
     load();
-    let decide = move |id: i64, accept: bool, blacklist: bool| spawn_local(async move {
+    let reply = RwSignal::new(String::new());
+    let decide = move |id: i64, accept: bool, blacklist: bool, dismiss: bool| spawn_local(async move {
         let path = format!("/api/guilds/{}/appeals/{id}/decide", g.get_value());
-        match api("POST", &path, Some(json!({"accept": accept, "blacklist": blacklist}))).await {
+        let body = json!({"accept": accept, "blacklist": blacklist, "dismiss": dismiss, "reply": reply.get_untracked()});
+        match api("POST", &path, Some(body)).await {
             Ok(_) => load(),
             Err(e) => msg.set(e),
         }
@@ -34,6 +36,7 @@ pub fn AppealList(guild: String) -> impl IntoView {
             </div>
             <input placeholder="User ID/tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
             <button class="ghost" on:click=move |_| load()>"Search"</button>
+            <input placeholder="Reply to the member (optional)" prop:value=reply on:input=move |e| reply.set(event_target_value(&e)) />
             <span class="err">{move || msg.get()}</span>
         </div>
         <Show when=move || rows.get().is_empty()><div class="banner">"No pending appeals.."</div></Show>
@@ -46,9 +49,10 @@ pub fn AppealList(guild: String) -> impl IntoView {
                     {r["answers"].as_array().cloned().unwrap_or_default().into_iter().map(|a| view! { <p><b>{s(&a["label"])}</b><br/>{s(&a["answer"])}</p> }).collect_view()}
                     <Show when=move || open>
                         <div class="row">
-                            <button on:click=move |_| decide(id, true, false)>"Accept"</button>
-                            <button class="ghost" on:click=move |_| decide(id, false, false)>"Deny"</button>
-                            <button class="ghost" on:click=move |_| decide(id, false, true)>"Deny and blacklist"</button>
+                            <button on:click=move |_| decide(id, true, false, false)>"Accept"</button>
+                            <button class="ghost" on:click=move |_| decide(id, false, false, false)>"Deny"</button>
+                            <button class="ghost" on:click=move |_| decide(id, false, true, false)>"Deny and blacklist"</button>
+                            <button class="ghost" on:click=move |_| decide(id, false, false, true)>"Dismiss"</button>
                         </div>
                     </Show>
                 </div> }
@@ -123,8 +127,21 @@ pub fn AppealForm(guild: String) -> impl IntoView {
                     view! { <div class="card">
                         {i["fields"].as_array().cloned().unwrap_or_default().into_iter().enumerate().map(|(n, f)| {
                             let on = move |e| answers.update(|a| a[n] = event_target_value(&e));
-                            view! { <div class="row"><label>{s(&f["label"])}</label>
-                                {if f["long"] == true { view! { <textarea maxlength="1000" on:input=on></textarea> }.into_any() } else { view! { <input maxlength="1000" on:input=on /> }.into_any() }}</div> }
+                            let opts: Vec<String> = f["options"].as_array().map(|o| o.iter().map(s).collect()).unwrap_or_default();
+                            let max = f["max"].as_u64().unwrap_or(1000).to_string();
+                            let input = if opts.is_empty() {
+                                if f["long"] == true { view! { <textarea maxlength=max on:input=on></textarea> }.into_any() } else { view! { <input maxlength=max on:input=on /> }.into_any() }
+                            } else if f["multi"] == true {
+                                // Picked options are kept one per line.
+                                view! { <div class="pick">{opts.into_iter().map(|o| { let o2 = o.clone(); view! { <label><input type="checkbox" on:change=move |e| answers.update(|a| {
+                                    let mut picked: Vec<String> = a[n].lines().filter(|l| *l != o2).map(String::from).collect();
+                                    if event_target_checked(&e) { picked.push(o2.clone()) }
+                                    a[n] = picked.join("\n");
+                                }) /> {o}</label> } }).collect_view()}</div> }.into_any()
+                            } else {
+                                view! { <select on:change=on><option value="">"Choose"</option>{opts.into_iter().map(|o| { let v = o.clone(); view! { <option value=v>{o}</option> } }).collect_view()}</select> }.into_any()
+                            };
+                            view! { <div class="row"><label>{s(&f["label"])}</label>{input}</div> }
                         }).collect_view()}
                         <button on:click=submit>"Send appeal"</button>
                     </div> }.into_any()
