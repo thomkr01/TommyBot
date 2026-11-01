@@ -242,8 +242,16 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         if crate::webhooks::webhook_exempt(app, gid, hook, listed(&wl.spam)).await {
             return Ok(());
         }
-        // A webhook is not a member: no strikes, remove the message and the freshly made hooks.
+        // A webhook is not a member: no strikes, remove its spam (the messages that built the heat
+        // too, or the first ones stay) and the freshly made hooks.
+        let tracked = app
+            .heat
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .map(|(_, h)| h.take_msgs());
         app.http.delete_message(m.channel_id, m.id).await.ok();
+        reply::purge_ids(app, &tracked.unwrap_or_default()).await;
         return crate::webhooks::delete_new_webhooks(app, gid).await;
     }
     crate::panic::note(app, gid, m.author.id, true).await?;

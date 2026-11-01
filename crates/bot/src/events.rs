@@ -4,15 +4,19 @@ use std::{
     sync::{atomic::Ordering::Relaxed, Arc},
     time::Instant,
 };
-use tommybot_logging::{Log, LogKind, LogMessage};
+use tommybot_logging::{embed::RED, Log, LogConfig, LogKind, LogMessage};
 use twilight_gateway::Event;
 use twilight_model::{
-    channel::message::{
-        component::{ActionRow, Button, ButtonStyle, Component},
-        AllowedMentions, Embed,
+    channel::{
+        message::{
+            component::{ActionRow, Button, ButtonStyle, Component},
+            AllowedMentions, Embed,
+        },
+        Channel,
     },
+    http::attachment::Attachment,
     id::{
-        marker::{ChannelMarker, RoleMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker},
         Id,
     },
 };
@@ -45,7 +49,7 @@ async fn send(
     embed: &Embed,
     link: Option<&(&str, String)>,
     mentions: &AllowedMentions,
-) -> Result<()> {
+) -> Result<Id<MessageMarker>> {
     let rows: Vec<Component> = link
         .map(|(label, url)| {
             Component::ActionRow(ActionRow {
@@ -64,34 +68,48 @@ async fn send(
         })
         .into_iter()
         .collect();
-    app.http
+    Ok(app
+        .http
         .create_message(channel)
         .content(pings)
         .embeds(std::slice::from_ref(embed))
         .components(&rows)
         .allowed_mentions(Some(mentions))
-        .await?;
-    Ok(())
+        .await?
+        .model()
+        .await?
+        .id)
 }
 
 async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     let mentions = AllowedMentions::default();
-    send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await
+    let id = send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await?;
+    // Discord shows attachments above the embed, so the file is its own message below it, replying to it.
+    if let Some((name, text)) = &m.file {
+        let file = Attachment::from_bytes(name.clone(), text.as_bytes().to_vec(), 0);
+        app.http
+            .create_message(m.channel_id)
+            .reply(id)
+            .fail_if_not_exists(false)
+            .allowed_mentions(Some(&mentions))
+            .attachments(&[file])
+            .await?;
+    }
+    Ok(())
 }
 
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
     match app.cfg(guild).await?.logging.target(kind, None) {
-        Some(ch) => {
-            send(
-                app,
-                ch,
-                "",
-                &embed.build(),
-                None,
-                &AllowedMentions::default(),
-            )
-            .await
-        }
+        Some(ch) => send(
+            app,
+            ch,
+            "",
+            &embed.build(),
+            None,
+            &AllowedMentions::default(),
+        )
+        .await
+        .map(drop),
         None => Ok(()),
     }
 }
@@ -112,7 +130,9 @@ pub async fn send_log_pinging(
         roles: roles.to_vec(),
         ..Default::default()
     };
-    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions).await
+    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions)
+        .await
+        .map(drop)
 }
 
 /// Like [`send_log`] with a link button under the embed.
@@ -135,6 +155,33 @@ pub async fn send_log_link(
         &AllowedMentions::default(),
     )
     .await
+    .map(drop)
+}
+
+/// A deleted log channel leaves the config, so its logs reach the main log channel, which says so.
+async fn forget_log_channel(app: &App, gid: Id<GuildMarker>, c: &Channel) -> Result<()> {
+    if !app.cfg(gid.get()).await?.logging.clone().forget(c.id) {
+        return Ok(());
+    }
+    let saved = crate::settings::save(app, gid, app.me.get(), &["logging"], |doc| {
+        let mut log: LogConfig =
+            serde_json::from_value(doc["logging"].clone()).map_err(|e| e.to_string())?;
+        log.forget(c.id);
+        // Merged in, so keys LogConfig does not model (the dashboard's config_changes) survive.
+        let new = serde_json::to_value(log).map_err(|e| e.to_string())?;
+        if let (Some(old), serde_json::Value::Object(new)) = (doc["logging"].as_object_mut(), new) {
+            old.extend(new);
+        }
+        Ok(())
+    })
+    .await?;
+    saved.map_err(anyhow::Error::msg)?;
+    let name = c.name.as_deref().unwrap_or("unknown");
+    let embed = Log::new("Log Channel Deleted", RED)
+        .line("Channel", &format!("#{name} (`{}`)", c.id))
+        .time()
+        .text("Its logs now go to the main log channel. Pick a new channel on the dashboard.");
+    send_log(app, gid.get(), LogKind::Server, embed).await
 }
 
 /// Sends held delete logs once their wait is over. `handle` only flushes when an event arrives,
@@ -236,7 +283,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         }
         Event::ChannelDelete(c) => {
             app.note_parent(&c.0);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
+            if let Some(g) = c.guild_id {
+                app.invalidate_guild(g);
+                forget_log_channel(app, g, &c.0).await?;
+            }
         }
         Event::GuildUpdate(g) => app.invalidate_guild(g.id),
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
