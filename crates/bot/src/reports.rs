@@ -17,7 +17,7 @@ use twilight_model::{
     },
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
-        marker::{GuildMarker, UserMarker},
+        marker::{AutoModerationRuleMarker, ChannelMarker, GuildMarker, UserMarker},
         Id,
     },
 };
@@ -84,7 +84,7 @@ fn button(label: &str, id: i64, action: &str, style: ButtonStyle) -> Component {
     })
 }
 
-fn rows(id: i64, jump: String) -> Vec<Component> {
+fn rows(id: i64, jump: String, deletable: bool) -> Vec<Component> {
     let row = |components| {
         Component::ActionRow(ActionRow {
             id: None,
@@ -102,11 +102,10 @@ fn rows(id: i64, jump: String) -> Vec<Component> {
         sku_id: None,
     });
     vec![
-        row(vec![
-            link,
-            button("Delete Message", id, "delete", ButtonStyle::Success),
-            button("Dismiss Report", id, "dismiss", ButtonStyle::Danger),
-        ]),
+        row(std::iter::once(link)
+            .chain(deletable.then(|| button("Delete Message", id, "delete", ButtonStyle::Success)))
+            .chain([button("Dismiss Report", id, "dismiss", ButtonStyle::Danger)])
+            .collect()),
         row(vec![
             button("User Info", id, "cases", ButtonStyle::Secondary),
             button("Warn", id, "warn", ButtonStyle::Secondary),
@@ -212,7 +211,7 @@ async fn report(
         .http
         .create_message(log)
         .embeds(&[embed])
-        .components(&rows(id, jump))
+        .components(&rows(id, jump, true))
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await;
     if let Err(e) = sent {
@@ -223,6 +222,74 @@ async fn report(
         return Err(e.into());
     }
     Ok(None)
+}
+
+/// Files a report for a message Discord's AutoMod already blocked, with the same action buttons
+/// (minus Delete, the message is gone). `false` when this server has no report channel.
+pub async fn file_native(
+    app: &App,
+    gid: Id<GuildMarker>,
+    channel: Option<Id<ChannelMarker>>,
+    target: Id<UserMarker>,
+    content: &str,
+    rule: Id<AutoModerationRuleMarker>,
+) -> Result<bool> {
+    let Some(log) = app
+        .cfg(gid.get())
+        .await?
+        .logging
+        .target(LogKind::Report, None)
+    else {
+        return Ok(false);
+    };
+    let content: String = content.chars().take(SNIPPET).collect();
+    // The blocked message has no id; the clock keeps the (guild, reporter, message) key unique.
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO reports (guild_id, reporter_id, target_id, channel_id, message_id, content, reason)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+    )
+    .bind(gid.get() as i64)
+    .bind(app.me.get() as i64)
+    .bind(target.get() as i64)
+    .bind(channel.map_or(0, |c| c.get() as i64))
+    .bind(crate::app::now_secs() * 1000 + rand::random::<u8>() as i64)
+    .bind(&content)
+    .bind(format!("Discord AutoMod rule {rule}"))
+    .fetch_one(&app.pool)
+    .await?;
+    let jump = format!(
+        "https://discord.com/channels/{gid}/{}",
+        channel.map_or(String::new(), |c| c.to_string())
+    );
+    let embed = Log::new("Discord AutoMod Report", ORANGE)
+        .text(&format!(
+            "<@{target}>'s message was blocked by Discord AutoMod rule `{rule}`"
+        ))
+        .field(
+            "Blocked Message:",
+            &if content.is_empty() {
+                "(no text)".into()
+            } else {
+                format!("||{}||", content.replace("||", "|\u{200b}|"))
+            },
+        )
+        .footer(&format!("Reported by TommyBot | TARGET: {target}"))
+        .build();
+    let sent = app
+        .http
+        .create_message(log)
+        .embeds(&[embed])
+        .components(&rows(id, jump, false))
+        .allowed_mentions(Some(&AllowedMentions::default()))
+        .await;
+    if let Err(e) = sent {
+        sqlx::query("DELETE FROM reports WHERE id=$1")
+            .bind(id)
+            .execute(&app.pool)
+            .await?;
+        return Err(e.into());
+    }
+    Ok(true)
 }
 
 const MODAL: &str = "reportm:";

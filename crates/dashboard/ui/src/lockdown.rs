@@ -152,9 +152,18 @@ const RULE_KINDS: [(&str, &str, &str); 4] = [
     ("Block Custom Words", "keyword", "Blocks the words you list."),
 ];
 
+const BOT_ACTIONS: [(&str, &str); 6] = [
+    ("report", "Report the message flagged by Discord for moderators to take action."),
+    ("warn", "Warn the member."),
+    ("timeout", "Time the member out."),
+    ("kick", "Kick the member."),
+    ("ban", "Ban the member."),
+    ("lock", "Lock the server; pick the lock mode below."),
+];
+
 fn blank_rule(name: &str, trigger: &str) -> Value {
     json!({"name": name, "enabled": true, "trigger": trigger, "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 20, "scope": "", "scope_triggers": 1, "scope_duration_s": 5,
-        "custom_message": "", "alert_channel": "", "timeout_s": 0, "exempt_roles": [], "exempt_channels": [], "bot_actions": []})
+        "custom_message": "", "alert_channel": "", "timeout_s": 0, "exempt_roles": [], "exempt_channels": [], "bot_actions": [], "lock": ""})
 }
 
 #[component]
@@ -207,8 +216,13 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
             {fld("alert_channel", "channel", "Send Alert")}
             <Show when=move || matches!(trigger().as_str(), "keyword" | "mention")>{fld("timeout_s", "int", "Timeout User (seconds, 0 = none)")}</Show>
             <Show when=move || val.get()["block_message"] == true><div class="row"><label>"TommyBot Response"</label><span class="muted">"You need at least 1 TommyBot action if you want TommyBot to consider this rule."</span>
-                {["report", "warn", "timeout", "kick", "ban", "lock"].into_iter().map(|a| view! { <label><input type="checkbox" prop:checked=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!(a)))
-                    on:change=move |e| val.update(|v| { let mut l: Vec<String> = v["bot_actions"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).filter(|x| x != a).collect()).unwrap_or_default(); if event_target_checked(&e) { l.push(a.into()); } v["bot_actions"] = json!(l); }) /> {a}</label> }).collect_view()}</div></Show>
+                {BOT_ACTIONS.into_iter().map(|(a, tip)| view! { <label title=tip><input type="checkbox" prop:checked=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!(a)))
+                    on:change=move |e| val.update(|v| { let mut l: Vec<String> = v["bot_actions"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).filter(|x| x != a).collect()).unwrap_or_default(); if event_target_checked(&e) { l.push(a.into()); } v["bot_actions"] = json!(l); }) /> {a}" - "<span class="muted">{tip}</span></label> }).collect_view()}
+                <Show when=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!("lock")))>
+                    <label>"Lock mode"</label>
+                    <select on:change=move |e| val.update(|v| v["lock"] = json!(event_target_value(&e)))>
+                        {[("", "Server lockdown settings"), ("channel", "Channel"), ("server", "All Public Channels"), ("kick", "Kick New Members"), ("ban", "Ban New Members"), ("invites", "Pause Invites")].into_iter().map(|(k, t)| view! { <option value=k selected=move || s(&val.get()["lock"]) == k>{t}</option> }).collect_view()}
+                    </select></Show></div></Show>
             <h3>"3 Allowed Keywords"</h3>
             <Show when=move || matches!(trigger().as_str(), "keyword" | "preset")>{fld("allow", "list", "Add Keyword")}</Show>
             {fld("exempt_roles", "roles", "Whitelisted Roles")}
@@ -243,17 +257,28 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
         }
     });
     view! {
+        <div class="card"><h2>"Discord built-in AutoMod"</h2><span class="muted">"TommyBot AutoMod Integration"</span></div>
         <div class="card row">
             <button on:click=move |_| load()>"Refresh"</button>
+            <button class="ghost" title="Turn off every rule that is on" disabled=move || rules.get().iter().all(|r| r["enabled"] != true)
+                on:click=move |_| for r in rules.get_untracked().iter().filter(|r| r["enabled"] == true) { call("POST", format!("/{}/enabled", s(&r["id"])), Some(json!({"enabled": false}))) }>"Deactivate"</button>
             <button class="go" title="Turn on every rule that is off" disabled=move || rules.get().iter().all(|r| r["enabled"] == true)
                 on:click=move |_| for r in rules.get_untracked().iter().filter(|r| r["enabled"] != true) { call("POST", format!("/{}/enabled", s(&r["id"])), Some(json!({"enabled": true}))) }>"Activate"</button>
             <span class="sp"></span>
+            <button class="ghost" title="Copy the local word blacklist into a Discord rule, then clear the local lists"
+                on:click=move |_| if web_sys::window().and_then(|w| w.confirm_with_message("Copy your word blacklist into a new Discord AutoMod rule and clear the local lists? This cannot be undone.").ok()).unwrap_or(false) {
+                    spawn_local(async move {
+                        match api("POST", &format!("/api/guilds/{}/discord-rules-migrate-words", g.get_value()), None).await {
+                            Ok(_) => { load(); msg.set("Words migrated.".into()); }
+                            Err(e) => msg.set(e),
+                        }
+                    });
+                }>"Migrate words to Discord's AutoMod"</button>
             <button class="go" on:click=move |_| picking.set(true)>"+ Create"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
         <Show when=move || rules.get().is_empty()>
-            <div class="card empty"><p class="warn">"No Discord AutoMod rules found."</p>
-                <button class="ghost dashed" on:click=move |_| picking.set(true)>"+ CREATE NEW RULE"</button></div>
+            <div class="card empty"><p class="warn">"No Discord AutoMod rules found."</p></div>
         </Show>
         <Show when=move || picking.get()>
             <div class="card"><h2>"Create a rule"</h2>
@@ -265,9 +290,23 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
         <For each=move || rules.get() key=|r| r.to_string() let:r>
             {
                 let (id, on) = (s(&r["id"]), r["enabled"].as_bool().unwrap_or(false));
-                let (id3, r2) = (id.clone(), r.clone());
+                let (id3, id4, r2, r3) = (id.clone(), id.clone(), r.clone(), r.clone());
+                let words = r["keywords"].as_array().map(Vec::len).filter(|_| r["trigger"] == "keyword");
+                let mut discord = vec![];
+                if r["block_message"] == true { discord.push("Block Message".to_string()); }
+                if !s(&r["alert_channel"]).is_empty() { discord.push("Send Alert".into()); }
+                if r["timeout_s"].as_u64().unwrap_or(0) > 0 { discord.push("Timeout".into()); }
+                let bot: Vec<String> = r["bot_actions"].as_array().map(|l| l.iter().map(s).collect()).unwrap_or_default();
                 view! { <div class="card row">
-                    <div><h3>{s(&r["name"])}</h3><span class="muted">{format!("trigger: {}", s(&r["trigger"]))}</span></div><span class="sp"></span>
+                    <div><h3>{s(&r["name"])}" "
+                        <button class="ghost" title="Rename" on:click=move |_| {
+                            let name = web_sys::window().and_then(|w| w.prompt_with_message_and_default("Rule name", &s(&r3["name"])).ok().flatten());
+                            if let Some(name) = name.filter(|n| !n.trim().is_empty()) { let mut v = r3.clone(); v["name"] = json!(name); call("PUT", format!("/{id4}"), Some(v)); }
+                        }>"✎"</button>
+                        {words.map(|n| format!(" ({n} words)"))}</h3>
+                        <span class="muted">{format!("trigger: {}", s(&r["trigger"]))}</span>
+                        {discord.into_iter().map(|b| view! { <span class="chip">{b}</span> }).collect_view()}
+                        {bot.into_iter().map(|b| view! { <span class="chip ok">{b}</span> }).collect_view()}</div><span class="sp"></span>
                     <span class="chip" class:ok=on>{if on { "Active" } else { "Off" }}</span>
                     <button class=if on { "ghost" } else { "go" } on:click=move |_| call("POST", format!("/{id}/enabled"), Some(json!({"enabled": !on})))>{if on { "Deactivate" } else { "Activate" }}</button>
                     <button class="ghost" on:click=move |_| editing.set(Some(r2.clone()))>"Edit"</button>
@@ -275,6 +314,7 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
                 </div> }
             }
         </For>
+        <div class="card empty"><button class="ghost dashed" on:click=move |_| picking.set(true)>"+ CREATE NEW RULE"</button></div>
         {move || editing.get().map(|_| {
             let done = move || { editing.set(None); load(); };
             view! { <RuleEditor guild=g.get_value() rule=editing dc=dc done /> }
