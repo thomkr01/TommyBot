@@ -717,6 +717,10 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             crate::general::commands_page(&level, &cfg.misc.prefix, page)
         }
         None if kind == "about" => crate::general::about_page(page),
+        None if kind.starts_with("cases.") => {
+            let user = kind["cases.".len()..].parse().unwrap_or_default();
+            crate::modview::cases_page(app, gid.get() as i64, user, page).await?
+        }
         None if kind == "ginfo" => crate::info::server_page(app, gid, page).await?,
         None => return Ok(true),
     };

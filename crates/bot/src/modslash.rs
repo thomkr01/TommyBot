@@ -26,8 +26,9 @@ pub fn definitions() -> Vec<Command> {
             .required(req)
     };
     let note_id = |req| {
-        IntegerBuilder::new("note_id", "Note number")
-            .min_value(1)
+        StringBuilder::new("note_id", "Note id")
+            .min_length(1)
+            .max_length(12)
             .required(req)
     };
     let chat = |n, d| {
@@ -247,15 +248,15 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                 },
                 "view" => ModCmd::NoteList {
                     user: user_opt(s, "user").map(|u| u.get()),
-                    id: int(s, "note_id"),
+                    id: string(s, "note_id").map(String::from),
                     by: user_opt(s, "mod").map(|u| u.get()),
                 },
                 "remove" => ModCmd::NoteRemove {
-                    id: int(s, "note_id").ok_or("missing note_id")?,
+                    id: string(s, "note_id").ok_or("missing note_id")?.into(),
                     user: user_opt(s, "user").map(|u| u.get()),
                 },
                 "modify" => ModCmd::NoteModify {
-                    id: int(s, "note_id").ok_or("missing note_id")?,
+                    id: string(s, "note_id").ok_or("missing note_id")?.into(),
                     text: string(s, "msg").ok_or("missing msg")?.into(),
                 },
                 "sweep" => ModCmd::NoteSweep {

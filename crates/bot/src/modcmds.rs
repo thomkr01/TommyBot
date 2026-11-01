@@ -10,7 +10,7 @@ use tommybot_logging::{
 };
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
-    channel::message::Embed,
+    channel::message::{AllowedMentions, Embed},
     gateway::payload::incoming::MessageCreate,
     id::{
         marker::{ChannelMarker, GuildMarker, UserMarker},
@@ -25,7 +25,7 @@ use crate::{
     confirm::{self, Action, Pending},
     events::send_log,
     prefix::Parsed,
-    purge, reply, targets,
+    purge, reply, settings, targets,
 };
 
 /// The clicked message of a purge menu: From Here purges it and the newer ones below it, Until Here
@@ -103,16 +103,16 @@ pub enum ModCmd {
     /// Every filter is optional; none lists the latest notes.
     NoteList {
         user: Option<u64>,
-        id: Option<i64>,
+        id: Option<String>,
         by: Option<u64>,
     },
     NoteRemove {
-        id: i64,
+        id: String,
         /// Only if the note is about this member.
         user: Option<u64>,
     },
     NoteModify {
-        id: i64,
+        id: String,
         text: String,
     },
     /// Without filters: every note of the server.
@@ -208,6 +208,7 @@ impl ModCmd {
             Self::Sanitize { .. } => "sanitize",
             Self::Purge { .. } => "purge",
             Self::Slowmode { .. } => "slowmode",
+            Self::NoteAdd { .. } | Self::NoteList { id: Some(_), .. } => "note",
             _ => return None,
         })
     }
@@ -221,7 +222,17 @@ impl ModCmd {
             | Self::ClearWarns { user }
             | Self::Quarantine { user }
             | Self::Unquarantine { user }
-            | Self::Sanitize { user } => Some(user),
+            | Self::Sanitize { user }
+            | Self::NoteAdd { user, .. }
+            | Self::NoteList {
+                user: Some(user), ..
+            }
+            | Self::NoteRemove {
+                user: Some(user), ..
+            }
+            | Self::NoteSweep {
+                user: Some(user), ..
+            } => Some(user),
             _ => None,
         }
     }
@@ -236,6 +247,13 @@ pub(crate) fn reply_parts(
     actor: u64,
 ) -> (String, Vec<Embed>) {
     match kind {
+        // A note card shows the note's text, so it goes to the moderator only (see `run_prefix`).
+        Some("note") => match texts.first() {
+            Some(t) if !compact && t.starts_with("Note: ") => {
+                (String::new(), vec![crate::modview::note_embed(t)])
+            }
+            _ => (texts.join("\n"), vec![]),
+        },
         Some(k) if !compact => (String::new(), reply::result_embeds(k, texts, reason, actor)),
         Some(k) => (reply::summary(k, true, texts, reason, actor), vec![]),
         None => (texts.join("\n"), vec![]),
@@ -319,7 +337,12 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                     text: text.ok_or("Give the note with ?r")?,
                 },
                 Some("remove") => ModCmd::NoteRemove {
-                    id: case()? as i64,
+                    id: p
+                        .names
+                        .get(1)
+                        .cloned()
+                        .or(small.map(|n| n.to_string()))
+                        .ok_or("Give a note id")?,
                     user,
                 },
                 Some("sweep") => ModCmd::NoteSweep {
@@ -390,7 +413,10 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     let free_text = matches!(p.command.as_str(), "editc" | "editreason");
     let mut users: Vec<u64> = p.targets.iter().copied().filter(|t| *t >= SMALL).collect();
     let mut failed = vec![];
-    let lookups: Vec<&String> = match (multi, free_text, users.is_empty()) {
+    // `note remove q413p9`: the id is not a member name.
+    let note_id = matches!(p.command.as_str(), "note" | "notes")
+        && p.names.first().is_some_and(|n| n == "remove");
+    let lookups: Vec<&String> = match (multi, free_text || note_id, users.is_empty()) {
         (true, ..) => p.names.iter().filter(name_word).collect(),
         (false, false, true) if p.targets.iter().all(|t| *t < SMALL) => {
             p.names.iter().find(name_word).into_iter().collect()
@@ -430,6 +456,17 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
         return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action)).await;
     }
     let kind = cmd.result_kind();
+    let private = matches!(cmd, ModCmd::NoteAdd { .. } | ModCmd::NoteList { .. });
+    // `cases NAME` pages through all of the member's cases.
+    let paged = match cmd {
+        ModCmd::CasesView {
+            case: None,
+            user: Some(u),
+            by: None,
+            kind: None,
+        } => Some(u),
+        _ => None,
+    };
     let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
     let cmds = if cmds.is_empty() { vec![cmd] } else { cmds };
     let mut texts = vec![];
@@ -463,6 +500,37 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
         p.reason.as_deref(),
         msg.author.id.get(),
     );
+    if private {
+        // Notes are for moderators only: the channel never sees their text.
+        let sent = async {
+            let ch = app
+                .http
+                .create_private_channel(msg.author.id)
+                .await?
+                .model()
+                .await?;
+            app.http
+                .create_message(ch.id)
+                .content(&text)
+                .embeds(&embeds)
+                .allowed_mentions(Some(&AllowedMentions::default()))
+                .await?;
+            anyhow::Ok(())
+        };
+        let notice = match sent.await {
+            Ok(()) => "Sent to your DMs.",
+            Err(_) => "Could not DM you: open your DMs to read notes.",
+        };
+        return commands::say(app, msg, notice).await;
+    }
+    // A first page that starts with a case line was allowed; denials are plain text.
+    if let (Some(u), true) = (paged, text.starts_with("`#")) {
+        let (e, pages) = crate::modview::cases_page(app, gid.get() as i64, u, 0).await?;
+        if pages > 1 {
+            let row = settings::page_row(msg.author.id.get(), &format!("cases.{u}"), 0, pages);
+            return settings::send(app, msg, "", Some(e), vec![row]).await;
+        }
+    }
     commands::say_embeds(app, msg, &text, &embeds).await
 }
 
@@ -504,23 +572,23 @@ pub async fn run(
                 user,
                 by,
                 kind,
-            } => return crate::modview::view_cases(app, g, case, user, by, kind).await,
+            } => return crate::modview::view_cases(app, g, case, user, by, kind, 0).await,
             ModCmd::NoteAdd { user, text } => {
                 if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
                     return Ok(format!(
                         "A note must be {NOTE_MIN} to {NOTE_MAX} characters long"
                     ));
                 }
-                let (id,): (i64,) = sqlx::query_as(
-                    "INSERT INTO notes (guild_id, user_id, author_id, text) VALUES ($1,$2,$3,$4) RETURNING id",
+                let (id,): (String,) = sqlx::query_as(
+                    "INSERT INTO notes (guild_id, user_id, author_id, text) VALUES ($1,$2,$3,$4) RETURNING short_id",
                 )
                 .bind(g)
                 .bind(user as i64)
                 .bind(actor_id.get() as i64)
-                .bind(text)
+                .bind(&text)
                 .fetch_one(&app.pool)
                 .await?;
-                return Ok(format!("Note #{id} added for <@{user}>"));
+                return Ok(crate::modview::note_text(&id, user, actor_id.get(), &text));
             }
             ModCmd::NoteModify { id, text } => {
                 if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
@@ -528,16 +596,16 @@ pub async fn run(
                         "A note must be {NOTE_MIN} to {NOTE_MAX} characters long"
                     ));
                 }
-                let n = sqlx::query("UPDATE notes SET text=$3 WHERE guild_id=$1 AND id=$2")
+                let n = sqlx::query("UPDATE notes SET text=$3 WHERE guild_id=$1 AND short_id=$2")
                     .bind(g)
-                    .bind(id)
+                    .bind(&id)
                     .bind(text)
                     .execute(&app.pool)
                     .await?
                     .rows_affected();
                 return Ok(match n {
-                    0 => format!("No note #{id}"),
-                    _ => format!("Note #{id} updated"),
+                    0 => format!("No note `{id}`"),
+                    _ => format!("Note `{id}` updated"),
                 });
             }
             ModCmd::NoteList { user, id, by } => {
@@ -545,17 +613,17 @@ pub async fn run(
             }
             ModCmd::NoteRemove { id, user } => {
                 let n = sqlx::query(
-                    "DELETE FROM notes WHERE guild_id=$1 AND id=$2 AND ($3::bigint IS NULL OR user_id=$3)",
+                    "DELETE FROM notes WHERE guild_id=$1 AND short_id=$2 AND ($3::bigint IS NULL OR user_id=$3)",
                 )
                 .bind(g)
-                .bind(id)
+                .bind(&id)
                 .bind(user.map(|u| u as i64))
                     .execute(&app.pool)
                     .await?
                     .rows_affected();
                 return Ok(match n {
-                    0 => format!("No note #{id}"),
-                    _ => format!("Removed note #{id}"),
+                    0 => format!("No note `{id}`"),
+                    _ => format!("Removed note `{id}`"),
                 });
             }
             ModCmd::NoteSweep { user, by } => {
@@ -952,8 +1020,11 @@ mod tests {
         );
         assert!(pf(&format!("note add {big}"), None).is_err()); // text required
         assert_eq!(
-            pf("note remove 4", None),
-            Ok(ModCmd::NoteRemove { id: 4, user: None })
+            pf("note remove q413p9", None),
+            Ok(ModCmd::NoteRemove {
+                id: "q413p9".into(),
+                user: None
+            })
         );
         assert_eq!(
             pf(&format!("note {big}"), None),
