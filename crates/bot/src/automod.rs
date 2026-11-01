@@ -1,7 +1,7 @@
 //! Message heat -> strikes -> timeouts, join gate and raid detection, mention-triggered lockdown.
 use anyhow::Result;
 use std::collections::{hash_map::Entry, HashMap};
-use tommybot_antinuke::{webhooks_to_delete, Webhook};
+use tommybot_antinuke::{webhook_whitelisted, webhooks_to_delete, Webhook};
 use tommybot_automod::{
     discord_api::BotAction,
     filters,
@@ -240,7 +240,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !triggered {
         return Ok(());
     }
-    if m.webhook_id.is_some() {
+    if let Some(hook) = m.webhook_id {
+        if webhook_exempt(app, gid, hook, listed(&wl.spam)).await {
+            return Ok(());
+        }
         // A webhook is not a member: no strikes, remove the message and the freshly made hooks.
         app.http.delete_message(m.channel_id, m.id).await.ok();
         return delete_new_webhooks(app, gid).await;
@@ -543,6 +546,26 @@ pub async fn sync_discord_rule(app: std::sync::Arc<App>, guild: u64) {
     }
 }
 
+/// Wick 4.6.0: a webhook is exempt if its owner is whitelisted (bot-made hooks only, user hooks have
+/// an exposed token) or it is listed itself; when the webhook cannot be fetched only the list counts.
+async fn webhook_exempt(
+    app: &App,
+    gid: Id<GuildMarker>,
+    hook: Id<twilight_model::id::marker::WebhookMarker>,
+    listed: bool,
+) -> bool {
+    let fetched = async { anyhow::Ok(app.http.webhook(hook).await?.model().await?) }.await;
+    let cached = match fetched.map(|h| h.user) {
+        Ok(Some(owner)) => app
+            .whitelisted(gid, owner.id, "antinuke")
+            .await
+            .ok()
+            .map(|wl| (wl, !owner.bot)),
+        _ => None,
+    };
+    webhook_whitelisted(cached, listed)
+}
+
 /// Deletes webhooks made in the last 10 minutes unless their owner is immune.
 async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     let mut hooks = vec![];
@@ -552,7 +575,13 @@ async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         let owner = h.user.as_ref().map(|u| u.id);
         if let Some(owner) = owner {
             if let Entry::Vacant(e) = immune.entry(owner.get()) {
-                e.insert(app.is_immune(gid, owner).await?);
+                // Verified bots stand in for Wick's popular bots.
+                let verified = h
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.public_flags)
+                    .is_some_and(|f| f.contains(UserFlags::VERIFIED_BOT));
+                e.insert(verified || app.is_immune(gid, owner).await?);
             }
         }
         // Snowflake timestamp: ms since the Discord epoch in the top bits.

@@ -768,7 +768,7 @@ pub fn schema() -> Vec<Value> {
         ti(fg("Moderation commands", "hide_staff_in_dms", "bool"), "Hide the staff member responsible when DMing the punished member"),
         hp(
             ti(
-                dv(fg("Moderation commands", "default_timeout_secs", "int"), 600),
+                dv(fg("Moderation commands", "default_timeout_secs", "int"), 0),
                 "Default timeout duration",
             ),
             "0 means 28 days",
