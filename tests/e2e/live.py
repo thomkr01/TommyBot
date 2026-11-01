@@ -178,7 +178,7 @@ def emojis():
     me = call("GET", "/users/@me")["id"]
     logs = [m for m in call("GET", f"/channels/{chan}/messages?limit=10") if m["author"]["id"] == me and m["embeds"]]
     text = json.dumps([m["embeds"] for m in logs])
-    in_log = "<:right_sort:" in text or "<:success:" in text
+    in_log = "<:channel_text:" in text and "<:clock:" in text
     row = [{"type": 2, "style": 2, "custom_id": f"e2e-{n}", "emoji": {"id": have.get(n), "name": n}} for n in
            ("page_first", "page_prev", "page_next", "page_last", "close")]
     msg = call("POST", f"/channels/{chan}/messages", body={

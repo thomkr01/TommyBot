@@ -16,7 +16,13 @@ pub const DONE: u32 = 0x08E36B;
 pub const HANDLED: u32 = 0x00CB73;
 pub const BLUE: u32 = 0x0D9DF8;
 
+use crate::emoji::{for_label, CLOCK};
 pub use crate::emoji::{ARROW, NO, YES};
+
+/// `<icon> **label:**`, the start of a labelled line.
+pub fn label_head(label: &str) -> String {
+    format!("{} **{label}:**", for_label(label))
+}
 
 /// Discord's embed limits.
 const TITLE: usize = 256;
@@ -48,7 +54,7 @@ impl Log {
 
     /// `▸ **label:** value`
     pub fn line(mut self, label: &str, value: &str) -> Self {
-        self.lines.push(format!("{ARROW} **{label}:** {value}"));
+        self.lines.push(format!("{} {value}", label_head(label)));
         self
     }
 
@@ -63,7 +69,7 @@ impl Log {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        self.text(&format!("{ARROW} <t:{now}:F>"))
+        self.text(&format!("{CLOCK} <t:{now}:F>"))
     }
 
     /// A bold heading ("Changes", "Settings", "Previous Settings", "Additional Information").

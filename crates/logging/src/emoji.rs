@@ -103,6 +103,78 @@ pub const CPU: Emoji = e("loading", "▸");
 pub const SIZE: Emoji = e("stats", "▸");
 pub const SERVERS: Emoji = e("server", "▸");
 
+pub const CLOCK: Emoji = e("clock", "▸");
+
+/// The icon in front of a `**Label:**` line, matched on words in the label (first match wins),
+/// like Wick's per-field icons. Unknown labels keep the plain arrow.
+pub fn for_label(label: &str) -> Emoji {
+    const BY_WORD: &[(&str, &str)] = &[
+        ("responsible", "moderator_field"),
+        ("moderator", "moderator_field"),
+        ("executor", "moderator_field"),
+        ("inviter", "moderator_field"),
+        ("owner", "owner"),
+        ("author", "member"),
+        ("member", "member"),
+        ("user", "member"),
+        ("target", "target"),
+        ("channel", "channel_text"),
+        ("role", "role"),
+        ("permission", "permissions"),
+        ("additions", "plus"),
+        ("removals", "minus"),
+        ("id", "user_id"),
+        ("type", "tag"),
+        ("content", "message"),
+        ("message", "message"),
+        ("reason", "reason"),
+        ("case", "case_number"),
+        ("action", "settings"),
+        ("duration", "duration"),
+        ("uptime", "pending"),
+        ("creat", "account_age"),
+        ("joined", "joined_date"),
+        ("invite", "invite_code"),
+        ("position", "position"),
+        ("name", "nickname"),
+        ("tag", "tag"),
+        ("topic", "reason"),
+        ("nsfw", "nsfw_filter"),
+        ("slowmode", "slowmode"),
+        ("emoji", "emoji"),
+        ("webhook", "webhook"),
+        ("avatar", "avatar_field"),
+        ("badge", "nitro_badge"),
+        ("bot", "bot"),
+        ("count", "stats"),
+        ("strike", "warn_points"),
+        ("rule", "rules"),
+        ("factor", "heat"),
+        ("error", "error"),
+        ("result", "logs"),
+        ("appeal", "appeal"),
+        ("banned", "ban"),
+        ("timed out", "timeout"),
+        ("quarantine", "quarantine"),
+        ("server", "server"),
+        ("version", "info"),
+    ];
+    let l = label.to_ascii_lowercase();
+    let word = |w: &str| {
+        // "id" must be a whole word, or "inside"/"valid" would match.
+        if w == "id" {
+            l.split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|p| p == "id")
+        } else {
+            l.contains(w)
+        }
+    };
+    BY_WORD
+        .iter()
+        .find(|(w, _)| word(w))
+        .map_or(ARROW, |&(_, name)| e(name, "▸"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +199,8 @@ mod tests {
         let l = LINK.on(b());
         assert_eq!(l.label.as_deref(), Some("View Message"));
         assert!(matches!(l.emoji, Some(EmojiReactionType::Custom { .. })));
+        assert_eq!(for_label("Role Name").name, "role");
+        assert_eq!(for_label("Id").name, "user_id");
+        assert_eq!(for_label("Valid").name, "right_sort");
     }
 }
