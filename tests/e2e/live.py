@@ -57,17 +57,6 @@ def logging_cfg():
                           f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
 
 
-def set_logging(log):
-    """Replaces only the logging section, then tells the bot to reload."""
-    sql(f"""insert into guild_config (guild_id, version, config)
-            select {GUILD}, coalesce(max(version), 0) + 1,
-                   coalesce((select config from guild_config where guild_id = {GUILD}
-                             order by version desc limit 1), '{{}}') || '{json.dumps({"logging": log})}'
-            from guild_config where guild_id = {GUILD};
-            select pg_notify('config_changed', '{GUILD}');""")
-    time.sleep(2)
-
-
 def text_channel(name):
     chans = call("GET", f"/guilds/{GUILD}/channels")
     return next(c["id"] for c in chans if c["type"] == 0 and c["name"] == name)
@@ -82,13 +71,15 @@ def snowflake_now():
     return str((int(time.time() * 1000) - 1420070400000) << 22)
 
 
-def logged(kind, since, title=None):
-    """True if the bot posted an embed (titled `title`, if given) in the log channel for `kind`
-    (its route, else the main one) after `since`."""
+def log_messages(kind, since):
+    """Messages after `since` in the log channel for `kind`: its route, else the main one."""
     log = logging_cfg()
     chan = log.get("routes", {}).get(kind) or log.get("fallback")
-    msgs = call("GET", f"/channels/{chan}/messages?after={since}&limit=50", soft=True) or []
-    return any(e.get("title") == title or title is None for m in msgs for e in m["embeds"])
+    return call("GET", f"/channels/{chan}/messages?after={since}&limit=50", soft=True) or []
+
+
+def logged(kind, since, title=None):
+    return any(title in (None, e.get("title")) for m in log_messages(kind, since) for e in m["embeds"])
 
 
 def spam():
@@ -160,14 +151,13 @@ def logchan():
     chan = call("POST", f"/guilds/{GUILD}/channels", body={"name": "e2e-logs"})["id"]
     log = logging_cfg()
     log.setdefault("routes", {})["sticker"] = chan
-    set_logging(log)
+    set_config("logging", log)
     call("DELETE", f"/channels/{chan}")
     time.sleep(4)
     gone = chan not in logging_cfg().get("routes", {}).values()
     print("cleaned: e2e-logs channel deleted by the test; the bot removed its route")
     return check(gone and logged("server", since, "Log Channel Deleted"),
                  f"logchan: route removed={gone}, notice logged")
-
 
 
 def purge():
@@ -179,16 +169,16 @@ def purge():
     time.sleep(1)
     call("POST", f"/channels/{chan}/messages/bulk-delete", body={"messages": ids})
     time.sleep(3)
-    log = logging_cfg()
-    out = log.get("routes", {}).get("message") or log.get("fallback")
-    msgs = call("GET", f"/channels/{out}/messages?after={since}&limit=50") or []
-    files = [a for m in msgs for a in m.get("attachments", []) if a["filename"] == "messages.txt"]
+    msgs = [m for m in log_messages("message", since)
+            if any(a["filename"] == "messages.txt" for a in m["attachments"])]
+    files = [a for m in msgs for a in m["attachments"]]
+    noted = any("3/3" in json.dumps(m["embeds"]) for m in msgs)
     # The CDN refuses urllib's default user agent.
     get = urllib.request.Request(files[0]["url"], headers={"User-Agent": "tommybot-e2e"}) if files else None
     text = urllib.request.urlopen(get).read().decode() if get else ""
     print("cleaned: nothing left, the test messages were the ones purged")
-    return check(all(f"e2e purge {i}" in text for i in range(3)),
-                 f"purge: messages.txt attached={bool(files)} with all 3 messages")
+    return check(noted and all(f"e2e purge {i}" in text for i in range(3)),
+                 f"purge: messages.txt attached={bool(files)} with all 3 messages, embed says 3/3={noted}")
 
 
 SCENARIOS = {"spam": spam, "nuke": nuke, "logchan": logchan, "purge": purge}
@@ -199,6 +189,6 @@ if __name__ == "__main__":
     # Log checks need a main log channel; a fresh database has none.
     log = logging_cfg()
     if not log.get("fallback"):
-        set_logging({**log, "fallback": text_channel("tommybot-logs")})
+        set_config("logging", {**log, "fallback": text_channel("tommybot-logs")})
     results = [SCENARIOS[n]() for n in names]
     sys.exit(0 if all(results) else 1)

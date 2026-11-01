@@ -86,17 +86,8 @@ async fn send(
 
 async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     let mentions = AllowedMentions::default();
-    let file = m.file.as_deref();
-    send(
-        app,
-        m.channel_id,
-        "",
-        &m.embed,
-        m.link.as_ref(),
-        &mentions,
-        file,
-    )
-    .await
+    let (link, file) = (m.link.as_ref(), m.file.as_deref());
+    send(app, m.channel_id, "", &m.embed, link, &mentions, file).await
 }
 
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
@@ -177,7 +168,11 @@ async fn forget_log_channel(app: &App, gid: Id<GuildMarker>, c: &Channel) -> Res
         let mut log: LogConfig =
             serde_json::from_value(doc["logging"].clone()).map_err(|e| e.to_string())?;
         log.forget(c.id);
-        doc["logging"] = serde_json::to_value(log).map_err(|e| e.to_string())?;
+        // Merged in, so keys LogConfig does not model (the dashboard's config_changes) survive.
+        let new = serde_json::to_value(log).map_err(|e| e.to_string())?;
+        if let (Some(old), serde_json::Value::Object(new)) = (doc["logging"].as_object_mut(), new) {
+            old.extend(new);
+        }
         Ok(())
     })
     .await?;

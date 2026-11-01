@@ -143,7 +143,7 @@ impl Logger {
             let mut ids = m.ids.clone();
             ids.sort();
             // Each line is "author id: content", oldest first; uncached messages are skipped.
-            let text: String = ids
+            let lines: Vec<String> = ids
                 .iter()
                 .filter_map(|id| self.cache.remove(guild, *id))
                 .map(|c| format!("{}: {}\n", c.author, c.content))
@@ -153,9 +153,9 @@ impl Logger {
                     out.push(LogMessage {
                         channel_id: log,
                         kind: LogKind::Message,
-                        embed: render::bulk_delete(m.channel_id, m.ids.len()),
+                        embed: render::bulk_delete(m.channel_id, m.ids.len(), lines.len()),
                         link: None,
-                        file: (!text.is_empty()).then_some(text),
+                        file: (!lines.is_empty()).then(|| lines.concat()),
                     });
                 }
             }
@@ -569,6 +569,7 @@ mod tests {
         };
         let out = logger.handle(&cfg, &bulk(vec![8, 99, 7]), now);
         assert_eq!(out[0].file.as_deref(), Some("20: first\n20: second\n"));
+        assert!(format!("{:?}", out[0].embed).contains("`2/3` saved in `messages.txt`"));
         // Already removed from the cache, so a repeat has nothing to attach.
         assert_eq!(logger.handle(&cfg, &bulk(vec![7]), now)[0].file, None);
     }

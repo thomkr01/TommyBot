@@ -71,12 +71,20 @@ pub fn message_delete(
     log.build()
 }
 
-pub fn bulk_delete(channel: Id<ChannelMarker>, count: usize) -> Embed {
-    Log::new("Message Delete Bulk", RED)
+/// `saved` is how many of the deleted messages are in the attached messages.txt.
+pub fn bulk_delete(channel: Id<ChannelMarker>, count: usize, saved: usize) -> Embed {
+    let log = Log::new("Message Delete Bulk", RED)
         .line("Channel", &embed::channel(channel.get()))
         .time()
-        .line("Count", &count.to_string())
-        .build()
+        .line("Count", &count.to_string());
+    match saved {
+        0 => log.line("Content", "not cached"),
+        n => log.line(
+            "Content",
+            &format!("`{n}/{count}` saved in `messages.txt` below"),
+        ),
+    }
+    .build()
 }
 
 pub fn member_add(user: &User) -> Embed {
