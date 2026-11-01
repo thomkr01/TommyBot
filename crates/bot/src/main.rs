@@ -15,6 +15,8 @@ mod lockdown;
 mod metrics;
 mod modcmds;
 mod modslash;
+mod modview;
+mod native;
 mod panic;
 mod prefix;
 mod purge;
@@ -28,6 +30,7 @@ mod targets;
 mod tickets;
 mod timeout_roles;
 mod verify;
+mod webhooks;
 mod welcome;
 mod whitelist;
 

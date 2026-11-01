@@ -346,7 +346,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         }
     }
     let kind = match p.command.as_str() {
-        "ban" | "softban" => ModKind::Ban,
+        "ban" | "softban" | "hackban" => ModKind::Ban,
         "kick" => ModKind::Kick,
         "warn" => ModKind::Warn,
         "timeout" => ModKind::Timeout,
@@ -374,6 +374,11 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
                 c => c.to_vec(),
             };
             let name = p.kind.as_ref().or(p.names.first()).map(String::as_str);
+            // `-blind` turns a server lock (or the default) into a blind one.
+            let name = match (p.flags.blind, name) {
+                (true, None | Some("server" | "sc")) => Some("blind"),
+                (_, n) => n,
+            };
             let name = name.or((!p.channels.is_empty()).then_some("c"));
             let mut kinds = vec![];
             for c in &channels {
@@ -393,12 +398,21 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             {
                 out.push(lockdown::command(app, gid, &actor, unlock, kind, p.duration_s).await?);
             }
-            return say(app, msg, &out.join("\n")).await;
+            if cfg_compact(app, gid, p.flags).await? {
+                return say(app, msg, &out.join("\n")).await;
+            }
+            let title = if unlock {
+                "Unlock Result:"
+            } else {
+                "Lock Result:"
+            };
+            return say_embeds(app, msg, "", &reply::plain_embed(title, &out.join("\n"))).await;
         }
-        "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
-        | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
-        | "editreason" | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns"
-        | "warns" | "modcases" => return modcmds::run_prefix(app, msg, p).await,
+        "unban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge" | "slowmode"
+        | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc" | "editreason"
+        | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns" | "warns" | "modcases" => {
+            return modcmds::run_prefix(app, msg, p).await
+        }
         "backups" => return backup_prefix(app, msg, gid, &p).await,
         _ => return Ok(()),
     };
@@ -446,6 +460,10 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         msg.author.id.get(),
     );
     say(app, msg, &text).await
+}
+
+async fn cfg_compact(app: &App, gid: Id<GuildMarker>, flags: Flags) -> Result<bool> {
+    Ok(flags.compact || app.cfg(gid.get()).await?.misc.compact_replies)
 }
 
 /// Discord's audit log caps reasons at 512 characters.
@@ -769,6 +787,7 @@ mod tests {
             dm: true,
             soft: true,
             compact: false,
+            ..Default::default()
         };
         let a = Action::Mod {
             kind: ModKind::Ban,

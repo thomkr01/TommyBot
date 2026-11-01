@@ -84,8 +84,15 @@ pub(crate) async fn user_info(
         .line("Created", &format!("<t:{created}:R>"));
     let Some(m) = member else {
         let banned = app.http.ban(gid, uid).await.is_ok();
+        let held: Option<(i64,)> =
+            sqlx::query_as("SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+                .bind(gid.get() as i64)
+                .bind(uid.get() as i64)
+                .fetch_optional(&app.pool)
+                .await?;
         return Ok(e
             .line("In Server", NO)
+            .line("Left While Quarantined", yes(held.is_some()))
             .line("Banned", yes(banned))
             .line("Bot", yes(user.bot))
             .build());
@@ -120,11 +127,18 @@ pub(crate) async fn user_info(
         .filter_map(|r| info.role_perms.get(r))
         .fold(0, |a, p| a | p);
     let level = app.level(gid, info.owner, uid).await?;
+    let accessories = format!(
+        "{} Avatar Decoration\n{} Banner\n{} Server Avatar",
+        yes(user.avatar_decoration_data.is_some()),
+        yes(user.banner.is_some()),
+        yes(m.avatar.is_some())
+    );
     Ok(e.inline("Suspicious Status:", &suspicious)
         .inline("Whitelist:", &whitelists)
         .inline("Warn Points:", &format!("`{points}`"))
         .inline("Dangerous Permissions:", &dangerous(perms))
         .inline("TommyBot Permissions:", &level_name(&level))
+        .inline("Account Accessories:", &accessories)
         .build())
 }
 

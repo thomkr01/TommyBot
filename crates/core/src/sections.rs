@@ -516,7 +516,7 @@ impl Default for MiscCfg {
             always_dm: false,
             delete_invocation: false,
             hide_staff_in_dms: false,
-            default_timeout_secs: 600,
+            default_timeout_secs: 0,
             ban_purge_days: 7,
             show_reason_on_auto: true,
             purge_last_100: false,

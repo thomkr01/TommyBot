@@ -1,11 +1,20 @@
 //! Slash definitions of the commands in `modcmds`.
 use twilight_model::application::{
     command::{Command, CommandType},
-    interaction::InteractionContextType,
+    interaction::{
+        application_command::{CommandDataOption, CommandOptionValue},
+        InteractionContextType,
+    },
 };
 use twilight_util::builder::command::{
     AttachmentBuilder, BooleanBuilder, CommandBuilder, IntegerBuilder, RoleBuilder, StringBuilder,
     SubCommandBuilder, UserBuilder,
+};
+
+use crate::{
+    modcmds::{ModCmd, MAX_SLOWMODE, SMALL},
+    purge,
+    slash::{int, role, string, user as user_opt},
 };
 
 pub fn definitions() -> Vec<Command> {
@@ -13,6 +22,11 @@ pub fn definitions() -> Vec<Command> {
     let reason = || StringBuilder::new("reason", "Reason for the case");
     let case = |req| {
         IntegerBuilder::new("case", "Case number")
+            .min_value(1)
+            .required(req)
+    };
+    let note_id = |req| {
+        IntegerBuilder::new("note_id", "Note number")
             .min_value(1)
             .required(req)
     };
@@ -121,16 +135,14 @@ pub fn definitions() -> Vec<Command> {
                     ),
             )
             .option(
-                SubCommandBuilder::new("view", "Show a member's latest notes")
-                    .option(user("Member")),
+                SubCommandBuilder::new("view", "Show the latest notes")
+                    .option(note_id(false))
+                    .option(UserBuilder::new("user", "Notes about this member"))
+                    .option(UserBuilder::new("mod", "Notes written by this moderator")),
             )
             .option(
                 SubCommandBuilder::new("modify", "Change a note")
-                    .option(
-                        IntegerBuilder::new("id", "Note number")
-                            .min_value(1)
-                            .required(true),
-                    )
+                    .option(note_id(true))
                     .option(
                         StringBuilder::new("msg", "The new text (5 to 500 characters)")
                             .min_length(5)
@@ -139,15 +151,17 @@ pub fn definitions() -> Vec<Command> {
                     ),
             )
             .option(
-                SubCommandBuilder::new("remove", "Remove one note").option(
-                    IntegerBuilder::new("id", "Note number")
-                        .min_value(1)
-                        .required(true),
-                ),
+                SubCommandBuilder::new("remove", "Remove one note")
+                    .option(note_id(true))
+                    .option(UserBuilder::new(
+                        "user",
+                        "Only if the note is about this member",
+                    )),
             )
             .option(
-                SubCommandBuilder::new("sweep", "Remove all notes of a member")
-                    .option(user("Member")),
+                SubCommandBuilder::new("sweep", "Remove notes in bulk, all without a filter")
+                    .option(UserBuilder::new("user", "Notes about this member"))
+                    .option(UserBuilder::new("mod", "Notes written by this moderator")),
             )
             .build(),
         chat("cases", "View or edit cases")
@@ -178,4 +192,102 @@ pub fn definitions() -> Vec<Command> {
             )
             .build(),
     ]
+}
+
+/// Slash options -> command plus the optional `reason`.
+pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option<String>), String> {
+    let u = || user_opt(o, "user").map(|u| u.get()).ok_or("missing user");
+    let case = |o| int(o, "case").map(|n| n as i32).ok_or("missing case");
+    let cmd = match name {
+        "unban" => ModCmd::Unban { user: u()? },
+        "hackban" => ModCmd::Hackban {
+            user: string(o, "user_id")
+                .and_then(|s| s.trim().parse().ok())
+                .filter(|id| *id >= SMALL)
+                .ok_or("`user_id` must be a numeric user id")?,
+        },
+        "untimeout" => ModCmd::Untimeout { user: u()? },
+        "unwarn" => ModCmd::Unwarn { case: case(o)? },
+        "quarantine" => ModCmd::Quarantine { user: u()? },
+        "unquarantine" => ModCmd::Unquarantine { user: u()? },
+        "verify" => ModCmd::Verify { user: u()? },
+        "sanitize" => ModCmd::Sanitize { user: u()? },
+        "purge" => ModCmd::Purge {
+            count: int(o, "number")
+                .ok_or("missing number")?
+                .clamp(1, purge::MAX as i64) as usize,
+            user: user_opt(o, "user").map(|u| u.get()),
+            from: None,
+            filters: string(o, "type")
+                .map(|t| purge::Filter::parse(t, string(o, "input")))
+                .transpose()?
+                .into_iter()
+                .chain(role(o, "role").map(purge::Filter::Role))
+                .collect(),
+        },
+        "slowmode" => ModCmd::Slowmode {
+            secs: int(o, "seconds")
+                .ok_or("missing seconds")?
+                .clamp(0, MAX_SLOWMODE as i64) as u16,
+            channels: vec![],
+        },
+        "notes" => {
+            let Some(CommandDataOption {
+                name,
+                value: CommandOptionValue::SubCommand(s),
+            }) = o.first()
+            else {
+                return Err("Pick a subcommand".into());
+            };
+            let u = || user_opt(s, "user").map(|u| u.get()).ok_or("missing user");
+            match name.as_str() {
+                "add" => ModCmd::NoteAdd {
+                    user: u()?,
+                    text: string(s, "msg").ok_or("missing msg")?.into(),
+                },
+                "view" => ModCmd::NoteList {
+                    user: user_opt(s, "user").map(|u| u.get()),
+                    id: int(s, "note_id"),
+                    by: user_opt(s, "mod").map(|u| u.get()),
+                },
+                "remove" => ModCmd::NoteRemove {
+                    id: int(s, "note_id").ok_or("missing note_id")?,
+                    user: user_opt(s, "user").map(|u| u.get()),
+                },
+                "modify" => ModCmd::NoteModify {
+                    id: int(s, "note_id").ok_or("missing note_id")?,
+                    text: string(s, "msg").ok_or("missing msg")?.into(),
+                },
+                "sweep" => ModCmd::NoteSweep {
+                    user: user_opt(s, "user").map(|u| u.get()),
+                    by: user_opt(s, "mod").map(|u| u.get()),
+                },
+                _ => return Err("Unknown subcommand".into()),
+            }
+        }
+        "cases" => {
+            let Some(CommandDataOption {
+                name,
+                value: CommandOptionValue::SubCommand(s),
+            }) = o.first()
+            else {
+                return Err("Pick a subcommand".into());
+            };
+            match name.as_str() {
+                "view" => ModCmd::CasesView {
+                    case: case(s).ok(),
+                    user: user_opt(s, "user").map(|u| u.get()),
+                    by: user_opt(s, "mod").map(|u| u.get()),
+                    kind: string(s, "type").map(String::from),
+                },
+                "modify" => ModCmd::CasesEdit {
+                    case: case(s)?,
+                    reason: string(s, "reason").ok_or("missing reason")?.into(),
+                },
+                _ => return Err("Unknown subcommand".into()),
+            }
+        }
+        _ => return Err("Unknown command".into()),
+    };
+    Ok((cmd, string(o, "reason").map(String::from)))
 }

@@ -13,7 +13,7 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tommybot_automod::{
-    discord_api::{rule_body, BotAction, DiscordAutomodCfg, RuleSpec},
+    discord_api::{rule_body, DiscordAutomodCfg, MentionScope, RuleSpec},
     lockdown::{kind_from, tshoot, Fix, LockKind, Overwrite, Problem, RoleInfo, Snapshot},
 };
 use tommybot_core::jobs;
@@ -358,6 +358,11 @@ async fn rules(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
             let mut v = json!(RuleSpec::from_discord(r));
             v["id"] = r["id"].clone();
             v["bot_actions"] = json!(r["id"].as_str().and_then(|id| mine.actions.get(id)));
+            if let Some(sc) = r["id"].as_str().and_then(|id| mine.scopes.get(id)) {
+                v["scope"] = json!(sc.scope);
+                v["scope_triggers"] = json!(sc.triggers);
+                v["scope_duration_s"] = json!(sc.duration_s);
+            }
             v
         })
         .collect();
@@ -385,7 +390,7 @@ async fn create_rule(
         )
         .await?;
     let id = made["id"].as_str().unwrap_or_default();
-    set_bot_actions(&st, &s, guild, id, &spec.bot_actions).await?;
+    set_bot_actions(&st, &s, guild, id, &spec).await?;
     audit(
         &st,
         &s,
@@ -401,16 +406,35 @@ async fn set_bot_actions(
     s: &Sess,
     guild: i64,
     rule: &str,
-    actions: &[BotAction],
+    spec: &RuleSpec,
 ) -> Result<(), ApiError> {
     let (version, mut config) = crate::store::current(&st.db, guild).await?;
-    let slot = &mut config["discord_automod"]["actions"];
-    if actions.is_empty() {
-        if slot.as_object_mut().and_then(|m| m.remove(rule)).is_none() {
-            return Ok(());
+    // Wick-style mention scopes live next to the bot actions; Discord's own scope is on the rule.
+    let scope = (spec.trigger == "mention" && matches!(spec.scope.as_str(), "user" | "server"))
+        .then(|| MentionScope {
+            scope: spec.scope.clone(),
+            triggers: spec.scope_triggers.clamp(1, 100),
+            duration_s: spec.scope_duration_s.clamp(1, 3600),
+        });
+    let mut changed = false;
+    for (key, value) in [
+        (
+            "actions",
+            (!spec.bot_actions.is_empty()).then(|| json!(spec.bot_actions)),
+        ),
+        ("scopes", scope.map(|s| json!(s))),
+    ] {
+        let slot = &mut config["discord_automod"][key];
+        match value {
+            Some(v) => {
+                slot[rule] = v;
+                changed = true;
+            }
+            None => changed |= slot.as_object_mut().and_then(|m| m.remove(rule)).is_some(),
         }
-    } else {
-        slot[rule] = json!(actions);
+    }
+    if !changed {
+        return Ok(());
     }
     let mut tx = st.db.begin().await?;
     crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
@@ -437,7 +461,7 @@ async fn update_rule(
     st.discord
         .call(Method::PATCH, &rule_path(guild, &rule)?, Some(b))
         .await?;
-    set_bot_actions(&st, &s, guild, &rule, &spec.bot_actions).await?;
+    set_bot_actions(&st, &s, guild, &rule, &spec).await?;
     audit(
         &st,
         &s,
@@ -493,7 +517,7 @@ async fn delete_rule(
     st.discord
         .call(Method::DELETE, &rule_path(guild, &rule)?, None)
         .await?;
-    set_bot_actions(&st, &s, guild, &rule, &[]).await?;
+    set_bot_actions(&st, &s, guild, &rule, &RuleSpec::default()).await?;
     audit(&st, &s, guild, "deleted a Discord AutoMod rule".into()).await?;
     Ok(Json(json!({"ok": true})))
 }

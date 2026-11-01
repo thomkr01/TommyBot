@@ -256,7 +256,11 @@ async fn report(app: &App, gid: Id<GuildMarker>, sum: &backup::Summary) -> Log {
         .inline("Webhooks", &format!("Deleted: `{}`", sum.webhooks_deleted))
         .inline(
             "Settings",
-            &format!("Server {}", if sum.settings { YES } else { NO }),
+            // Restores never touch TommyBot's own settings.
+            &format!(
+                "{ARROW} Server: {}\n{ARROW} TommyBot: {NO}",
+                if sum.settings { YES } else { NO }
+            ),
         )
 }
 

@@ -153,7 +153,7 @@ const RULE_KINDS: [(&str, &str, &str); 4] = [
 ];
 
 fn blank_rule(name: &str, trigger: &str) -> Value {
-    json!({"name": name, "enabled": true, "trigger": trigger, "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 20,
+    json!({"name": name, "enabled": true, "trigger": trigger, "block_message": true, "keywords": [], "allow": [], "presets": [1, 2, 3], "mention_limit": 20, "scope": "", "scope_triggers": 1, "scope_duration_s": 5,
         "custom_message": "", "alert_channel": "", "timeout_s": 0, "exempt_roles": [], "exempt_channels": [], "bot_actions": []})
 }
 
@@ -190,7 +190,14 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
                 <details><summary>"Need help?"</summary>
                     <p><code>"world"</code>" matches the whole word, "<code>"*world*"</code>" anywhere inside a word, "<code>"*world"</code>" at the end of a word and "<code>"world*"</code>" at the start."</p>
                 </details></Show>
-            <Show when=move || trigger() == "mention">{fld("mention_limit", "int", "mentions per message")}</Show>
+            <Show when=move || trigger() == "mention">{fld("mention_limit", "int", "mentions per message")}
+                <div class="row"><label>"Mention scope"</label>
+                    <select on:change=move |e| val.update(|v| v["scope"] = json!(event_target_value(&e)))>
+                        {[("", "Limit per message only"), ("discord", "Discord Mention Scope (detects mention raids)"), ("user", "TommyBot Mention Scope: per user"), ("server", "TommyBot Mention Scope: whole server")].into_iter().map(|(k, t)| view! { <option value=k selected=move || s(&val.get()["scope"]) == k>{t}</option> }).collect_view()}
+                    </select></div>
+                <Show when=move || matches!(s(&val.get()["scope"]).as_str(), "user" | "server")>
+                    {fld("scope_triggers", "int", "Triggers")}{fld("scope_duration_s", "int", "Trigger Duration (seconds)")}
+                </Show></Show>
             <Show when=move || trigger() == "preset"><div class="row"><label>"Presets"</label>
                 {[(1, "Profanity"), (2, "Sexual content"), (3, "Slurs")].into_iter().map(|(n, t)| view! { <label><input type="checkbox" prop:checked=move || val.get()["presets"].as_array().is_some_and(|a| a.contains(&json!(n)))
                     on:change=move |e| val.update(|v| { let mut p: Vec<i64> = v["presets"].as_array().map(|a| a.iter().filter_map(Value::as_i64).filter(|x| *x != n).collect()).unwrap_or_default(); if event_target_checked(&e) { p.push(n); } v["presets"] = json!(p); }) /> {t}</label> }).collect_view()}</div></Show>

@@ -105,7 +105,7 @@ pub(super) static STATICS: Module = Module {
         r!("6", "Logging Channel", "logging.fallback", Kind::Channel, |c| mentions(c.logging.fallback.map(|r| r.get()), "#")),
         r!("7", "Mod-Logging Channel", "logging.routes.mod_command", Kind::Channel, |c| mentions(c.logging.routes.get(&LogKind::ModCommand).map(|r| r.get()), "#")),
         r!("8", "Partnering Channels", "whitelist.partner_channels", Kind::Channels, |c| chans(&c.whitelist.partner_channels)),
-        dash!("10", "Trusted Admins"),
+        Row { code: "10", name: "Trusted Admins", path: "", kind: Kind::Users, get: |_| String::new() },
         dash!("11", "Extra Owners"),
         r!("12", "Verification Channel", "verification.channel", Kind::Channel, |c| mentions(c.verification.channel.map(|r| r.get()), "#")),
     ],
@@ -130,7 +130,10 @@ pub(super) static HEAT: Module = Module {
         r!("7d", "Multiplier Status", "automod.strike.multiply", Kind::Bool, |c| on(c.automod.strike.multiply)),
         r!("7e", "Multiplier Percentage", "automod.strike.multiplier_pct", Kind::Int(100, 1000), |c| format!("{}%", c.automod.strike.multiplier_pct)),
         r!("8", "Reset Heat On Timeout", "automod.strike.reset_heat_on_timeout", Kind::Bool, |c| on(c.automod.strike.reset_heat_on_timeout)),
-        dash!("9", "Heat Panic Mode"),
+        group!("9", "Heat Panic Mode"),
+        r!("9a", "Status", "panic.heat_algorithm", Kind::Bool, |c| on(c.panic.heat_algorithm)),
+        r!("9b", "Trigger", "panic.heat_executors", Kind::Int(1, 50), |c| format!("{} Raiders", c.panic.heat_executors)),
+        r!("9c", "Panic Duration", "panic.duration_secs", Kind::Secs, |c| embed::duration(c.panic.duration_secs as i64)),
         group!("10", "Auto Server Lockdown"),
         r!("10a", "Status", "automod.auto_lockdown.enabled", Kind::Bool, |c| on(c.automod.auto_lockdown.enabled)),
         r!("10b", "Mentions", "automod.auto_lockdown.mention_count", Kind::Int(1, 1000), |c| c.automod.auto_lockdown.mention_count.to_string()),
@@ -139,15 +142,20 @@ pub(super) static HEAT: Module = Module {
 };
 
 /// Wick's panel shows filters 6-9 in this order; the rest of the order is ours.
-static HFILTERS_ROWS: [Row; 56] = {
+static HFILTERS_ROWS: [Row; 58] = {
     let [a1, a2, a3, a4] = filter!("1", "Normal Message Heat", "regular", regular; base, "per message");
     let [b1, b2, b3, b4] = filter!("2", "Similar Message Repetition Heat", "similar", similar; similarity, "at full similarity");
     let [c1, c2, c3, c4] = filter!("3", "Mentions Heat", "mentions", mentions; per_mention, "per mention");
     let [d1, d2, d3, d4] = filter!("4", "Attachments Heat", "attachments", attachments; per_image, "per image");
     let [e1, e2, e3, e4] = filter!("5", "Advertisement Heat", "invites", invites; invite, "per invite");
     let [f1, f2, f3, f4] = filter!("6", "Malicious Websites Heat", "bad_sites", bad_sites; malicious, "per message");
+    let f5 = r!("6d", "Anti-Scam", "automod.filters.scam_links.enabled", Kind::Bool, |c| on(c.automod.filters.scam_links.enabled));
     let [g1, g2, g3, g4] = filter!("7", "Emojis Heat", "emojis", emojis; per_emoji, "per emoji");
-    let [h1, h2, h3, h4] = filter!("8", "Uppercase Characters Heat", "chars_upper", chars_upper; per_upper, "per uppercased character");
+    // Wick has one Message Characters filter; status and action follow the uppercase one, the lowercase one keeps rows 10a-10c.
+    let [_, h2, h3, _] = filter!("8", "Uppercase Characters Heat", "chars_upper", chars_upper; per_upper, "per uppercased character");
+    let h1 = group!("8", "Message Characters Heat");
+    let h4 = r!("8c", "LC Heat", "automod.heat.per_lower", Kind::Num(1.0), |c| format!("{} per lowercased character", pct(c.automod.heat.per_lower)));
+    let h5 = r!("8d", "UC Heat", "automod.heat.per_upper", Kind::Num(1.0), |c| format!("{} per uppercased character", pct(c.automod.heat.per_upper)));
     let [i1, i2, i3, i4] = filter!("9", "New Line Heat", "newlines", newlines; per_newline, "per newline");
     let [j1, j2, j3, j4] = filter!("10", "Lowercase Characters Heat", "chars_lower", chars_lower; per_lower, "per lowercased character");
     let [k1, k2, k3, k4] = filter!("11", "Inactive Channel Heat", "inactive_channel", inactive_channel; inactive_channel, "per message");
@@ -155,8 +163,8 @@ static HFILTERS_ROWS: [Row; 56] = {
     let [m1, m2, m3, m4] = filter!("13", "Words Blacklist Heat", "words.filter", words.filter; per_blacklisted_word, "per word");
     let [n1, n2, n3, n4] = filter!("14", "Suspicious Account Heat", "suspicion", suspicion; suspicious_account, "per message");
     [
-        a1, a2, a3, a4, b1, b2, b3, b4, c1, c2, c3, c4, d1, d2, d3, d4, e1, e2, e3, e4, f1, f2, f3, f4,
-        g1, g2, g3, g4, h1, h2, h3, h4, i1, i2, i3, i4, j1, j2, j3, j4, k1, k2, k3, k4, l1, l2, l3, l4,
+        a1, a2, a3, a4, b1, b2, b3, b4, c1, c2, c3, c4, d1, d2, d3, d4, e1, e2, e3, e4, f1, f2, f3, f4, f5,
+        g1, g2, g3, g4, h1, h2, h3, h4, h5, i1, i2, i3, i4, j1, j2, j3, j4, k1, k2, k3, k4, l1, l2, l3, l4,
         m1, m2, m3, m4, n1, n2, n3, n4,
     ]
 };
@@ -224,7 +232,7 @@ pub(super) static RESTORE: Module = Module {
     ],
 };
 
-static JOINGATE_ROWS: [Row; 26] = {
+static JOINGATE_ROWS: [Row; 27] = {
     let [a1, a2, a3] = gate_filter!("2", "No PfP Filter", no_avatar);
     let [b1, b2, b3] = gate_filter!("3", "Account Age Filter", account_age);
     let [c1, c2, c3] = gate_filter!("4", "Bot Addition Filter", unauthorized_bot);
@@ -233,19 +241,20 @@ static JOINGATE_ROWS: [Row; 26] = {
     let [f1, f2, f3] = gate_filter!("7", "Suspicious Accounts", suspicious);
     let [g1, g2, g3] = gate_filter!("8", "Username Filter", username_filter);
     [
-        r!("1", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
+        group!("1", "General"),
+        r!("1a", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
+        r!("1b", "DM Members", "joingate.dm_punished", Kind::Bool, |c| on(c.joingate.dm_punished)),
         a1, a2, a3, b1, b2, b3,
         r!("3c", "Minimum Age", "joingate.min_age_days", Kind::Int(1, 3650), |c| format!("{}d", c.joingate.min_age_days)),
         r!("3e", "Minimum Age (precise)", "joingate.min_age_override_ms", Kind::Ms, |c| ms(c.joingate.min_age_ms())),
         r!("3d", "Expose Minimum Age", "joingate.expose_min_age", Kind::Bool, |c| on(c.joingate.expose_min_age)),
         c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3,
-        r!("9", "DM Punished Members", "joingate.dm_punished", Kind::Bool, |c| on(c.joingate.dm_punished)),
     ]
 };
 
 pub(super) static JOINGATE: Module = Module {
     names: &["joingate", "jg"],
-    title: "Join Gate Panel:",
+    title: "JoinGate Panel:",
     per_page: 0,
     footer: "Username words: Dashboard",
     rows: &JOINGATE_ROWS,
@@ -273,7 +282,7 @@ pub(super) static JOINRAID: Module = Module {
         group!("8", "ID Flag"),
         r!("8a", "Status", "joinraid.id_flag_min", Kind::Switch("4", "null"), |c| on(raid(c).id_flag_min.is_some())),
         r!("8b", "Granularity", "joinraid.id_granularity", Kind::Choice(&[("adapt", "\"Adaptive\""), ("h", "\"Hour\""), ("d", "\"Day\""), ("m", "\"Month\"")]), |c| format!("{:?}", raid(c).id_granularity)),
-        r!("8c", "Margin", "joinraid.id_margin", Kind::Int(0, 24), |c| raid(c).id_margin.to_string()),
+        r!("8c", "Margin", "joinraid.id_margin_ms", Kind::Ms, |c| ms(raid(c).id_margin_ms)),
         r!("8d", "Minimum Matches", "joinraid.id_flag_min", Kind::Int(2, 500), |c| raid(c).id_flag_min.map_or(NO.into(), |n| n.to_string())),
     ],
 };
@@ -310,6 +319,7 @@ pub(super) static MISC: Module = Module {
         r!("2d", "Anonymous Mod", "misc.hide_staff_in_dms", Kind::Bool, |c| on(c.misc.hide_staff_in_dms)),
         r!("2e", "DM Targets", "misc.always_dm", Kind::Bool, |c| on(c.misc.always_dm)),
         r!("2f", "Display Reason On Auto Timeout", "misc.show_reason_on_auto", Kind::Bool, |c| on(c.misc.show_reason_on_auto)),
+        r!("2g", "Purge On Auto Timeout", "misc.purge_last_100", Kind::Bool, |c| on(c.misc.purge_last_100)),
         r!("2h", "Auto Delete Mod Cmd", "misc.delete_invocation", Kind::Bool, |c| on(c.misc.delete_invocation)),
         r!("2i", "Remove Main Roles On TO", "misc.remove_main_roles_on_timeout", Kind::Bool, |c| on(c.misc.remove_main_roles_on_timeout)),
         group!("3", "Warn Settings"),
@@ -348,4 +358,12 @@ pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE,
 
 pub fn module(name: &str) -> Option<&'static Module> {
     MODULES.iter().copied().find(|m| m.names.contains(&name))
+}
+
+/// Numbers an older panel used for a row that Wick numbers differently.
+pub(super) fn alias<'a>(m: &Module, code: &'a str) -> &'a str {
+    match (m.names[0], code) {
+        ("joingate", "9") => "1b",
+        (_, c) => c,
+    }
 }

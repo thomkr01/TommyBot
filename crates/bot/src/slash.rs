@@ -235,7 +235,7 @@ pub fn parse(
         }
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
         | "slowmode" | "cases" | "verify" | "sanitize" | "notes" => {
-            return modcmds::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
+            return crate::modslash::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
         }
         "revert" => {
             return Ok(Cmd::Revert {
@@ -547,9 +547,13 @@ async fn run(
             Ok(text)
         }
         Cmd::Lock { kind, duration_s } => {
-            crate::lockdown::command(app, gid, &actor, false, kind, duration_s).await
+            let text = crate::lockdown::command(app, gid, &actor, false, kind, duration_s).await?;
+            embed_unless_compact(app, gid, out, "Lock Result:", text).await
         }
-        Cmd::Unlock { kind } => crate::lockdown::command(app, gid, &actor, true, kind, None).await,
+        Cmd::Unlock { kind } => {
+            let text = crate::lockdown::command(app, gid, &actor, true, kind, None).await?;
+            embed_unless_compact(app, gid, out, "Unlock Result:", text).await
+        }
         Cmd::LockUpdate { text } => {
             let ch = i
                 .channel
@@ -579,6 +583,7 @@ async fn run(
             }
             let target = c.target().map(Id::new);
             let dm_name = c.dm_name();
+            let result_kind = c.result_kind();
             let text = modcmds::run(
                 app,
                 gid,
@@ -599,9 +604,35 @@ async fn run(
                 let who = (!hide).then_some(actor_id.get());
                 reply::dm(app, t, &reply::dm_text(dm_name, reason.as_deref(), who)).await;
             }
+            let compact = app.cfg(gid.get()).await?.misc.compact_replies;
+            let (text, embeds) = modcmds::reply_parts(
+                result_kind,
+                compact,
+                &[text],
+                reason.as_deref(),
+                actor_id.get(),
+            );
+            if !embeds.is_empty() {
+                *out = embeds;
+            }
             Ok(text)
         }
     }
+}
+
+/// Puts `text` in a result embed unless the server wants compact replies.
+async fn embed_unless_compact(
+    app: &App,
+    gid: Id<twilight_model::id::marker::GuildMarker>,
+    out: &mut Vec<twilight_model::channel::message::Embed>,
+    title: &str,
+    text: String,
+) -> Result<String> {
+    if app.cfg(gid.get()).await?.misc.compact_replies {
+        return Ok(text);
+    }
+    *out = reply::plain_embed(title, &text);
+    Ok(String::new())
 }
 
 #[cfg(test)]

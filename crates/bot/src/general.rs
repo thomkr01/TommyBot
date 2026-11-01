@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use tommybot_core::permits::Level;
-use tommybot_logging::embed::{self, Log, BLUE, GREEN, NO, YES};
+use tommybot_logging::embed::{self, Log, ARROW, BLUE, GREEN, NO, YES};
 use twilight_model::{
     application::{
         command::{Command, CommandType},
@@ -162,10 +162,16 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "hackban",
         &["hb"],
         "ban",
-        "hackban ID",
+        "hackban IDS [?r REASON] [?dm]",
         "Ban someone not in the server",
     ),
-    ("unban", &["ub"], "ban", "unban ID", "Lift a ban"),
+    (
+        "unban",
+        &["ub"],
+        "ban",
+        "unban MEMBERS [?r REASON]",
+        "Lift a ban",
+    ),
     (
         "kick",
         &["k"],
@@ -213,7 +219,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
     ),
     (
         "purge",
-        &["clear", "sweep", "p", "c"],
+        &["clear", "sweep", "p", "c", "botclear", "bc"],
         "purge",
         "purge [COUNT] [MEMBER]",
         "Delete messages",
@@ -378,6 +384,36 @@ fn lookup(
     CMDS.iter().find(|c| c.0 == word || c.1.contains(&word))
 }
 
+/// Average CPU use of this process since boot, from /proc (clock ticks at 100 Hz).
+fn cpu_percent(up_secs: i64) -> String {
+    let ticks = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            // The command name is in parentheses and may hold spaces: count fields after it.
+            let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+            Some(f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?)
+        });
+    match ticks {
+        Some(t) if up_secs > 0 => format!("{:.2}%", t / 100.0 / up_secs as f64 * 100.0),
+        _ => "unknown".into(),
+    }
+}
+
+/// `about`: page 1 the pitch, page 2 the version lines ("Nerdy Stats").
+pub fn about_page(page: usize) -> (Embed, usize) {
+    let page = page.min(1);
+    let e = if page == 0 {
+        Log::new("About TommyBot:", BLUE).text("A Rust moderation bot: anti-nuke, heat automod, join gate, join raid, verification and logs.")
+    } else {
+        let up = now_secs() - metrics::STARTED.load(std::sync::atomic::Ordering::Relaxed) as i64;
+        Log::new("About TommyBot [Nerdy Stats]:", BLUE)
+            .line("Version", &format!("`{}`", env!("CARGO_PKG_VERSION")))
+            .line("Uptime", &format!("`{}`", embed::duration(up)))
+            .line("Price", "Everything is free")
+    };
+    (e.footer(&format!("Page: {}/2", page + 1)).build(), 2)
+}
+
 /// One category per page, only the commands `level` may use.
 pub fn commands_page(level: &Level, prefix: &str, page: usize) -> (Embed, usize) {
     let page = page.min(CATEGORIES.len() - 1);
@@ -495,7 +531,7 @@ async fn ncases(app: &App, gid: Id<GuildMarker>, id: Option<&str>) -> Result<Emb
 }
 
 /// Drops this guild's caches so the next event reloads them.
-fn tshoot(app: &App, gid: Id<GuildMarker>) -> String {
+fn tshoot(app: &App, gid: Id<GuildMarker>) -> Embed {
     let started = Instant::now();
     let g = gid.get();
     app.invalidate_guild(gid);
@@ -510,15 +546,31 @@ fn tshoot(app: &App, gid: Id<GuildMarker>) -> String {
         .unwrap()
         .retain(|(guild, _), _| *guild != g);
     app.mentions.lock().unwrap().remove(&g);
-    format!(
-        "{YES} Decached heat\n{YES} Decached nuke heat\n{YES} Decached server and members\n{YES} Reloaded config\nTroubleshooting Finished! TommyBot has made some changes in `{:.2}ms`",
-        started.elapsed().as_secs_f64() * 1000.0
-    )
+    let lines = [
+        "Heat Panic Decache",
+        "Nuke Panic Decache",
+        "Members Decache",
+        "Server Decache",
+    ];
+    tshoot_embed(&lines.map(|l| format!("{YES} {l}")).join("\n"), started)
+}
+
+/// Wick's troubleshooting embed: result lines, then the finished block.
+fn tshoot_embed(lines: &str, started: Instant) -> Embed {
+    Log::new("TommyBot Troubleshooting:", BLUE)
+        .text(lines)
+        .text("Troubleshooting Finished!")
+        .text(&format!(
+            "*TommyBot has made some changes in `{:.2}ms`. If issues are still happening, ask in the support server.*",
+            started.elapsed().as_secs_f64() * 1000.0
+        ))
+        .build()
 }
 
 /// `tshoot lockdown`: main roles (or @everyone when there are none) get View Channel and Send Messages,
 /// every other role below the bot loses them.
-async fn tshoot_lockdown(app: &App, gid: Id<GuildMarker>) -> Result<String> {
+async fn tshoot_lockdown(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
+    let started = Instant::now();
     const BITS: u64 = (1 << 10) | (1 << 11);
     let cfg = app.cfg(gid.get()).await?;
     let info = app.guild_info(gid).await?;
@@ -546,10 +598,13 @@ async fn tshoot_lockdown(app: &App, gid: Id<GuildMarker>) -> Result<String> {
         }
     }
     app.invalidate_guild(gid);
-    Ok(match tweaked {
-        0 => "No roles needed changes. You are clear!".into(),
-        n => format!("{YES} {n} roles were tweaked"),
-    })
+    Ok(tshoot_embed(
+        &match tweaked {
+            0 => format!("{YES} No roles were found to not be complying with the lockdown system. You are clear!"),
+            n => format!("{YES} {n} roles were tweaked to comply with the lockdown system!"),
+        },
+        started,
+    ))
 }
 
 /// Handles the commands above and `COMMAND -h`; false for anything else.
@@ -694,15 +749,9 @@ async fn answer(
     let embed = |e| Ok((String::new(), Some(e), vec![]));
     match name {
         "about" => {
-            let up =
-                now_secs() - metrics::STARTED.load(std::sync::atomic::Ordering::Relaxed) as i64;
-            let e = Log::new("About TommyBot:", BLUE)
-                .text("A Rust moderation bot: anti-nuke, heat automod, join gate, join raid, verification and logs.")
-                .line("Version", &format!("`{}`", env!("CARGO_PKG_VERSION")))
-                .line("Uptime", &format!("`{}`", embed::duration(up)))
-                .line("Price", "Everything is free")
-                .build();
-            Ok((String::new(), Some(e), links(app)))
+            let (e, pages) = about_page(0);
+            let row = settings::page_row(invoker.get(), "about", 0, pages);
+            Ok((String::new(), Some(e), vec![row]))
         }
         "commands" => {
             let (e, pages) = commands_page(level, &pfx, 0);
@@ -713,25 +762,18 @@ async fn answer(
             ))
         }
         "help" => {
-            let e = Log::new("TommyBot Help Panel", BLUE)
-                .line(
-                    "Commands",
-                    &format!("`{pfx}commands` lists what you can use"),
-                )
-                .line(
-                    "One command",
-                    &format!("`{pfx}COMMAND -h` shows how it works"),
-                )
-                .line(
-                    "Settings",
-                    &format!("`{pfx}setup`, then `{pfx}heat`, `{pfx}an`, `{pfx}jg`..."),
-                )
+            let e = Log::new("TommyBot's Help Panel:", BLUE)
+                .text("🫴 **General Help:**")
+                .text(&format!("{ARROW} To view the commands you can use, do: `{pfx}commands`"))
+                .text(&format!("{ARROW} To see how one command works, do: `{pfx}COMMAND -h`"))
+                .text(&format!("{ARROW} To set things up, do: `{pfx}setup`, then `{pfx}heat`, `{pfx}an`, `{pfx}jg`..."))
+                .text(&format!("{ARROW} Quick Troubleshooting: `{pfx}tshoot`"))
                 .build();
             Ok((String::new(), Some(e), links(app)))
         }
         "invite" => {
             let e = Log::new("Invite TommyBot!", BLUE)
-                .text("Add TommyBot to your server with the button below.")
+                .text("Thank you for your interest in using TommyBot, get ready to maximize the security for your server and have the best moderation tools at your service!")
                 .build();
             Ok((String::new(), Some(e), links(app)))
         }
@@ -748,19 +790,28 @@ async fn answer(
                 .map_or("unknown".into(), |pages| {
                     format!("{} MB", pages * 4096 / 1_048_576)
                 });
+            let servers = app
+                .http
+                .current_user_application()
+                .await?
+                .model()
+                .await?
+                .approximate_guild_count
+                .map_or("unknown".into(), |n| n.to_string());
+            let gw = if gw == 0 {
+                "measuring".into()
+            } else {
+                format!("{gw}ms")
+            };
+            // One process is one shard.
+            let shard = format!(
+                "Latency: `{gw}` (API `{rest_ms}ms`)\nUptime: `{}`\nResources:\n  RAM: `{ram}`\n  CPU: `{}`\nSize:\n  Servers: `{servers}`",
+                embed::duration(up),
+                cpu_percent(up),
+            );
             embed(
                 Log::new("TommyBot Status:", GREEN)
-                    .line(
-                        "Gateway Latency",
-                        &if gw == 0 {
-                            "measuring".into()
-                        } else {
-                            format!("`{gw}ms`")
-                        },
-                    )
-                    .line("API Latency", &format!("`{rest_ms}ms`"))
-                    .line("Uptime", &format!("`{}`", embed::duration(up)))
-                    .line("RAM", &format!("`{ram}`"))
+                    .inline("🟢 Shard [0 -Current-]:", &shard)
                     .build(),
             )
         }
@@ -785,6 +836,7 @@ async fn answer(
                         "Join Raid",
                         sys(cfg.joinraid.as_ref().is_some_and(|r| r.enabled)),
                     )
+                    .line("Persistence", sys(cfg.misc.enforce_quarantine_perms))
                     .build(),
             )
         }
@@ -826,12 +878,14 @@ async fn answer(
             }
         }
         "ncases" => embed(ncases(app, gid, arg).await?),
-        "tshoot" if arg == Some("lockdown") => text(&if allowed(level, "owner") {
-            tshoot_lockdown(app, gid).await?
-        } else {
-            "Only the owner or an Extra Owner can run this".into()
-        }),
-        _ => text(&tshoot(app, gid)),
+        "tshoot" if arg == Some("lockdown") => {
+            if allowed(level, "owner") {
+                embed(tshoot_lockdown(app, gid).await?)
+            } else {
+                text("Only the owner or an Extra Owner can run this")
+            }
+        }
+        _ => embed(tshoot(app, gid)),
     }
 }
 

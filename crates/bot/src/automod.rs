@@ -1,9 +1,6 @@
 //! Message heat -> strikes -> timeouts, join gate and raid detection, mention-triggered lockdown.
 use anyhow::Result;
-use std::collections::{hash_map::Entry, HashMap};
-use tommybot_antinuke::{webhooks_to_delete, Webhook};
 use tommybot_automod::{
-    discord_api::BotAction,
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
     join::{account_created_ms, gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
@@ -21,10 +18,7 @@ use tommybot_logging::{
     Log, LogKind,
 };
 use twilight_model::{
-    gateway::payload::incoming::{
-        AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
-    },
-    guild::auto_moderation::AutoModerationActionType,
+    gateway::payload::incoming::{MemberAdd, MemberUpdate, MessageCreate},
     guild::Permissions,
     id::{
         marker::{GuildMarker, UserMarker},
@@ -240,10 +234,13 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !triggered {
         return Ok(());
     }
-    if m.webhook_id.is_some() {
+    if let Some(hook) = m.webhook_id {
+        if crate::webhooks::webhook_exempt(app, gid, hook, listed(&wl.spam)).await {
+            return Ok(());
+        }
         // A webhook is not a member: no strikes, remove the message and the freshly made hooks.
         app.http.delete_message(m.channel_id, m.id).await.ok();
-        return delete_new_webhooks(app, gid).await;
+        return crate::webhooks::delete_new_webhooks(app, gid).await;
     }
     crate::panic::note(app, gid, m.author.id, true).await?;
     let tripped = tripped_filter(&breakdown, f, bad_site);
@@ -543,42 +540,6 @@ pub async fn sync_discord_rule(app: std::sync::Arc<App>, guild: u64) {
     }
 }
 
-/// Deletes webhooks made in the last 10 minutes unless their owner is immune.
-async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Result<()> {
-    let mut hooks = vec![];
-    let mut immune: HashMap<u64, bool> = HashMap::new();
-    for h in app.http.guild_webhooks(gid).await?.models().await? {
-        // Hooks without an owner (integrations, channel follows) count as owner 0, never immune.
-        let owner = h.user.as_ref().map(|u| u.id);
-        if let Some(owner) = owner {
-            if let Entry::Vacant(e) = immune.entry(owner.get()) {
-                e.insert(app.is_immune(gid, owner).await?);
-            }
-        }
-        // Snowflake timestamp: ms since the Discord epoch in the top bits.
-        let created_at = ((h.id.get() >> 22) + 1_420_070_400_000) / 1000;
-        hooks.push(Webhook {
-            id: h.id.get(),
-            owner: owner.map_or(0, |o| o.get()),
-            created_at: created_at as i64,
-        });
-    }
-    let cfg = app.cfg(gid.get()).await?;
-    let doomed = webhooks_to_delete(
-        &hooks,
-        now_secs() - 600,
-        |o| immune.get(&o).copied().unwrap_or(false),
-        |id| cfg.whitelist.spam.webhooks.iter().any(|w| w.get() == id),
-    );
-    for id in &doomed {
-        app.http.delete_webhook(Id::new(*id)).await.ok();
-    }
-    let log = Log::new("Webhooks Deleted", RED)
-        .line("Count", &format!("`{}`", doomed.len()))
-        .line("Reason", "Webhook spam");
-    send_log(app, gid.get(), LogKind::AutoMod, log).await
-}
-
 pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     let (gid, user) = (m.guild_id, &m.member.user);
     let cfg = app.cfg(gid.get()).await?;
@@ -608,6 +569,16 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         }
     }
     let name = cure(&user.name);
+    // Without an audit entry the bot counts as authorised.
+    let adder = if user.bot {
+        crate::welcome::bot_adder(app, gid, user.id).await
+    } else {
+        None
+    };
+    let authorized = match adder {
+        Some(a) => app.is_immune(gid, a).await.unwrap_or(true),
+        None => true,
+    };
     let j = Joiner {
         invite: invite.as_ref().map(|i| i.0.as_str()),
         id: user.id.get(),
@@ -617,7 +588,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         bot_verified: user
             .public_flags
             .is_some_and(|f| f.contains(UserFlags::VERIFIED_BOT)),
-        added_by_authorized: !user.bot || bot_added_by_authorized(app, gid, user.id).await,
+        added_by_authorized: authorized,
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     verify::on_join(app, gid, user.id, suspicious, user.bot).await;
@@ -630,6 +601,18 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             "join gate".into()
         };
         punish(app, &cfg, gid, j.id, action, &why).await?;
+        // The bot filter also punishes whoever added it.
+        if let (Some(adder), true) = (adder, hits.iter().any(|h| h.0 == Filter::UnauthorizedBot)) {
+            punish(
+                app,
+                &cfg,
+                gid,
+                adder.get(),
+                action,
+                "adding a bot without permission",
+            )
+            .await?;
+        }
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
         join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
@@ -750,25 +733,7 @@ async fn join_raid(
     Ok(())
 }
 
-/// Bot-side actions for a native rule; the rule's block-message event fires once per hit.
-pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Result<()> {
-    if e.action.kind != AutoModerationActionType::BlockMessage {
-        return Ok(());
-    }
-    let gid = e.guild_id;
-    let cfg = app.cfg(gid.get()).await?;
-    let Some(actions) = cfg.discord_automod.actions.get(&e.rule_id.to_string()) else {
-        return Ok(());
-    };
-    for &a in actions {
-        if let Err(err) = native_action(app, &cfg, e, a).await {
-            tracing::warn!(?err, ?a, "native rule action failed");
-        }
-    }
-    Ok(())
-}
-
-async fn warn_actions(
+pub(crate) async fn warn_actions(
     app: &App,
     cfg: &GuildCfg,
     gid: Id<GuildMarker>,
@@ -780,63 +745,6 @@ async fn warn_actions(
             .user("Member", uid.get())
             .line("Result", &text);
         send_log(app, gid.get(), LogKind::AutoMod, log).await?;
-    }
-    Ok(())
-}
-
-async fn native_action(
-    app: &App,
-    cfg: &GuildCfg,
-    e: &AutoModerationActionExecution,
-    action: BotAction,
-) -> Result<()> {
-    const WHY: &str = "discord automod rule";
-    let (gid, uid) = (e.guild_id, e.user_id);
-    if app.whitelisted(gid, uid, "automod").await? {
-        return Ok(());
-    }
-    match action {
-        BotAction::Report => {
-            let log = Log::new("Discord AutoMod Report", ORANGE)
-                .user("Member", uid.get())
-                .line("Rule", &format!("`{}`", e.rule_id))
-                .text(&format!("{ARROW} **Content:**"))
-                .diff(Some(&e.content), None);
-            send_log(app, gid.get(), LogKind::AutoMod, log).await?;
-        }
-        BotAction::Warn => {
-            cases::create(
-                &app.pool,
-                NewCase {
-                    guild_id: gid.get() as i64,
-                    kind: "warn",
-                    user_id: uid.get() as i64,
-                    mod_id: app.me.get() as i64,
-                    reason: Some(WHY),
-                    points: cfg.misc.warn_base_points,
-                    duration_s: None,
-                    proof: None,
-                    inverse: None,
-                },
-            )
-            .await?;
-            warn_actions(app, cfg, gid, uid).await?;
-        }
-        BotAction::Timeout => {
-            timeout(
-                &app.http,
-                gid,
-                uid,
-                cfg.misc.timeout_secs() as i64,
-                "Automod",
-            )
-            .await?
-        }
-        BotAction::Kick => punish(app, cfg, gid, uid.get(), Action::Kick, WHY).await?,
-        BotAction::Ban => punish(app, cfg, gid, uid.get(), Action::Ban, WHY).await?,
-        BotAction::Lock => {
-            lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?;
-        }
     }
     Ok(())
 }
@@ -853,14 +761,6 @@ pub(crate) fn count_emojis(s: &str) -> usize {
 /// Names with fancy Unicode, lookalikes and leetspeak folded to plain letters, for the username filter.
 pub(crate) fn cure(name: &str) -> String {
     decancer::cure!(name).map_or_else(|_| name.to_string(), |c| c.to_string())
-}
-
-/// Whether whoever added the bot is Owner/EO/TA; when the audit log has no entry the bot counts as authorized.
-async fn bot_added_by_authorized(app: &App, gid: Id<GuildMarker>, bot: Id<UserMarker>) -> bool {
-    match crate::welcome::bot_adder(app, gid, bot).await {
-        Some(adder) => app.is_immune(gid, adder).await.unwrap_or(true),
-        None => true,
-    }
 }
 
 /// Re-runs the username filter when a member renames, if the gate asks for it.
@@ -906,7 +806,7 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     .await
 }
 
-async fn punish(
+pub(crate) async fn punish(
     app: &App,
     cfg: &GuildCfg,
     gid: Id<GuildMarker>,

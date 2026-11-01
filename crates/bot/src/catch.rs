@@ -53,6 +53,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
         dm: c.dm,
         soft,
         compact: true,
+        ..Default::default()
     };
     // The bot acts with owner rights, so the usual permit and hierarchy checks still refuse
     // owners and members above the bot's role; that refusal is logged, never silent.

@@ -10,7 +10,7 @@ use tommybot_logging::{
 };
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
-    application::interaction::application_command::{CommandDataOption, CommandOptionValue},
+    channel::message::Embed,
     gateway::payload::incoming::MessageCreate,
     id::{
         marker::{ChannelMarker, GuildMarker, UserMarker},
@@ -25,9 +25,7 @@ use crate::{
     confirm::{self, Action, Pending},
     events::send_log,
     prefix::Parsed,
-    purge,
-    slash::{int, role, string, user},
-    targets,
+    purge, reply, targets,
 };
 
 /// The clicked message of a purge menu: From Here purges it and the newer ones below it, Until Here
@@ -68,6 +66,9 @@ pub enum ModCmd {
     },
     Slowmode {
         secs: u16,
+        /// Empty means the current channel.
+        #[serde(default)]
+        channels: Vec<u64>,
     },
     CasesView {
         case: Option<i32>,
@@ -99,24 +100,31 @@ pub enum ModCmd {
         user: u64,
         text: String,
     },
+    /// Every filter is optional; none lists the latest notes.
     NoteList {
-        user: u64,
+        user: Option<u64>,
+        id: Option<i64>,
+        by: Option<u64>,
     },
     NoteRemove {
         id: i64,
+        /// Only if the note is about this member.
+        user: Option<u64>,
     },
     NoteModify {
         id: i64,
         text: String,
     },
+    /// Without filters: every note of the server.
     NoteSweep {
-        user: u64,
+        user: Option<u64>,
+        by: Option<u64>,
     },
 }
 
 /// Numbers below this are case numbers / counts, not snowflakes.
-const SMALL: u64 = 1_000_000;
-const MAX_SLOWMODE: u64 = 21_600;
+pub(crate) const SMALL: u64 = 1_000_000;
+pub(crate) const MAX_SLOWMODE: u64 = 21_600;
 const NOTE_MIN: usize = 5;
 const NOTE_MAX: usize = 500;
 
@@ -168,9 +176,40 @@ impl ModCmd {
             } => format!("purge {count} messages of <@{u}>"),
             Self::Purge { count, .. } => format!("purge {count} messages"),
             Self::Hackban { user } => format!("ban <@{user}>"),
-            Self::NoteSweep { user } => format!("remove all notes of <@{user}>"),
+            Self::NoteSweep { user: Some(u), .. } => format!("remove all notes of <@{u}>"),
+            Self::NoteSweep { by: Some(m), .. } => format!("remove all notes written by <@{m}>"),
+            Self::NoteSweep { .. } => "remove all notes".into(),
             _ => self.perm().into(),
         }
+    }
+
+    /// Wick takes several members for these; the prefix runs one copy per member.
+    fn with_user(&self, u: u64) -> Option<Self> {
+        Some(match self {
+            Self::Unban { .. } => Self::Unban { user: u },
+            Self::Untimeout { .. } => Self::Untimeout { user: u },
+            Self::Quarantine { .. } => Self::Quarantine { user: u },
+            Self::Unquarantine { .. } => Self::Unquarantine { user: u },
+            Self::Verify { .. } => Self::Verify { user: u },
+            Self::Sanitize { .. } => Self::Sanitize { user: u },
+            _ => return None,
+        })
+    }
+
+    /// Key of the result embed (`reply::result_embeds`); None keeps plain text (views, notes, case edits).
+    pub(crate) fn result_kind(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Hackban { .. } => "ban",
+            Self::Unban { .. } => "unban",
+            Self::Untimeout { .. } => "untimeout",
+            Self::Quarantine { .. } => "quarantine",
+            Self::Unquarantine { .. } => "unquarantine",
+            Self::Verify { .. } => "verify",
+            Self::Sanitize { .. } => "sanitize",
+            Self::Purge { .. } => "purge",
+            Self::Slowmode { .. } => "slowmode",
+            _ => return None,
+        })
     }
 
     /// The member the permit/hierarchy check applies to.
@@ -185,6 +224,21 @@ impl ModCmd {
             | Self::Sanitize { user } => Some(user),
             _ => None,
         }
+    }
+}
+
+/// Text and embeds for a finished command: result embeds, or Wick's count lines when compact.
+pub(crate) fn reply_parts(
+    kind: Option<&str>,
+    compact: bool,
+    texts: &[String],
+    reason: Option<&str>,
+    actor: u64,
+) -> (String, Vec<Embed>) {
+    match kind {
+        Some(k) if !compact => (String::new(), reply::result_embeds(k, texts, reason, actor)),
+        Some(k) => (reply::summary(k, true, texts, reason, actor), vec![]),
+        None => (texts.join("\n"), vec![]),
     }
 }
 
@@ -237,7 +291,13 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                 .collect(),
         },
         "slowmode" => {
-            let off = p.names.iter().any(|n| n == "off");
+            let channels: Vec<u64> = p
+                .channels
+                .iter()
+                .copied()
+                .chain(p.targets.iter().copied().filter(|t| *t >= SMALL))
+                .collect();
+            let off = p.names.iter().any(|n| n == "off") || !channels.is_empty();
             let secs = p
                 .duration_s
                 .map(|d| d as u64)
@@ -248,6 +308,7 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                     .filter(|s| *s <= MAX_SLOWMODE)
                     .ok_or("Give a delay up to 6h (e.g. 10s) or `off`")?
                     as u16,
+                channels,
             }
         }
         "note" | "notes" => {
@@ -257,9 +318,19 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
                     user: need_user()?,
                     text: text.ok_or("Give the note with ?r")?,
                 },
-                Some("remove") => ModCmd::NoteRemove { id: case()? as i64 },
-                Some("sweep") => ModCmd::NoteSweep { user: need_user()? },
-                _ => ModCmd::NoteList { user: need_user()? },
+                Some("remove") => ModCmd::NoteRemove {
+                    id: case()? as i64,
+                    user,
+                },
+                Some("sweep") => ModCmd::NoteSweep {
+                    user: Some(need_user()?),
+                    by: None,
+                },
+                _ => ModCmd::NoteList {
+                    user,
+                    id: None,
+                    by: None,
+                },
             }
         }
         "cases" | "case" if p.names.first().is_some_and(|n| n == "modify") => ModCmd::CasesEdit {
@@ -271,7 +342,7 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
             case: small.map(|n| n as i32),
             user,
             by: None,
-            kind: case_kind(p.kind.as_deref())?,
+            kind: crate::modview::case_kind(p.kind.as_deref())?,
         },
         "warns" => ModCmd::CasesView {
             case: None,
@@ -283,30 +354,10 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
             case: None,
             user: None,
             by: Some(need_user()?),
-            kind: case_kind(p.kind.as_deref())?,
+            kind: crate::modview::case_kind(p.kind.as_deref())?,
         },
         _ => return Err("Unknown command".into()),
     })
-}
-
-/// Wick's `?t` codes (B, UB, K, TIMEOUT, WA, Q, UQ) and plain kind names, singular or plural.
-fn case_kind(t: Option<&str>) -> Result<Option<String>, String> {
-    let Some(t) = t else { return Ok(None) };
-    let kind = match t.trim_end_matches('s') {
-        "b" | "ban" => "ban",
-        "ub" | "unban" => "unban",
-        "k" | "kick" => "kick",
-        "t" | "to" | "timeout" | "mute" => "timeout",
-        "wa" | "warn" => "warn",
-        "q" | "quarantine" => "quarantine",
-        "uq" | "unquarantine" => "unquarantine",
-        _ => {
-            return Err(format!(
-                "Unknown case type `{t}`: use b, ub, k, timeout, wa, q or uq"
-            ))
-        }
-    };
-    Ok(Some(kind.into()))
 }
 
 /// Prefix entry for the commands above; the caller only routes known names here.
@@ -325,34 +376,67 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
         p.reason = Some(p.names.join(" ")).filter(|r| !r.is_empty());
         p.names.clear();
     }
-    let mut resolved = None;
-    let name = p.names.iter().find(|n| {
+    let multi = matches!(
+        p.command.as_str(),
+        "unban" | "untimeout" | "quarantine" | "unquarantine" | "verify" | "sanitize"
+    );
+    let name_word = |n: &&String| {
         !matches!(
             n.as_str(),
             "modify" | "view" | "off" | "add" | "remove" | "sweep" | "list"
         )
-    });
+    };
     // `editc 3 new reason`: the words are the reason, not a member.
     let free_text = matches!(p.command.as_str(), "editc" | "editreason");
-    if let (Some(n), true, false) = (name, p.targets.iter().all(|t| *t < SMALL), free_text) {
-        match targets::resolve(app, gid, n).await? {
-            Ok(id) => resolved = Some(id.get()),
+    let mut users: Vec<u64> = p.targets.iter().copied().filter(|t| *t >= SMALL).collect();
+    let mut failed = vec![];
+    let lookups: Vec<&String> = match (multi, free_text, users.is_empty()) {
+        (true, ..) => p.names.iter().filter(name_word).collect(),
+        (false, false, true) if p.targets.iter().all(|t| *t < SMALL) => {
+            p.names.iter().find(name_word).into_iter().collect()
+        }
+        _ => vec![],
+    };
+    for n in lookups {
+        let found = if p.command == "unban" {
+            targets::resolve_banned(app, gid, n).await?
+        } else {
+            targets::resolve(app, gid, n).await?
+        };
+        match found {
+            Ok(id) => users.push(id.get()),
+            Err(e) if multi => failed.push(e),
             Err(e) => return commands::say(app, msg, &e).await,
         }
     }
-    let text = match from_prefix(&p, resolved) {
-        Err(e) => e,
-        Ok(cmd) => {
-            if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
-                let action = Action::Ext {
-                    cmd,
-                    channel: msg.channel_id,
-                    reason: p.reason,
-                    proof: None,
-                };
-                return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action))
-                    .await;
-            }
+    let cmd = match from_prefix(&p, users.first().copied()) {
+        Ok(c) => c,
+        Err(e) => {
+            let text = if failed.is_empty() {
+                e
+            } else {
+                failed.join("\n")
+            };
+            return commands::say(app, msg, &text).await;
+        }
+    };
+    if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
+        let action = Action::Ext {
+            cmd,
+            channel: msg.channel_id,
+            reason: p.reason,
+            proof: None,
+        };
+        return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action)).await;
+    }
+    let kind = cmd.result_kind();
+    let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
+    let cmds = if cmds.is_empty() { vec![cmd] } else { cmds };
+    let mut texts = vec![];
+    for cmd in cmds {
+        // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
+        let level = app.level(gid, owner, msg.author.id).await?;
+        texts.push(
             run(
                 app,
                 gid,
@@ -367,10 +451,19 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             .unwrap_or_else(|e| {
                 tracing::warn!(?e, "mod command failed");
                 format!("Command failed: {}", crate::confirm::why(&e))
-            })
-        }
-    };
-    commands::say(app, msg, &text).await
+            }),
+        );
+    }
+    texts.extend(failed);
+    let compact = app.cfg(gid.get()).await?.misc.compact_replies || p.flags.compact;
+    let (text, embeds) = reply_parts(
+        kind,
+        compact,
+        &texts,
+        p.reason.as_deref(),
+        msg.author.id.get(),
+    );
+    commands::say_embeds(app, msg, &text, &embeds).await
 }
 
 /// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text.
@@ -411,7 +504,7 @@ pub async fn run(
                 user,
                 by,
                 kind,
-            } => return view_cases(app, g, case, user, by, kind).await,
+            } => return crate::modview::view_cases(app, g, case, user, by, kind).await,
             ModCmd::NoteAdd { user, text } => {
                 if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
                     return Ok(format!(
@@ -447,11 +540,16 @@ pub async fn run(
                     _ => format!("Note #{id} updated"),
                 });
             }
-            ModCmd::NoteList { user } => return view_notes(app, g, user).await,
-            ModCmd::NoteRemove { id } => {
-                let n = sqlx::query("DELETE FROM notes WHERE guild_id=$1 AND id=$2")
-                    .bind(g)
-                    .bind(id)
+            ModCmd::NoteList { user, id, by } => {
+                return crate::modview::view_notes(app, g, user, id, by).await
+            }
+            ModCmd::NoteRemove { id, user } => {
+                let n = sqlx::query(
+                    "DELETE FROM notes WHERE guild_id=$1 AND id=$2 AND ($3::bigint IS NULL OR user_id=$3)",
+                )
+                .bind(g)
+                .bind(id)
+                .bind(user.map(|u| u as i64))
                     .execute(&app.pool)
                     .await?
                     .rows_affected();
@@ -460,14 +558,17 @@ pub async fn run(
                     _ => format!("Removed note #{id}"),
                 });
             }
-            ModCmd::NoteSweep { user } => {
-                let n = sqlx::query("DELETE FROM notes WHERE guild_id=$1 AND user_id=$2")
-                    .bind(g)
-                    .bind(user as i64)
-                    .execute(&app.pool)
-                    .await?
-                    .rows_affected();
-                return Ok(format!("Removed {n} notes of <@{user}>"));
+            ModCmd::NoteSweep { user, by } => {
+                let n = sqlx::query(
+                    "DELETE FROM notes WHERE guild_id=$1 AND ($2::bigint IS NULL OR user_id=$2) AND ($3::bigint IS NULL OR author_id=$3)",
+                )
+                .bind(g)
+                .bind(user.map(|u| u as i64))
+                .bind(by.map(|u| u as i64))
+                .execute(&app.pool)
+                .await?
+                .rows_affected();
+                return Ok(format!("Removed {n} notes"));
             }
             ModCmd::CasesEdit { case, reason } => {
                 let done =
@@ -519,8 +620,10 @@ pub async fn run(
                 ("unban", user, None, None, format!("Unbanned <@{user}>"))
             }
             ModCmd::Hackban { user } => {
+                let secs = app.cfg(gid.get()).await?.misc.purge_secs();
                 app.http
                     .create_ban(gid, Id::new(user))
+                    .delete_message_seconds(secs)
                     .reason(&audit)
                     .await?;
                 let inv = json!({"op":"unban","user":user});
@@ -584,7 +687,18 @@ pub async fn run(
             }
             ModCmd::Verify { user } => {
                 let cfg = app.cfg(gid.get()).await?;
-                if cfg.verification.roles.is_empty() {
+                // Wick's verify also ends a quarantine.
+                let held: Option<(i64,)> = sqlx::query_as(
+                    "SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2",
+                )
+                .bind(g)
+                .bind(user as i64)
+                .fetch_optional(&app.pool)
+                .await?;
+                if held.is_some() {
+                    antinuke::run_inverse(app, gid, &Inverse::Unquarantine { user }).await?;
+                }
+                if cfg.verification.roles.is_empty() && held.is_none() {
                     return Ok("Set the verification roles on the dashboard first".into());
                 }
                 crate::verify::grant(app, gid, Id::new(user), &cfg.verification).await?;
@@ -598,7 +712,7 @@ pub async fn run(
                     .model()
                     .await?;
                 let name = m.nick.or(m.user.global_name).unwrap_or(m.user.name);
-                let clean = sanitized(&name);
+                let clean = crate::modview::sanitized(&name);
                 if clean == name {
                     return Ok(format!("<@{user}> already has a clean name"));
                 }
@@ -631,13 +745,20 @@ pub async fn run(
                     format!("Deleted {n} messages"),
                 )
             }
-            ModCmd::Slowmode { secs } => {
-                app.http
-                    .update_channel(channel)
-                    .rate_limit_per_user(secs)
-                    .reason(&audit)
-                    .await?;
-                let note = format!("{secs}s in <#{channel}>");
+            ModCmd::Slowmode { secs, channels } => {
+                let channels = match channels.as_slice() {
+                    [] => vec![channel.get()],
+                    c => c.to_vec(),
+                };
+                for c in &channels {
+                    app.http
+                        .update_channel(Id::new(*c))
+                        .rate_limit_per_user(secs)
+                        .reason(&audit)
+                        .await?;
+                }
+                let list: Vec<_> = channels.iter().map(|c| format!("<#{c}>")).collect();
+                let note = format!("{secs}s in {}", list.join(" "));
                 (
                     "slowmode",
                     actor_id.get(),
@@ -683,179 +804,6 @@ pub async fn run(
     Ok(format!("Case #{case_no}: {reply}{hint}"))
 }
 
-/// Fancy Unicode folded to plain letters (Wick: 𝓽𝓲𝓶𝓶𝔂 -> timmy), then leading symbols trimmed.
-fn sanitized(name: &str) -> String {
-    let cured = if name.is_ascii() {
-        name.to_string()
-    } else {
-        // Symbols would cure to lookalike letters (⚡ -> s), so only letters and digits go in.
-        let letters: String = name
-            .chars()
-            .filter(|c| c.is_ascii() || c.is_alphanumeric())
-            .collect();
-        crate::automod::cure(&letters)
-    };
-    let ascii: String = cured
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .collect();
-    let s = ascii
-        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
-        .trim_end();
-    if s.is_empty() {
-        "Moderated Nickname".into()
-    } else {
-        s.into()
-    }
-}
-
-type CaseRow = (i32, String, i64, i64, Option<String>, bool, i64);
-
-fn fmt_case((no, kind, user, moderator, reason, active, at): &CaseRow) -> String {
-    format!(
-        "`#{no}` {kind}{} <@{user}> by <@{moderator}> <t:{at}:R>: {}",
-        if *active { "" } else { " (inactive)" },
-        reason.as_deref().unwrap_or("no reason")
-    )
-}
-
-/// One case by number, or the 10 latest (optionally of one user, by one moderator, of one kind).
-async fn view_cases(
-    app: &App,
-    g: i64,
-    case: Option<i32>,
-    user: Option<u64>,
-    by: Option<u64>,
-    kind: Option<String>,
-) -> Result<String> {
-    let rows: Vec<CaseRow> = sqlx::query_as(
-        "SELECT case_no, kind, user_id, mod_id, reason, active, EXTRACT(EPOCH FROM created_at)::bigint
-         FROM cases WHERE guild_id=$1 AND ($2::int IS NULL OR case_no=$2) AND ($3::bigint IS NULL OR user_id=$3)
-         AND ($4::bigint IS NULL OR mod_id=$4) AND ($5::text IS NULL OR kind=$5)
-         ORDER BY case_no DESC LIMIT 10",
-    )
-    .bind(g)
-    .bind(case)
-    .bind(user.map(|u| u as i64))
-    .bind(by.map(|u| u as i64))
-    .bind(kind)
-    .fetch_all(&app.pool)
-    .await?;
-    Ok(if rows.is_empty() {
-        "No matching cases".into()
-    } else {
-        rows.iter().map(fmt_case).collect::<Vec<_>>().join("\n")
-    })
-}
-
-async fn view_notes(app: &App, g: i64, user: u64) -> Result<String> {
-    let rows: Vec<(i64, i64, String, i64)> = sqlx::query_as(
-        "SELECT id, author_id, text, EXTRACT(EPOCH FROM created_at)::bigint FROM notes
-         WHERE guild_id=$1 AND user_id=$2 ORDER BY id DESC LIMIT 10",
-    )
-    .bind(g)
-    .bind(user as i64)
-    .fetch_all(&app.pool)
-    .await?;
-    Ok(if rows.is_empty() {
-        format!("No notes for <@{user}>")
-    } else {
-        rows.iter()
-            .map(|(id, by, text, at)| format!("`#{id}` by <@{by}> <t:{at}:R>: {text}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
-}
-
-/// Slash options -> command plus the optional `reason`.
-pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option<String>), String> {
-    let u = || user(o, "user").map(|u| u.get()).ok_or("missing user");
-    let case = |o| int(o, "case").map(|n| n as i32).ok_or("missing case");
-    let cmd = match name {
-        "unban" => ModCmd::Unban { user: u()? },
-        "hackban" => ModCmd::Hackban {
-            user: string(o, "user_id")
-                .and_then(|s| s.trim().parse().ok())
-                .filter(|id| *id >= SMALL)
-                .ok_or("`user_id` must be a numeric user id")?,
-        },
-        "untimeout" => ModCmd::Untimeout { user: u()? },
-        "unwarn" => ModCmd::Unwarn { case: case(o)? },
-        "quarantine" => ModCmd::Quarantine { user: u()? },
-        "unquarantine" => ModCmd::Unquarantine { user: u()? },
-        "verify" => ModCmd::Verify { user: u()? },
-        "sanitize" => ModCmd::Sanitize { user: u()? },
-        "purge" => ModCmd::Purge {
-            count: int(o, "number")
-                .ok_or("missing number")?
-                .clamp(1, purge::MAX as i64) as usize,
-            user: user(o, "user").map(|u| u.get()),
-            from: None,
-            filters: string(o, "type")
-                .map(|t| purge::Filter::parse(t, string(o, "input")))
-                .transpose()?
-                .into_iter()
-                .chain(role(o, "role").map(purge::Filter::Role))
-                .collect(),
-        },
-        "slowmode" => ModCmd::Slowmode {
-            secs: int(o, "seconds")
-                .ok_or("missing seconds")?
-                .clamp(0, MAX_SLOWMODE as i64) as u16,
-        },
-        "notes" => {
-            let Some(CommandDataOption {
-                name,
-                value: CommandOptionValue::SubCommand(s),
-            }) = o.first()
-            else {
-                return Err("Pick a subcommand".into());
-            };
-            let u = || user(s, "user").map(|u| u.get()).ok_or("missing user");
-            match name.as_str() {
-                "add" => ModCmd::NoteAdd {
-                    user: u()?,
-                    text: string(s, "msg").ok_or("missing msg")?.into(),
-                },
-                "view" => ModCmd::NoteList { user: u()? },
-                "remove" => ModCmd::NoteRemove {
-                    id: int(s, "id").ok_or("missing id")?,
-                },
-                "modify" => ModCmd::NoteModify {
-                    id: int(s, "id").ok_or("missing id")?,
-                    text: string(s, "msg").ok_or("missing msg")?.into(),
-                },
-                "sweep" => ModCmd::NoteSweep { user: u()? },
-                _ => return Err("Unknown subcommand".into()),
-            }
-        }
-        "cases" => {
-            let Some(CommandDataOption {
-                name,
-                value: CommandOptionValue::SubCommand(s),
-            }) = o.first()
-            else {
-                return Err("Pick a subcommand".into());
-            };
-            match name.as_str() {
-                "view" => ModCmd::CasesView {
-                    case: case(s).ok(),
-                    user: user(s, "user").map(|u| u.get()),
-                    by: user(s, "mod").map(|u| u.get()),
-                    kind: string(s, "type").map(String::from),
-                },
-                "modify" => ModCmd::CasesEdit {
-                    case: case(s)?,
-                    reason: string(s, "reason").ok_or("missing reason")?.into(),
-                },
-                _ => return Err("Unknown subcommand".into()),
-            }
-        }
-        _ => return Err("Unknown command".into()),
-    };
-    Ok((cmd, string(o, "reason").map(String::from)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,9 +836,28 @@ mod tests {
             })
         );
         assert!(pf("purge 5000", None).is_err());
-        assert_eq!(pf("slowmode 10s", None), Ok(ModCmd::Slowmode { secs: 10 }));
-        assert_eq!(pf("slowmode off", None), Ok(ModCmd::Slowmode { secs: 0 }));
+        assert_eq!(
+            pf("slowmode 10s", None),
+            Ok(ModCmd::Slowmode {
+                secs: 10,
+                channels: vec![]
+            })
+        );
+        assert_eq!(
+            pf("slowmode off", None),
+            Ok(ModCmd::Slowmode {
+                secs: 0,
+                channels: vec![]
+            })
+        );
         assert!(pf("slowmode 7h", None).is_err());
+        assert_eq!(
+            pf("sm <#5000000> <#6000000> 1h", None),
+            Ok(ModCmd::Slowmode {
+                secs: 3600,
+                channels: vec![5_000_000, 6_000_000]
+            })
+        );
         assert_eq!(
             pf("cases modify 3 ?r typo", None),
             Ok(ModCmd::CasesEdit {
@@ -945,6 +912,35 @@ mod tests {
     }
 
     #[test]
+    fn multi_target_and_purge_aliases() {
+        let cmd = ModCmd::Unban { user: 1 };
+        assert_eq!(cmd.with_user(2), Some(ModCmd::Unban { user: 2 }));
+        assert_eq!(
+            ModCmd::Slowmode {
+                secs: 1,
+                channels: vec![]
+            }
+            .with_user(2),
+            None
+        );
+        let big = 123_456_789_012_345_678u64;
+        let c = pf(&format!("bc 20 {big}"), None).unwrap();
+        let ModCmd::Purge { filters, .. } = c else {
+            panic!()
+        };
+        assert_eq!(filters, vec![purge::Filter::Bots]);
+        assert_eq!(
+            purge::Filter::parse("-sus", None),
+            Ok(purge::Filter::Suspicious)
+        );
+        assert_eq!(purge::Filter::parse("@", None), Ok(purge::Filter::Mentions));
+        assert_eq!(
+            purge::Filter::parse("=", Some("Hi")),
+            Ok(purge::Filter::Equals("hi".into()))
+        );
+    }
+
+    #[test]
     fn note_prefix() {
         let big = 123_456_789_012_345_678u64;
         assert_eq!(
@@ -955,33 +951,34 @@ mod tests {
             })
         );
         assert!(pf(&format!("note add {big}"), None).is_err()); // text required
-        assert_eq!(pf("note remove 4", None), Ok(ModCmd::NoteRemove { id: 4 }));
+        assert_eq!(
+            pf("note remove 4", None),
+            Ok(ModCmd::NoteRemove { id: 4, user: None })
+        );
         assert_eq!(
             pf(&format!("note {big}"), None),
-            Ok(ModCmd::NoteList { user: big })
+            Ok(ModCmd::NoteList {
+                user: Some(big),
+                id: None,
+                by: None
+            })
         );
-        assert_eq!(ModCmd::NoteList { user: 1 }.perm(), "notes_view");
+        assert_eq!(
+            ModCmd::NoteList {
+                user: None,
+                id: None,
+                by: None
+            }
+            .perm(),
+            "notes_view"
+        );
     }
 
     #[test]
-    fn sanitizes_names() {
-        assert_eq!(sanitized("!!!Bob"), "Bob");
-        assert_eq!(sanitized("  .1ｂｏｂ the Builder"), "1bob the builder");
-        assert_eq!(sanitized("𝓽𝓲𝓶𝓶𝔂"), "timmy");
-        assert_eq!(sanitized("Ann-Marie 2"), "Ann-Marie 2");
-        assert_eq!(sanitized("⚡⚡"), "Moderated Nickname");
+    fn dehoist_alias() {
         assert_eq!(
             pf("dehoist 5000000", None),
             Ok(ModCmd::Sanitize { user: 5_000_000 })
-        );
-    }
-
-    #[test]
-    fn case_line() {
-        let row = (3, "warn".to_string(), 9, 8, None, false, 100);
-        assert_eq!(
-            fmt_case(&row),
-            "`#3` warn (inactive) <@9> by <@8> <t:100:R>: no reason"
         );
     }
 }

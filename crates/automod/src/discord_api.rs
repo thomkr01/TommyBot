@@ -163,10 +163,44 @@ pub enum BotAction {
     Lock,
 }
 
+/// Wick's "Mention Scope" for a mention rule: the bot only runs the rule's actions once a member
+/// (`user`) or the whole server (`server`) hit the rule `triggers` times within `duration_s`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct MentionScope {
+    pub scope: String,
+    pub triggers: u32,
+    pub duration_s: u32,
+}
+
+impl Default for MentionScope {
+    fn default() -> Self {
+        Self {
+            scope: "user".into(),
+            triggers: 1,
+            duration_s: 5,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct DiscordAutomodCfg {
     pub actions: std::collections::HashMap<String, Vec<BotAction>>,
+    /// Rule id -> its Wick-style mention scope.
+    pub scopes: std::collections::HashMap<String, MentionScope>,
+}
+
+/// Records a rule hit at `now` (seconds) and says whether the scope's trigger count is reached;
+/// the hits are cleared when it is.
+pub fn scope_tripped(hits: &mut Vec<i64>, now: i64, s: &MentionScope) -> bool {
+    hits.retain(|t| now - t < i64::from(s.duration_s));
+    hits.push(now);
+    let tripped = hits.len() >= s.triggers.max(1) as usize;
+    if tripped {
+        hits.clear();
+    }
+    tripped
 }
 
 #[derive(Debug, Default, Deserialize, serde::Serialize)]
@@ -180,6 +214,11 @@ pub struct RuleSpec {
     /// 1 profanity, 2 sexual content, 3 slurs.
     pub presets: Vec<u8>,
     pub mention_limit: u32,
+    /// Mention rules: "discord" (Discord's mention raid detection), "user" or "server" (bot-side
+    /// scope), anything else a plain per-message limit.
+    pub scope: String,
+    pub scope_triggers: u32,
+    pub scope_duration_s: u32,
     pub block_message: bool,
     pub custom_message: String,
     pub alert_channel: String,
@@ -223,6 +262,11 @@ impl RuleSpec {
                 })
                 .unwrap_or_default(),
             mention_limit: meta["mention_total_limit"].as_u64().unwrap_or(0) as u32,
+            scope: if meta["mention_raid_protection_enabled"].as_bool() == Some(true) {
+                "discord".into()
+            } else {
+                String::new()
+            },
             exempt_roles: strs(&v["exempt_roles"]),
             exempt_channels: strs(&v["exempt_channels"]),
             ..Default::default()
@@ -258,7 +302,8 @@ pub fn rule_body(r: &RuleSpec) -> Result<Value> {
         ),
         "mention" => (
             5,
-            json!({ "mention_total_limit": r.mention_limit.clamp(1, 50) }),
+            json!({ "mention_total_limit": r.mention_limit.clamp(1, 50),
+                    "mention_raid_protection_enabled": r.scope == "discord" }),
         ),
         other => bail!("unknown trigger {other:?}"),
     };
@@ -329,6 +374,20 @@ fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mention_scope_counts_triggers_in_the_window() {
+        let s = MentionScope {
+            scope: "user".into(),
+            triggers: 2,
+            duration_s: 5,
+        };
+        let mut hits = vec![];
+        assert!(!scope_tripped(&mut hits, 100, &s));
+        assert!(!scope_tripped(&mut hits, 106, &s)); // first hit expired
+        assert!(scope_tripped(&mut hits, 108, &s));
+        assert!(hits.is_empty());
+    }
 
     #[test]
     fn retry_after_reads_the_body_and_is_capped() {
