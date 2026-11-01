@@ -25,6 +25,7 @@ use twilight_model::{
         AutoModerationActionExecution, MemberAdd, MemberUpdate, MessageCreate,
     },
     guild::auto_moderation::AutoModerationActionType,
+    guild::Permissions,
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -69,6 +70,21 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let listed =
         |l: &WhitelistList| l.covers(m.author.id, roles, m.channel_id, category, m.webhook_id);
     let partner = wl.partner_channels.contains(&m.channel_id);
+    // Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
+    let dangerous = !cfg.misc.staff_only_permitted && {
+        const BITS: Permissions = Permissions::ADMINISTRATOR
+            .union(Permissions::KICK_MEMBERS)
+            .union(Permissions::BAN_MEMBERS)
+            .union(Permissions::MANAGE_CHANNELS)
+            .union(Permissions::MANAGE_GUILD)
+            .union(Permissions::MANAGE_MESSAGES)
+            .union(Permissions::MANAGE_ROLES)
+            .union(Permissions::MANAGE_WEBHOOKS);
+        let info = app.guild_info(gid).await?;
+        roles
+            .iter()
+            .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
+    };
     let now = now_ms();
     let content = m.content.as_str();
     let f = &am.filters;
@@ -135,7 +151,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         suspicious_account: m.author.avatar.is_none()
             || now - account_created_ms(m.author.id.get()) < cfg.joingate.min_age_ms(),
         whitelist: Whitelist {
-            spam: partner || listed(&wl.spam),
+            spam: partner || dangerous || listed(&wl.spam),
             mention_spam: listed(&wl.mentions),
             advertising: partner || listed(&wl.invites),
             everyone: partner || listed(&wl.everyone),
@@ -245,22 +261,34 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .collect();
         reply::purge_ids(app, &others).await;
     }
-    if am.strike.enabled {
-        if cfg.misc.show_reason_on_auto {
-            reply::dm(
-                app,
-                m.author.id,
-                "You were timed out by automod: message spam",
-            )
-            .await;
-        }
-        timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
-    }
     let reason = if act.purge {
         "Message spam (strike cap)"
     } else {
         tripped.map_or("Message spam", |t| t.1)
     };
+    if am.strike.enabled {
+        let why = if cfg.misc.show_reason_on_auto {
+            format!(": {reason}")
+        } else {
+            String::new()
+        };
+        reply::dm(
+            app,
+            m.author.id,
+            &format!("You were timed out by automod{why}"),
+        )
+        .await;
+        timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
+        auto_case(
+            app,
+            gid,
+            m.author.id,
+            "timeout",
+            reason,
+            Some(act.timeout_ms / 1000),
+        )
+        .await?;
+    }
     let log = Log::new(&format!("*{} has been timed out!*", m.author.name), ORANGE)
         .line("Reason", &format!("*{reason}*"))
         .user("Member", m.author.id.get())
@@ -366,6 +394,32 @@ fn tripped_filter<'a>(
     })
 }
 
+/// The case an automod punishment leaves on the cases page, filed by the bot.
+async fn auto_case(
+    app: &App,
+    gid: Id<GuildMarker>,
+    uid: Id<UserMarker>,
+    kind: &str,
+    reason: &str,
+    duration_s: Option<i64>,
+) -> Result<()> {
+    cases::create(
+        &app.pool,
+        NewCase {
+            guild_id: gid.get() as i64,
+            kind,
+            user_id: uid.get() as i64,
+            mod_id: app.me.get() as i64,
+            reason: Some(reason),
+            points: 0,
+            duration_s,
+            inverse: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 /// A filter's own action replaces the strike system: no strike is recorded.
 async fn filter_action(
     app: &App,
@@ -402,12 +456,17 @@ async fn filter_action(
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        FilterAction::Timeout => timeout(&app.http, gid, uid, secs).await?,
+        FilterAction::Timeout => {
+            timeout(&app.http, gid, uid, secs).await?;
+            auto_case(app, gid, uid, "timeout", factor, Some(secs)).await?;
+        }
         FilterAction::Kick => {
             app.http.remove_guild_member(gid, uid).await?;
+            auto_case(app, gid, uid, "kick", factor, None).await?;
         }
         FilterAction::Ban => {
             app.http.create_ban(gid, uid).await?;
+            auto_case(app, gid, uid, "ban", factor, None).await?;
         }
     }
     send_log(

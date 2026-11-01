@@ -84,13 +84,19 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
 
 impl GuildCfg {
     pub(crate) fn parse(cfg: &Value) -> Self {
+        let lockdown: LockdownCfg = section(cfg, "lockdown");
+        let mut verification: VerificationCfg = section(cfg, "verification");
+        // Verified members get the Statics main roles unless verification names its own.
+        if verification.roles.is_empty() {
+            verification.roles = lockdown.main_roles.clone();
+        }
         Self {
             logging: section(cfg, "logging"),
             antinuke: section(cfg, "antinuke"),
             automod: section(cfg, "automod"),
             joingate: section(cfg, "joingate"),
             joinraid: section(cfg, "joinraid"),
-            lockdown: section(cfg, "lockdown"),
+            lockdown,
             lockdown_prefs: section(cfg, "lockdown"),
             discord_automod: section(cfg, "discord_automod"),
             panic: section(cfg, "panic"),
@@ -98,7 +104,7 @@ impl GuildCfg {
             misc: section(cfg, "misc"),
             appeals: section(cfg, "appeals"),
             whitelist: section(cfg, "whitelist"),
-            verification: section(cfg, "verification"),
+            verification,
             tickets: section(cfg, "tickets"),
             catch: section(cfg, "catch"),
         }

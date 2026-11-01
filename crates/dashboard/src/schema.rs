@@ -577,6 +577,10 @@ pub fn schema() -> Vec<Value> {
             "Minimum account age",
         ),
         ti(
+            fg("Account age", "min_age_override_ms", "int"),
+            "Minimum account age in milliseconds (minutes to days, empty uses the days above)",
+        ),
+        ti(
             fg("Account age", "expose_min_age", "bool"),
             "Tell punished members the minimum age in the DM",
         ),
@@ -773,7 +777,7 @@ pub fn schema() -> Vec<Value> {
         ),
         hp(
             ti(
-                dv(fg("General", "replace_roles", "bool"), true),
+                dv(fg("General", "replace_roles", "bool"), false),
                 "Set autoroles instead of adding them",
             ),
             "On a pass the member's roles are replaced by the verification roles.",

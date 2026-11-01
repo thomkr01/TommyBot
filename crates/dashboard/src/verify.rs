@@ -28,7 +28,7 @@ fn gate(cfg: &Value, have_keys: bool) -> Result<bool, &'static str> {
     if v["roles"].as_array().is_none_or(|r| r.is_empty()) {
         return Err("This server has no verification roles set.");
     }
-    if third && !have_keys {
+    if !have_keys {
         return Err("The captcha is not configured on this bot. Ask the server staff.");
     }
     Ok(have_keys)
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn gate_follows_mode_roles_and_keys() {
         let cfg = |mode, roles: Value| json!({"verification": {"enabled": true, "mode": mode, "roles": roles}});
-        assert_eq!(gate(&cfg("Web", json!(["1"])), false), Ok(false));
+        assert!(gate(&cfg("Web", json!(["1"])), false).is_err());
         assert_eq!(gate(&cfg("Web", json!(["1"])), true), Ok(true));
         assert!(gate(&cfg("ThirdParty", json!(["1"])), false).is_err());
         assert_eq!(gate(&cfg("ThirdParty", json!(["1"])), true), Ok(true));

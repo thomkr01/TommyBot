@@ -87,6 +87,8 @@ pub struct GateCfg {
     pub no_avatar: GateFilter,
     pub account_age: GateFilter,
     pub min_age_days: u32,
+    /// Minimum age in ms (`jg 3c 3d`, minutes to days); wins over `min_age_days`.
+    pub min_age_override_ms: Option<i64>,
     /// Tell a punished member the minimum age in the DM (`jg 3d`).
     pub expose_min_age: bool,
     pub unauthorized_bot: GateFilter,
@@ -160,6 +162,7 @@ impl Default for GateCfg {
             no_avatar: GateFilter::default(),
             account_age: GateFilter::default(),
             min_age_days: 7,
+            min_age_override_ms: None,
             expose_min_age: false,
             unauthorized_bot: GateFilter::default(),
             unverified_bot: GateFilter::default(),
@@ -177,7 +180,8 @@ impl Default for GateCfg {
 impl GateCfg {
     /// The configured minimum account age; also the "young account" limit of Suspicious while the age filter is off.
     pub fn min_age_ms(&self) -> i64 {
-        i64::from(self.min_age_days) * DAY_MS
+        self.min_age_override_ms
+            .unwrap_or(i64::from(self.min_age_days) * DAY_MS)
     }
 
     pub fn name_matches(&self, name: &str) -> bool {
@@ -653,7 +657,7 @@ impl Default for VerifyCfg {
             time_limit_ms: 120_000,
             on_fail: FailAction::Nothing,
             quarantine_on_join: false,
-            replace_roles: true,
+            replace_roles: false,
             show_notes: true,
             regen_ms: None,
             captcha: CaptchaCfg::default(),
