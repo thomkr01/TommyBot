@@ -44,7 +44,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
             let member = if c["staff"] == true { format!("{member}, Admins and Moderators roles with their permits") } else { member };
             let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
-            msg.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine}", role("quarantine_role")));
+            msg.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
         }) });
     };
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
@@ -104,7 +104,7 @@ pub fn Ring(pct: Signal<usize>, #[prop(default = None)] color: Option<&'static s
 const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
     ("automod", "Auto Mod", "Anti Spam, Anti Advertising, Anti Phishing and all the message filters.", true, false),
     ("antinuke", "Anti Nuke", "The system that monitors your staff members and guards your server away from getting nuked.", true, true),
-    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true, true),
+    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true, false),
     ("joinraid", "Join Raid", "The advanced system that monitors your server joins and reacts if a raid is targeting your server.", true, true),
     ("verification", "Verification", "TommyBot's verification gate that your new members need to pass in order to get access to your server.", true, false),
 ];
@@ -250,8 +250,8 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let has_key = RwSignal::new(false);
     let key = RwSignal::new(String::new());
+    let qr = RwSignal::new(String::new());
     let shown = RwSignal::new(false);
-    let claim = RwSignal::new(String::new());
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
     spawn_local(async move {
@@ -263,11 +263,10 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let g = guild.clone();
     let regen = move |_| {
         let g = g.clone();
-        run_act(async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await }, msg, need, move |v| { key.set(s(&v["key"])); has_key.set(true); });
-    };
-    let claim_it = move |_| {
-        let (g, k) = (guild.clone(), claim.get_untracked());
-        run_act(async move { api("POST", "/api/rescue/claim", Some(json!({"guild_id": g, "key": k.trim()}))).await }, msg, need, move |_| msg.set("Claimed.".into()));
+        run_act(async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await }, msg, need, move |v| {
+            key.set(s(&v["key"])); has_key.set(true);
+            qr.set(qrcode::QrCode::new(v["uri"].as_str().unwrap_or("")).map(|q| q.render::<qrcode::render::svg::Color>().min_dimensions(200, 200).build()).unwrap_or_default());
+        });
     };
     view! {
         <div class="card">
@@ -278,14 +277,38 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 <div class="row"><pre class:blur=move || !shown.get()>{move || key.get()}</pre>
                     <button class="danger" on:click=move |_| shown.update(|v| *v = !*v)>{move || if shown.get() { "Hide" } else { "Show" }}</button>
                     <button class="ghost" on:click=move |_| { if let Some(w) = web_sys::window() { let _ = w.navigator().clipboard().write_text(&key.get_untracked()); } }>"Copy"</button></div>
-                <ul class="checks warn"><li>"View this rescue key alone!"</li><li>"Anyone with this rescue key can get dangerous TommyBot permissions."</li><li>"This rescue key is used ONLY when you lose physical owner account access."</li><li>"It grants TommyBot owner permissions, not Discord ownership."</li></ul>
+                <p><b>"Or scan this with Google Authenticator or Authy and use its 6-digit code instead of the key:"</b></p>
+                <div class="qr" class:blur=move || !shown.get() inner_html=move || qr.get()></div>
+                <ul class="checks warn"><li>"View this rescue key alone!"</li><li>"Never share a screenshot of this QR code."</li><li>"Anyone with this rescue key can get dangerous TommyBot permissions."</li><li>"This rescue key is used ONLY when you lose physical owner account access."</li><li>"It grants TommyBot owner permissions, not Discord ownership."</li></ul>
             </Show>
         </div>
-        <div class="card">
-            <b>"Claim ownership with a key"</b>
-            <div class="row"><input placeholder="Rescue key" prop:value=claim on:input=move |e| claim.set(event_target_value(&e)) /><button on:click=claim_it>"Claim"</button></div>
-        </div>
         <p>{move || msg.get()}</p>
+        <StepUp need enrolled />
+    }
+}
+
+/// "Lost control over TommyBot in a server?": claims Extra Owner with the rescue key or the
+/// authenticator's 6-digit code. Works from the Servers page, before any server is open.
+#[component]
+pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
+    let (open, guild, secret) = (RwSignal::new(false), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let claim = move |_| {
+        let (g, k) = (guild.get_untracked(), secret.get_untracked());
+        let k = k.trim().to_string();
+        let body = if k.len() == 6 && k.chars().all(|c| c.is_ascii_digit()) { json!({"guild_id": g, "code": k}) } else { json!({"guild_id": g, "key": k}) };
+        run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.set("Claimed. Refresh your servers.".into()));
+    };
+    view! {
+        <a class="danger" href="#/" on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</a>
+        <Show when=move || open.get()>
+            <div class="card">
+                <h2>"RESCUE PROCESS"</h2>
+                <p class="muted">"You have lost access to your physical owner account. Enter the server ID and either the rescue key or the 6-digit code from your authenticator."</p>
+                <div class="row"><input placeholder="Server ID" prop:value=guild on:input=move |e| guild.set(event_target_value(&e)) /><input placeholder="Rescue key or 6-digit code" prop:value=secret on:input=move |e| secret.set(event_target_value(&e)) /><button on:click=claim>"CONFIRM"</button></div>
+                <p>{move || msg.get()}</p>
+            </div>
+        </Show>
         <StepUp need enrolled />
     }
 }
@@ -317,7 +340,27 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
             <a class:on=sub == "essential" href=format!("#/{guild}/logging/{tab}/essential")>"essential"</a>
             <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
         </div>
+        {(tab == "wick").then(|| view! { <RouteNote guild=guild.clone() customize=sub == "customize" /> })}
         <Section guild=guild.clone() name="logging".to_string() part enrolled />
+    }
+}
+
+/// Wick's note under Wick Logs listing the types that have their own channel, and the empty state on
+/// the customize tab.
+#[component]
+fn RouteNote(guild: String, customize: bool) -> impl IntoView {
+    let moved = RwSignal::new(None::<Vec<String>>);
+    spawn_local(async move {
+        if let Ok(v) = api("GET", &format!("/api/guilds/{guild}/config"), None).await {
+            let routes = v["config"]["logging"]["routes"].as_object().cloned().unwrap_or_default();
+            let mut names: Vec<String> = routes.iter().filter(|(k, r)| *k != "mod_command" && !r.is_null()).map(|(k, _)| k.replace('_', " ")).collect();
+            names.sort();
+            moved.set(Some(names));
+        }
+    });
+    view! {
+        {move || moved.get().filter(|n| !n.is_empty() && !customize).map(|n| view! { <p class="info">{format!("There are some types that won't be logged here as you have custom logs set below, these types are: [{}]. All other logs (besides modlogs) will still go to this channel.", n.join(", "))}</p> })}
+        {move || moved.get().filter(|n| n.is_empty() && customize).map(|_| view! { <p class="muted">"There are no customizable log channels set, add your own."</p> })}
     }
 }
 

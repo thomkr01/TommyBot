@@ -33,16 +33,16 @@ fn alias(cmd: &str) -> (&str, Option<&str>) {
         "lockc" | "clock" => ("lock", Some("c")),
         "serverlock" | "slock" | "locks" | "lockserver" | "lockchannels" => ("lock", Some("sc")),
         "ul" => ("unlock", None),
-        "bcreate" | "bsave" | "btake" | "createbackup" => ("backups", Some("create")),
+        "lockupdate" | "updatel" | "locku" => ("lock", Some("update")),
+        "sweep" | "clear" | "p" | "c" => ("purge", None),
+        "san" | "sanitise" | "dehoist" => ("sanitize", None),
+        "sm" => ("slowmode", None),
+        "backup" | "bcreate" | "bsave" | "btake" | "createbackup" => ("backups", Some("take")),
         "bload" | "bapply" | "loadbackup" => ("backups", Some("load")),
         "bdel" | "bdelete" | "deletebackup" | "delbackup" | "backupdelete" => {
             ("backups", Some("delete"))
         }
         "iclear" | "imgclear" | "ipurge" | "imgp" | "imgpurge" | "ic" => ("backups", Some("clear")),
-        "lockupdate" | "updatel" | "locku" => ("lock", Some("update")),
-        "sweep" | "clear" | "p" | "c" => ("purge", None),
-        "san" | "sanitise" | "dehoist" => ("sanitize", None),
-        "sm" => ("slowmode", None),
         c => (c, None),
     }
 }

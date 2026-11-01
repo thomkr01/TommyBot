@@ -6,7 +6,7 @@ use tommybot_antinuke::{panic_end_plan, panic_plan, PanicStep};
 use tommybot_automod::lockdown::LockKind;
 use tommybot_core::{jobs, sections::PanicCfg};
 use tommybot_logging::{
-    embed::{ALERT, ARROW, DONE, NO, YES},
+    embed::{self, ALERT, ARROW, DONE, NO, YES},
     Log, LogKind,
 };
 use twilight_model::{
@@ -25,6 +25,19 @@ use crate::{
     events::{send_log, send_log_pinging},
     lockdown,
 };
+
+/// True while heat panic is on for the guild and `user` is one of its raiders.
+pub fn is_raider(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
+    let mut m = app.heat_raiders.lock().unwrap();
+    match m.get(&gid.get()) {
+        Some((_, until)) if *until <= crate::app::now_secs() => {
+            m.remove(&gid.get());
+            false
+        }
+        Some((set, _)) => set.contains(&user.get()),
+        None => false,
+    }
+}
 
 /// Counts `user` towards panic mode (a quarantined nuker, or with `heat` an automod heat trip)
 /// and starts it when enough distinct accounts hit the window. No-op while panic mode runs.
@@ -45,15 +58,33 @@ pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: b
     if executors == 0 || app.panic_runs.lock().unwrap().contains_key(&gid.get()) {
         return Ok(());
     }
-    let tripped = {
+    let (tripped, mut raiders) = {
         let mut t = tracker.lock().unwrap();
         t.window = Duration::from_secs(cfg.window_secs);
         t.executors = executors;
-        t.record(gid.get(), user.get(), Instant::now())
+        let now = Instant::now();
+        let raiders = t.involved(gid.get(), now);
+        (t.record(gid.get(), user.get(), now), raiders)
     };
-    if tripped {
-        start(app, gid, &cfg).await?;
+    if !tripped {
+        return Ok(());
     }
+    if !heat {
+        return start(app, gid, &cfg).await;
+    }
+    // Heat panic: every message from these accounts is deleted and timed out until it ends.
+    raiders.insert(user.get());
+    let until = crate::app::now_secs() + cfg.duration_secs as i64;
+    let log = Log::new("Heat Panic Mode Triggered!", ALERT).text(&format!(
+        "{ARROW} {} raiders will be timed out on every message for {}.",
+        raiders.len(),
+        embed::duration(cfg.duration_secs as i64)
+    ));
+    app.heat_raiders
+        .lock()
+        .unwrap()
+        .insert(gid.get(), (raiders, until));
+    send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
     Ok(())
 }
 
@@ -157,12 +188,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             PanicStep::LockModCommands | PanicStep::QuarantineInvolved => {}
             PanicStep::LoadLatestBackup => {
                 let log = match backup::restore_latest(app, gid).await {
-                    Ok(Some(n)) => Log::new("Panic Mode Report:", DONE)
-                        .section("Backup System Report:")
-                        .text(&format!(
-                            "{YES} **Backup System loaded the recent backup successfully!**"
-                        ))
-                        .line("Changes", &format!("`{n}`")),
+                    Ok(Some(sum)) => report(app, gid, &sum).await,
                     Ok(None) => Log::new("Panic Mode Report:", ALERT)
                         .section("Backup System Report:")
                         .text(&format!("{NO} **There is no backup to load.**")),
@@ -186,6 +212,52 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             .text(&format!("{YES} **The server has been locked down.**")),
     )
     .await
+}
+
+/// The green "Panic Mode Report:" embed: latest nuke case, who was quarantined and what the
+/// backup restore changed.
+async fn report(app: &App, gid: Id<GuildMarker>, sum: &backup::Summary) -> Log {
+    let case: Option<(String, Value)> = sqlx::query_as(
+        "SELECT case_id, data FROM nuke_incidents WHERE guild_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await
+    .unwrap_or_default();
+    let mut log = Log::new("Panic Mode Report:", DONE);
+    if let Some((id, data)) = &case {
+        log = log.text(&format!("› CASE: `{id}`"));
+        let who = data["quarantined"].as_array().cloned().unwrap_or_default();
+        log = log.text(&format!(
+            "🧍 Members Quarantined: {} {YES} | 0 {NO}",
+            who.len()
+        ));
+        for u in who.iter().filter_map(Value::as_u64) {
+            let frags = data["fragments"][u.to_string()].as_u64().unwrap_or(0);
+            log = log.text(&format!(
+                "{ARROW} {} [{frags} fragments] 🧍",
+                embed::user(u)
+            ));
+        }
+    }
+    let col = |c: backup::Counts| {
+        format!(
+            "Deleted: `{}`\nRecovered: `{}`\nEdited: `{}`",
+            c.deleted, c.created, c.updated
+        )
+    };
+    log.section("Backup System Report:")
+        .text(&format!(
+            "{YES} **Backup System loaded the recent backup successfully!**"
+        ))
+        .inline("Roles", &col(sum.roles))
+        .inline("Channels", &col(sum.channels))
+        .inline("Categories", &col(sum.categories))
+        .inline("Webhooks", &format!("Deleted: `{}`", sum.webhooks_deleted))
+        .inline(
+            "Settings",
+            &format!("Server {}", if sum.settings { YES } else { NO }),
+        )
 }
 
 /// Ends panic mode for a guild; runs from the `panic_end` job, whose payload says what to put back.

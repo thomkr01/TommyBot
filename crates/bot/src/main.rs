@@ -21,6 +21,7 @@ mod reply;
 mod reports;
 mod scheduler;
 mod settings;
+mod setup;
 mod slash;
 mod targets;
 mod tickets;

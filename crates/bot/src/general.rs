@@ -280,7 +280,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "backups",
         &["backup"],
         "backups",
-        "backups [create|list|view N|load N [confirm]|delete N|clear]",
+        "backups [take | load ID ?confirm | delete ID | clear]",
         "Server backups",
     ),
     (

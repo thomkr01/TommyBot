@@ -204,10 +204,12 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
         Event::ChannelCreate(c) => {
             app.note_parent(&c.0);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::setup::enforce_quarantine(app, c).await.ok();
         }
         Event::ChannelUpdate(c) => {
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::setup::enforce_quarantine(app, c).await.ok();
             crate::catch::keep_top(app, c).await?;
         }
         Event::ChannelDelete(c) => {
@@ -232,6 +234,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
                 && !tickets::handle(app, &i.0).await?
                 && !confirm::handle_confirm(app, &i.0).await?
                 && !reports::handle(app, &i.0).await?
+                && !crate::appeals::handle(app, &i.0).await?
                 && !crate::settings::handle(app, &i.0).await?
                 && !crate::whitelist::handle(app, &i.0).await?
             {

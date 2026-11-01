@@ -64,9 +64,14 @@ pub enum Cmd {
 pub enum BackupCmd {
     Create,
     List,
-    Load { id: i64, confirm: bool },
-    Delete { id: i64 },
-    View { id: i64 },
+    Load {
+        id: String,
+        confirm: bool,
+    },
+    Delete {
+        id: String,
+    },
+    /// Deletes every backup (`w!backups clear`, `/backups purge`).
     Clear,
 }
 
@@ -119,7 +124,7 @@ fn backup(o: &[CommandDataOption]) -> Result<Cmd, String> {
     else {
         return Err("Pick a subcommand".into());
     };
-    let id = || int(sub, "id").ok_or("missing id");
+    let id = || string(sub, "id").map(str::to_owned).ok_or("missing id");
     Ok(Cmd::Backup(match name.as_str() {
         "create" => BackupCmd::Create,
         "list" => BackupCmd::List,
@@ -128,7 +133,6 @@ fn backup(o: &[CommandDataOption]) -> Result<Cmd, String> {
             confirm: flag(sub, "confirm"),
         },
         "delete" => BackupCmd::Delete { id: id()? },
-        "view" => BackupCmd::View { id: id()? },
         "purge" => BackupCmd::Clear,
         _ => return Err("Unknown subcommand".into()),
     }))
@@ -374,7 +378,7 @@ pub fn definitions() -> Vec<Command> {
                 .option(SubCommandBuilder::new("list", "List saved backups"))
                 .option(
                     SubCommandBuilder::new("load", "Restore the server to a backup")
-                        .option(IntegerBuilder::new("id", "Backup id").required(true))
+                        .option(StringBuilder::new("id", "Backup id").required(true))
                         .option(BooleanBuilder::new(
                             "confirm",
                             "Apply it (otherwise preview)",
@@ -382,11 +386,7 @@ pub fn definitions() -> Vec<Command> {
                 )
                 .option(
                     SubCommandBuilder::new("delete", "Delete a backup")
-                        .option(IntegerBuilder::new("id", "Backup id").required(true)),
-                )
-                .option(
-                    SubCommandBuilder::new("view", "Show what a backup holds")
-                        .option(IntegerBuilder::new("id", "Backup id").required(true)),
+                        .option(StringBuilder::new("id", "Backup id").required(true)),
                 )
                 .option(SubCommandBuilder::new("purge", "Delete all backups")),
         ),
@@ -473,8 +473,7 @@ async fn run(
         return Ok("Server only".into());
     };
     if data.kind == CommandType::Message {
-        return reports::message_menu(app, data, gid, actor_id, i.author().map_or("", |u| &u.name))
-            .await;
+        return reports::message_menu(app, data, gid, actor_id).await;
     }
     if let Some(words) = crate::general::slash_words(&data.name, &data.options) {
         let (text, embeds, row) = crate::general::slash(app, gid, actor_id, words).await?;
@@ -768,25 +767,28 @@ mod tests {
                 &sub(
                     "load",
                     vec![
-                        opt("id", CommandOptionValue::Integer(4)),
+                        opt("id", CommandOptionValue::String("dh0mfu".into())),
                         opt("confirm", CommandOptionValue::Boolean(true))
                     ]
                 ),
                 None
             ),
             Ok(Cmd::Backup(BackupCmd::Load {
-                id: 4,
+                id: "dh0mfu".into(),
                 confirm: true
             }))
         );
         assert_eq!(
             parse(
                 "backups",
-                &sub("load", vec![opt("id", CommandOptionValue::Integer(4))]),
+                &sub(
+                    "load",
+                    vec![opt("id", CommandOptionValue::String("dh0mfu".into()))]
+                ),
                 None
             ),
             Ok(Cmd::Backup(BackupCmd::Load {
-                id: 4,
+                id: "dh0mfu".into(),
                 confirm: false
             }))
         );

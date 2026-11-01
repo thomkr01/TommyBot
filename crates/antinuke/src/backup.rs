@@ -54,6 +54,14 @@ pub struct Settings {
     pub locale: String,
 }
 
+/// A webhook as it existed when the image was taken.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookImg {
+    pub id: u64,
+    pub name: String,
+    pub channel: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub guild: u64,
@@ -63,6 +71,9 @@ pub struct Image {
     /// `None` in backups made before settings were captured and in dashboard previews.
     #[serde(default)]
     pub settings: Option<Settings>,
+    /// `None` in backups made before webhooks were captured: restores must not delete any then.
+    #[serde(default)]
+    pub webhooks: Option<Vec<WebhookImg>>,
 }
 
 /// A planned change. Ids on `Update`/`Delete` are live ids; `Create` carries the image object.

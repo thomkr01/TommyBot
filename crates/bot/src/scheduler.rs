@@ -75,7 +75,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             }
         }
         "backup_create" => {
-            let id = backup::save(app, gid).await?;
+            let id = backup::save(app, gid, job.payload["by"].as_u64()).await?;
             send_log(
                 app,
                 gid.get(),
@@ -88,7 +88,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let id = job.payload["id"]
                 .as_i64()
                 .context("job payload has no id")?;
-            let text = backup::load(app, gid, id, true).await?;
+            let text = backup::load(app, gid, &id.to_string(), true).await?;
             let log = Log::new("Backup Loaded", DONE)
                 .line("Id", &format!("`{id}`"))
                 .text(&format!("{YES} **{text}**"));

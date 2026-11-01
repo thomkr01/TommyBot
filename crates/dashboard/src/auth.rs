@@ -161,7 +161,7 @@ pub async fn me(State(st): State<AppState>, s: Sess) -> Result<Json<serde_json::
     ))
 }
 
-fn totp(secret_b32: &str, user: &str) -> Result<TOTP, ApiError> {
+pub(crate) fn totp(secret_b32: &str, user: &str) -> Result<TOTP, ApiError> {
     let raw = Secret::Encoded(secret_b32.into())
         .to_bytes()
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;

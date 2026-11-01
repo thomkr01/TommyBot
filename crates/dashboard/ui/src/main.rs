@@ -21,7 +21,7 @@ use common::*;
 use embeds::Embeds;
 use form::Section;
 use permits::Permits;
-use pages::{Catch, Logging, Rescue, Revert, Score, Tickets, Wizard};
+use pages::{Catch, Logging, LostControl, Rescue, Revert, Score, Tickets, Wizard};
 use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
 use channels::ChannelSetup;
@@ -167,6 +167,7 @@ fn App() -> impl IntoView {
     let pages = StoredValue::new(TOP.iter().chain(NAV.iter().flat_map(|(_, i)| i.iter())).copied().collect::<Vec<_>>());
     let guild = Signal::derive(move || route.get().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())));
     let (nav_open, set_nav_open) = signal(false);
+    let (filter, set_filter) = signal(String::new());
     let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
     let load_guilds = move || async move {
         match api("GET", "/api/guilds", None).await {
@@ -226,9 +227,9 @@ fn App() -> impl IntoView {
                 <main>
                     {move || match route.get().as_slice() {
                         [] => view! {
-                            <div class="head"><h1>"Servers"</h1><button class="ghost" on:click=move |_| { set_guilds_note.set("Loading servers...".into()); spawn_local(load_guilds()) }>"Refresh servers"</button></div>
+                            <div class="head"><h1>"Servers"</h1><input placeholder="Filter: [Type name or ID]" prop:value=filter on:input=move |e| set_filter.set(event_target_value(&e)) /><LostControl enrolled /><button class="ghost" on:click=move |_| { set_guilds_note.set("Loading servers...".into()); spawn_local(load_guilds()) }>"Refresh servers"</button></div>
                             <p class="muted">{move || guilds_note.get()}</p>
-                            <div class="cards">{guilds.get().iter().map(|g| view! { <div class="card"><a class="gcard" href=format!("#/{}/overview", g["id"].as_str().unwrap_or(""))>{match g["icon"].as_str() {
+                            <div class="cards">{guilds.get().iter().filter(|g| { let f = filter.get().to_lowercase(); g["name"].as_str().unwrap_or("").to_lowercase().contains(&f) || g["id"].as_str().unwrap_or("").contains(&f) }).map(|g| view! { <div class="card"><a class="gcard" href=format!("#/{}/overview", g["id"].as_str().unwrap_or(""))>{match g["icon"].as_str() {
                                 Some(i) => view! { <img src=format!("https://cdn.discordapp.com/icons/{}/{i}.png?size=64", g["id"].as_str().unwrap_or("")) /> }.into_any(),
                                 None => view! { <i>{g["name"].as_str().unwrap_or("?").chars().next().unwrap_or('?').to_string()}</i> }.into_any() }}
                                 <b>{g["name"].as_str().unwrap_or("").to_string()}</b><span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></a></div> }).collect_view()}</div>

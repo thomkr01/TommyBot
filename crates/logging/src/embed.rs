@@ -3,7 +3,7 @@
 //! headings ("Changes", "Previous Settings") and red/green diff blocks for before/after text.
 use twilight_model::{channel::message::Embed, user::User};
 use twilight_util::builder::embed::{
-    EmbedBuilder, EmbedFieldBuilder, EmbedFooterBuilder, ImageSource,
+    EmbedAuthorBuilder, EmbedBuilder, EmbedFieldBuilder, EmbedFooterBuilder, ImageSource,
 };
 
 /// Colours sampled from Wick's screenshots: Discord logs (create, update, delete) and Wick's own
@@ -121,6 +121,16 @@ impl Log {
         if let Ok(src) = ImageSource::url(avatar(u)) {
             self.embed = self.embed.thumbnail(src);
         }
+        self
+    }
+
+    /// Wick's report layout: the title sits in the author line next to the avatar.
+    pub fn author(mut self, u: &User, text: &str) -> Self {
+        let mut a = EmbedAuthorBuilder::new(clip(text, 256));
+        if let Ok(src) = ImageSource::url(avatar(u)) {
+            a = a.icon_url(src);
+        }
+        self.embed = self.embed.author(a);
         self
     }
 
