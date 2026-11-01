@@ -109,6 +109,9 @@ pub const CLOCK: Emoji = e("clock", "▸");
 /// like Wick's per-field icons. Unknown labels keep the plain arrow.
 pub fn for_label(label: &str) -> Emoji {
     const BY_WORD: &[(&str, &str)] = &[
+        ("kicked", "kick"),
+        ("revert", "restore"),
+        ("recreat", "backup"),
         ("responsible", "moderator_field"),
         ("moderator", "moderator_field"),
         ("executor", "moderator_field"),
@@ -201,6 +204,7 @@ mod tests {
         assert!(matches!(l.emoji, Some(EmojiReactionType::Custom { .. })));
         assert_eq!(for_label("Role Name").name, "role");
         assert_eq!(for_label("Id").name, "user_id");
+        assert_eq!(for_label("Recreated").name, "backup");
         assert_eq!(for_label("Valid").name, "right_sort");
     }
 }
