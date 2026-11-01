@@ -134,8 +134,13 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     // A webhook on the webhook whitelist is exempt whatever its creator may do.
     let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?
         || (action == Action::WebhookCreate
-            && e.target_id
-                .is_some_and(|t| cfg.whitelist.spam.webhooks.iter().any(|w| w.get() == t.get())));
+            && e.target_id.is_some_and(|t| {
+                cfg.whitelist
+                    .spam
+                    .webhooks
+                    .iter()
+                    .any(|w| w.get() == t.get())
+            }));
     let inv = inverse(action, e.target_id.map(|t| t.get()));
     if let (true, Some(t), Action::ChannelCreate | Action::RoleCreate) =
         (exempt, e.target_id, action)

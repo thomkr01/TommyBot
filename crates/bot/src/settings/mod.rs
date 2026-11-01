@@ -549,7 +549,17 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         }
         Op::Set(c, _) | Op::Toggle(c, _) | Op::Add(c, _) | Op::Remove(c, _) => c.clone(),
     };
-    let Some(row) = m.rows.iter().find(|r| r.code == code) else {
+    // A switch typed on a group (`an 5 ?off`) means its first letter (`5a`).
+    let code = maps::alias(m, &code);
+    let group_switch = format!("{code}a");
+    let found = m.rows.iter().find(|r| r.code == code);
+    let found = match (found, &op) {
+        (Some(r), Op::Toggle(..)) if matches!(r.kind, Kind::Group) => {
+            m.rows.iter().find(|r| r.code == group_switch)
+        }
+        (f, _) => f,
+    };
+    let Some(row) = found else {
         send(
             app,
             msg,

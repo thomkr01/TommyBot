@@ -638,8 +638,8 @@ pub fn schema() -> Vec<Value> {
             "Granularity",
         ),
         ti(
-            fg("ID flag", "id_margin", "int"),
-            "Margin (neighbouring buckets)",
+            fg("ID flag", "id_margin_ms", "int"),
+            "Margin (milliseconds)",
         ),
         dv(
             choice(
