@@ -4,15 +4,19 @@ use std::{
     sync::{atomic::Ordering::Relaxed, Arc},
     time::Instant,
 };
-use tommybot_logging::{Log, LogKind, LogMessage};
+use tommybot_logging::{embed::RED, Log, LogConfig, LogKind, LogMessage};
 use twilight_gateway::Event;
 use twilight_model::{
-    channel::message::{
-        component::{ActionRow, Button, ButtonStyle, Component},
-        AllowedMentions, Embed,
+    channel::{
+        message::{
+            component::{ActionRow, Button, ButtonStyle, Component},
+            AllowedMentions, Embed,
+        },
+        Channel,
     },
+    http::attachment::Attachment,
     id::{
-        marker::{ChannelMarker, RoleMarker},
+        marker::{ChannelMarker, GuildMarker, RoleMarker},
         Id,
     },
 };
@@ -45,7 +49,12 @@ async fn send(
     embed: &Embed,
     link: Option<&(&str, String)>,
     mentions: &AllowedMentions,
+    file: Option<&str>,
 ) -> Result<()> {
+    let files: Vec<Attachment> = file
+        .map(|t| Attachment::from_bytes("messages.txt".into(), t.as_bytes().to_vec(), 0))
+        .into_iter()
+        .collect();
     let rows: Vec<Component> = link
         .map(|(label, url)| {
             Component::ActionRow(ActionRow {
@@ -69,6 +78,7 @@ async fn send(
         .content(pings)
         .embeds(std::slice::from_ref(embed))
         .components(&rows)
+        .attachments(&files)
         .allowed_mentions(Some(mentions))
         .await?;
     Ok(())
@@ -76,7 +86,17 @@ async fn send(
 
 async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     let mentions = AllowedMentions::default();
-    send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await
+    let file = m.file.as_deref();
+    send(
+        app,
+        m.channel_id,
+        "",
+        &m.embed,
+        m.link.as_ref(),
+        &mentions,
+        file,
+    )
+    .await
 }
 
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
@@ -89,6 +109,7 @@ pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Resul
                 &embed.build(),
                 None,
                 &AllowedMentions::default(),
+                None,
             )
             .await
         }
@@ -112,7 +133,16 @@ pub async fn send_log_pinging(
         roles: roles.to_vec(),
         ..Default::default()
     };
-    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions).await
+    send(
+        app,
+        ch,
+        pings.trim_end(),
+        &embed.build(),
+        None,
+        &mentions,
+        None,
+    )
+    .await
 }
 
 /// Like [`send_log`] with a link button under the embed.
@@ -133,8 +163,31 @@ pub async fn send_log_link(
         &embed.build(),
         Some(&link),
         &AllowedMentions::default(),
+        None,
     )
     .await
+}
+
+/// A deleted log channel leaves the config, so its logs reach the main log channel, which says so.
+async fn forget_log_channel(app: &App, gid: Id<GuildMarker>, c: &Channel) -> Result<()> {
+    if !app.cfg(gid.get()).await?.logging.clone().forget(c.id) {
+        return Ok(());
+    }
+    let saved = crate::settings::save(app, gid, app.me.get(), &["logging"], |doc| {
+        let mut log: LogConfig =
+            serde_json::from_value(doc["logging"].clone()).map_err(|e| e.to_string())?;
+        log.forget(c.id);
+        doc["logging"] = serde_json::to_value(log).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await?;
+    saved.map_err(anyhow::Error::msg)?;
+    let name = c.name.as_deref().unwrap_or("unknown");
+    let embed = Log::new("Log Channel Deleted", RED)
+        .line("Channel", &format!("#{name} (`{}`)", c.id))
+        .time()
+        .text("Its logs now go to the main log channel. Pick a new channel on the dashboard.");
+    send_log(app, gid.get(), LogKind::Server, embed).await
 }
 
 /// Sends held delete logs once their wait is over. `handle` only flushes when an event arrives,
@@ -236,7 +289,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         }
         Event::ChannelDelete(c) => {
             app.note_parent(&c.0);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
+            if let Some(g) = c.guild_id {
+                app.invalidate_guild(g);
+                forget_log_channel(app, g, &c.0).await?;
+            }
         }
         Event::GuildUpdate(g) => app.invalidate_guild(g.id),
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
