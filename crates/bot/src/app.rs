@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{postgres::PgListener, PgPool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
@@ -137,6 +137,8 @@ pub struct App {
     pub panic: Mutex<PanicTracker>,
     pub panic_heat: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
+    /// Heat panic: accounts that tripped it and when it ends (unix secs). Lost on restart, it is short.
+    pub heat_raiders: Mutex<HashMap<u64, (HashSet<u64>, i64)>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
     /// Category of each channel created or deleted since its audit entry, for anti-nuke's ticket categories.
     pub channel_parents: Mutex<HashMap<u64, u64>>,
@@ -178,6 +180,7 @@ impl App {
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
             panic_heat: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
             panic_runs: Default::default(),
+            heat_raiders: Default::default(),
             guilds: Default::default(),
             channel_parents: Default::default(),
         }

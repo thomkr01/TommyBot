@@ -52,6 +52,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !am.enabled || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
     }
+    if crate::panic::is_raider(app, gid, m.author.id) {
+        app.http.delete_message(m.channel_id, m.id).await.ok();
+        return timeout(&app.http, gid, m.author.id, am.strike.strike_timeout_ms / 1000).await;
+    }
     let wl = &cfg.whitelist;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
     let any_categories = [&wl.spam, &wl.invites, &wl.mentions, &wl.everyone]

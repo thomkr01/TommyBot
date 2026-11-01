@@ -68,6 +68,12 @@ impl PanicTracker {
         }
     }
 
+    /// Distinct accounts counted for this guild inside the window, before the next `record`.
+    pub fn involved(&self, guild: u64, now: Instant) -> HashSet<u64> {
+        let live = |t: &Instant| now.duration_since(*t) < self.window;
+        self.hits.get(&guild).into_iter().flatten().filter(|(t, _)| live(t)).map(|(_, u)| *u).collect()
+    }
+
     /// Call on every quarantine verdict. True means start panic mode (resets the guild).
     pub fn record(&mut self, guild: u64, executor: u64, now: Instant) -> bool {
         let q = self.hits.entry(guild).or_default();

@@ -26,6 +26,19 @@ use crate::{
     lockdown,
 };
 
+/// True while heat panic is on for the guild and `user` is one of its raiders.
+pub fn is_raider(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
+    let mut m = app.heat_raiders.lock().unwrap();
+    match m.get(&gid.get()) {
+        Some((_, until)) if *until <= crate::app::now_secs() => {
+            m.remove(&gid.get());
+            false
+        }
+        Some((set, _)) => set.contains(&user.get()),
+        None => false,
+    }
+}
+
 /// Counts `user` towards panic mode (a quarantined nuker, or with `heat` an automod heat trip)
 /// and starts it when enough distinct accounts hit the window. No-op while panic mode runs.
 pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: bool) -> Result<()> {
@@ -45,15 +58,31 @@ pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: b
     if executors == 0 || app.panic_runs.lock().unwrap().contains_key(&gid.get()) {
         return Ok(());
     }
-    let tripped = {
+    let (tripped, mut raiders) = {
         let mut t = tracker.lock().unwrap();
         t.window = Duration::from_secs(cfg.window_secs);
         t.executors = executors;
-        t.record(gid.get(), user.get(), Instant::now())
+        let now = Instant::now();
+        let raiders = t.involved(gid.get(), now);
+        (t.record(gid.get(), user.get(), now), raiders)
     };
-    if tripped {
-        start(app, gid, &cfg).await?;
+    if !tripped {
+        return Ok(());
     }
+    if !heat {
+        return start(app, gid, &cfg).await;
+    }
+    // Heat panic: every message from these accounts is deleted and timed out until it ends.
+    raiders.insert(user.get());
+    let until = crate::app::now_secs() + cfg.duration_secs as i64;
+    let log = Log::new("Heat Panic Mode Triggered!", ALERT)
+        .text(&format!(
+            "{ARROW} {} raiders will be timed out on every message for {}.",
+            raiders.len(),
+            embed::duration(cfg.duration_secs as i64)
+        ));
+    app.heat_raiders.lock().unwrap().insert(gid.get(), (raiders, until));
+    send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
     Ok(())
 }
 
