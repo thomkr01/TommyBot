@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const VIEW_CHANNEL: u64 = 1 << 10;
 pub const SEND_MESSAGES: u64 = 1 << 11;
+const CONNECT: u64 = 1 << 20;
 /// Perms stripped by role lock: admin, kick, ban, manage channels/guild/messages/roles/webhooks/
 /// expressions/nicknames/events/threads, mention everyone, moderate members, view audit log.
 pub const DANGEROUS: u64 = (1 << 3)
@@ -91,6 +92,8 @@ pub struct LockdownPrefs {
     pub roles: bool,
     pub joins: bool,
     pub updates: bool,
+    /// A kick lock also pauses Discord invites.
+    pub pause_invites: bool,
 }
 
 impl Default for LockdownPrefs {
@@ -100,6 +103,7 @@ impl Default for LockdownPrefs {
             roles: false,
             joins: false,
             updates: false,
+            pause_invites: true,
         }
     }
 }
@@ -293,6 +297,18 @@ pub fn tshoot(
                 ),
                 fix: None,
             });
+        } else if r.perms & (VIEW_CHANNEL | SEND_MESSAGES) != VIEW_CHANNEL | SEND_MESSAGES {
+            out.push(Problem {
+                id: format!("main_missing_{}", r.id),
+                text: format!(
+                    "Member needs some permissions added. [MAIN ROLE <@&{}>: View Channel, Send Messages]",
+                    r.id
+                ),
+                fix: Some(Fix::SetRolePerms {
+                    role: r.id,
+                    perms: r.perms | VIEW_CHANNEL | SEND_MESSAGES,
+                }),
+            });
         }
     }
     for r in roles.iter().filter(|r| !main.contains(&r.id) && !r.managed) {
@@ -309,7 +325,20 @@ pub fn tshoot(
             let fixable = r.position < bot_position;
             out.push(Problem {
                 id: format!("bypass_{}", r.id),
-                text: format!("Role <@&{}> grants Send Messages, so members with it can still talk during a lock.", r.id),
+                text: format!(
+                    "<@&{}> has some permissions that need to be removed. [Send Messages{}{}]",
+                    r.id,
+                    if r.perms & VIEW_CHANNEL != 0 {
+                        ", View Channel"
+                    } else {
+                        ""
+                    },
+                    if r.perms & CONNECT != 0 {
+                        ", Connect"
+                    } else {
+                        ""
+                    },
+                ),
                 fix: fixable.then_some(Fix::SetRolePerms {
                     role: r.id,
                     perms: r.perms & !SEND_MESSAGES,
@@ -529,6 +558,7 @@ mod tests {
         assert!(tshoot(G, &[12], &roles(), &[], 5)[0]
             .id
             .starts_with("main_above_bot"));
+        assert_eq!(tshoot(G, &[11], &roles(), &[], 5)[0].id, "main_missing_11");
         assert_eq!(kind_from("channel", None), None);
         assert_eq!(kind_from("c", Some(7)), Some(LockKind::Channel(7)));
         assert_eq!(kind_from("sc", None), Some(LockKind::Server));
@@ -548,6 +578,7 @@ mod tests {
             roles: true,
             joins: false,
             updates: false,
+            pause_invites: true,
         };
         let p = plan(&prefs.kind(), G, &[10], &roles(), 5);
         assert!(p.ops.contains(&Op::SetRolePerms {
