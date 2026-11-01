@@ -8,7 +8,10 @@ use tommybot_automod::{
 use twilight_model::{
     guild::Permissions,
     http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
-    id::{marker::GuildMarker, Id},
+    id::{
+        marker::{ChannelMarker, GuildMarker, UserMarker},
+        Id,
+    },
 };
 
 use crate::{
@@ -16,7 +19,7 @@ use crate::{
     events::send_log,
 };
 use tommybot_logging::{
-    embed::{ALERT, DONE, YES},
+    embed::{self, ALERT, ARROW, DONE, YES},
     Log, LogKind,
 };
 
@@ -236,6 +239,12 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
         lifted += 1;
     }
     if lifted > 0 {
+        if active(app, gid).await?.is_empty() {
+            sqlx::query("DELETE FROM lock_updates WHERE guild_id=$1")
+                .bind(gid.get() as i64)
+                .execute(&app.pool)
+                .await?;
+        }
         announce(
             app,
             gid,
@@ -245,6 +254,51 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
         .await;
     }
     Ok(lifted)
+}
+
+/// `lock MESSAGE ?t update`: posts the message with the last five updates in `channel` and in the lock channel.
+pub async fn update(
+    app: &App,
+    gid: Id<GuildMarker>,
+    channel: Id<ChannelMarker>,
+    (actor_id, actor): (Id<UserMarker>, &tommybot_core::permits::Level),
+    text: &str,
+) -> Result<String> {
+    if !actor.has("lock_updates") {
+        return Ok("Cannot post lock updates: no permit".into());
+    }
+    let locks = store::locks(&app.pool, gid.get()).await?;
+    if locks.is_empty() {
+        return Ok("Nothing is locked".into());
+    }
+    let g = gid.get() as i64;
+    sqlx::query("INSERT INTO lock_updates (guild_id, author_id, message) VALUES ($1,$2,$3)")
+        .bind(g)
+        .bind(actor_id.get() as i64)
+        .bind(embed::clip(text, 500))
+        .execute(&app.pool)
+        .await?;
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT message, EXTRACT(EPOCH FROM created_at)::bigint FROM lock_updates
+         WHERE guild_id=$1 ORDER BY id DESC LIMIT 5",
+    )
+    .bind(g)
+    .fetch_all(&app.pool)
+    .await?;
+    let mut log = Log::new("Lockdown Updates", ALERT);
+    for (m, at) in rows.iter().rev() {
+        log = log.text(&format!("{ARROW} <t:{at}:R> {m}"));
+    }
+    let e = log.build();
+    let locked = locks.iter().find_map(|s| s.locked_channel).map(Id::new);
+    for ch in std::iter::once(channel).chain(locked.filter(|c| *c != channel)) {
+        app.http
+            .create_message(ch)
+            .embeds(std::slice::from_ref(&e))
+            .await
+            .ok();
+    }
+    Ok("Lock update posted".into())
 }
 
 fn lock_name(k: &LockKind) -> String {

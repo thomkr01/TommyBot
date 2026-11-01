@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use tommybot_antinuke::Inverse;
 use tommybot_core::{cases, permits};
+use twilight_http::request::AuditLogReason;
 use twilight_model::{
     application::interaction::application_command::{CommandDataOption, CommandOptionValue},
     gateway::payload::incoming::MessageCreate,
@@ -321,6 +322,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
                     cmd,
                     channel: msg.channel_id,
                     reason: p.reason,
+                    proof: None,
                 };
                 return commands::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action))
                     .await;
@@ -333,6 +335,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
                 msg.channel_id,
                 cmd,
                 p.reason.as_deref(),
+                None,
             )
             .await
             .unwrap_or_else(|e| {
@@ -345,6 +348,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
 }
 
 /// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     app: &App,
     gid: Id<GuildMarker>,
@@ -353,6 +357,7 @@ pub async fn run(
     channel: Id<ChannelMarker>,
     cmd: ModCmd,
     reason: Option<&str>,
+    proof: Option<&str>,
 ) -> Result<String> {
     let perm = cmd.perm();
     if let Some(t) = cmd.target() {
@@ -371,6 +376,14 @@ pub async fn run(
     }
     let g = gid.get() as i64;
     let reasonless = reason.is_none();
+    // Discord's audit log caps reasons at 512 characters.
+    let audit = tommybot_logging::embed::clip(
+        &format!(
+            "{} | Moderator: {actor_id}",
+            reason.unwrap_or("No reason provided")
+        ),
+        500,
+    );
     // (case kind, case user, inverse, reason prefix, reply)
     let (kind, uid, inverse, note, reply): (&str, u64, Option<Value>, Option<String>, String) =
         match cmd {
@@ -453,11 +466,17 @@ pub async fn run(
                 return Ok(format!("Cleared the warns of <@{user}>"));
             }
             ModCmd::Unban { user } => {
-                app.http.delete_ban(gid, Id::new(user)).await?;
+                app.http
+                    .delete_ban(gid, Id::new(user))
+                    .reason(&audit)
+                    .await?;
                 ("unban", user, None, None, format!("Unbanned <@{user}>"))
             }
             ModCmd::Hackban { user } => {
-                app.http.create_ban(gid, Id::new(user)).await?;
+                app.http
+                    .create_ban(gid, Id::new(user))
+                    .reason(&audit)
+                    .await?;
                 let inv = json!({"op":"unban","user":user});
                 (
                     "ban",
@@ -471,6 +490,7 @@ pub async fn run(
                 app.http
                     .update_guild_member(gid, Id::new(user))
                     .communication_disabled_until(None)
+                    .reason(&audit)
                     .await?;
                 let text = format!("Removed timeout of <@{user}>");
                 ("untimeout", user, None, None, text)
@@ -539,6 +559,7 @@ pub async fn run(
                 app.http
                     .update_guild_member(gid, Id::new(user))
                     .nick(Some(&clean))
+                    .reason(&audit)
                     .await?;
                 let note = format!("`{name}` -> `{clean}`");
                 let text = format!("Renamed <@{user}> to `{clean}`");
@@ -568,6 +589,7 @@ pub async fn run(
                 app.http
                     .update_channel(channel)
                     .rate_limit_per_user(secs)
+                    .reason(&audit)
                     .await?;
                 let note = format!("{secs}s in <#{channel}>");
                 (
@@ -593,10 +615,20 @@ pub async fn run(
             reason: reason.as_deref(),
             points: 0,
             duration_s: None,
+            proof,
             inverse,
         },
     )
     .await?;
+    commands::mod_log(
+        app,
+        gid,
+        (case_no, kind),
+        (actor_id, Id::new(uid)),
+        None,
+        reason.as_deref(),
+    )
+    .await;
     let hint = if reasonless {
         crate::reply::add_reason_hint(case_no.into())
     } else {

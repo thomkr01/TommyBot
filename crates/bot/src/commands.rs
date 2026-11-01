@@ -13,9 +13,12 @@ use tommybot_logging::{
 use twilight_http::{request::AuditLogReason, Client};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
-    channel::message::{
-        component::{ActionRow, Button, ButtonStyle, Component},
-        AllowedMentions, MessageFlags,
+    channel::{
+        message::{
+            component::{ActionRow, Button, ButtonStyle, Component},
+            AllowedMentions, MessageFlags,
+        },
+        ChannelType,
     },
     gateway::payload::incoming::MessageCreate,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
@@ -137,6 +140,7 @@ pub async fn apply(
         duration_s,
         points,
         Flags::default(),
+        None,
     )
     .await
 }
@@ -154,6 +158,7 @@ pub async fn apply_dm(
     duration_s: Option<i64>,
     points: i32,
     flags: Flags,
+    proof: Option<&str>,
 ) -> Result<String> {
     let perm = kind.name();
     let target_level = app.level(gid, owner, target).await?;
@@ -249,24 +254,21 @@ pub async fn apply_dm(
             reason,
             points,
             duration_s,
+            proof,
             inverse,
         },
     )
     .await?;
     let name = if soft { "softban" } else { perm };
-    // Wick's mod log: no title, Case / Type / Moderator columns, then Target and Reason.
-    let mut log = Log::new("", case_color(name))
-        .inline("Case:", &format!("`{case_no}`"))
-        .inline("Type:", &format!("`{}`", case_title(name)))
-        .inline("Moderator:", &embed::user(actor_id.get()))
-        .field("Target:", &format!("{ARROW} {}", embed::user(t)));
-    if let Some(d) = duration_s {
-        log = log.field("Duration:", &format!("`{}`", duration(d)));
-    }
-    let log = log.field("Reason:", reason.unwrap_or("No reason provided"));
-    if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
-        tracing::warn!(?e, "mod log failed");
-    }
+    mod_log(
+        app,
+        gid,
+        (case_no, name),
+        (actor_id, target),
+        duration_s,
+        reason,
+    )
+    .await;
     let mut text = reply::case_text(
         cfg.misc.compact_replies || flags.compact,
         (case_no.into(), if soft { "softban" } else { perm }, t),
@@ -279,6 +281,34 @@ pub async fn apply_dm(
         }
     }
     Ok(text)
+}
+
+/// Wick stays silent for quarantined members and in a voice channel's chat (purge excepted).
+pub async fn ignored(
+    app: &App,
+    msg: &MessageCreate,
+    gid: Id<GuildMarker>,
+    rest: &str,
+) -> Result<bool> {
+    let held: Option<(i64,)> =
+        sqlx::query_as("SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+            .bind(gid.get() as i64)
+            .bind(msg.author.id.get() as i64)
+            .fetch_optional(&app.pool)
+            .await?;
+    if held.is_some() {
+        return Ok(true);
+    }
+    if crate::prefix::parse(rest).is_some_and(|p| p.command == "purge") {
+        return Ok(false);
+    }
+    let Ok(ch) = app.http.channel(msg.channel_id).await else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        ch.model().await?.kind,
+        ChannelType::GuildVoice | ChannelType::GuildStageVoice
+    ))
 }
 
 /// Every command name [`run`] answers; the invoking message is deleted for these when `delete_invocation` is on.
@@ -346,6 +376,13 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         "lock" | "unlock" => {
             let owner = app.guild_info(gid).await?.owner;
             let actor = app.level(gid, owner, msg.author.id).await?;
+            if p.kind.as_deref() == Some("update") {
+                let text = p.input.clone().unwrap_or_else(|| p.names.join(", "));
+                let text =
+                    lockdown::update(app, gid, msg.channel_id, (msg.author.id, &actor), &text)
+                        .await?;
+                return say(app, msg, &text).await;
+            }
             // `lock role`, `lock server`, `lock channel`...: one-off type instead of the dashboard default.
             // Channel mentions lock (or unlock) those channels instead of this one.
             let channels = match p.channels.as_slice() {
@@ -404,6 +441,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             reason: p.reason,
             duration_s: p.duration_s,
             flags: p.flags,
+            proof: None,
         },
     );
     if cfg.misc.confirm && job.needs_confirm() {
@@ -411,6 +449,10 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
     }
     let texts = job.run(app, owner, cfg.misc.warn_base_points).await?;
     let compact = cfg.misc.compact_replies || p.flags.compact;
+    if kind == ModKind::Timeout && !compact {
+        let e = reply::timeout_embeds(&texts, reason.as_deref(), msg.author.id.get());
+        return say_embeds(app, msg, "", &e).await;
+    }
     let text = reply::summary(
         kind.name(),
         compact,
@@ -430,11 +472,15 @@ pub enum Action {
         reason: Option<String>,
         duration_s: Option<i64>,
         flags: Flags,
+        #[serde(default)]
+        proof: Option<String>,
     },
     Ext {
         cmd: ModCmd,
         channel: Id<ChannelMarker>,
         reason: Option<String>,
+        #[serde(default)]
+        proof: Option<String>,
     },
 }
 
@@ -482,18 +528,20 @@ impl Pending {
 
     /// One reply per target.
     async fn run(&self, app: &App, owner: Id<UserMarker>, points: i32) -> Result<Vec<String>> {
-        let (kind, targets, reason, duration_s, flags) = match &self.action {
+        let (kind, targets, reason, duration_s, flags, proof) = match &self.action {
             Action::Mod {
                 kind,
                 targets,
                 reason,
                 duration_s,
                 flags,
-            } => (*kind, targets, reason, *duration_s, *flags),
+                proof,
+            } => (*kind, targets, reason, *duration_s, *flags, proof),
             Action::Ext {
                 cmd,
                 channel,
                 reason,
+                proof,
             } => {
                 let actor = app.level(self.gid, owner, self.actor).await?;
                 let text = modcmds::run(
@@ -504,6 +552,7 @@ impl Pending {
                     *channel,
                     cmd.clone(),
                     reason.as_deref(),
+                    proof.as_deref(),
                 )
                 .await
                 .unwrap_or_else(|e| {
@@ -528,6 +577,7 @@ impl Pending {
                 duration_s,
                 points,
                 flags,
+                proof.as_deref(),
             )
             .await
             {
@@ -694,6 +744,29 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
     Ok(true)
 }
 
+/// Wick's mod log: no title, Case / Type / Moderator columns, then Target, Duration and Reason.
+pub(crate) async fn mod_log(
+    app: &App,
+    gid: Id<GuildMarker>,
+    (case_no, name): (i32, &str),
+    (actor, target): (Id<UserMarker>, Id<UserMarker>),
+    duration_s: Option<i64>,
+    reason: Option<&str>,
+) {
+    let mut log = Log::new("", case_color(name))
+        .inline("Case:", &format!("`{case_no}`"))
+        .inline("Type:", &format!("`{}`", case_title(name)))
+        .inline("Moderator:", &embed::user(actor.get()))
+        .field("Target:", &format!("{ARROW} {}", embed::user(target.get())));
+    if let Some(d) = duration_s {
+        log = log.field("Duration:", &format!("`{}`", duration(d)));
+    }
+    let log = log.field("Reason:", reason.unwrap_or("No reason provided"));
+    if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
+        tracing::warn!(?e, "mod log failed");
+    }
+}
+
 fn case_title(kind: &str) -> String {
     let mut c = kind.chars();
     c.next()
@@ -723,15 +796,45 @@ pub(crate) async fn apply_warn_actions(
     let Some(t) = warn::crossed(&misc.warn_actions, after - added, after) else {
         return Ok(None);
     };
-    match t.action {
+    let why = format!("Reached {} warn points", t.points);
+    let (kind, secs) = match t.action {
         warn::Action::Ban => {
-            app.http.create_ban(g, u).await?;
+            app.http.create_ban(g, u).reason(&why).await?;
+            ("ban", None)
         }
         warn::Action::Kick => {
-            app.http.remove_guild_member(g, u).await?;
+            app.http.remove_guild_member(g, u).reason(&why).await?;
+            ("kick", None)
         }
-        warn::Action::Timeout { secs } => timeout(&app.http, g, u, secs).await?,
-    }
+        warn::Action::Timeout { secs } => {
+            timeout(&app.http, g, u, secs, &why).await?;
+            ("timeout", Some(secs))
+        }
+    };
+    let case_no = cases::create(
+        &app.pool,
+        cases::NewCase {
+            guild_id: gid,
+            kind,
+            user_id: uid,
+            mod_id: app.me.get() as i64,
+            reason: Some(&why),
+            points: 0,
+            duration_s: secs,
+            proof: None,
+            inverse: None,
+        },
+    )
+    .await?;
+    mod_log(
+        app,
+        g,
+        (case_no, kind),
+        (app.me.cast(), u),
+        secs,
+        Some(&why),
+    )
+    .await;
     cases::reset_warns(&app.pool, gid, uid).await?;
     Ok(Some(format!(
         "<@{uid}> reached {} warn points: {:?}",
@@ -753,10 +856,12 @@ pub async fn timeout(
     g: Id<GuildMarker>,
     u: Id<UserMarker>,
     secs: i64,
+    reason: &str,
 ) -> Result<()> {
     let until = Timestamp::from_secs(now_secs() + timeout_chunk(secs).0)?;
     http.update_guild_member(g, u)
         .communication_disabled_until(Some(until))
+        .reason(reason)
         .await?;
     Ok(())
 }
@@ -795,10 +900,20 @@ pub async fn timeout_until(
 }
 
 pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()> {
+    say_embeds(app, msg, text, &[]).await
+}
+
+pub(crate) async fn say_embeds(
+    app: &App,
+    msg: &MessageCreate,
+    text: &str,
+    embeds: &[twilight_model::channel::message::Embed],
+) -> Result<()> {
     let sent = app
         .http
         .create_message(msg.channel_id)
         .content(text)
+        .embeds(embeds)
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?
         .model()
@@ -891,13 +1006,19 @@ mod tests {
             reason: Some("spam".into()),
             duration_s: Some(60),
             flags,
+            proof: Some("https://x/y.png".into()),
         };
-        let Action::Mod { kind, targets, .. } =
-            serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap()
+        let Action::Mod {
+            kind,
+            targets,
+            proof,
+            ..
+        } = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap()
         else {
             panic!("variant changed")
         };
         assert_eq!((kind, targets), (ModKind::Ban, vec![Id::new(42)]));
+        assert_eq!(proof.as_deref(), Some("https://x/y.png"));
         let purge = ModCmd::Purge {
             count: 5,
             user: None,
@@ -908,6 +1029,7 @@ mod tests {
             cmd: purge.clone(),
             channel: Id::new(7),
             reason: None,
+            proof: None,
         };
         let Action::Ext { cmd, channel, .. } =
             serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap()

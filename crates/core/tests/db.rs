@@ -47,6 +47,7 @@ fn case(
         reason: None,
         points,
         duration_s: None,
+        proof: None,
         inverse,
     }
 }

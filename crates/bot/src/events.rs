@@ -183,7 +183,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
-                if let Some(rest) = m.content.strip_prefix(&pfx) {
+                if let Some(rest) = m.content.strip_prefix(&pfx).filter(|r| !r.is_empty()) {
+                    if commands::ignored(app, m, gid, rest).await? {
+                        return Ok(());
+                    }
                     if !crate::general::try_run(app, m, rest).await?
                         && !crate::settings::try_run(app, m, rest).await?
                     {

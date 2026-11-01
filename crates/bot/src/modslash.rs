@@ -4,7 +4,8 @@ use twilight_model::application::{
     interaction::InteractionContextType,
 };
 use twilight_util::builder::command::{
-    CommandBuilder, IntegerBuilder, RoleBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
+    AttachmentBuilder, CommandBuilder, IntegerBuilder, RoleBuilder, StringBuilder,
+    SubCommandBuilder, UserBuilder,
 };
 
 pub fn definitions() -> Vec<Command> {
@@ -19,29 +20,33 @@ pub fn definitions() -> Vec<Command> {
         CommandBuilder::new(n, d, CommandType::ChatInput).contexts([InteractionContextType::Guild])
     };
     vec![
-        chat("unban", "Unban a user")
-            .option(user("User to unban"))
-            .option(reason())
-            .build(),
         chat("hackban", "Ban someone by id, even if not in the server")
             .option(StringBuilder::new("user_id", "User id").required(true))
-            .option(reason())
-            .build(),
-        chat("untimeout", "Remove a member's timeout")
-            .option(user("Member"))
             .option(reason())
             .build(),
         chat("unwarn", "Deactivate a warn case")
             .option(case(true))
             .option(reason())
             .build(),
-        chat("quarantine", "Strip a member's roles")
-            .option(user("Member"))
-            .option(reason())
-            .build(),
-        chat("unquarantine", "Restore a quarantined member's roles")
-            .option(user("Member"))
-            .option(reason())
+        chat("quarantine", "Strip a member's roles or give them back")
+            .option(
+                SubCommandBuilder::new("add", "Strip a member's roles")
+                    .option(user("Member"))
+                    .option(reason())
+                    .option(AttachmentBuilder::new(
+                        "proof",
+                        "Screenshot or file as evidence",
+                    )),
+            )
+            .option(
+                SubCommandBuilder::new("remove", "Restore a quarantined member's roles")
+                    .option(user("Member"))
+                    .option(reason())
+                    .option(AttachmentBuilder::new(
+                        "proof",
+                        "Screenshot or file as evidence",
+                    )),
+            )
             .build(),
         chat("verify", "Manually verify a member")
             .option(user("Member"))

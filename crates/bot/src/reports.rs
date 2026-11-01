@@ -66,6 +66,7 @@ pub async fn message_menu(
         msg.channel_id,
         cmd,
         None,
+        None,
     )
     .await
 }
@@ -268,8 +269,17 @@ async fn act(
                 by: None,
                 kind: None,
             };
-            let text =
-                modcmds::run(app, gid, owner, who, Id::new(channel as u64), cmd, None).await?;
+            let text = modcmds::run(
+                app,
+                gid,
+                owner,
+                who,
+                Id::new(channel as u64),
+                cmd,
+                None,
+                None,
+            )
+            .await?;
             return Ok(Outcome(text, None));
         }
         "warn" => (ModKind::Warn, "warned the user"),

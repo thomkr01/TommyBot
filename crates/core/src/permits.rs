@@ -115,22 +115,6 @@ const fn flag(key: &'static str, label: &'static str, help: &'static str) -> Per
     }
 }
 
-/// Shown locked until the bot has the feature behind it (lock-updates channel).
-const fn planned(
-    key: &'static str,
-    label: &'static str,
-    help: &'static str,
-    flag: bool,
-) -> PermDef {
-    PermDef {
-        key,
-        label,
-        help,
-        flag,
-        locked: true,
-    }
-}
-
 /// Everything a permit can hold, in the order the editor shows it (Wick's five-section layout).
 pub const CATALOG: &[PermSection] = &[
     PermSection {
@@ -217,11 +201,10 @@ pub const CATALOG: &[PermSection] = &[
                 "Lock Server Joins",
                 "Kick/Ban new members joining",
             ),
-            planned(
+            perm(
                 "lock_updates",
                 "Make Lockdown Updates",
                 "Make updates in the lock-updates channel",
-                false,
             ),
         ],
     },
