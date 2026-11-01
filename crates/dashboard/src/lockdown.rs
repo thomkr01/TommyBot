@@ -13,7 +13,7 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tommybot_automod::{
-    discord_api::{rule_body, DiscordAutomodCfg, MentionScope, RuleSpec},
+    discord_api::{rule_body, BotAction, DiscordAutomodCfg, MentionScope, RuleSpec},
     lockdown::{kind_from, tshoot, Fix, LockKind, Overwrite, Problem, RoleInfo, Snapshot},
 };
 use tommybot_core::jobs;
@@ -38,6 +38,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/guilds/{guild}/discord-rules/{rule}/enabled",
             post(set_enabled),
+        )
+        .route(
+            "/api/guilds/{guild}/discord-rules-migrate-words",
+            post(migrate_words),
         )
 }
 
@@ -357,7 +361,16 @@ async fn rules(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
         .map(|r| {
             let mut v = json!(RuleSpec::from_discord(r));
             v["id"] = r["id"].clone();
-            v["bot_actions"] = json!(r["id"].as_str().and_then(|id| mine.actions.get(id)));
+            v["bot_actions"] = json!(r["id"]
+                .as_str()
+                .and_then(|id| mine.actions.get(id))
+                .cloned()
+                .unwrap_or_default());
+            v["lock"] = json!(r["id"]
+                .as_str()
+                .and_then(|id| mine.locks.get(id))
+                .cloned()
+                .unwrap_or_default());
             if let Some(sc) = r["id"].as_str().and_then(|id| mine.scopes.get(id)) {
                 v["scope"] = json!(sc.scope);
                 v["scope_triggers"] = json!(sc.triggers);
@@ -423,6 +436,15 @@ async fn set_bot_actions(
             (!spec.bot_actions.is_empty()).then(|| json!(spec.bot_actions)),
         ),
         ("scopes", scope.map(|s| json!(s))),
+        (
+            "locks",
+            (spec.bot_actions.contains(&BotAction::Lock)
+                && matches!(
+                    spec.lock.as_str(),
+                    "channel" | "server" | "kick" | "ban" | "invites"
+                ))
+            .then(|| json!(spec.lock)),
+        ),
     ] {
         let slot = &mut config["discord_automod"][key];
         match value {
@@ -470,6 +492,71 @@ async fn update_rule(
     )
     .await?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// Wick's "Migrate words to Discord's AutoMod": one copy of the local word blacklist into a new
+/// keyword rule, then the local lists are cleared. Regex patterns stay local (rules have no regex here).
+async fn migrate_words(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    require(&st, &s, guild, Level::Editor, false).await?;
+    let (version, mut config) = crate::store::current(&st.db, guild).await?;
+    let w = &mut config["automod"]["filters"]["words"];
+    let list =
+        |k: &str| -> Vec<String> { serde_json::from_value(w[k].clone()).unwrap_or_default() };
+    let flag = |k: &str| w[k] == true;
+    let keywords: Vec<String> = list("strict")
+        .into_iter()
+        .chain(list("wildcard").into_iter().map(|x| format!("*{x}*")))
+        .chain(tommybot_automod::filters::premade_words(
+            flag("premade_profane"),
+            flag("premade_vulgar"),
+            flag("premade_racist"),
+        ))
+        .collect();
+    if keywords.is_empty() {
+        return Err(ApiError::BadRequest("There are no words to migrate".into()));
+    }
+    if keywords.len() > 1000 || keywords.iter().any(|k| k.chars().count() > 60) {
+        return Err(ApiError::BadRequest(
+            "Discord allows at most 1000 words of up to 60 characters per rule".into(),
+        ));
+    }
+    let spec = RuleSpec {
+        name: "TommyBot migrated words".into(),
+        enabled: true,
+        trigger: "keyword".into(),
+        keywords,
+        block_message: true,
+        ..Default::default()
+    };
+    st.discord
+        .call(
+            Method::POST,
+            &format!("/guilds/{guild}/auto-moderation/rules"),
+            Some(body(&spec)?),
+        )
+        .await?;
+    for k in ["strict", "wildcard"] {
+        w[k] = json!([]);
+    }
+    for k in ["premade_profane", "premade_vulgar", "premade_racist"] {
+        w[k] = json!(false);
+    }
+    // The rule is a one-time copy, so the keep-in-sync toggle must not overwrite it later.
+    w["use_discord_automod"] = json!(false);
+    let mut tx = st.db.begin().await?;
+    crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
+    tx.commit().await?;
+    audit(
+        &st,
+        &s,
+        guild,
+        format!(
+            "migrated {} word(s) to Discord AutoMod",
+            spec.keywords.len()
+        ),
+    )
+    .await?;
+    Ok(Json(json!({"ok": true, "migrated": spec.keywords.len()})))
 }
 
 #[derive(Deserialize)]

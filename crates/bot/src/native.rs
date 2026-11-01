@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use tommybot_automod::{
     discord_api::{self, BotAction},
     join::Action,
+    lockdown::kind_from,
 };
 use tommybot_core::cases::{self, NewCase};
 use tommybot_logging::{
@@ -20,7 +21,7 @@ use crate::{
     automod::{punish, warn_actions},
     commands::timeout,
     events::send_log,
-    lockdown,
+    lockdown, reports,
 };
 
 /// Recent hits of rules with a Wick-style mention scope, by (guild, rule, member or 0 for the server).
@@ -78,6 +79,9 @@ async fn native_action(
     }
     match action {
         BotAction::Report => {
+            if reports::file_native(app, gid, e.channel_id, uid, &e.content, e.rule_id).await? {
+                return Ok(());
+            }
             let log = Log::new("Discord AutoMod Report", ORANGE)
                 .user("Member", uid.get())
                 .line("Rule", &format!("`{}`", e.rule_id))
@@ -116,7 +120,20 @@ async fn native_action(
         BotAction::Kick => punish(app, cfg, gid, uid.get(), Action::Kick, WHY).await?,
         BotAction::Ban => punish(app, cfg, gid, uid.get(), Action::Ban, WHY).await?,
         BotAction::Lock => {
-            lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?;
+            let sub = cfg
+                .discord_automod
+                .locks
+                .get(&e.rule_id.to_string())
+                .map_or("", String::as_str);
+            if sub == "invites" {
+                let now = now_secs() * 1000;
+                let until = now + discord_api::MAX_INVITE_PAUSE_MS;
+                app.api.pause_invites(gid.get(), Some((now, until))).await?;
+            } else if sub.is_empty() {
+                lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?;
+            } else if let Some(kind) = kind_from(sub, e.channel_id.map(|c| c.get())) {
+                lockdown::lock(app, gid, kind).await?;
+            }
         }
     }
     Ok(())

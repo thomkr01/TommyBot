@@ -189,6 +189,9 @@ pub struct DiscordAutomodCfg {
     pub actions: std::collections::HashMap<String, Vec<BotAction>>,
     /// Rule id -> its Wick-style mention scope.
     pub scopes: std::collections::HashMap<String, MentionScope>,
+    /// Rule id -> lock submode of its Lock action ("channel", "server", "kick", "ban", "invites");
+    /// missing means the server-wide lockdown kind.
+    pub locks: std::collections::HashMap<String, String>,
 }
 
 /// Records a rule hit at `now` (seconds) and says whether the scope's trigger count is reached;
@@ -226,6 +229,8 @@ pub struct RuleSpec {
     pub exempt_roles: Vec<String>,
     pub exempt_channels: Vec<String>,
     pub bot_actions: Vec<BotAction>,
+    /// Submode of the Lock bot action, see `DiscordAutomodCfg::locks`.
+    pub lock: String,
 }
 
 impl RuleSpec {
@@ -374,6 +379,15 @@ fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_configs_without_locks_still_load() {
+        let c: DiscordAutomodCfg =
+            serde_json::from_value(json!({"actions": {"1": ["lock"]}})).unwrap();
+        assert!(c.locks.is_empty());
+        let c: DiscordAutomodCfg = serde_json::from_value(json!({"locks": {"1": "ban"}})).unwrap();
+        assert_eq!(c.locks["1"], "ban");
+    }
 
     #[test]
     fn mention_scope_counts_triggers_in_the_window() {
