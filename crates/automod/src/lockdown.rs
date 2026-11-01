@@ -395,6 +395,11 @@ impl MentionWatch {
         }
         n >= limit
     }
+
+    /// When the latest mention was counted, if any.
+    pub fn last_at(&self) -> Option<i64> {
+        self.0.last()
+    }
 }
 
 /// Heat panic: N raiders trigger within T, then for `duration_ms` any raider message is a timeout.

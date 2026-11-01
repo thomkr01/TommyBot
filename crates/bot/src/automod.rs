@@ -185,9 +185,13 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     let over_hour_cap =
         am.anti_spam && f.mentions.enabled && !listed(&wl.mentions) && pings > 0 && {
             let mut map = app.pings.lock().unwrap();
-            // shortcut: dropped wholesale past 100k members, move to a TTL cache when that bites.
+            // Past 100k members, drop those with no ping in the hour window (they count 0 anyway);
+            // everyone only if that frees nothing.
             if map.len() > 100_000 {
-                map.clear();
+                map.retain(|_, w| w.last_at().is_some_and(|t| t > now - 3_600_000));
+                if map.len() > 100_000 {
+                    map.clear();
+                }
             }
             map.entry((gid.get(), m.author.id.get()))
                 .or_default()
