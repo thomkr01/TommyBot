@@ -19,6 +19,19 @@ pub const BLUE: u32 = 0x0D9DF8;
 use crate::emoji::{for_label, CLOCK};
 pub use crate::emoji::{ARROW, NO, YES};
 
+/// A field name with its label icon in front, once the custom emojis are loaded (the Unicode
+/// arrow would only clutter a field name). Names that already start with an emoji stay as they are.
+fn field_name(name: &str) -> String {
+    let icon = for_label(name);
+    let shown = icon.to_string();
+    match name.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() && icon.name != ARROW.name && shown != icon.fallback => {
+            format!("{shown} {name}")
+        }
+        _ => name.into(),
+    }
+}
+
 /// `<icon> **label:**`, the start of a labelled line.
 pub fn label_head(label: &str) -> String {
     format!("{} **{label}:**", for_label(label))
@@ -111,12 +124,12 @@ impl Log {
 
     /// A field below the description, for Wick's columns ("Initial Flags:", "Roles:").
     pub fn field(mut self, name: &str, value: &str) -> Self {
-        self.fields.push((name.into(), value.into(), false));
+        self.fields.push((field_name(name), value.into(), false));
         self
     }
 
     pub fn inline(mut self, name: &str, value: &str) -> Self {
-        self.fields.push((name.into(), value.into(), true));
+        self.fields.push((field_name(name), value.into(), true));
         self
     }
 
