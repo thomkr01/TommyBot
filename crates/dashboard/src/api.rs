@@ -177,6 +177,10 @@ pub async fn put_section(
     require(&st, &s, guild, min, step_up).await?;
     let (_, mut config) = store::current(&st.db, guild).await?;
     config[&section] = b.value;
+    let web = matches!(section.as_str(), "verification" | "lockdown");
+    if let Some(e) = tommybot_automod::join::web_mode_error(&config).filter(|_| web) {
+        return Err(ApiError::BadRequest(e.into()));
+    }
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;

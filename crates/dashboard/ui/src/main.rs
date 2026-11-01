@@ -87,11 +87,17 @@ fn Tabs(guild: String, items: &'static [(&'static str, &'static str)], active: S
 #[component]
 fn Bell(route: ReadSignal<Vec<String>>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
+    let appeals = RwSignal::new(Vec::<Value>::new());
+    let fetch = move || spawn_local(async move { if let Ok(v) = api("GET", "/api/appeal/notifications", None).await { appeals.set(v.as_array().cloned().unwrap_or_default()) } });
+    fetch();
     let load = move |_| {
+        // Opening the bell shows the verdicts once; the next fetch no longer lists them.
+        if !appeals.get_untracked().is_empty() { spawn_local(async move { let _ = api("POST", "/api/appeal/notifications", None).await; }); }
         let Some(g) = route.get_untracked().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())) else { return };
         spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await { rows.set(v.as_array().cloned().unwrap_or_default()) } });
     };
-    view! { <details class="ico" on:toggle=load><summary aria-label="notifications">"🔔"</summary><div>
+    view! { <details class="ico" on:toggle=load><summary aria-label="notifications">"🔔"{move || (!appeals.get().is_empty()).then(|| format!(" {}", appeals.get().len()))}</summary><div>
+        {move || appeals.get().into_iter().map(|a| view! { <a href=format!("#/appeal/{}", a["guild"].as_str().unwrap_or(""))>{format!("Your {} appeal #{} was {}", a["kind"].as_str().unwrap_or(""), a["id"], if a["status"] == "accepted" { "approved" } else { "denied" })}</a> }).collect_view()}
         {move || if rows.get().is_empty() { view! { <a href="#/">"No recent changes"</a> }.into_any() } else {
             rows.get().into_iter().take(5).map(|r| view! { <a href="#/">{format!("v{} · {}", r["version"], r["at"].as_str().unwrap_or("").get(..16).unwrap_or(""))}</a> }).collect_view().into_any() }}
     </div></details> }

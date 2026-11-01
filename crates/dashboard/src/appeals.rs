@@ -73,6 +73,7 @@ pub fn routes() -> Router<AppState> {
     let g = "/api/guilds/{guild}/appeals";
     Router::new()
         .route("/api/appeal/{guild}", get(form).post(submit))
+        .route("/api/appeal/notifications", get(unread).post(mark_seen))
         .route("/api/appeal/{guild}/mine", get(mine))
         .route("/api/appeal/{guild}/withdraw", post(withdraw))
         .route(g, get(list))
@@ -267,6 +268,30 @@ async fn mine(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Re
         .into_iter()
         .map(|(id, kind, status, reply, at)| json!({"id": id, "kind": kind, "status": status, "reply": reply, "at": at}))
         .collect::<Vec<_>>())))
+}
+
+/// Verdicts the member has not seen yet, across servers, for the header bell.
+async fn unread(State(st): State<AppState>, s: Sess) -> Res {
+    let rows: Vec<(i64, i64, String, String)> = sqlx::query_as(
+        "select id, guild_id, kind, status from appeals
+         where user_id = $1 and status in ('accepted', 'denied') and seen_at is null
+         order by created_at desc limit 20",
+    )
+    .bind(s.user_id)
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(json!(rows
+        .into_iter()
+        .map(|(id, guild, kind, status)| json!({"id": id, "guild": guild.to_string(), "kind": kind, "status": status}))
+        .collect::<Vec<_>>())))
+}
+
+async fn mark_seen(State(st): State<AppState>, s: Sess) -> Res {
+    sqlx::query("update appeals set seen_at = now() where user_id = $1 and seen_at is null and status <> 'open'")
+        .bind(s.user_id)
+        .execute(&st.db)
+        .await?;
+    Ok(Json(json!({"ok": true})))
 }
 
 /// The member takes back their open appeal.
