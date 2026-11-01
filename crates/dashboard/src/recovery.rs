@@ -20,6 +20,7 @@ use tommybot_core::jobs;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/guilds/{guild}/backups", get(list).post(create))
+        .route("/api/guilds/{guild}/backups/{id}", get(detail))
         .route("/api/guilds/{guild}/backups/{id}/preview", get(preview))
         .route("/api/guilds/{guild}/backups/{id}/load", post(load))
         .route("/api/guilds/{guild}/backups/{id}/delete", post(delete))
@@ -76,6 +77,27 @@ async fn owned_image(st: &AppState, guild: i64, id: i64) -> Result<Image, ApiErr
             .fetch_optional(&st.db)
             .await?;
     row.map(|(i,)| i.0).ok_or(ApiError::NotFound)
+}
+
+/// What a backup holds, for the detail view: server settings, roles, the channel tree, webhooks.
+async fn detail(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i64, i64)>) -> Res {
+    require(&st, &s, guild, Level::Viewer, false).await?;
+    let img = owned_image(&st, guild, id).await?;
+    let name = |id: Option<u64>| {
+        img.channels
+            .iter()
+            .find(|c| Some(c.id) == id)
+            .map(|c| c.name.clone())
+    };
+    let mut channels = img.channels.clone();
+    channels.sort_by_key(|c| (c.parent.or(Some(c.id)), c.kind != 4, c.position));
+    Ok(Json(json!({
+        "name": img.name,
+        "settings": img.settings,
+        "roles": img.roles.iter().map(|r| json!({"name": r.name, "color": r.color, "permissions": r.permissions.to_string()})).collect::<Vec<_>>(),
+        "channels": channels.iter().map(|c| json!({"name": c.name, "kind": c.kind, "parent": name(c.parent), "overwrites": c.overwrites.len()})).collect::<Vec<_>>(),
+        "webhooks": img.webhooks.iter().flatten().map(|w| json!({"name": w.name, "channel": name(Some(w.channel))})).collect::<Vec<_>>(),
+    })))
 }
 
 fn num<T: std::str::FromStr + Default>(v: &Value) -> T {

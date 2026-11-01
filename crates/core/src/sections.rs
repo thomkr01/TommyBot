@@ -19,6 +19,8 @@ pub struct AntinukeCfg {
     pub quarantine_role: Option<Id<RoleMarker>>,
     /// Watch member prunes.
     pub prune: bool,
+    /// Punish anyone who touches a quarantined member (roles, nickname, timeout, kick, ban).
+    pub quarantine_hold: bool,
     /// Quarantine whoever changes the vanity URL (bots cannot set it back).
     pub vanity_guard: bool,
     /// Off: a reached limit is only logged and reverted.
@@ -44,6 +46,7 @@ impl Default for AntinukeCfg {
             limits: HashMap::new(),
             quarantine_role: None,
             prune: false,
+            quarantine_hold: true,
             vanity_guard: false,
             auto_quarantine: true,
             strict_mode: false,
@@ -443,6 +446,8 @@ pub struct MiscCfg {
     pub ignore_no_permit: bool,
     /// Take dangerous-permission roles from members who have no permit.
     pub enforce_permits: bool,
+    /// Shown instead of the default appeal line in ban and timeout DMs.
+    pub ban_appeal_message: String,
     pub confirm: bool,
     pub always_dm: bool,
     /// Delete the staff member's prefix command message.
@@ -470,9 +475,10 @@ impl Default for MiscCfg {
             use_slash: true,
             compact_replies: false,
             delete_replies_secs: None,
-            enforce_quarantine_perms: false,
+            enforce_quarantine_perms: true,
             ignore_no_permit: false,
             enforce_permits: false,
+            ban_appeal_message: String::new(),
             confirm: true,
             always_dm: false,
             delete_invocation: false,

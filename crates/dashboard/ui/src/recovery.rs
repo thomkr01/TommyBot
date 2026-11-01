@@ -21,6 +21,7 @@ fn queued(fut: impl std::future::Future<Output = Result<Value, String>> + 'stati
 pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let preview = RwSignal::new(None::<(i64, Vec<String>)>);
+    let detail = RwSignal::new(None::<String>);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let load = {
         let g = guild.clone();
@@ -35,6 +36,14 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let show = Callback::new(move |id: i64| { let g = gp.clone(); msg.set(String::new()); run_act(async move { api("GET", &format!("/api/guilds/{g}/backups/{id}/preview"), None).await }, msg, need, move |v| {
         let lines = v["lines"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
         preview.set(Some((id, lines)));
+    }) });
+    let gv = guild.clone();
+    let view_it = Callback::new(move |id: i64| { let g = gv.clone(); run_act(async move { api("GET", &format!("/api/guilds/{g}/backups/{id}"), None).await }, msg, need, move |v| {
+        let names = |k: &str, f: &dyn Fn(&Value) -> String| v[k].as_array().map(|a| a.iter().map(f).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+        let ch = names("channels", &|c| format!("{}{}", if c["kind"] == 4 { "" } else { "  " }, c["name"].as_str().unwrap_or("")));
+        let hooks = names("webhooks", &|w| format!("{} in #{}", w["name"].as_str().unwrap_or(""), w["channel"].as_str().unwrap_or("?")));
+        let st = &v["settings"];
+        detail.set(Some(format!("General Settings\nName: {}\nVerification level: {}\nContent filter: {}\n\nRoles\n{}\n\nChannels\n{ch}\n\nWebhooks\n{hooks}", v["name"].as_str().unwrap_or(""), st["verification"], st["content_filter"], names("roles", &|r| r["name"].as_str().unwrap_or("").to_string()))));
     }) });
     let apply = Callback::new(move |id: i64| { let g = gl.clone(); preview.set(None); queued(async move { api("POST", &format!("/api/guilds/{g}/backups/{id}/load"), None).await }, msg, need, || ()) });
     let remove = Callback::new(move |id: i64| { let (g, l) = (gd.clone(), load.clone()); run_act(async move { api("POST", &format!("/api/guilds/{g}/backups/{id}/delete"), None).await }, msg, need, move |_| l()) });
@@ -51,6 +60,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                             <b>{format!("#{}", r["code"].as_str().unwrap_or_default())}</b>
                             <span class="muted">{format!("{} · {} · {} roles · {} channels", if r["by"].is_null() { "TommyBot".to_string() } else { format!("user {}", r["by"]) }, when(r["at"].as_i64().unwrap_or(0)), r["roles"], r["channels"])}</span>
                             <span class="sp"></span>
+                            <button class="ghost" on:click=move |_| view_it.run(id)>"View"</button>
                             <button class="ghost" on:click=move |_| show.run(id)>"Load"</button>
                             <button class="ghost" on:click=move |_| remove.run(id)>"Delete"</button>
                         </div>
@@ -59,6 +69,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             </For>
             <Show when=move || rows.get().is_empty()><p class="muted">"No backups yet."</p></Show>
         </div>
+        {move || detail.get().map(|t| view! { <div class="card"><pre>{t}</pre><button class="ghost" on:click=move |_| detail.set(None)>"Close"</button></div> })}
         {move || preview.get().map(|(id, lines)| view! {
             <div class="card">
                 <h2>{format!("Load backup #{id}")}</h2>

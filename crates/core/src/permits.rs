@@ -177,7 +177,11 @@ pub const CATALOG: &[PermSection] = &[
         items: &[
             perm("cases", "Manage Cases", "View and edit cases"),
             perm("ban", "Ban Command", "Ban, unban and hackban"),
-            perm("kick", "Kick Command", ""),
+            perm(
+                "kick",
+                "Kick Command",
+                "Anyone with this can kick members without limitations",
+            ),
             perm("timeout", "Timeout Command", "Timeout and untimeout"),
             perm(
                 "quarantine",
@@ -185,19 +189,35 @@ pub const CATALOG: &[PermSection] = &[
                 "Quarantine and unquarantine",
             ),
             perm("warn", "Warn Command", "Warn and unwarn"),
-            perm("slowmode", "Slowmode Command", ""),
-            perm("purge", "Purge Command", ""),
+            perm(
+                "slowmode",
+                "Slowmode Command",
+                "Anyone with this can set slowmode without limitations",
+            ),
+            perm(
+                "purge",
+                "Purge Command",
+                "Anyone with this can purge messages without limitations",
+            ),
             perm("verify", "Verify Command", "Manually verify members"),
             perm("sanitize", "Sanitize Command", "Sanitize/Dehoist"),
             perm("reports", "Manage Reports", "View and act on reports"),
             perm("backups", "Backups", "Take/Load/Delete backups"),
-            perm("notes_view", "View Notes", ""),
+            perm(
+                "notes_view",
+                "View Notes",
+                "Anyone with this can view member notes",
+            ),
             perm(
                 "notes_manage",
                 "Manage Notes",
                 "View/edit/remove/sweep notes",
             ),
-            perm("appeals", "Review Appeals", ""),
+            perm(
+                "appeals",
+                "Review Appeals",
+                "Anyone with this can accept or deny appeals",
+            ),
             perm("revert", "Revert Center", "Undo anti-nuke actions"),
             perm("tickets", "Manage Tickets", "See and close every ticket"),
         ],
@@ -206,7 +226,11 @@ pub const CATALOG: &[PermSection] = &[
         id: "lockdown",
         title: "Lockdown",
         items: &[
-            perm("lock_channels", "Lock Server Channels", ""),
+            perm(
+                "lock_channels",
+                "Lock Server Channels",
+                "Anyone with this can lock and unlock server channels",
+            ),
             perm(
                 "lock_staff_roles",
                 "Lock Staff Roles",

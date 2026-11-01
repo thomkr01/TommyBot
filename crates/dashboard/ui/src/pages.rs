@@ -104,7 +104,7 @@ pub fn Ring(pct: Signal<usize>, #[prop(default = None)] color: Option<&'static s
 const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
     ("automod", "Auto Mod", "Anti Spam, Anti Advertising, Anti Phishing and all the message filters.", true, false),
     ("antinuke", "Anti Nuke", "The system that monitors your staff members and guards your server away from getting nuked.", true, true),
-    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true, true),
+    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true, false),
     ("joinraid", "Join Raid", "The advanced system that monitors your server joins and reacts if a raid is targeting your server.", true, true),
     ("verification", "Verification", "TommyBot's verification gate that your new members need to pass in order to get access to your server.", true, false),
 ];

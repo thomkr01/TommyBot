@@ -175,7 +175,7 @@ pub async fn apply_dm(
     let cfg = app.cfg(gid.get()).await?;
     let soft = flags.soft && kind == ModKind::Ban;
     // One DM before the action: a banned user can't be DMed afterwards.
-    let note = appeals::note(&cfg.appeals, gid)
+    let note = appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
         .filter(|_| matches!(kind, ModKind::Ban | ModKind::Timeout) && !soft);
     let told = (flags.dm || cfg.misc.always_dm).then(|| {
         let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());

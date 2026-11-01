@@ -807,7 +807,7 @@ async fn punish(
         } else {
             format!("Automod action: {action:?}")
         };
-        let note = crate::appeals::note(&cfg.appeals, gid)
+        let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
             .filter(|_| matches!(action, Action::Ban | Action::Timeout(_)));
         reply::dm(
             app,

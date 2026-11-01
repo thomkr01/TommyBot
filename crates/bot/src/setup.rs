@@ -12,6 +12,7 @@ use twilight_model::{
     channel::permission_overwrite::{
         PermissionOverwrite as ModelOverwrite, PermissionOverwriteType as ModelOverwriteType,
     },
+    channel::Channel,
     gateway::payload::incoming::MessageCreate,
     guild::{Permissions, RolePosition},
     http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
@@ -25,6 +26,36 @@ use crate::{
 
 /// Wick's quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
 const QUARANTINE_DENY: u64 = 1_051_712;
+
+/// `misc.enforce_quarantine_perms`: puts the quarantine overwrite back on a channel that lacks it.
+pub async fn enforce_quarantine(app: &App, c: &Channel) -> Result<()> {
+    let Some(gid) = c.guild_id else {
+        return Ok(());
+    };
+    let cfg = app.cfg(gid.get()).await?;
+    let Some(role) = cfg
+        .antinuke
+        .quarantine_role
+        .filter(|_| cfg.misc.enforce_quarantine_perms)
+    else {
+        return Ok(());
+    };
+    let want = Permissions::from_bits_truncate(QUARANTINE_DENY);
+    let ok =
+        c.permission_overwrites.iter().flatten().any(|o| {
+            o.id.get() == role.get() && o.deny.contains(want) && !o.allow.intersects(want)
+        });
+    if !ok {
+        let o = PermissionOverwrite {
+            id: role.cast(),
+            kind: PermissionOverwriteType::Role,
+            allow: None,
+            deny: Some(want),
+        };
+        app.http.update_channel_permission(c.id, &o).await?;
+    }
+    Ok(())
+}
 
 const STEPS: [&str; 9] = [
     "Initializing Setup",

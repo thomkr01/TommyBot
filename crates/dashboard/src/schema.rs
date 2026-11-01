@@ -238,6 +238,7 @@ pub fn schema() -> Vec<Value> {
     let mut nuke = vec![
         ti(fg("Status", "enabled", "bool"), "Use the antinuke module"),
         ti(fg("Status", "prune", "bool"), "Detect and react to member prunes"),
+        ti(dv(fg("Status", "quarantine_hold", "bool"), true), "Punish anyone who touches a quarantined member"),
         ti(fg("Status", "vanity_guard", "bool"), "Have TommyBot guard your server's vanity url"),
         ti(dv(fg("Auto quarantine", "auto_quarantine", "bool"), true), "Use the auto quarantine module"),
         ti(fg("Auto quarantine", "quarantine_role", "role"), "Quarantine role"),
@@ -699,8 +700,9 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("General", "use_slash", "bool"), true), "Use slash commands"),
         ti(fg("General", "compact_replies", "bool"), "Minify TommyBot's message replies to compact embeds"),
         ti(fg("General", "delete_replies_secs", "int"), "Delete TommyBot's auto messages after few seconds"),
-        ti(fg("General", "enforce_quarantine_perms", "bool"), "Always enforce the proper permissions of Quarantine role in channels"),
+        ti(dv(fg("General", "enforce_quarantine_perms", "bool"), true), "Always enforce the proper permissions of Quarantine role in channels"),
         ti(fg("General", "ignore_no_permit", "bool"), "Always ignore commands issued by members without any permits"),
+        ti(fg("General", "ban_appeal_message", "text"), "Message shown to banned members with the appeal link"),
         ti(fg("General", "enforce_permits", "bool"), "Remove roles with dangerous permissions from members without any permits"),
         sx(
             "logging",

@@ -7,14 +7,16 @@ pub fn link(base: &str, guild: Id<GuildMarker>) -> String {
 }
 
 /// Line appended to a ban or timeout DM, so the member gets one message and not two.
-pub fn note(cfg: &AppealsCfg, guild: Id<GuildMarker>) -> Option<String> {
+pub fn note(cfg: &AppealsCfg, message: &str, guild: Id<GuildMarker>) -> Option<String> {
     let base = std::env::var("DASHBOARD_URL")
         .ok()
         .filter(|u| cfg.enabled && !u.is_empty())?;
-    Some(format!(
-        "You can appeal this on the dashboard: {}",
-        link(&base, guild)
-    ))
+    let message = if message.is_empty() {
+        "You can appeal this on the dashboard:"
+    } else {
+        message
+    };
+    Some(format!("{message} {}", link(&base, guild)))
 }
 
 #[cfg(test)]

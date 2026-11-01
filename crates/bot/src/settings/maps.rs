@@ -181,6 +181,7 @@ pub(super) static ANTINUKE: Module = Module {
         group!("4", "Prune"),
         r!("4a", "Prune Detection", "antinuke.prune", Kind::Bool, |c| on(c.antinuke.prune)),
         group!("5", "Quarantine Hold"),
+        r!("5a", "Quarantine Hold", "antinuke.quarantine_hold", Kind::Bool, |c| on(c.antinuke.quarantine_hold)),
         r!("5b", "Strict Mode", "antinuke.strict_mode", Kind::Bool, |c| on(c.antinuke.strict_mode)),
         r!("5c", "Monitor Public Roles", "antinuke.monitor_public_roles", Kind::Bool, |c| on(c.antinuke.monitor_public_roles)),
         r!("5d", "Vanity Protection", "antinuke.vanity_guard", Kind::Bool, |c| on(c.antinuke.vanity_guard)),
@@ -315,6 +316,7 @@ pub(super) static MISC: Module = Module {
         r!("6", "Enforce Quarantine Perms", "misc.enforce_quarantine_perms", Kind::Bool, |c| on(c.misc.enforce_quarantine_perms)),
         r!("7", "Ignore Permit 1 Commands", "misc.ignore_no_permit", Kind::Bool, |c| on(c.misc.ignore_no_permit)),
         r!("8", "Enforce Permits", "misc.enforce_permits", Kind::Bool, |c| on(c.misc.enforce_permits)),
+        r!("9", "Ban Appeal Message", "misc.ban_appeal_message", Kind::Text, |c| c.misc.ban_appeal_message.clone()),
     ],
 };
 
