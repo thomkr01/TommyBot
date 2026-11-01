@@ -374,6 +374,11 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
                 c => c.to_vec(),
             };
             let name = p.kind.as_ref().or(p.names.first()).map(String::as_str);
+            // `-blind` turns a server lock (or the default) into a blind one.
+            let name = match (p.flags.blind, name) {
+                (true, None | Some("server" | "sc")) => Some("blind"),
+                (_, n) => n,
+            };
             let name = name.or((!p.channels.is_empty()).then_some("c"));
             let mut kinds = vec![];
             for c in &channels {
@@ -782,6 +787,7 @@ mod tests {
             dm: true,
             soft: true,
             compact: false,
+            ..Default::default()
         };
         let a = Action::Mod {
             kind: ModKind::Ban,

@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::{hash_map::Entry, HashMap};
 use tommybot_antinuke::{webhook_whitelisted, webhooks_to_delete, Webhook};
 use tommybot_automod::{
-    discord_api::BotAction,
+    discord_api::{self, BotAction},
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
     join::{account_created_ms, gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
@@ -637,6 +637,16 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         }
     }
     let name = cure(&user.name);
+    // Without an audit entry the bot counts as authorised.
+    let adder = if user.bot {
+        crate::welcome::bot_adder(app, gid, user.id).await
+    } else {
+        None
+    };
+    let authorized = match adder {
+        Some(a) => app.is_immune(gid, a).await.unwrap_or(true),
+        None => true,
+    };
     let j = Joiner {
         invite: invite.as_ref().map(|i| i.0.as_str()),
         id: user.id.get(),
@@ -646,7 +656,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         bot_verified: user
             .public_flags
             .is_some_and(|f| f.contains(UserFlags::VERIFIED_BOT)),
-        added_by_authorized: !user.bot || bot_added_by_authorized(app, gid, user.id).await,
+        added_by_authorized: authorized,
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     verify::on_join(app, gid, user.id, suspicious, user.bot).await;
@@ -659,6 +669,18 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             "join gate".into()
         };
         punish(app, &cfg, gid, j.id, action, &why).await?;
+        // The bot filter also punishes whoever added it.
+        if let (Some(adder), true) = (adder, hits.iter().any(|h| h.0 == Filter::UnauthorizedBot)) {
+            punish(
+                app,
+                &cfg,
+                gid,
+                adder.get(),
+                action,
+                "adding a bot without permission",
+            )
+            .await?;
+        }
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
         join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
@@ -779,6 +801,10 @@ async fn join_raid(
     Ok(())
 }
 
+/// Recent hits of rules with a Wick-style mention scope, by (guild, rule, member or 0 for the server).
+type ScopeHits = std::sync::Mutex<HashMap<(u64, u64, u64), Vec<i64>>>;
+static MENTION_HITS: std::sync::LazyLock<ScopeHits> = std::sync::LazyLock::new(Default::default);
+
 /// Bot-side actions for a native rule; the rule's block-message event fires once per hit.
 pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Result<()> {
     if e.action.kind != AutoModerationActionType::BlockMessage {
@@ -789,6 +815,22 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
     let Some(actions) = cfg.discord_automod.actions.get(&e.rule_id.to_string()) else {
         return Ok(());
     };
+    if let Some(sc) = cfg.discord_automod.scopes.get(&e.rule_id.to_string()) {
+        // Server scope counts everyone together, user scope each member apart.
+        let who = if sc.scope == "server" {
+            0
+        } else {
+            e.user_id.get()
+        };
+        let key = (gid.get(), e.rule_id.get(), who);
+        let tripped = {
+            let mut hits = MENTION_HITS.lock().unwrap();
+            discord_api::scope_tripped(hits.entry(key).or_default(), now_secs(), sc)
+        };
+        if !tripped {
+            return Ok(());
+        }
+    }
     for &a in actions {
         if let Err(err) = native_action(app, &cfg, e, a).await {
             tracing::warn!(?err, ?a, "native rule action failed");
@@ -882,14 +924,6 @@ pub(crate) fn count_emojis(s: &str) -> usize {
 /// Names with fancy Unicode, lookalikes and leetspeak folded to plain letters, for the username filter.
 pub(crate) fn cure(name: &str) -> String {
     decancer::cure!(name).map_or_else(|_| name.to_string(), |c| c.to_string())
-}
-
-/// Whether whoever added the bot is Owner/EO/TA; when the audit log has no entry the bot counts as authorized.
-async fn bot_added_by_authorized(app: &App, gid: Id<GuildMarker>, bot: Id<UserMarker>) -> bool {
-    match crate::welcome::bot_adder(app, gid, bot).await {
-        Some(adder) => app.is_immune(gid, adder).await.unwrap_or(true),
-        None => true,
-    }
 }
 
 /// Re-runs the username filter when a member renames, if the gate asks for it.

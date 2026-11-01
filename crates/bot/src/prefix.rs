@@ -55,6 +55,9 @@ pub struct Flags {
     pub dm: bool,
     pub soft: bool,
     pub compact: bool,
+    /// `-blind` / `-b` on a lock: hide the channels too.
+    #[serde(default)]
+    pub blind: bool,
 }
 
 /// `s` is the message text with the prefix already stripped. Targets are mentions, raw ids, or names (words before the first `?flag`; with commas,
@@ -104,6 +107,7 @@ pub fn parse(s: &str) -> Option<Parsed> {
             "?s" => p.flags.soft = true,
             "?p" => p.flags.compact = true,
             "?h" => {}
+            "-blind" | "-b" if command == "lock" || command == "unlock" => p.flags.blind = true,
             _ if tok.starts_with("<@&") || tok.starts_with("<#") => {
                 if let Ok(id) = tok.trim_matches(|c: char| !c.is_ascii_digit()).parse() {
                     if tok.starts_with("<#") {
@@ -230,6 +234,13 @@ mod tests {
             (p.kind.as_deref(), p.input, p.channels),
             (Some("c"), None, vec![1, 2])
         );
+    }
+
+    #[test]
+    fn blind_flag_on_locks() {
+        assert!(parse("lock -blind").unwrap().flags.blind);
+        assert!(parse("lock sc -b").unwrap().flags.blind);
+        assert!(!parse("purge 5 -b").unwrap().flags.blind);
     }
 
     #[test]
