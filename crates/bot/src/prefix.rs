@@ -33,6 +33,12 @@ fn alias(cmd: &str) -> (&str, Option<&str>) {
         "lockc" | "clock" => ("lock", Some("c")),
         "serverlock" | "slock" | "locks" | "lockserver" | "lockchannels" => ("lock", Some("sc")),
         "ul" => ("unlock", None),
+        "bcreate" | "bsave" | "btake" | "createbackup" => ("backups", Some("create")),
+        "bload" | "bapply" | "loadbackup" => ("backups", Some("load")),
+        "bdel" | "bdelete" | "deletebackup" | "delbackup" | "backupdelete" => {
+            ("backups", Some("delete"))
+        }
+        "iclear" | "imgclear" | "ipurge" | "imgp" | "imgpurge" | "ic" => ("backups", Some("clear")),
         "lockupdate" | "updatel" | "locku" => ("lock", Some("update")),
         "sweep" | "clear" | "p" | "c" => ("purge", None),
         "san" | "sanitise" | "dehoist" => ("sanitize", None),
@@ -184,6 +190,11 @@ mod tests {
             ("lock", Some("sc"))
         );
         assert_eq!(parse("ld ?t K").unwrap().kind.as_deref(), Some("k"));
+        let p = parse("bload 3").unwrap();
+        assert_eq!(
+            (p.command.as_str(), p.kind.as_deref(), p.targets.as_slice()),
+            ("backups", Some("load"), &[3][..])
+        );
         let p = parse("locku raid over").unwrap();
         assert_eq!(
             (p.command.as_str(), p.kind.as_deref()),

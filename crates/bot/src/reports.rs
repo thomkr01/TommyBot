@@ -332,7 +332,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         .unwrap_or_else(|e| {
             tracing::warn!(?e, action, "report action failed");
             Outcome(
-                format!("Something went wrong: {}", crate::commands::why(&e)),
+                format!("Something went wrong: {}", crate::confirm::why(&e)),
                 None,
             )
         });

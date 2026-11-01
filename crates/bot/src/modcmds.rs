@@ -4,6 +4,10 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use tommybot_antinuke::Inverse;
 use tommybot_core::{cases, permits};
+use tommybot_logging::{
+    embed::{self, ORANGE},
+    Log, LogKind,
+};
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
     application::interaction::application_command::{CommandDataOption, CommandOptionValue},
@@ -17,7 +21,9 @@ use twilight_model::{
 use crate::{
     antinuke,
     app::App,
-    commands::{self, gated, target_above_bot, Action, Pending},
+    commands::{self, gated, target_above_bot},
+    confirm::{self, Action, Pending},
+    events::send_log,
     prefix::Parsed,
     purge,
     slash::{int, role, string, user},
@@ -99,6 +105,10 @@ pub enum ModCmd {
     NoteRemove {
         id: i64,
     },
+    NoteModify {
+        id: i64,
+        text: String,
+    },
     NoteSweep {
         user: u64,
     },
@@ -120,13 +130,23 @@ impl ModCmd {
             Self::Quarantine { .. } | Self::Unquarantine { .. } => "quarantine",
             Self::Purge { .. } => "purge",
             Self::NoteList { .. } => "notes_view",
-            Self::NoteAdd { .. } | Self::NoteRemove { .. } | Self::NoteSweep { .. } => {
-                "notes_manage"
-            }
+            Self::NoteAdd { .. }
+            | Self::NoteModify { .. }
+            | Self::NoteRemove { .. }
+            | Self::NoteSweep { .. } => "notes_manage",
             Self::Slowmode { .. } => "slowmode",
             Self::CasesView { .. } | Self::CasesEdit { .. } | Self::CaseSet { .. } => "cases",
             Self::Verify { .. } => "verify",
             Self::Sanitize { .. } => "sanitize",
+        }
+    }
+
+    /// What a DM about this command calls it.
+    pub(crate) fn dm_name(&self) -> &'static str {
+        match self {
+            Self::Untimeout { .. } => "timeout removal",
+            Self::Unquarantine { .. } => "quarantine removal",
+            _ => self.perm(),
         }
     }
 
@@ -154,7 +174,7 @@ impl ModCmd {
     }
 
     /// The member the permit/hierarchy check applies to.
-    fn target(&self) -> Option<u64> {
+    pub(crate) fn target(&self) -> Option<u64> {
         match *self {
             Self::Unban { user }
             | Self::Hackban { user }
@@ -299,6 +319,12 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     if level == permits::Level::None && app.cfg(gid.get()).await?.misc.ignore_no_permit {
         return Ok(());
     }
+    // `unban 123 spam links`: the words after an id are the reason, not names.
+    let mut p = p;
+    if p.command == "unban" && !p.targets.is_empty() && p.reason.is_none() {
+        p.reason = Some(p.names.join(" ")).filter(|r| !r.is_empty());
+        p.names.clear();
+    }
     let mut resolved = None;
     let name = p.names.iter().find(|n| {
         !matches!(
@@ -324,7 +350,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
                     reason: p.reason,
                     proof: None,
                 };
-                return commands::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action))
+                return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action))
                     .await;
             }
             run(
@@ -340,7 +366,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(?e, "mod command failed");
-                format!("Command failed: {}", crate::commands::why(&e))
+                format!("Command failed: {}", crate::confirm::why(&e))
             })
         }
     };
@@ -376,14 +402,7 @@ pub async fn run(
     }
     let g = gid.get() as i64;
     let reasonless = reason.is_none();
-    // Discord's audit log caps reasons at 512 characters.
-    let audit = tommybot_logging::embed::clip(
-        &format!(
-            "{} | Moderator: {actor_id}",
-            reason.unwrap_or("No reason provided")
-        ),
-        500,
-    );
+    let audit = commands::audit_reason(reason, actor_id);
     // (case kind, case user, inverse, reason prefix, reply)
     let (kind, uid, inverse, note, reply): (&str, u64, Option<Value>, Option<String>, String) =
         match cmd {
@@ -409,6 +428,24 @@ pub async fn run(
                 .fetch_one(&app.pool)
                 .await?;
                 return Ok(format!("Note #{id} added for <@{user}>"));
+            }
+            ModCmd::NoteModify { id, text } => {
+                if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
+                    return Ok(format!(
+                        "A note must be {NOTE_MIN} to {NOTE_MAX} characters long"
+                    ));
+                }
+                let n = sqlx::query("UPDATE notes SET text=$3 WHERE guild_id=$1 AND id=$2")
+                    .bind(g)
+                    .bind(id)
+                    .bind(text)
+                    .execute(&app.pool)
+                    .await?
+                    .rows_affected();
+                return Ok(match n {
+                    0 => format!("No note #{id}"),
+                    _ => format!("Note #{id} updated"),
+                });
             }
             ModCmd::NoteList { user } => return view_notes(app, g, user).await,
             ModCmd::NoteRemove { id } => {
@@ -441,6 +478,15 @@ pub async fn run(
                         .execute(&app.pool)
                         .await?
                         .rows_affected();
+                if done > 0 {
+                    let log = Log::new("Case Updated", ORANGE)
+                        .line("Case", &format!("`{case}`"))
+                        .line("Moderator", &embed::user(actor_id.get()))
+                        .line("New Reason", &reason);
+                    send_log(app, gid.get(), LogKind::ModCommand, log)
+                        .await
+                        .ok();
+                }
                 return Ok(match done {
                     0 => format!("No case #{case}"),
                     _ => format!("Case #{case} reason updated"),
@@ -774,6 +820,10 @@ pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option
                 "view" => ModCmd::NoteList { user: u()? },
                 "remove" => ModCmd::NoteRemove {
                     id: int(s, "id").ok_or("missing id")?,
+                },
+                "modify" => ModCmd::NoteModify {
+                    id: int(s, "id").ok_or("missing id")?,
+                    text: string(s, "msg").ok_or("missing msg")?.into(),
                 },
                 "sweep" => ModCmd::NoteSweep { user: u()? },
                 _ => return Err("Unknown subcommand".into()),

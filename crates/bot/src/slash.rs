@@ -25,7 +25,8 @@ use twilight_util::builder::command::{
 
 use crate::{
     app::App,
-    commands::{self, Action, ModKind, Pending},
+    commands::{self, ModKind},
+    confirm::{self, Action, Pending},
     modcmds::{self, ModCmd},
     prefix::Flags,
     reply, reports,
@@ -65,6 +66,8 @@ pub enum BackupCmd {
     List,
     Load { id: i64, confirm: bool },
     Delete { id: i64 },
+    View { id: i64 },
+    Clear,
 }
 
 pub(crate) fn user(o: &[CommandDataOption], name: &str) -> Option<Id<UserMarker>> {
@@ -125,6 +128,8 @@ fn backup(o: &[CommandDataOption]) -> Result<Cmd, String> {
             confirm: flag(sub, "confirm"),
         },
         "delete" => BackupCmd::Delete { id: id()? },
+        "view" => BackupCmd::View { id: id()? },
+        "purge" => BackupCmd::Clear,
         _ => return Err("Unknown subcommand".into()),
     }))
 }
@@ -323,6 +328,7 @@ pub fn definitions() -> Vec<Command> {
                     SubCommandBuilder::new("remove", "Remove a member's timeout")
                         .option(user())
                         .option(reason())
+                        .option(dm())
                         .option(proof()),
                 ),
         ),
@@ -377,7 +383,12 @@ pub fn definitions() -> Vec<Command> {
                 .option(
                     SubCommandBuilder::new("delete", "Delete a backup")
                         .option(IntegerBuilder::new("id", "Backup id").required(true)),
-                ),
+                )
+                .option(
+                    SubCommandBuilder::new("view", "Show what a backup holds")
+                        .option(IntegerBuilder::new("id", "Backup id").required(true)),
+                )
+                .option(SubCommandBuilder::new("purge", "Delete all backups")),
         ),
         guild_only(menu("Ban")),
         guild_only(menu("Kick")),
@@ -491,7 +502,7 @@ async fn run(
         if data.kind == CommandType::User || !(cfg_confirm && job.needs_confirm()) {
             return Ok(None);
         }
-        let (text, row) = commands::stash_confirm(app, i.id.get(), job).await?;
+        let (text, row) = confirm::stash_confirm(app, i.id.get(), job).await?;
         *confirm = Some(row);
         Ok(Some(text))
     };
@@ -529,8 +540,9 @@ async fn run(
                 proof.as_deref(),
             )
             .await?;
-            if kind == ModKind::Timeout && !app.cfg(gid.get()).await?.misc.compact_replies {
-                *out = reply::timeout_embeds(&[text], reason.as_deref(), actor_id.get());
+            if !app.cfg(gid.get()).await?.misc.compact_replies {
+                *out =
+                    reply::result_embeds(kind.name(), &[text], reason.as_deref(), actor_id.get());
                 return Ok(String::new());
             }
             Ok(text)
@@ -566,7 +578,9 @@ async fn run(
             if let Some(q) = ask(action).await? {
                 return Ok(q);
             }
-            modcmds::run(
+            let target = c.target().map(Id::new);
+            let dm_name = c.dm_name();
+            let text = modcmds::run(
                 app,
                 gid,
                 owner,
@@ -576,7 +590,17 @@ async fn run(
                 reason.as_deref(),
                 proof.as_deref(),
             )
-            .await
+            .await?;
+            if let (Some(t), true, true) = (
+                target,
+                text.starts_with("Case #"),
+                flag(flatten(&data.name, &data.options).1, "dm"),
+            ) {
+                let hide = app.cfg(gid.get()).await?.misc.hide_staff_in_dms;
+                let who = (!hide).then_some(actor_id.get());
+                reply::dm(app, t, &reply::dm_text(dm_name, reason.as_deref(), who)).await;
+            }
+            Ok(text)
         }
     }
 }

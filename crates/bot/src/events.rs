@@ -18,7 +18,8 @@ use twilight_model::{
 };
 
 use crate::{
-    antinuke, app::App, automod, commands, metrics, prefix, reports, slash, tickets, verify,
+    antinuke, app::App, automod, commands, confirm, metrics, prefix, reports, slash, tickets,
+    verify,
 };
 
 fn guild_of(ev: &Event) -> Option<u64> {
@@ -229,7 +230,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?
-                && !commands::handle_confirm(app, &i.0).await?
+                && !confirm::handle_confirm(app, &i.0).await?
                 && !reports::handle(app, &i.0).await?
                 && !crate::settings::handle(app, &i.0).await?
                 && !crate::whitelist::handle(app, &i.0).await?

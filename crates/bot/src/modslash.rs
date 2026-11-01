@@ -4,7 +4,7 @@ use twilight_model::application::{
     interaction::InteractionContextType,
 };
 use twilight_util::builder::command::{
-    AttachmentBuilder, CommandBuilder, IntegerBuilder, RoleBuilder, StringBuilder,
+    AttachmentBuilder, BooleanBuilder, CommandBuilder, IntegerBuilder, RoleBuilder, StringBuilder,
     SubCommandBuilder, UserBuilder,
 };
 
@@ -33,6 +33,7 @@ pub fn definitions() -> Vec<Command> {
                 SubCommandBuilder::new("add", "Strip a member's roles")
                     .option(user("Member"))
                     .option(reason())
+                    .option(BooleanBuilder::new("dm", "Tell the member by DM"))
                     .option(AttachmentBuilder::new(
                         "proof",
                         "Screenshot or file as evidence",
@@ -42,6 +43,7 @@ pub fn definitions() -> Vec<Command> {
                 SubCommandBuilder::new("remove", "Restore a quarantined member's roles")
                     .option(user("Member"))
                     .option(reason())
+                    .option(BooleanBuilder::new("dm", "Tell the member by DM"))
                     .option(AttachmentBuilder::new(
                         "proof",
                         "Screenshot or file as evidence",
@@ -121,6 +123,20 @@ pub fn definitions() -> Vec<Command> {
             .option(
                 SubCommandBuilder::new("view", "Show a member's latest notes")
                     .option(user("Member")),
+            )
+            .option(
+                SubCommandBuilder::new("modify", "Change a note")
+                    .option(
+                        IntegerBuilder::new("id", "Note number")
+                            .min_value(1)
+                            .required(true),
+                    )
+                    .option(
+                        StringBuilder::new("msg", "The new text (5 to 500 characters)")
+                            .min_length(5)
+                            .max_length(500)
+                            .required(true),
+                    ),
             )
             .option(
                 SubCommandBuilder::new("remove", "Remove one note").option(

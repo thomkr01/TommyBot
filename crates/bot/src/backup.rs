@@ -197,6 +197,14 @@ pub async fn list(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(i64, i64, i32,
     .await?)
 }
 
+pub async fn clear(app: &App, gid: Id<GuildMarker>) -> Result<u64> {
+    let r = sqlx::query("DELETE FROM backups WHERE guild_id = $1")
+        .bind(gid.get() as i64)
+        .execute(&app.pool)
+        .await?;
+    Ok(r.rows_affected())
+}
+
 pub async fn delete(app: &App, gid: Id<GuildMarker>, id: i64) -> Result<bool> {
     let r = sqlx::query("DELETE FROM backups WHERE guild_id = $1 AND id = $2")
         .bind(gid.get() as i64)

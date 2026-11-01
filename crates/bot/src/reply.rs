@@ -64,15 +64,21 @@ pub fn add_reason_hint(case_no: i64) -> String {
     format!("\nAdd Reason: `/cases modify case:{case_no} reason:`")
 }
 
-/// Wick's two timeout embeds: the result, and a pointer to add a reason when none was given.
-pub fn timeout_embeds(texts: &[String], reason: Option<&str>, actor: u64) -> Vec<Embed> {
-    let mut result = Log::new("Timeout Result:", BLUE)
+/// Wick's two result embeds: "Timeout Result:" and its kin, and a pointer to add a reason when none was given.
+pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: u64) -> Vec<Embed> {
+    let (title, done) = match kind {
+        "ban" => ("Ban Result:", "Banned:"),
+        "kick" => ("Kick Result:", "Kicked:"),
+        "warn" => ("Warn Result:", "Warned:"),
+        _ => ("Timeout Result:", "Timed out:"),
+    };
+    let mut result = Log::new(title, BLUE)
         .text(&format!(
             "📄 **Reason:** {}",
             reason.unwrap_or("No reason.")
         ))
         .text(&format!("👤 **Moderator:** <@{actor}>"))
-        .text("**Timed out:**");
+        .text(&format!("**{done}**"));
     let mut cases = vec![];
     for t in texts {
         let first = t.lines().next().unwrap_or_default();
@@ -84,6 +90,14 @@ pub fn timeout_embeds(texts: &[String], reason: Option<&str>, actor: u64) -> Vec
                 cases.push(n);
                 let id = who.trim_matches(|c: char| !c.is_ascii_digit());
                 result = result.text(&format!("{YES} {who} [`{id}`]"));
+                // Warn threshold notes; the embed already shows moderator and reason.
+                for extra in t.lines().skip(1).filter(|l| {
+                    !["Moderator:", "Reason:", "Add Reason"]
+                        .iter()
+                        .any(|p| l.starts_with(p))
+                }) {
+                    result = result.text(extra);
+                }
             }
             _ => result = result.text(&format!("{NO} {first}")),
         }
@@ -225,12 +239,12 @@ mod tests {
             "Case #4: timeout <@5>".to_string(),
             "Cannot timeout <@6>: they are immune".into(),
         ];
-        let e = timeout_embeds(&t, None, 9);
+        let e = result_embeds("timeout", &t, None, 9);
         assert_eq!(e.len(), 2);
         let d = e[0].description.clone().unwrap();
         assert!(d.contains("No reason.") && d.contains("✅ <@5> [`5`]") && d.contains("❎ Cannot"));
         assert!(e[1].description.clone().unwrap().contains("(Case: 4)"));
-        assert_eq!(timeout_embeds(&t, Some("x"), 9).len(), 1);
+        assert_eq!(result_embeds("timeout", &t, Some("x"), 9).len(), 1);
     }
 
     #[test]

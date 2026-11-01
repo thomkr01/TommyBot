@@ -361,6 +361,18 @@ pub async fn command(
         }
     };
     let name = lock_name(&kind);
+    let (channels, roles, joins) = kind.covers();
+    let needs = [
+        (
+            channels || matches!(kind, LockKind::Channel(_)),
+            "lock_channels",
+        ),
+        (roles, "lock_staff_roles"),
+        (joins.is_some(), "lock_joins"),
+    ];
+    if let Some((_, p)) = needs.iter().find(|(on, p)| *on && !actor.has(p)) {
+        return Ok(format!("Cannot lock {name}: you lack the {p} permit"));
+    }
     let done = lock(app, gid, kind.clone()).await?;
     if done {
         if let Some(d) = duration_s {
