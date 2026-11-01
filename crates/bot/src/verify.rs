@@ -6,6 +6,7 @@ use captcha::{
     Captcha,
 };
 use image::{Rgb, RgbImage};
+use rand::Rng;
 use serde::Deserialize;
 use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
@@ -469,24 +470,74 @@ fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
         cap.apply_filter(Dots::new(12).min_radius(2).max_radius(4));
     }
     let load = |png: Option<Vec<u8>>| Some(image::load_from_memory(&png?).ok()?.into_luma8());
-    let (Some(text), Some(all)) = (load(text), load(cap.as_png())) else {
+    // Faint background letters: a second code that is never the answer.
+    let mut bg = Captcha::new();
+    bg.add_chars(5).view(cw, ch);
+    let (Some(text), Some(all), Some(bg)) = (load(text), load(cap.as_png()), load(bg.as_png()))
+    else {
         return (cap.chars_as_string(), vec![]);
     };
-    let black = Rgb([0, 0, 0]);
-    let (font, decoy) = (
-        rgb(&c.font_color).unwrap_or(black),
-        rgb(&c.decoy_color).unwrap_or(black),
-    );
-    let img = RgbImage::from_fn(all.width(), all.height(), |x, y| {
+    let (font, decoy) = (rgb(&c.font_color), rgb(&c.decoy_color));
+    let custom = |c: Option<Rgb<u8>>| c.filter(|c| c.0 != [0, 0, 0]);
+    // Each character slot gets its own green or yellow unless the settings name a color.
+    let mut rng = rand::thread_rng();
+    let slots = c.length.clamp(3, 7);
+    let pick: Vec<(Rgb<u8>, Rgb<u8>)> = (0..slots)
+        .map(|_| {
+            let t = if rng.gen() {
+                Rgb([40, 190, 60])
+            } else {
+                Rgb([225, 200, 30])
+            };
+            let d = Rgb([
+                rng.gen_range(150..230),
+                rng.gen_range(150..230),
+                rng.gen_range(150..230),
+            ]);
+            (custom(font).unwrap_or(t), custom(decoy).unwrap_or(d))
+        })
+        .collect();
+    let mut img = RgbImage::from_fn(all.width(), all.height(), |x, y| {
+        let (t, d) = pick[(x * slots / all.width()) as usize];
         match (
             text.get_pixel(x, y).0[0] < 128,
             all.get_pixel(x, y).0[0] < 128,
+            bg.get_pixel(x, y).0[0] < 128,
         ) {
-            (true, _) => font,
-            (false, true) => decoy,
+            (true, _, _) => t,
+            (_, true, _) | (_, _, true) => d,
             _ => Rgb([255, 255, 255]),
         }
     });
+    if c.trace {
+        // A zigzag through the text, alternating red and green.
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        let steps = slots * 2;
+        let at = |i: u32| {
+            (
+                iw * i as f32 / steps as f32,
+                ih * if i.is_multiple_of(2) { 0.3 } else { 0.7 },
+            )
+        };
+        for i in 0..steps {
+            let ((x0, y0), (x1, y1)) = (at(i), at(i + 1));
+            let col = if i % 2 == 0 {
+                Rgb([220, 30, 30])
+            } else {
+                Rgb([30, 170, 50])
+            };
+            for k in 0..=200 {
+                let f = k as f32 / 200.0;
+                let (x, y) = (x0 + (x1 - x0) * f, y0 + (y1 - y0) * f);
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let (px, py) = (x as u32 + dx, y as u32 + dy);
+                    if px < img.width() && py < img.height() {
+                        img.put_pixel(px, py, col);
+                    }
+                }
+            }
+        }
+    }
     let img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
     let mut png = std::io::Cursor::new(vec![]);
     let ok = img
@@ -641,6 +692,19 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 .unwrap()
                 .get(&gid.get())
                 .is_some_and(|r| r.active(now));
+            // Owners are immune and never need to verify.
+            if matches!(cfg.verification.verify.mode, VerifyMode::Web) {
+                let owner = app.guild_info(gid).await?.owner;
+                if matches!(
+                    app.level(gid, owner, user).await?,
+                    tommybot_core::permits::Level::Owner
+                        | tommybot_core::permits::Level::ExtraOwner
+                ) {
+                    let t = "The server owner and extra owners cannot verify; you are exempt.";
+                    client.create_response(i.id, &i.token, &reply(t)).await?;
+                    return Ok(true);
+                }
+            }
             match decide(&cfg.verification, raid, suspicious, has_role) {
                 Step::Say(t) => {
                     client.create_response(i.id, &i.token, &reply(t)).await?;
@@ -870,6 +934,20 @@ mod tests {
                 assert!(!new_captcha(&c).1.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn captcha_defaults_draw_green_yellow_text_and_a_red_line() {
+        let img = image::load_from_memory(&new_captcha(&CaptchaCfg::default()).1)
+            .unwrap()
+            .into_rgb8();
+        assert_eq!(img.dimensions(), (300, 100));
+        let has = |f: fn(&Rgb<u8>) -> bool| img.pixels().any(f);
+        assert!(has(|p| p.0[0] > 200 && p.0[1] < 80), "red line");
+        assert!(
+            has(|p| p.0[1] > 150 && p.0[0] < 100 && p.0[2] < 100),
+            "green"
+        );
     }
 
     #[test]

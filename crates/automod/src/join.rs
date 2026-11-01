@@ -614,6 +614,21 @@ pub struct VerifyCfg {
     pub captcha: CaptchaCfg,
 }
 
+/// Web verification only works with action Nothing and at least one verified/main role (roles fall back to
+/// the lockdown main roles). Takes the whole guild config; Some is the refusal text.
+pub fn web_mode_error(cfg: &serde_json::Value) -> Option<&'static str> {
+    let v = &cfg["verification"];
+    if v["enabled"] != true || v["mode"] != "Web" {
+        return None;
+    }
+    if !matches!(v["on_fail"].as_str(), None | Some("Nothing")) {
+        return Some("Web verification requires the Action to be set to Nothing.");
+    }
+    let has = |x: &serde_json::Value| x.as_array().is_some_and(|a| !a.is_empty());
+    (!has(&v["roles"]) && !has(&cfg["lockdown"]["main_roles"]))
+        .then_some("Web verification requires at least one verified or main role.")
+}
+
 /// The image captcha's look.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -990,5 +1005,24 @@ mod tests {
         cfg.target = VerifyTarget::SuspiciousOnly;
         assert!(!must_verify(&cfg, false, false));
         assert!(must_verify(&cfg, true, false));
+    }
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::web_mode_error;
+    use serde_json::json;
+
+    #[test]
+    fn web_mode_needs_action_nothing_and_a_role() {
+        let c = |fail, roles, main| {
+            json!({"verification": {"enabled": true, "mode": "Web", "on_fail": fail, "roles": roles},
+                   "lockdown": {"main_roles": main}})
+        };
+        assert!(web_mode_error(&c("Nothing", json!(["1"]), json!([]))).is_none());
+        assert!(web_mode_error(&c("Nothing", json!([]), json!(["2"]))).is_none());
+        assert!(web_mode_error(&c("Kick", json!(["1"]), json!([]))).is_some());
+        assert!(web_mode_error(&c("Nothing", json!([]), json!([]))).is_some());
+        assert!(web_mode_error(&json!({"verification": {"mode": "Captcha"}})).is_none());
     }
 }

@@ -506,6 +506,12 @@ pub async fn save(
             return Ok(Err(format!("Not saved: {e}")));
         }
     }
+    let touches = sections
+        .iter()
+        .any(|s| matches!(*s, "verification" | "lockdown"));
+    if let Some(e) = tommybot_automod::join::web_mode_error(&doc).filter(|_| touches) {
+        return Ok(Err(format!("Not saved: {e}")));
+    }
     sqlx::query(
         "insert into guild_config (guild_id, version, config, changed_by) values ($1,$2,$3,$4)",
     )
