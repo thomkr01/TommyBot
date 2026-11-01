@@ -112,7 +112,12 @@ def spam():
         call("DELETE", f"/channels/{chan}/messages/{i}", soft=True)
     # Once heat trips, the messages that built it go too, so nothing of the flood is left.
     print(f"cleaned: webhook e2e-spammer and {len(left)} leftover messages in #general")
-    return check(hook_gone and not left and logged("auto_mod", since),
+    # Hooks of verified bots are exempt (Wick's popular bots), and Discord flags the attacker as one.
+    owner = call("GET", f"/users/{hook['user']['id']}")
+    if owner.get("public_flags", 0) & 1 << 16:
+        print("SKIP spam webhook delete: the attacker is a verified bot, so its hook is exempt")
+        return check(not left, f"spam: {len(left)}/{len(ids)} messages left")
+    return check(hook_gone and not left and logged("auto_mod", since, "Webhooks Deleted"),
                  f"spam: webhook deleted={hook_gone}, {len(left)}/{len(ids)} messages left, automod logged")
 
 
@@ -122,6 +127,10 @@ def nuke():
     if not attacker:
         print("SKIP nuke: ATTACKER_TOKEN not set")
         return True
+    # New servers start with anti-nuke off.
+    current = json.loads(sql(f"select coalesce(config->'antinuke', '{{}}') from guild_config "
+                             f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
+    set_config("antinuke", {**current, "enabled": True})
     before = sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}")
     since = snowflake_now()
     # Soft: once the bot quarantines the attacker its calls fail, which is the point.
