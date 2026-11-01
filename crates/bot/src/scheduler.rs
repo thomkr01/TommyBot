@@ -7,6 +7,7 @@ use std::{
 };
 use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
+use tommybot_logging::emoji::ARROW;
 use tommybot_logging::{
     embed::{DONE, YES},
     Log, LogKind,
@@ -111,7 +112,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let code = job.payload["code"].as_str().unwrap_or_default();
             match crate::invites::raid_url(code).filter(|_| caught > 0) {
                 Some(url) => {
-                    log = log.text(&format!("› `{code}`"));
+                    log = log.text(&format!("{ARROW} `{code}`"));
                     send_log_link(
                         app,
                         gid.get(),

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tommybot_core::jobs;
 use tommybot_logging::embed::{Log, ARROW, BLUE, GREEN, NO, YES};
+use tommybot_logging::emoji::{MODERATOR, REASON};
 use twilight_model::channel::message::Embed;
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
@@ -43,14 +44,14 @@ pub fn summary(
     let mut s = if compact && texts.len() > 1 {
         let (ok, failed): (Vec<_>, Vec<_>) = texts.iter().partition(|t| t.starts_with("Case #"));
         let mut s = format!(
-            "✅ Successful {kind}s: `{}`\n❎ Unsuccessful {kind}s: `{}`",
+            "{YES} Successful {kind}s: `{}`\n{NO} Unsuccessful {kind}s: `{}`",
             ok.len(),
             failed.len()
         );
         if let Some(r) = reason {
-            s += format!("\n📄 Reason: {r}").as_str();
+            s += format!("\n{REASON} Reason: {r}").as_str();
         }
-        s += format!("\n👤 Moderator: <@{actor}>").as_str();
+        s += format!("\n{MODERATOR} Moderator: <@{actor}>").as_str();
         failed.iter().fold(s, |s, f| s + "\n" + f.as_str())
     } else {
         texts.join("\n")
@@ -82,10 +83,10 @@ pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: 
     };
     let mut result = Log::new(title, BLUE)
         .text(&format!(
-            "📄 **Reason:** {}",
+            "{REASON} **Reason:** {}",
             reason.unwrap_or("No reason.")
         ))
-        .text(&format!("👤 **Moderator:** <@{actor}>"))
+        .text(&format!("{MODERATOR} **Moderator:** <@{actor}>"))
         .text(&format!("**{done}**"));
     let mut cases = vec![];
     for t in texts {

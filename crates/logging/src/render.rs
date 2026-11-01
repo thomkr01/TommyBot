@@ -1,6 +1,6 @@
 use crate::{
     cache::CachedMessage,
-    embed::{self, Log, ARROW, GREEN, NO, ORANGE, RED, YES},
+    embed::{self, Log, GREEN, NO, ORANGE, RED, YES},
     Entry, LogEvent, LogKind,
 };
 use serde_json::Value;
@@ -29,7 +29,7 @@ pub fn message_edit(old: Option<&str>, msg: &Message) -> (Embed, Option<Link>) {
         .line("Target", &embed::channel(msg.channel_id.get()))
         .time()
         .section("Changes")
-        .text(&format!("{ARROW} **Content:**"))
+        .text(&embed::label_head("Content"))
         .diff(
             Some(old.unwrap_or("(previous content not cached)")),
             Some(&msg.content),
@@ -60,7 +60,7 @@ pub fn message_delete(
         .section("Previous Settings")
         .line("Channel", &format!("<#{channel}>"))
         .line("Id", &id.to_string())
-        .text(&format!("{ARROW} **Content:**"))
+        .text(&embed::label_head("Content"))
         .diff(
             Some(cached.map_or("(content not cached)", |c| c.content.as_str())),
             None,
@@ -246,7 +246,7 @@ fn changes(
                 let label = match key {
                     "allow" => format!("{YES} **Allowed:**"),
                     "deny" => format!("{NO} **Denied:**"),
-                    _ => format!("{ARROW} **Permissions:**"),
+                    _ => embed::label_head("Permissions"),
                 };
                 let (added, removed) = perm_diff(old, new);
                 if added.is_empty() && removed.is_empty() {
@@ -254,17 +254,17 @@ fn changes(
                 }
                 let mut l = log.text(&label);
                 if !added.is_empty() {
-                    l = l.text(&format!("{ARROW} **Additions:** {added}"));
+                    l = l.text(&format!("{} {added}", embed::label_head("Additions")));
                 }
                 if !removed.is_empty() {
-                    l = l.text(&format!("{ARROW} **Removals:** {removed}"));
+                    l = l.text(&format!("{} {removed}", embed::label_head("Removals")));
                 }
                 l
             }
             key if created => log.line(&words(key), &value(key, kind, new)),
             key if deleted => log.line(&words(key), &value(key, kind, old)),
             key => log
-                .text(&format!("{ARROW} **{}:**", words(key)))
+                .text(&embed::label_head(&words(key)))
                 .diff(Some(&show(key, kind, old)), Some(&show(key, kind, new))),
         };
     }

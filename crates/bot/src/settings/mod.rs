@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 use tommybot_automod::join::RaidCfg;
 use tommybot_core::{duration, permits::Level};
 use tommybot_logging::embed::{self, ARROW};
+use tommybot_logging::emoji::YES;
+use tommybot_logging::emoji::{Emoji, CLOSE, OFF, ON, PAGE_FIRST, PAGE_LAST, PAGE_NEXT, PAGE_PREV};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::message::{
@@ -242,7 +244,7 @@ async fn edit_trusted_admins(
     .await?;
     let list: Vec<_> = now.iter().map(|u| format!("<@{u}>")).collect();
     Ok(format!(
-        "✅ [10] Trusted Admins: {}",
+        "{YES} [10] Trusted Admins: {}",
         if list.is_empty() {
             "none".into()
         } else {
@@ -354,7 +356,13 @@ fn entries(m: &Module, cfg: &GuildCfg, dash: &str) -> Vec<(String, String)> {
                     Kind::Group => String::new(),
                     _ => format!("{ARROW} {val}"),
                 };
-                out.push((format!("[{}] {}:", row.code, row.name), lines));
+                // Wick shows a module's on/off state as a toggle next to the Status title.
+                let toggle = match (row.kind, row.name) {
+                    (Kind::Bool, "Status") if (row.get)(cfg) == "Enabled" => format!(" {ON}"),
+                    (Kind::Bool, "Status") => format!(" {OFF}"),
+                    _ => String::new(),
+                };
+                out.push((format!("[{}] {}:{toggle}", row.code, row.name), lines));
             }
         }
     }
@@ -388,20 +396,20 @@ pub fn panel(m: &Module, cfg: &GuildCfg, gid: u64, page: usize) -> (Embed, usize
 
 const PAGE: &str = "pg:";
 
-fn button(label: &str, id: String, style: ButtonStyle, disabled: bool) -> Component {
-    Component::Button(Button {
+fn button(icon: Emoji, id: String, style: ButtonStyle, disabled: bool) -> Component {
+    Component::Button(icon.on(Button {
         id: None,
         custom_id: Some(id),
         disabled,
         emoji: None,
-        label: Some(label.into()),
+        label: Some(icon.fallback.into()),
         style,
         url: None,
         sku_id: None,
-    })
+    }))
 }
 
-/// Wick's `≪ ‹ › ≫ ✖` row. The custom id carries the invoker, the panel and the target page, so no
+/// Wick's `≪ ‹ › ≫ ✖` row, drawn with the custom page emojis. The custom id carries the invoker, the panel and the target page, so no
 /// state is kept; the last field only keeps ids unique when two buttons lead to the same page.
 pub fn page_row(invoker: u64, kind: &str, page: usize, pages: usize) -> Component {
     let id = |to: usize, slot: &str| format!("{PAGE}{invoker}:{kind}:{to}:{slot}");
@@ -410,12 +418,12 @@ pub fn page_row(invoker: u64, kind: &str, page: usize, pages: usize) -> Componen
     Component::ActionRow(ActionRow {
         id: None,
         components: vec![
-            button("≪", id(0, "f"), grey, page == 0),
-            button("‹", id(page.saturating_sub(1), "p"), grey, page == 0),
-            button("›", id((page + 1).min(last), "n"), grey, page >= last),
-            button("≫", id(last, "l"), grey, page >= last),
+            button(PAGE_FIRST, id(0, "f"), grey, page == 0),
+            button(PAGE_PREV, id(page.saturating_sub(1), "p"), grey, page == 0),
+            button(PAGE_NEXT, id((page + 1).min(last), "n"), grey, page >= last),
+            button(PAGE_LAST, id(last, "l"), grey, page >= last),
             button(
-                "✖",
+                CLOSE,
                 format!("{PAGE}{invoker}:x"),
                 ButtonStyle::Danger,
                 false,
@@ -676,7 +684,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         Ok(doc) => {
             let cfg = GuildCfg::parse(&doc);
             format!(
-                "✅ [{}] {}: {}",
+                "{YES} [{}] {}: {}",
                 row.code.to_uppercase(),
                 row.name,
                 (row.get)(&cfg)
@@ -915,7 +923,7 @@ mod tests {
         let f = &e.fields;
         assert_eq!(
             (f[0].name.as_str(), f[0].value.as_str()),
-            ("[1] Status:", "▸ *`Disabled`*")
+            ("[1] Status: 🔴", "▸ *`Disabled`*")
         );
         let t = f.iter().find(|f| f.name == "[7] Auto Timeouts:").unwrap();
         assert!(t

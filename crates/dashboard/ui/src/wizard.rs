@@ -30,7 +30,7 @@ fn bot(body: AnyView) -> AnyView {
 
 /// A fake embed: colour bar, bold title, lines.
 fn embed(color: &str, title: &str, lines: Vec<String>) -> AnyView {
-    view! { <div class="dembed" style=format!("border-color:{color}")><b>{title.to_string()}</b>{lines.into_iter().map(|l| view! { <div>{l}</div> }).collect_view()}</div> }.into_any()
+    view! { <div class="dembed" style=format!("border-color:{color}")><b>{title.to_string()}</b>{lines.into_iter().map(|l| view! { <div>{crate::icons::rich(&l)}</div> }).collect_view()}</div> }.into_any()
 }
 
 /// The message box with something typed in it.
@@ -190,7 +190,7 @@ pub const VERIFICATION: &[Card] = &[Card {
     ..card("Verification status", "Do you want to filter in only genuine members? Use the verification and fend off bots!", &[("verification.enabled", "Enable Verification"), ("verification.mode", "Verification mode")], |c, _| {
         let panel = |button: &'static str| bot(view! { {embed("var(--primary)", "Verification Required!", vec!["To access the server, you need to pass the verification first.".into()])}<button class="go">{button}</button> }.into_any());
         match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
-            "Web" | "ThirdParty" => view! { <span class="chip ok">"This is recommended!"</span><div class="dembed"><b>"VERIFICATION"</b><div>"☐ I am human"</div></div> }.into_any(),
+            "Web" | "ThirdParty" => view! { <span class="chip ok">"This is recommended!"</span><div class="dembed"><b>"VERIFICATION"</b><div>{crate::icons::icon("checkbox_off")}" I am human"</div></div> }.into_any(),
             "Dm" => view! { <p class="muted">"The captcha is sent in DMs."</p>{panel("Verify")} }.into_any(),
             "Button" => view! { <span class="chip warn">"This is very weak!"</span>{panel("Instant Access")} }.into_any(),
             _ => view! { <p class="muted">"# verify-here"</p>{panel("Verify")} }.into_any(),

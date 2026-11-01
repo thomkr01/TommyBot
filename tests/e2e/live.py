@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|logchan|purge|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
+Usage: live.py spam|lock|mention_lock|nuke|logchan|purge|emojis|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
@@ -205,6 +205,31 @@ def mention_lock():
                  f"mention lock: locked={locked > 0}, lifted={unlocked == 0}")
 
 
+def emojis():
+    """Custom emojis: every icon is uploaded, a lock log uses them, and Discord takes them as button emojis."""
+    app = call("GET", "/applications/@me")["id"]
+    have = {e["name"]: e["id"] for e in call("GET", f"/applications/{app}/emojis")["items"]}
+    icons = {f[:-4] for f in os.listdir("assets/icons") if f.endswith(".svg")}
+    missing = sorted(icons - set(have))
+    chan = text_channel("general")
+    set_config("logging", {"fallback": chan})
+    locked = lock()
+    me = call("GET", "/users/@me")["id"]
+    logs = [m for m in call("GET", f"/channels/{chan}/messages?limit=10") if m["author"]["id"] == me and m["embeds"]]
+    text = json.dumps([m["embeds"] for m in logs])
+    in_log = "<:channel_text:" in text and "<:clock:" in text
+    row = [{"type": 2, "style": 2, "custom_id": f"e2e-{n}", "emoji": {"id": have.get(n), "name": n}} for n in
+           ("page_first", "page_prev", "page_next", "page_last", "close")]
+    msg = call("POST", f"/channels/{chan}/messages", body={
+        "content": f"{' '.join(f'<:{n}:{have.get(n)}>' for n in ('success', 'error', 'right_sort'))} e2e emoji check",
+        "components": [{"type": 1, "components": row}]}, soft=True)
+    buttons = bool(msg) and all(c.get("emoji", {}).get("id") for c in msg["components"][0]["components"])
+    if msg:
+        call("DELETE", f"/channels/{chan}/messages/{msg['id']}", soft=True)
+    return check(locked and not missing and in_log and buttons,
+                 f"emojis: uploaded {len(icons) - len(missing)}/{len(icons)}, in lock log={in_log}, buttons={buttons}")
+
+
 def logchan():
     """Deleting a routed log channel must drop it from the config and say so in the main log channel."""
     since = snowflake_now()
@@ -244,7 +269,7 @@ def purge():
 
 
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
-             "logchan": logchan, "purge": purge}
+             "logchan": logchan, "purge": purge, "emojis": emojis}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]

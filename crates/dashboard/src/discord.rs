@@ -103,6 +103,32 @@ impl Discord {
         }
     }
 
+    /// Loads the custom emoji ids, as the bot does, for the messages the dashboard sends.
+    pub async fn load_emojis(&self) -> Result<()> {
+        #[derive(Deserialize)]
+        struct E {
+            name: String,
+            id: String,
+        }
+        #[derive(Deserialize)]
+        struct List {
+            items: Vec<E>,
+        }
+        let list: List = self
+            .bot(format!("/applications/{}/emojis", self.client_id))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        tommybot_logging::emoji::load(
+            list.items
+                .into_iter()
+                .filter_map(|e| Some((e.name, e.id.parse().ok()?))),
+        );
+        Ok(())
+    }
+
     fn bot(&self, path: String) -> reqwest::RequestBuilder {
         self.http
             .get(format!("{}{path}", self.api))

@@ -1,5 +1,6 @@
 //! Thank-you message posted once when the bot joins a server.
 use anyhow::Result;
+use tommybot_logging::emoji::YES;
 use twilight_model::{
     channel::{
         message::component::{ActionRow, Button, ButtonStyle, Component},
@@ -25,7 +26,7 @@ fn wizard_url(base: &str, guild: impl std::fmt::Display) -> String {
 }
 
 pub(crate) fn link(label: &str, url: String) -> Component {
-    Component::Button(Button {
+    Component::Button(tommybot_logging::emoji::LINK.on(Button {
         id: None,
         custom_id: None,
         disabled: false,
@@ -34,7 +35,7 @@ pub(crate) fn link(label: &str, url: String) -> Component {
         style: ButtonStyle::Link,
         url: Some(url),
         sku_id: None,
-    })
+    }))
 }
 
 pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
@@ -85,7 +86,7 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
     let embed = EmbedBuilder::new()
         .title("Thank you for choosing TommyBot!")
         .description(format!(
-            "✅ `TommyBot` has been added to `{}` successfully!\n\n{wizard} Every feature is free.",
+            "{YES} `TommyBot` has been added to `{}` successfully!\n\n{wizard} Every feature is free.",
             g.name
         ))
         .build();

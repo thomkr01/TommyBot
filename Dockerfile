@@ -9,6 +9,7 @@ FROM rust:1-bookworm AS ui
 RUN rustup target add wasm32-unknown-unknown \
  && cargo install trunk --version 0.21.14 --locked
 WORKDIR /src/crates/dashboard/ui
+COPY assets /src/assets
 COPY crates/dashboard/ui ./
 RUN trunk build --release
 

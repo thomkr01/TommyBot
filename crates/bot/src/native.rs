@@ -7,10 +7,7 @@ use tommybot_automod::{
     lockdown::kind_from,
 };
 use tommybot_core::cases::{self, NewCase};
-use tommybot_logging::{
-    embed::{ARROW, ORANGE},
-    Log, LogKind,
-};
+use tommybot_logging::{embed::ORANGE, Log, LogKind};
 use twilight_model::{
     gateway::payload::incoming::AutoModerationActionExecution,
     guild::auto_moderation::AutoModerationActionType,
@@ -85,7 +82,7 @@ async fn native_action(
             let log = Log::new("Discord AutoMod Report", ORANGE)
                 .user("Member", uid.get())
                 .line("Rule", &format!("`{}`", e.rule_id))
-                .text(&format!("{ARROW} **Content:**"))
+                .text(&tommybot_logging::embed::label_head("Content"))
                 .diff(Some(&e.content), None);
             send_log(app, gid.get(), LogKind::AutoMod, log).await?;
         }

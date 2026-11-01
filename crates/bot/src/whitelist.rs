@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde_json::json;
 use tommybot_core::permits::Level;
 use tommybot_logging::embed::{self, GREEN, NO, ORANGE, YES};
+use tommybot_logging::emoji::{MODERATOR, TARGET};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::{
@@ -356,8 +357,8 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                         e = e.text(&format!("{} {label}", if now[t] { YES } else { NO }));
                     }
                     let e = e
-                        .inline("👤 Executor", &embed::user(actor.get()))
-                        .inline("🎟️ Target", &mention(kind, id));
+                        .inline(&format!("{MODERATOR} Executor"), &embed::user(actor.get()))
+                        .inline(&format!("{TARGET} Target"), &mention(kind, id));
                     InteractionResponseData {
                         embeds: Some(vec![e.build()]),
                         components: Some(vec![]),

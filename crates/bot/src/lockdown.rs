@@ -5,6 +5,7 @@ use tommybot_automod::{
     lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot, SEND_MESSAGES},
     store,
 };
+use tommybot_logging::emoji::LOCKDOWN;
 use twilight_model::{
     guild::Permissions,
     http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
@@ -71,7 +72,7 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .await?;
             app.http
                 .create_message(ch.id)
-                .content("🔒 **The server is locked down.** Staff are on it; channels open again when the lock ends.")
+                .content(&format!("{LOCKDOWN} **The server is locked down.** Staff are on it; channels open again when the lock ends."))
                 .await?;
             return Ok(Some(ch.id.get()));
         }

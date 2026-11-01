@@ -39,6 +39,14 @@ use std::sync::Arc;
 use tommybot_core::{config::Config, db};
 use twilight_gateway::{EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 
+/// Loads the ids of the application emojis that `tools/emojis.mjs upload` uploaded.
+async fn load_emojis(http: &twilight_http::Client) -> Result<()> {
+    let app = http.current_user_application().await?.model().await?.id;
+    let list = http.get_application_emojis(app).await?.model().await?;
+    tommybot_logging::emoji::load(list.items.into_iter().map(|e| (e.name, e.id.get())));
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -49,6 +57,9 @@ async fn main() -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
     let http = twilight_http::Client::new(cfg.discord_token.clone());
     let me = http.current_user().await?.model().await?.id;
+    if let Err(e) = load_emojis(&http).await {
+        tracing::warn!(?e, "custom emojis not loaded, using Unicode fallbacks");
+    }
     let app = Arc::new(app::App::new(
         http,
         twilight_http::Client::new(cfg.discord_token.clone()),

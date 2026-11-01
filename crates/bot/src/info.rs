@@ -20,12 +20,8 @@ fn created_secs(id: u64) -> i64 {
     (((id >> 22) + 1_420_070_400_000) / 1000) as i64
 }
 
-fn yes(b: bool) -> &'static str {
-    if b {
-        YES
-    } else {
-        NO
-    }
+fn yes(b: bool) -> String {
+    if b { YES } else { NO }.to_string()
 }
 
 /// Names of the dangerous permission bits in `perms`.
@@ -99,11 +95,11 @@ pub(crate) async fn user_info(
         .fetch_optional(&app.pool)
         .await?;
         return Ok(e
-            .line("In Server", NO)
-            .line("Left While Timed Out", yes(timed_out.is_some()))
-            .line("Left While Quarantined", yes(held.is_some()))
-            .line("Banned", yes(banned))
-            .line("Bot", yes(user.bot))
+            .line("In Server", &NO.to_string())
+            .line("Left While Timed Out", &yes(timed_out.is_some()))
+            .line("Left While Quarantined", &yes(held.is_some()))
+            .line("Banned", &yes(banned))
+            .line("Bot", &yes(user.bot))
             .build());
     };
     if let Some(j) = m.joined_at {
@@ -253,7 +249,7 @@ mod tests {
 
     #[test]
     fn dangerous_names() {
-        assert_eq!(dangerous(0), NO);
+        assert_eq!(dangerous(0), NO.to_string());
         assert_eq!(
             dangerous((1 << 3) | (1 << 2) | (1 << 10)),
             "Administrator, Ban Members"

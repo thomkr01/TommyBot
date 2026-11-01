@@ -1,6 +1,10 @@
 //! Wick's general commands: about, commands, help (and `-h` after any command), invite, ping, info,
 //! ncases and tshoot.
 use std::time::Instant;
+use tommybot_logging::emoji::{
+    ANTI_NUKE, CHEVRON, CPU, HEAT, HELP, JOIN_GATE, JOIN_RAID, LATENCY, OFF, ON, ONLINE,
+    PERSISTENCE, QUARANTINED, RAM, RESOURCES, SERVERS, SIZE, UPTIME, VERIFICATION,
+};
 
 use anyhow::Result;
 use tommybot_core::permits::Level;
@@ -424,7 +428,7 @@ pub fn commands_page(level: &Level, prefix: &str, page: usize) -> (Embed, usize)
         .filter_map(|n| lookup(n))
         .filter(|c| allowed(level, c.2))
     {
-        e = e.text(&format!("❯ `{prefix}{}` {}", name.0, name.4));
+        e = e.text(&format!("{CHEVRON} `{prefix}{}` {}", name.0, name.4));
     }
     let e = e.footer(&format!(
         "Need more? {prefix}COMMAND -h · Page: {}/{}",
@@ -763,7 +767,7 @@ async fn answer(
         }
         "help" => {
             let e = Log::new("TommyBot's Help Panel:", BLUE)
-                .text("🫴 **General Help:**")
+                .text(&format!("{HELP} **General Help:**"))
                 .text(&format!("{ARROW} To view the commands you can use, do: `{pfx}commands`"))
                 .text(&format!("{ARROW} To see how one command works, do: `{pfx}COMMAND -h`"))
                 .text(&format!("{ARROW} To set things up, do: `{pfx}setup`, then `{pfx}heat`, `{pfx}an`, `{pfx}jg`..."))
@@ -805,13 +809,13 @@ async fn answer(
             };
             // One process is one shard.
             let shard = format!(
-                "Latency: `{gw}` (API `{rest_ms}ms`)\nUptime: `{}`\nResources:\n  RAM: `{ram}`\n  CPU: `{}`\nSize:\n  Servers: `{servers}`",
+                "{LATENCY} **Latency:** `{gw}` (API `{rest_ms}ms`)\n{UPTIME} **Uptime:** `{}`\n{RESOURCES} **Resources:**\n\u{2003}{RAM} RAM: `{ram}`\n\u{2003}{CPU} CPU: `{}`\n{SIZE} **Size:**\n\u{2003}{SERVERS} Servers: `{servers}`",
                 embed::duration(up),
                 cpu_percent(up),
             );
             embed(
                 Log::new("TommyBot Status:", GREEN)
-                    .inline("🟢 Shard [0 -Current-]:", &shard)
+                    .inline(&format!("{ONLINE} Shard [0 -Current-]:"), &shard)
                     .build(),
             )
         }
@@ -822,23 +826,30 @@ async fn answer(
                 .antinuke
                 .quarantine_role
                 .map_or(NO.to_string(), |r| embed::role(r.get()));
-            let sys = |on: bool| if on { YES } else { NO };
-            embed(
-                Log::new(&format!("{}'s Config Overview", g.name), BLUE)
-                    .section("Essential Roles")
-                    .line("Quarantine Role", &role)
-                    .section("Major Systems")
-                    .line("Anti Nuke", sys(cfg.antinuke.enabled))
-                    .line("Heat System", sys(cfg.automod.enabled))
-                    .line("Verification", sys(cfg.verification.enabled))
-                    .line("Join Gate", sys(cfg.joingate.enabled))
-                    .line(
-                        "Join Raid",
-                        sys(cfg.joinraid.as_ref().is_some_and(|r| r.enabled)),
-                    )
-                    .line("Persistence", sys(cfg.misc.enforce_quarantine_perms))
-                    .build(),
-            )
+            let systems = [
+                (ANTI_NUKE, "Anti Nuke", cfg.antinuke.enabled),
+                (HEAT, "Heat System", cfg.automod.enabled),
+                (VERIFICATION, "Verification", cfg.verification.enabled),
+                (JOIN_GATE, "Join Gate", cfg.joingate.enabled),
+                (
+                    JOIN_RAID,
+                    "Join Raid",
+                    cfg.joinraid.as_ref().is_some_and(|r| r.enabled),
+                ),
+                (
+                    PERSISTENCE,
+                    "Persistence",
+                    cfg.misc.enforce_quarantine_perms,
+                ),
+            ];
+            let mut log = Log::new(&format!("{}'s Config Overview", g.name), BLUE)
+                .section("Essential Roles")
+                .text(&format!("{QUARANTINED} **Quarantine Role:** {role}"))
+                .section("Major Systems");
+            for (icon, name, on) in systems {
+                log = log.text(&format!("{icon} **{name}:** {}", if on { ON } else { OFF }));
+            }
+            embed(log.build())
         }
         "serverinfo" => server_info(app, gid, invoker).await,
         "roleinfo" | "info" => {

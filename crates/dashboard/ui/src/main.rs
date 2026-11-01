@@ -7,6 +7,7 @@ mod records;
 mod common;
 mod embeds;
 mod form;
+mod icons;
 mod lockdown;
 mod md;
 mod pages;
@@ -96,7 +97,7 @@ fn Bell(route: ReadSignal<Vec<String>>) -> impl IntoView {
         let Some(g) = route.get_untracked().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())) else { return };
         spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await { rows.set(v.as_array().cloned().unwrap_or_default()) } });
     };
-    view! { <details class="ico" on:toggle=load><summary aria-label="notifications">"🔔"{move || (!appeals.get().is_empty()).then(|| format!(" {}", appeals.get().len()))}</summary><div>
+    view! { <details class="ico" on:toggle=load><summary aria-label="notifications">{icons::icon("bell")}{move || (!appeals.get().is_empty()).then(|| format!(" {}", appeals.get().len()))}</summary><div>
         {move || appeals.get().into_iter().map(|a| view! { <a href=format!("#/appeal/{}", a["guild"].as_str().unwrap_or(""))>{format!("Your {} appeal #{} was {}", a["kind"].as_str().unwrap_or(""), a["id"], if a["status"] == "accepted" { "approved" } else { "denied" })}</a> }).collect_view()}
         {move || if rows.get().is_empty() { view! { <a href="#/">"No recent changes"</a> }.into_any() } else {
             rows.get().into_iter().take(5).map(|r| view! { <a href="#/">{format!("v{} · {}", r["version"], r["at"].as_str().unwrap_or("").get(..16).unwrap_or(""))}</a> }).collect_view().into_any() }}
@@ -196,11 +197,11 @@ fn App() -> impl IntoView {
     view! {
         <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))><button>"Log in with Discord"</button></a></main> }>
             <header>
-                <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>"☰"</button>
+                <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/">"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
-                <details class="ico"><summary aria-label="language">"🌐"</summary><div><button>"English"</button></div></details>
+                <details class="ico"><summary aria-label="language">{icons::icon("globe")}</summary><div><button>"English"</button></div></details>
                 <Bell route />
-                <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>"🌓"</button>
+                <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
                     <summary>{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
                     <div><a href="#/">"Servers"</a><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
