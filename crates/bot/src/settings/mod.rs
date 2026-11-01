@@ -646,6 +646,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             let level = app.level(gid, owner, Id::new(invoker.unwrap_or(1))).await?;
             crate::general::commands_page(&level, &cfg.misc.prefix, page)
         }
+        None if kind == "about" => crate::general::about_page(page),
         None if kind == "ginfo" => crate::info::server_page(app, gid, page).await?,
         None => return Ok(true),
     };
