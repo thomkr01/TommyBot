@@ -10,7 +10,6 @@ use tommybot_logging::{
 };
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
-    application::interaction::application_command::{CommandDataOption, CommandOptionValue},
     channel::message::Embed,
     gateway::payload::incoming::MessageCreate,
     id::{
@@ -26,9 +25,7 @@ use crate::{
     confirm::{self, Action, Pending},
     events::send_log,
     prefix::Parsed,
-    purge, reply,
-    slash::{int, role, string, user},
-    targets,
+    purge, reply, targets,
 };
 
 /// The clicked message of a purge menu: From Here purges it and the newer ones below it, Until Here
@@ -126,8 +123,8 @@ pub enum ModCmd {
 }
 
 /// Numbers below this are case numbers / counts, not snowflakes.
-const SMALL: u64 = 1_000_000;
-const MAX_SLOWMODE: u64 = 21_600;
+pub(crate) const SMALL: u64 = 1_000_000;
+pub(crate) const MAX_SLOWMODE: u64 = 21_600;
 const NOTE_MIN: usize = 5;
 const NOTE_MAX: usize = 500;
 
@@ -345,7 +342,7 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
             case: small.map(|n| n as i32),
             user,
             by: None,
-            kind: case_kind(p.kind.as_deref())?,
+            kind: crate::modview::case_kind(p.kind.as_deref())?,
         },
         "warns" => ModCmd::CasesView {
             case: None,
@@ -357,30 +354,10 @@ pub fn from_prefix(p: &Parsed, resolved: Option<u64>) -> Result<ModCmd, String> 
             case: None,
             user: None,
             by: Some(need_user()?),
-            kind: case_kind(p.kind.as_deref())?,
+            kind: crate::modview::case_kind(p.kind.as_deref())?,
         },
         _ => return Err("Unknown command".into()),
     })
-}
-
-/// Wick's `?t` codes (B, UB, K, TIMEOUT, WA, Q, UQ) and plain kind names, singular or plural.
-fn case_kind(t: Option<&str>) -> Result<Option<String>, String> {
-    let Some(t) = t else { return Ok(None) };
-    let kind = match t.trim_end_matches('s') {
-        "b" | "ban" => "ban",
-        "ub" | "unban" => "unban",
-        "k" | "kick" => "kick",
-        "t" | "to" | "timeout" | "mute" => "timeout",
-        "wa" | "warn" => "warn",
-        "q" | "quarantine" => "quarantine",
-        "uq" | "unquarantine" => "unquarantine",
-        _ => {
-            return Err(format!(
-                "Unknown case type `{t}`: use b, ub, k, timeout, wa, q or uq"
-            ))
-        }
-    };
-    Ok(Some(kind.into()))
 }
 
 /// Prefix entry for the commands above; the caller only routes known names here.
@@ -527,7 +504,7 @@ pub async fn run(
                 user,
                 by,
                 kind,
-            } => return view_cases(app, g, case, user, by, kind).await,
+            } => return crate::modview::view_cases(app, g, case, user, by, kind).await,
             ModCmd::NoteAdd { user, text } => {
                 if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
                     return Ok(format!(
@@ -563,7 +540,9 @@ pub async fn run(
                     _ => format!("Note #{id} updated"),
                 });
             }
-            ModCmd::NoteList { user, id, by } => return view_notes(app, g, user, id, by).await,
+            ModCmd::NoteList { user, id, by } => {
+                return crate::modview::view_notes(app, g, user, id, by).await
+            }
             ModCmd::NoteRemove { id, user } => {
                 let n = sqlx::query(
                     "DELETE FROM notes WHERE guild_id=$1 AND id=$2 AND ($3::bigint IS NULL OR user_id=$3)",
@@ -733,7 +712,7 @@ pub async fn run(
                     .model()
                     .await?;
                 let name = m.nick.or(m.user.global_name).unwrap_or(m.user.name);
-                let clean = sanitized(&name);
+                let clean = crate::modview::sanitized(&name);
                 if clean == name {
                     return Ok(format!("<@{user}> already has a clean name"));
                 }
@@ -823,199 +802,6 @@ pub async fn run(
         String::new()
     };
     Ok(format!("Case #{case_no}: {reply}{hint}"))
-}
-
-/// Fancy Unicode folded to plain letters (Wick: 𝓽𝓲𝓶𝓶𝔂 -> timmy), then leading symbols trimmed.
-fn sanitized(name: &str) -> String {
-    let cured = if name.is_ascii() {
-        name.to_string()
-    } else {
-        // Symbols would cure to lookalike letters (⚡ -> s), so only letters and digits go in.
-        let letters: String = name
-            .chars()
-            .filter(|c| c.is_ascii() || c.is_alphanumeric())
-            .collect();
-        crate::automod::cure(&letters)
-    };
-    let ascii: String = cured
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .collect();
-    let s = ascii
-        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
-        .trim_end();
-    if s.is_empty() {
-        "Moderated Nickname".into()
-    } else {
-        s.into()
-    }
-}
-
-type CaseRow = (i32, String, i64, i64, Option<String>, bool, i64);
-
-fn fmt_case((no, kind, user, moderator, reason, active, at): &CaseRow) -> String {
-    format!(
-        "`#{no}` {kind}{} <@{user}> by <@{moderator}> <t:{at}:R>: {}",
-        if *active { "" } else { " (inactive)" },
-        reason.as_deref().unwrap_or("no reason")
-    )
-}
-
-/// One case by number, or the 10 latest (optionally of one user, by one moderator, of one kind).
-async fn view_cases(
-    app: &App,
-    g: i64,
-    case: Option<i32>,
-    user: Option<u64>,
-    by: Option<u64>,
-    kind: Option<String>,
-) -> Result<String> {
-    let rows: Vec<CaseRow> = sqlx::query_as(
-        "SELECT case_no, kind, user_id, mod_id, reason, active, EXTRACT(EPOCH FROM created_at)::bigint
-         FROM cases WHERE guild_id=$1 AND ($2::int IS NULL OR case_no=$2) AND ($3::bigint IS NULL OR user_id=$3)
-         AND ($4::bigint IS NULL OR mod_id=$4) AND ($5::text IS NULL OR kind=$5)
-         ORDER BY case_no DESC LIMIT 10",
-    )
-    .bind(g)
-    .bind(case)
-    .bind(user.map(|u| u as i64))
-    .bind(by.map(|u| u as i64))
-    .bind(kind)
-    .fetch_all(&app.pool)
-    .await?;
-    Ok(if rows.is_empty() {
-        "No matching cases".into()
-    } else {
-        rows.iter().map(fmt_case).collect::<Vec<_>>().join("\n")
-    })
-}
-
-async fn view_notes(
-    app: &App,
-    g: i64,
-    user: Option<u64>,
-    id: Option<i64>,
-    by: Option<u64>,
-) -> Result<String> {
-    let rows: Vec<(i64, i64, i64, String, i64)> = sqlx::query_as(
-        "SELECT id, user_id, author_id, text, EXTRACT(EPOCH FROM created_at)::bigint FROM notes
-         WHERE guild_id=$1 AND ($2::bigint IS NULL OR user_id=$2) AND ($3::bigint IS NULL OR id=$3)
-         AND ($4::bigint IS NULL OR author_id=$4) ORDER BY id DESC LIMIT 10",
-    )
-    .bind(g)
-    .bind(user.map(|u| u as i64))
-    .bind(id)
-    .bind(by.map(|u| u as i64))
-    .fetch_all(&app.pool)
-    .await?;
-    Ok(if rows.is_empty() {
-        "No matching notes".into()
-    } else {
-        rows.iter()
-            .map(|(id, about, by, text, at)| {
-                format!("`#{id}` <@{about}> by <@{by}> <t:{at}:R>: {text}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
-}
-
-/// Slash options -> command plus the optional `reason`.
-pub fn from_slash(name: &str, o: &[CommandDataOption]) -> Result<(ModCmd, Option<String>), String> {
-    let u = || user(o, "user").map(|u| u.get()).ok_or("missing user");
-    let case = |o| int(o, "case").map(|n| n as i32).ok_or("missing case");
-    let cmd = match name {
-        "unban" => ModCmd::Unban { user: u()? },
-        "hackban" => ModCmd::Hackban {
-            user: string(o, "user_id")
-                .and_then(|s| s.trim().parse().ok())
-                .filter(|id| *id >= SMALL)
-                .ok_or("`user_id` must be a numeric user id")?,
-        },
-        "untimeout" => ModCmd::Untimeout { user: u()? },
-        "unwarn" => ModCmd::Unwarn { case: case(o)? },
-        "quarantine" => ModCmd::Quarantine { user: u()? },
-        "unquarantine" => ModCmd::Unquarantine { user: u()? },
-        "verify" => ModCmd::Verify { user: u()? },
-        "sanitize" => ModCmd::Sanitize { user: u()? },
-        "purge" => ModCmd::Purge {
-            count: int(o, "number")
-                .ok_or("missing number")?
-                .clamp(1, purge::MAX as i64) as usize,
-            user: user(o, "user").map(|u| u.get()),
-            from: None,
-            filters: string(o, "type")
-                .map(|t| purge::Filter::parse(t, string(o, "input")))
-                .transpose()?
-                .into_iter()
-                .chain(role(o, "role").map(purge::Filter::Role))
-                .collect(),
-        },
-        "slowmode" => ModCmd::Slowmode {
-            secs: int(o, "seconds")
-                .ok_or("missing seconds")?
-                .clamp(0, MAX_SLOWMODE as i64) as u16,
-            channels: vec![],
-        },
-        "notes" => {
-            let Some(CommandDataOption {
-                name,
-                value: CommandOptionValue::SubCommand(s),
-            }) = o.first()
-            else {
-                return Err("Pick a subcommand".into());
-            };
-            let u = || user(s, "user").map(|u| u.get()).ok_or("missing user");
-            match name.as_str() {
-                "add" => ModCmd::NoteAdd {
-                    user: u()?,
-                    text: string(s, "msg").ok_or("missing msg")?.into(),
-                },
-                "view" => ModCmd::NoteList {
-                    user: user(s, "user").map(|u| u.get()),
-                    id: int(s, "note_id"),
-                    by: user(s, "mod").map(|u| u.get()),
-                },
-                "remove" => ModCmd::NoteRemove {
-                    id: int(s, "note_id").ok_or("missing note_id")?,
-                    user: user(s, "user").map(|u| u.get()),
-                },
-                "modify" => ModCmd::NoteModify {
-                    id: int(s, "note_id").ok_or("missing note_id")?,
-                    text: string(s, "msg").ok_or("missing msg")?.into(),
-                },
-                "sweep" => ModCmd::NoteSweep {
-                    user: user(s, "user").map(|u| u.get()),
-                    by: user(s, "mod").map(|u| u.get()),
-                },
-                _ => return Err("Unknown subcommand".into()),
-            }
-        }
-        "cases" => {
-            let Some(CommandDataOption {
-                name,
-                value: CommandOptionValue::SubCommand(s),
-            }) = o.first()
-            else {
-                return Err("Pick a subcommand".into());
-            };
-            match name.as_str() {
-                "view" => ModCmd::CasesView {
-                    case: case(s).ok(),
-                    user: user(s, "user").map(|u| u.get()),
-                    by: user(s, "mod").map(|u| u.get()),
-                    kind: string(s, "type").map(String::from),
-                },
-                "modify" => ModCmd::CasesEdit {
-                    case: case(s)?,
-                    reason: string(s, "reason").ok_or("missing reason")?.into(),
-                },
-                _ => return Err("Unknown subcommand".into()),
-            }
-        }
-        _ => return Err("Unknown command".into()),
-    };
-    Ok((cmd, string(o, "reason").map(String::from)))
 }
 
 #[cfg(test)]
@@ -1189,24 +975,10 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_names() {
-        assert_eq!(sanitized("!!!Bob"), "Bob");
-        assert_eq!(sanitized("  .1ｂｏｂ the Builder"), "1bob the builder");
-        assert_eq!(sanitized("𝓽𝓲𝓶𝓶𝔂"), "timmy");
-        assert_eq!(sanitized("Ann-Marie 2"), "Ann-Marie 2");
-        assert_eq!(sanitized("⚡⚡"), "Moderated Nickname");
+    fn dehoist_alias() {
         assert_eq!(
             pf("dehoist 5000000", None),
             Ok(ModCmd::Sanitize { user: 5_000_000 })
-        );
-    }
-
-    #[test]
-    fn case_line() {
-        let row = (3, "warn".to_string(), 9, 8, None, false, 100);
-        assert_eq!(
-            fmt_case(&row),
-            "`#3` warn (inactive) <@9> by <@8> <t:100:R>: no reason"
         );
     }
 }

@@ -235,7 +235,7 @@ pub fn parse(
         }
         "unban" | "hackban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge"
         | "slowmode" | "cases" | "verify" | "sanitize" | "notes" => {
-            return modcmds::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
+            return crate::modslash::from_slash(name, o).map(|(c, r)| Cmd::Ext(c, r));
         }
         "revert" => {
             return Ok(Cmd::Revert {

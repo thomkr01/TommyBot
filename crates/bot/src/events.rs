@@ -264,7 +264,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
         }
         Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,
-        Event::AutoModerationActionExecution(e) => automod::on_native_hit(app, e).await?,
+        Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         _ => {}
     }
     Ok(())
