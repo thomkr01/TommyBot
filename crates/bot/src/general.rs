@@ -1,7 +1,7 @@
 //! Wick's general commands: about, commands, help (and `-h` after any command), invite, ping, info,
 //! ncases and tshoot.
-use tommybot_logging::emoji::{CHEVRON, HELP, ONLINE};
 use std::time::Instant;
+use tommybot_logging::emoji::{CHEVRON, HELP, ONLINE};
 
 use anyhow::Result;
 use tommybot_core::permits::Level;
@@ -823,21 +823,21 @@ async fn answer(
                 .antinuke
                 .quarantine_role
                 .map_or(NO.to_string(), |r| embed::role(r.get()));
-            let sys = |on: bool| if on { YES } else { NO };
+            let sys = |on: bool| if on { YES } else { NO }.to_string();
             embed(
                 Log::new(&format!("{}'s Config Overview", g.name), BLUE)
                     .section("Essential Roles")
                     .line("Quarantine Role", &role)
                     .section("Major Systems")
-                    .line("Anti Nuke", sys(cfg.antinuke.enabled))
-                    .line("Heat System", sys(cfg.automod.enabled))
-                    .line("Verification", sys(cfg.verification.enabled))
-                    .line("Join Gate", sys(cfg.joingate.enabled))
+                    .line("Anti Nuke", &sys(cfg.antinuke.enabled))
+                    .line("Heat System", &sys(cfg.automod.enabled))
+                    .line("Verification", &sys(cfg.verification.enabled))
+                    .line("Join Gate", &sys(cfg.joingate.enabled))
                     .line(
                         "Join Raid",
-                        sys(cfg.joinraid.as_ref().is_some_and(|r| r.enabled)),
+                        &sys(cfg.joinraid.as_ref().is_some_and(|r| r.enabled)),
                     )
-                    .line("Persistence", sys(cfg.misc.enforce_quarantine_perms))
+                    .line("Persistence", &sys(cfg.misc.enforce_quarantine_perms))
                     .build(),
             )
         }

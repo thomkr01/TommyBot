@@ -15,7 +15,7 @@ pub fn load(ids: impl IntoIterator<Item = (String, u64)>) {
     let _ = IDS.set(ids.into_iter().collect());
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Emoji {
     /// File name in `assets/icons` and the emoji's name on Discord.
     pub name: &'static str,

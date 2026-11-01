@@ -1,8 +1,8 @@
 //! Message context menus: Report Message (anyone) and the two purges (staff). A report is logged with
 //! action buttons; the staff who press them need the Manage Reports permit plus the permit of the action.
+use anyhow::Result;
 use tommybot_logging::emoji::{Emoji, CLOSE, LINK, PAGE_FIRST, PAGE_LAST, PAGE_NEXT, PAGE_PREV};
 use tommybot_logging::emoji::{AGE, MEMBER, NO, YES};
-use anyhow::Result;
 use tommybot_logging::{
     embed::{BLUE, GREEN, HANDLED, ORANGE},
     Log, LogKind,
@@ -627,7 +627,12 @@ async fn user_info(
 
 fn pager(id: i64, page: i64, pages: i64) -> Component {
     let last = pages - 1;
-    let b = |icon: Emoji, to: i64, slot: &str, style, off| match button(icon.fallback, id, &format!("cases:{to}:{slot}"), style) {
+    let b = |icon: Emoji, to: i64, slot: &str, style, off| match button(
+        icon.fallback,
+        id,
+        &format!("cases:{to}:{slot}"),
+        style,
+    ) {
         Component::Button(b) => Component::Button(icon.on(Button { disabled: off, ..b })),
         c => c,
     };

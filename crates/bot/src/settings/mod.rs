@@ -1,13 +1,13 @@
 //! Wick's Discord-side config. `w!<module>` shows a numbered panel; `VALUE ?set N`, `N ?on` / `N ?off`
 //! and `OBJ ?add N` / `OBJ ?remove N` change it. The numbers are public API (people memorise
 //! `w!jg 3c`), so never renumber a row: add new ones after the last.
-use tommybot_logging::emoji::{Emoji, CLOSE, PAGE_FIRST, PAGE_LAST, PAGE_NEXT, PAGE_PREV};
-use tommybot_logging::emoji::{YES};
 use anyhow::Result;
 use serde_json::{json, Value};
 use tommybot_automod::join::RaidCfg;
 use tommybot_core::{duration, permits::Level};
 use tommybot_logging::embed::{self, ARROW};
+use tommybot_logging::emoji::YES;
+use tommybot_logging::emoji::{Emoji, CLOSE, PAGE_FIRST, PAGE_LAST, PAGE_NEXT, PAGE_PREV};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::message::{

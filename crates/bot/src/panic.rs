@@ -1,11 +1,11 @@
 //! Panic mode (spec 4.2): runs the antinuke crate's plans when several accounts get quarantined at once.
-use tommybot_logging::emoji::{PANIC, QUARANTINED};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{panic_end_plan, panic_plan, PanicStep};
 use tommybot_automod::lockdown::LockKind;
 use tommybot_core::{jobs, sections::PanicCfg};
+use tommybot_logging::emoji::{PANIC, QUARANTINED};
 use tommybot_logging::{
     embed::{self, ALERT, ARROW, DONE, NO, YES},
     Log, LogKind,
@@ -178,7 +178,9 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             }
             PanicStep::PingWarnedRoles => {
                 let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
-                    .text(&format!("{PANIC} **An abnormal behaviour has been detected!**"))
+                    .text(&format!(
+                        "{PANIC} **An abnormal behaviour has been detected!**"
+                    ))
                     .text(&format!(
                         "{ARROW} TommyBot will lockdown the server and run a scan."
                     ));

@@ -122,7 +122,9 @@ impl Discord {
             .json()
             .await?;
         tommybot_logging::emoji::load(
-            list.items.into_iter().filter_map(|e| Some((e.name, e.id.parse().ok()?))),
+            list.items
+                .into_iter()
+                .filter_map(|e| Some((e.name, e.id.parse().ok()?))),
         );
         Ok(())
     }

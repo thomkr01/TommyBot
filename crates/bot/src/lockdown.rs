@@ -1,11 +1,11 @@
 //! Runs automod lockdown plans against Discord and restores them from the stored snapshot.
-use tommybot_logging::emoji::{LOCKDOWN};
 use anyhow::Result;
 use tommybot_automod::{
     discord_api::MAX_INVITE_PAUSE_MS,
     lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot, SEND_MESSAGES},
     store,
 };
+use tommybot_logging::emoji::LOCKDOWN;
 use twilight_model::{
     guild::Permissions,
     http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},

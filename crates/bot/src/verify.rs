@@ -1,6 +1,5 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
 //! Web and third-party modes hand the member to the dashboard's /verify page, which queues a `verify_grant` job.
-use tommybot_logging::emoji::{ARROW};
 use anyhow::Result;
 use captcha::{
     filters::{Dots, Noise, Wave},
@@ -13,6 +12,7 @@ use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
 };
 use tommybot_core::jobs;
+use tommybot_logging::emoji::ARROW;
 use tommybot_logging::{
     embed::{ALERT, DONE, GREEN, NO, RED, YES},
     Log, LogKind,
@@ -855,7 +855,9 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 let fail = EmbedBuilder::new()
                     .color(RED)
                     .title("❎ Unsuccessful Operation!")
-                    .description(format!("{ARROW} Wrong answer, try again before it's too late."))
+                    .description(format!(
+                        "{ARROW} Wrong answer, try again before it's too late."
+                    ))
                     .build();
                 client
                     .create_response(i.id, &i.token, &embed_reply(fail))

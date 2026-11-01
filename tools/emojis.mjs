@@ -22,7 +22,7 @@ function lint(n, s) {
   if (!/^[a-z0-9_]{2,32}$/.test(n)) bad.push('bad name');
   if (!s.startsWith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none"')) bad.push('root');
   if (/<(text|image|filter|style|script|foreignObject)\b|class=|<!--|<\?xml|data:|font|inkscape|sodipodi/i.test(s)) bad.push('forbidden content');
-  if (n === 'spacer') return s.trim() === '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none"/>' || /^<svg[^>]*>\s*<\/svg>$/.test(s.trim()) ? bad : [...bad, 'spacer must be empty'];
+  if (n === 'spacer') return /^<svg[^>]*(\/>|>\s*<\/svg>)$/.test(s.trim()) ? bad : [...bad, 'spacer must be empty'];
   const grads = [...s.matchAll(/<linearGradient\b[^>]*>/g)];
   if (grads.length !== 1) bad.push(`${grads.length} gradients`);
   else if (!grads[0][0].includes(`id="${n}-grad"`) || !/gradientUnits="userSpaceOnUse" x1="16" y1="16" x2="112" y2="112"/.test(grads[0][0])) bad.push('gradient attrs');

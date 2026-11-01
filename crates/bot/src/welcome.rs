@@ -1,6 +1,6 @@
 //! Thank-you message posted once when the bot joins a server.
-use tommybot_logging::emoji::{YES};
 use anyhow::Result;
+use tommybot_logging::emoji::YES;
 use twilight_model::{
     channel::{
         message::component::{ActionRow, Button, ButtonStyle, Component},

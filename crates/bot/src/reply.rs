@@ -1,10 +1,10 @@
 //! Reply-shaping helpers driven by `MiscCfg`: compact text, DMs, delayed deletes, message purges.
-use tommybot_logging::emoji::{MODERATOR, REASON};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tommybot_core::jobs;
 use tommybot_logging::embed::{Log, ARROW, BLUE, GREEN, NO, YES};
+use tommybot_logging::emoji::{MODERATOR, REASON};
 use twilight_model::channel::message::Embed;
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},

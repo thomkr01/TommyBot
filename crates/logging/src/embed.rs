@@ -47,7 +47,7 @@ impl Log {
     }
 
     /// `▸ **label:** value`
-    pub fn line(mut self, label: &str, value: impl std::fmt::Display) -> Self {
+    pub fn line(mut self, label: &str, value: &str) -> Self {
         self.lines.push(format!("{ARROW} **{label}:** {value}"));
         self
     }

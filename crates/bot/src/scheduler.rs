@@ -1,5 +1,4 @@
 //! Polls `scheduled_jobs` and runs what is due; failures are logged, never fatal.
-use tommybot_logging::emoji::{ARROW};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
@@ -8,6 +7,7 @@ use std::{
 };
 use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
+use tommybot_logging::emoji::ARROW;
 use tommybot_logging::{
     embed::{DONE, YES},
     Log, LogKind,

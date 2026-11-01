@@ -50,16 +50,18 @@ async fn send(
         .map(|(label, url)| {
             Component::ActionRow(ActionRow {
                 id: None,
-                components: vec![Component::Button(tommybot_logging::emoji::LINK.on(Button {
-                    id: None,
-                    custom_id: None,
-                    disabled: false,
-                    emoji: None,
-                    label: Some((*label).into()),
-                    style: ButtonStyle::Link,
-                    url: Some(url.clone()),
-                    sku_id: None,
-                }))],
+                components: vec![Component::Button(tommybot_logging::emoji::LINK.on(
+                    Button {
+                        id: None,
+                        custom_id: None,
+                        disabled: false,
+                        emoji: None,
+                        label: Some((*label).into()),
+                        style: ButtonStyle::Link,
+                        url: Some(url.clone()),
+                        sku_id: None,
+                    },
+                ))],
             })
         })
         .into_iter()
