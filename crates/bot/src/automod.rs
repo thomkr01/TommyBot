@@ -274,27 +274,6 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .collect();
         reply::purge_ids(app, &others).await;
     }
-    if am.strike.enabled {
-        if cfg.misc.show_reason_on_auto {
-            let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
-                .filter(|_| act.timeout_ms > 300_000);
-            let text = "You were timed out by automod: message spam";
-            reply::dm(
-                app,
-                m.author.id,
-                &note.map_or(text.into(), |n| format!("{text}\n{n}")),
-            )
-            .await;
-        }
-        timeout(
-            &app.http,
-            gid,
-            m.author.id,
-            act.timeout_ms / 1000,
-            "Automod",
-        )
-        .await?;
-    }
     let reason = if act.purge {
         "Message spam (strike cap)"
     } else {
@@ -943,6 +922,10 @@ async fn punish(
         } else {
             format!("Automod action: {action:?}")
         };
+        if cfg.joingate.expose_min_age && why.starts_with("join gate") {
+            let min = duration(cfg.joingate.min_age_ms() / 1000);
+            text.push_str(&format!("\nMinimum account age: `{min}`"));
+        }
         let note =
             crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid).filter(|_| {
                 match action {
