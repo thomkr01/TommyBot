@@ -70,6 +70,14 @@ pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: 
         "ban" => ("Ban Result:", "Banned:"),
         "kick" => ("Kick Result:", "Kicked:"),
         "warn" => ("Warn Result:", "Warned:"),
+        "unban" => ("Unban Result:", "Unbanned:"),
+        "untimeout" => ("Untimeout Result:", "Timeout removed:"),
+        "quarantine" => ("Quarantine Result:", "Quarantined:"),
+        "unquarantine" => ("Unquarantine Result:", "Released:"),
+        "verify" => ("Verify Result:", "Verified:"),
+        "sanitize" => ("Sanitize Result:", "Sanitized:"),
+        "purge" => ("Purge Result:", "Purged:"),
+        "slowmode" => ("Slowmode Result:", "Slowmode:"),
         _ => ("Timeout Result:", "Timed out:"),
     };
     let mut result = Log::new(title, BLUE)
@@ -85,21 +93,33 @@ pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: 
         let case = first
             .strip_prefix("Case #")
             .and_then(|r| r.split(':').next());
-        match (case, first.rsplit(' ').next()) {
-            (Some(n), Some(who)) => {
-                cases.push(n);
+        let Some(n) = case else {
+            result = result.text(&format!("{NO} {first}"));
+            continue;
+        };
+        cases.push(n);
+        let mention = first.find("<@").and_then(|s| {
+            let e = first[s..].find('>')?;
+            Some(&first[s..=s + e])
+        });
+        result = match mention {
+            Some(who) => {
                 let id = who.trim_matches(|c: char| !c.is_ascii_digit());
-                result = result.text(&format!("{YES} {who} [`{id}`]"));
-                // Warn threshold notes; the embed already shows moderator and reason.
-                for extra in t.lines().skip(1).filter(|l| {
-                    !["Moderator:", "Reason:", "Add Reason"]
-                        .iter()
-                        .any(|p| l.starts_with(p))
-                }) {
-                    result = result.text(extra);
-                }
+                result.text(&format!("{YES} {who} [`{id}`]"))
             }
-            _ => result = result.text(&format!("{NO} {first}")),
+            // Purge and slowmode have no member: show what happened.
+            None => result.text(&format!(
+                "{YES} {}",
+                first.split_once(": ").map_or(first, |c| c.1)
+            )),
+        };
+        // Warn threshold notes; the embed already shows moderator and reason.
+        for extra in t.lines().skip(1).filter(|l| {
+            !["Moderator:", "Reason:", "Add Reason"]
+                .iter()
+                .any(|p| l.starts_with(p))
+        }) {
+            result = result.text(extra);
         }
     }
     let mut out = vec![result.build()];
@@ -111,6 +131,15 @@ pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: 
         out.push(add.build());
     }
     out
+}
+
+/// A command with no case of its own (lock, unlock): its reply text in a result embed.
+pub fn plain_embed(title: &str, text: &str) -> Vec<Embed> {
+    let lines = text
+        .lines()
+        .map(|l| format!("{ARROW} {l}"))
+        .collect::<Vec<_>>();
+    vec![Log::new(title, BLUE).text(&lines.join("\n")).build()]
 }
 
 /// What the target is told; `actor` is None when staff identity is hidden.
@@ -245,6 +274,26 @@ mod tests {
         assert!(d.contains("No reason.") && d.contains("✅ <@5> [`5`]") && d.contains("❎ Cannot"));
         assert!(e[1].description.clone().unwrap().contains("(Case: 4)"));
         assert_eq!(result_embeds("timeout", &t, Some("x"), 9).len(), 1);
+    }
+
+    #[test]
+    fn other_commands_get_result_embeds() {
+        let t = ["Case #5: Deleted 7 messages".to_string()];
+        let e = result_embeds("purge", &t, Some("x"), 9);
+        assert_eq!(e.len(), 1);
+        let d = e[0].description.clone().unwrap();
+        assert!(d.contains("Purged:") && d.contains("✅ Deleted 7 messages"));
+        let t = ["Case #6: Renamed <@5> to `bob`".to_string()];
+        let d = result_embeds("sanitize", &t, Some("x"), 9)[0]
+            .description
+            .clone()
+            .unwrap();
+        assert!(d.contains("✅ <@5> [`5`]"));
+        assert!(plain_embed("Lock Result:", "Unlocked")[0]
+            .description
+            .clone()
+            .unwrap()
+            .contains("▸ Unlocked"));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use tommybot_logging::{
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
     application::interaction::application_command::{CommandDataOption, CommandOptionValue},
+    channel::message::Embed,
     gateway::payload::incoming::MessageCreate,
     id::{
         marker::{ChannelMarker, GuildMarker, UserMarker},
@@ -25,7 +26,7 @@ use crate::{
     confirm::{self, Action, Pending},
     events::send_log,
     prefix::Parsed,
-    purge,
+    purge, reply,
     slash::{int, role, string, user},
     targets,
 };
@@ -173,6 +174,35 @@ impl ModCmd {
         }
     }
 
+    /// Wick takes several members for these; the prefix runs one copy per member.
+    fn with_user(&self, u: u64) -> Option<Self> {
+        Some(match self {
+            Self::Unban { .. } => Self::Unban { user: u },
+            Self::Untimeout { .. } => Self::Untimeout { user: u },
+            Self::Quarantine { .. } => Self::Quarantine { user: u },
+            Self::Unquarantine { .. } => Self::Unquarantine { user: u },
+            Self::Verify { .. } => Self::Verify { user: u },
+            Self::Sanitize { .. } => Self::Sanitize { user: u },
+            _ => return None,
+        })
+    }
+
+    /// Key of the result embed (`reply::result_embeds`); None keeps plain text (views, notes, case edits).
+    pub(crate) fn result_kind(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Hackban { .. } => "ban",
+            Self::Unban { .. } => "unban",
+            Self::Untimeout { .. } => "untimeout",
+            Self::Quarantine { .. } => "quarantine",
+            Self::Unquarantine { .. } => "unquarantine",
+            Self::Verify { .. } => "verify",
+            Self::Sanitize { .. } => "sanitize",
+            Self::Purge { .. } => "purge",
+            Self::Slowmode { .. } => "slowmode",
+            _ => return None,
+        })
+    }
+
     /// The member the permit/hierarchy check applies to.
     pub(crate) fn target(&self) -> Option<u64> {
         match *self {
@@ -185,6 +215,21 @@ impl ModCmd {
             | Self::Sanitize { user } => Some(user),
             _ => None,
         }
+    }
+}
+
+/// Text and embeds for a finished command: result embeds, or Wick's count lines when compact.
+pub(crate) fn reply_parts(
+    kind: Option<&str>,
+    compact: bool,
+    texts: &[String],
+    reason: Option<&str>,
+    actor: u64,
+) -> (String, Vec<Embed>) {
+    match kind {
+        Some(k) if !compact => (String::new(), reply::result_embeds(k, texts, reason, actor)),
+        Some(k) => (reply::summary(k, true, texts, reason, actor), vec![]),
+        None => (texts.join("\n"), vec![]),
     }
 }
 
@@ -325,34 +370,67 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
         p.reason = Some(p.names.join(" ")).filter(|r| !r.is_empty());
         p.names.clear();
     }
-    let mut resolved = None;
-    let name = p.names.iter().find(|n| {
+    let multi = matches!(
+        p.command.as_str(),
+        "unban" | "untimeout" | "quarantine" | "unquarantine" | "verify" | "sanitize"
+    );
+    let name_word = |n: &&String| {
         !matches!(
             n.as_str(),
             "modify" | "view" | "off" | "add" | "remove" | "sweep" | "list"
         )
-    });
+    };
     // `editc 3 new reason`: the words are the reason, not a member.
     let free_text = matches!(p.command.as_str(), "editc" | "editreason");
-    if let (Some(n), true, false) = (name, p.targets.iter().all(|t| *t < SMALL), free_text) {
-        match targets::resolve(app, gid, n).await? {
-            Ok(id) => resolved = Some(id.get()),
+    let mut users: Vec<u64> = p.targets.iter().copied().filter(|t| *t >= SMALL).collect();
+    let mut failed = vec![];
+    let lookups: Vec<&String> = match (multi, free_text, users.is_empty()) {
+        (true, ..) => p.names.iter().filter(name_word).collect(),
+        (false, false, true) if p.targets.iter().all(|t| *t < SMALL) => {
+            p.names.iter().find(name_word).into_iter().collect()
+        }
+        _ => vec![],
+    };
+    for n in lookups {
+        let found = if p.command == "unban" {
+            targets::resolve_banned(app, gid, n).await?
+        } else {
+            targets::resolve(app, gid, n).await?
+        };
+        match found {
+            Ok(id) => users.push(id.get()),
+            Err(e) if multi => failed.push(e),
             Err(e) => return commands::say(app, msg, &e).await,
         }
     }
-    let text = match from_prefix(&p, resolved) {
-        Err(e) => e,
-        Ok(cmd) => {
-            if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
-                let action = Action::Ext {
-                    cmd,
-                    channel: msg.channel_id,
-                    reason: p.reason,
-                    proof: None,
-                };
-                return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action))
-                    .await;
-            }
+    let cmd = match from_prefix(&p, users.first().copied()) {
+        Ok(c) => c,
+        Err(e) => {
+            let text = if failed.is_empty() {
+                e
+            } else {
+                failed.join("\n")
+            };
+            return commands::say(app, msg, &text).await;
+        }
+    };
+    if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
+        let action = Action::Ext {
+            cmd,
+            channel: msg.channel_id,
+            reason: p.reason,
+            proof: None,
+        };
+        return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action)).await;
+    }
+    let kind = cmd.result_kind();
+    let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
+    let cmds = if cmds.is_empty() { vec![cmd] } else { cmds };
+    let mut texts = vec![];
+    for cmd in cmds {
+        // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
+        let level = app.level(gid, owner, msg.author.id).await?;
+        texts.push(
             run(
                 app,
                 gid,
@@ -367,10 +445,19 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             .unwrap_or_else(|e| {
                 tracing::warn!(?e, "mod command failed");
                 format!("Command failed: {}", crate::confirm::why(&e))
-            })
-        }
-    };
-    commands::say(app, msg, &text).await
+            }),
+        );
+    }
+    texts.extend(failed);
+    let compact = app.cfg(gid.get()).await?.misc.compact_replies || p.flags.compact;
+    let (text, embeds) = reply_parts(
+        kind,
+        compact,
+        &texts,
+        p.reason.as_deref(),
+        msg.author.id.get(),
+    );
+    commands::say_embeds(app, msg, &text, &embeds).await
 }
 
 /// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text.
@@ -519,8 +606,10 @@ pub async fn run(
                 ("unban", user, None, None, format!("Unbanned <@{user}>"))
             }
             ModCmd::Hackban { user } => {
+                let secs = app.cfg(gid.get()).await?.misc.purge_secs();
                 app.http
                     .create_ban(gid, Id::new(user))
+                    .delete_message_seconds(secs)
                     .reason(&audit)
                     .await?;
                 let inv = json!({"op":"unban","user":user});
@@ -941,6 +1030,28 @@ mod tests {
         assert_eq!(
             pf("clearwarns 5000000", None),
             Ok(ModCmd::ClearWarns { user: 5_000_000 })
+        );
+    }
+
+    #[test]
+    fn multi_target_and_purge_aliases() {
+        let cmd = ModCmd::Unban { user: 1 };
+        assert_eq!(cmd.with_user(2), Some(ModCmd::Unban { user: 2 }));
+        assert_eq!(ModCmd::Slowmode { secs: 1 }.with_user(2), None);
+        let big = 123_456_789_012_345_678u64;
+        let c = pf(&format!("bc 20 {big}"), None).unwrap();
+        let ModCmd::Purge { filters, .. } = c else {
+            panic!()
+        };
+        assert_eq!(filters, vec![purge::Filter::Bots]);
+        assert_eq!(
+            purge::Filter::parse("-sus", None),
+            Ok(purge::Filter::Suspicious)
+        );
+        assert_eq!(purge::Filter::parse("@", None), Ok(purge::Filter::Mentions));
+        assert_eq!(
+            purge::Filter::parse("=", Some("Hi")),
+            Ok(purge::Filter::Equals("hi".into()))
         );
     }
 

@@ -35,6 +35,7 @@ fn alias(cmd: &str) -> (&str, Option<&str>) {
         "ul" => ("unlock", None),
         "lockupdate" | "updatel" | "locku" => ("lock", Some("update")),
         "sweep" | "clear" | "p" | "c" => ("purge", None),
+        "botclear" | "bc" => ("purge", Some("bots")),
         "san" | "sanitise" | "dehoist" => ("sanitize", None),
         "sm" => ("slowmode", None),
         "backup" | "bcreate" | "bsave" | "btake" | "createbackup" => ("backups", Some("take")),

@@ -29,6 +29,35 @@ pub fn pick(query: &str, cands: &[(u64, Vec<String>)]) -> Pick {
     }
 }
 
+/// [`resolve`] for `unban`: a banned user is no member, so look through the ban list instead.
+pub async fn resolve_banned(
+    app: &App,
+    gid: Id<GuildMarker>,
+    name: &str,
+) -> Result<Result<Id<UserMarker>, String>> {
+    let bans = app.http.bans(gid).limit(1000).await?.models().await?;
+    let cands: Vec<_> = bans
+        .into_iter()
+        .map(|b| {
+            let names = [Some(b.user.name), b.user.global_name]
+                .into_iter()
+                .flatten()
+                .collect();
+            (b.user.id.get(), names)
+        })
+        .filter(|(_, names): &(u64, Vec<String>)| {
+            names
+                .iter()
+                .any(|n| n.to_lowercase().starts_with(&name.to_lowercase()))
+        })
+        .collect();
+    Ok(match pick(name, &cands) {
+        Pick::One(id) => Ok(Id::new(id)),
+        Pick::None => Err(format!("No banned user found for `{name}`")),
+        Pick::Ambiguous => Err(format!("`{name}` is ambiguous, use the id")),
+    })
+}
+
 /// Ok(Err(text)) is a user-facing failure ("not found" / "ambiguous").
 pub async fn resolve(
     app: &App,

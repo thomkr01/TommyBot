@@ -162,10 +162,16 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "hackban",
         &["hb"],
         "ban",
-        "hackban ID",
+        "hackban IDS [?r REASON] [?dm]",
         "Ban someone not in the server",
     ),
-    ("unban", &["ub"], "ban", "unban ID", "Lift a ban"),
+    (
+        "unban",
+        &["ub"],
+        "ban",
+        "unban MEMBERS [?r REASON]",
+        "Lift a ban",
+    ),
     (
         "kick",
         &["k"],
@@ -213,7 +219,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
     ),
     (
         "purge",
-        &["clear", "sweep", "p", "c"],
+        &["clear", "sweep", "p", "c", "botclear", "bc"],
         "purge",
         "purge [COUNT] [MEMBER]",
         "Delete messages",
