@@ -13,4 +13,9 @@ impl Window {
         }
         self.0.len()
     }
+
+    /// When the latest event happened, if any is kept.
+    pub fn last(&self) -> Option<i64> {
+        self.0.back().copied()
+    }
 }

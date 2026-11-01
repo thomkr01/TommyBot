@@ -324,7 +324,9 @@ pub(super) static MISC: Module = Module {
         r!("2i", "Remove Main Roles On TO", "misc.remove_main_roles_on_timeout", Kind::Bool, |c| on(c.misc.remove_main_roles_on_timeout)),
         group!("3", "Warn Settings"),
         r!("3a", "Status", "misc.auto_warn_actions", Kind::Bool, |c| on(c.misc.auto_warn_actions)),
-        dash!("3b", "Warn Actions"),
+        // Wick has one warn action; ours is a list, so the prefix edits its first entry.
+        r!("3b", "Warn Action", "misc.warn_actions.0.action", Kind::Choice(&[("timeout", "\"timeout\""), ("kick", "\"kick\""), ("ban", "\"ban\"")]), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| format!("{:?}", t.action))),
+        r!("3c", "Max Warns", "misc.warn_actions.0.points", Kind::Int(1, 1000), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| t.points.to_string())),
         r!("4", "Compact Outputs", "misc.compact_replies", Kind::Bool, |c| on(c.misc.compact_replies)),
         r!("5", "Informing Messages", "misc.delete_replies_secs", Kind::Switch("5", "null"), |c| on(c.misc.delete_replies_secs.is_some())),
         r!("6", "Enforce Quarantine Perms", "misc.enforce_quarantine_perms", Kind::Bool, |c| on(c.misc.enforce_quarantine_perms)),

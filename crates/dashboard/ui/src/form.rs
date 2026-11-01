@@ -234,7 +234,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                         {["timeout", "kick", "ban"].map(|a| view! { <option value=a selected=move || get()[i]["action"] == a>{a}</option> }).collect_view()}
                     </select>
                     <Show when=move || get()[i]["action"] == "timeout">
-                        <input aria-label="seconds" prop:value=move || show(&get()[i]["secs"]) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<i64>() { upd(i, "secs", json!(x)) } } /><span>"seconds"</span>
+                        <input aria-label="seconds" placeholder="default" prop:value=move || show(&get()[i]["secs"]) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<i64>() { upd(i, "secs", json!(x)) } } /><span>"seconds"</span>
                     </Show>
                     <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
                 </div> }).collect_view()}

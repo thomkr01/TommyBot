@@ -545,6 +545,10 @@ pub(crate) async fn apply_warn_actions(
             ("kick", None)
         }
         warn::Action::Timeout { secs } => {
+            let secs = match secs {
+                0 => misc.timeout_secs() as i64,
+                s => s,
+            };
             timeout(&app.http, g, u, secs, &why).await?;
             ("timeout", Some(secs))
         }

@@ -10,7 +10,7 @@ use tommybot_logging::{
 };
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
-    channel::message::{AllowedMentions, Embed},
+    channel::message::{AllowedMentions, Component, Embed},
     gateway::payload::incoming::MessageCreate,
     id::{
         marker::{ChannelMarker, GuildMarker, UserMarker},
@@ -129,6 +129,19 @@ const NOTE_MIN: usize = 5;
 const NOTE_MAX: usize = 500;
 
 impl ModCmd {
+    /// `cases MEMBER` with no other filter pages through all of the member's cases.
+    pub fn paged_user(&self) -> Option<u64> {
+        match *self {
+            ModCmd::CasesView {
+                case: None,
+                user: Some(u),
+                by: None,
+                kind: None,
+            } => Some(u),
+            _ => None,
+        }
+    }
+
     /// Permit name and rate-limit action. Unban/hackban share `ban`, untimeout shares `timeout`.
     fn perm(&self) -> &'static str {
         match self {
@@ -457,16 +470,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     }
     let kind = cmd.result_kind();
     let private = matches!(cmd, ModCmd::NoteAdd { .. } | ModCmd::NoteList { .. });
-    // `cases NAME` pages through all of the member's cases.
-    let paged = match cmd {
-        ModCmd::CasesView {
-            case: None,
-            user: Some(u),
-            by: None,
-            kind: None,
-        } => Some(u),
-        _ => None,
-    };
+    let paged = cmd.paged_user();
     let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
     let cmds = if cmds.is_empty() { vec![cmd] } else { cmds };
     let mut texts = vec![];
@@ -523,15 +527,31 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
         };
         return commands::say(app, msg, notice).await;
     }
-    // A first page that starts with a case line was allowed; denials are plain text.
-    if let (Some(u), true) = (paged, text.starts_with("`#")) {
-        let (e, pages) = crate::modview::cases_page(app, gid.get() as i64, u, 0).await?;
-        if pages > 1 {
-            let row = settings::page_row(msg.author.id.get(), &format!("cases.{u}"), 0, pages);
-            return settings::send(app, msg, "", Some(e), vec![row]).await;
-        }
+    if let Some((e, row)) = cases_pager(app, gid, msg.author.id.get(), paged, &text).await? {
+        return settings::send(app, msg, "", Some(e), vec![row]).await;
     }
     commands::say_embeds(app, msg, &text, &embeds).await
+}
+
+/// The first page and its buttons when a `cases MEMBER` reply spans several pages.
+pub(crate) async fn cases_pager(
+    app: &App,
+    gid: Id<GuildMarker>,
+    invoker: u64,
+    user: Option<u64>,
+    text: &str,
+) -> Result<Option<(Embed, Component)>> {
+    // A first page that starts with a case line was allowed; denials are plain text.
+    let (Some(u), true) = (user, text.starts_with("`#")) else {
+        return Ok(None);
+    };
+    let (e, pages) = crate::modview::cases_page(app, gid.get() as i64, u, 0).await?;
+    Ok((pages > 1).then(|| {
+        (
+            e,
+            settings::page_row(invoker, &format!("cases.{u}"), 0, pages),
+        )
+    }))
 }
 
 /// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text.

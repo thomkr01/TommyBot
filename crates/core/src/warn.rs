@@ -12,7 +12,11 @@ pub struct Threshold {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(tag = "action", rename_all = "lowercase")]
 pub enum Action {
-    Timeout { secs: i64 },
+    /// 0 (set by `misc 3b`) means the default timeout duration (`misc 2c`).
+    Timeout {
+        #[serde(default)]
+        secs: i64,
+    },
     Kick,
     Ban,
 }
