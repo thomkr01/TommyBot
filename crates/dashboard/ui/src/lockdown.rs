@@ -216,7 +216,7 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
             {fld("alert_channel", "channel", "Send Alert")}
             <Show when=move || matches!(trigger().as_str(), "keyword" | "mention")>{fld("timeout_s", "int", "Timeout User (seconds, 0 = none)")}</Show>
             <Show when=move || val.get()["block_message"] == true><div class="row"><label>"TommyBot Response"</label><span class="muted">"You need at least 1 TommyBot action if you want TommyBot to consider this rule."</span>
-                {BOT_ACTIONS.into_iter().map(|(a, tip)| view! { <label title=tip><input type="checkbox" prop:checked=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!(a)))
+                {BOT_ACTIONS.into_iter().map(|(a, tip)| view! { <label><input type="checkbox" prop:checked=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!(a)))
                     on:change=move |e| val.update(|v| { let mut l: Vec<String> = v["bot_actions"].as_array().map(|l| l.iter().filter_map(|x| x.as_str().map(String::from)).filter(|x| x != a).collect()).unwrap_or_default(); if event_target_checked(&e) { l.push(a.into()); } v["bot_actions"] = json!(l); }) /> {a}" - "<span class="muted">{tip}</span></label> }).collect_view()}
                 <Show when=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!("lock")))>
                     <label>"Lock mode"</label>

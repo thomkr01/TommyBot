@@ -40,8 +40,6 @@ pub struct Rule {
     pub name: String,
     pub enabled: bool,
     pub trigger_type: u8,
-    #[serde(default)]
-    pub exempt_channels: Vec<String>,
 }
 
 impl Api {

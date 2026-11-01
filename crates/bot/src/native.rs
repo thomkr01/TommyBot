@@ -58,20 +58,6 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
             return Ok(());
         }
     }
-    // Discord should skip whitelisted categories itself; this covers the case where it does not.
-    if let Some(parent) = match e.channel_id {
-        Some(c) => app.guild_info(gid).await?.parents.get(&c).copied(),
-        None => None,
-    } {
-        let rules = app.api.list_rules(gid.get()).await.unwrap_or_default();
-        let id = e.rule_id.to_string();
-        if rules
-            .iter()
-            .any(|r| r.id == id && r.exempt_channels.contains(&parent.to_string()))
-        {
-            return Ok(());
-        }
-    }
     for &a in actions {
         if let Err(err) = native_action(app, &cfg, e, a).await {
             tracing::warn!(?err, ?a, "native rule action failed");
