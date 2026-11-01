@@ -190,7 +190,6 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
                 .bind(m.author.id.get() as i64)
                 .fetch_one(&app.pool)
                 .await?;
-                // Quarantined members get no reply from any command.
                 if let (false, Some(rest)) = (quarantined, m.content.strip_prefix(&pfx)) {
                     if !crate::general::try_run(app, m, rest).await?
                         && !crate::settings::try_run(app, m, rest).await?

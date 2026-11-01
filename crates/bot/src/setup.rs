@@ -174,7 +174,6 @@ where
         http.update_channel_permission(c.id, &o).await.ok();
     }
     tick(6).await;
-    // Directly under TommyBot's top role, so it can still manage the role.
     if let Some(pos) = u64::try_from(info.bot_top - 1).ok().filter(|p| *p > 0) {
         http.update_role_positions(
             gid,

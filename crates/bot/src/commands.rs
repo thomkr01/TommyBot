@@ -378,40 +378,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
         | "editreason" | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns"
         | "warns" | "modcases" => return modcmds::run_prefix(app, msg, p).await,
-        "backups" => {
-            let owner = app.guild_info(gid).await?.owner;
-            let actor = app.level(gid, owner, msg.author.id).await?;
-            if actor == permits::Level::None {
-                return Ok(());
-            }
-            let mut args = msg.content.split_whitespace().skip(1);
-            // `bload dh0mfu`-style aliases carry the subcommand in `p.kind`.
-            let sub = p
-                .kind
-                .clone()
-                .or_else(|| args.next().map(str::to_lowercase));
-            let id = args.next().map(str::to_owned);
-            let cmd = match (sub.as_deref().unwrap_or("list"), id) {
-                ("take" | "create", _) => BackupCmd::Create,
-                ("list", _) => BackupCmd::List,
-                ("clear", _) => BackupCmd::Clear,
-                ("load", Some(id)) => BackupCmd::Load {
-                    id,
-                    confirm: msg.content.contains("?confirm"),
-                },
-                ("delete", Some(id)) => BackupCmd::Delete { id },
-                _ => {
-                    return say(
-                        app,
-                        msg,
-                        "Usage: `backups [take | load ID | delete ID | clear]`",
-                    )
-                    .await
-                }
-            };
-            let text = backup_cmd(app, gid, (msg.author.id, &actor), cmd).await?;
-            return say(app, msg, &text).await;
-        }
+        "backups" => return backup_prefix(app, msg, gid, &p).await,
         _ => return Ok(()),
     };
     let owner = app.guild_info(gid).await?.owner;
@@ -843,6 +810,47 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
         }
     }
     Ok(())
+}
+
+/// `w!backups take|load ID|delete ID|clear` and its Wick aliases.
+async fn backup_prefix(
+    app: &App,
+    msg: &MessageCreate,
+    gid: Id<GuildMarker>,
+    p: &Parsed,
+) -> Result<()> {
+    let owner = app.guild_info(gid).await?.owner;
+    let actor = app.level(gid, owner, msg.author.id).await?;
+    if actor == permits::Level::None {
+        return Ok(());
+    }
+    let mut args = msg.content.split_whitespace().skip(1);
+    // `bload dh0mfu`-style aliases carry the subcommand in `p.kind`.
+    let sub = p
+        .kind
+        .clone()
+        .or_else(|| args.next().map(str::to_lowercase));
+    let id = args.next().map(str::to_owned);
+    let cmd = match (sub.as_deref().unwrap_or("list"), id) {
+        ("take" | "create", _) => BackupCmd::Create,
+        ("list", _) => BackupCmd::List,
+        ("clear", _) => BackupCmd::Clear,
+        ("load", Some(id)) => BackupCmd::Load {
+            id,
+            confirm: msg.content.contains("?confirm"),
+        },
+        ("delete", Some(id)) => BackupCmd::Delete { id },
+        _ => {
+            return say(
+                app,
+                msg,
+                "Usage: `backups [take | load ID | delete ID | clear]`",
+            )
+            .await
+        }
+    };
+    let text = backup_cmd(app, gid, (msg.author.id, &actor), cmd).await?;
+    say(app, msg, &text).await
 }
 
 /// `/backups create|list|load|delete|purge` and `w!backups take|load|delete|clear`. `load`

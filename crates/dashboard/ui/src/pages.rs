@@ -296,7 +296,6 @@ pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
     let claim = move |_| {
         let (g, k) = (guild.get_untracked(), secret.get_untracked());
         let k = k.trim().to_string();
-        // A 6-digit number is an authenticator code, anything else is the key.
         let body = if k.len() == 6 && k.chars().all(|c| c.is_ascii_digit()) { json!({"guild_id": g, "code": k}) } else { json!({"guild_id": g, "key": k}) };
         run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.set("Claimed. Refresh your servers.".into()));
     };
