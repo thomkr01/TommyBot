@@ -373,7 +373,12 @@ pub async fn restore(
     if let (Some(f), Some(old)) = (filters, &image.webhooks) {
         if f.restore && f.delete_webhooks {
             let known: HashSet<u64> = old.iter().map(|w| w.id).collect();
-            for w in live.webhooks.iter().flatten().filter(|w| !known.contains(&w.id)) {
+            for w in live
+                .webhooks
+                .iter()
+                .flatten()
+                .filter(|w| !known.contains(&w.id))
+            {
                 let r = http.delete_webhook(Id::new(w.id)).await.map(drop);
                 sum.webhooks_deleted += usize::from(count(r.map_err(Into::into), "webhook"));
             }
@@ -486,7 +491,12 @@ async fn execute(
                 Change::Update { to, .. } => to.kind == CATEGORY,
                 Change::Delete(id) => live_cats.contains(id),
             };
-            if cat { &mut done.categories } else { &mut done.channels }.bump(ch);
+            if cat {
+                &mut done.categories
+            } else {
+                &mut done.channels
+            }
+            .bump(ch);
         }
     }
 

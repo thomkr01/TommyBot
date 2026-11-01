@@ -386,7 +386,10 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             }
             let mut args = msg.content.split_whitespace().skip(1);
             // `bload dh0mfu`-style aliases carry the subcommand in `p.kind`.
-            let sub = p.kind.clone().or_else(|| args.next().map(str::to_lowercase));
+            let sub = p
+                .kind
+                .clone()
+                .or_else(|| args.next().map(str::to_lowercase));
             let id = args.next().map(str::to_owned);
             let cmd = match (sub.as_deref().unwrap_or("list"), id) {
                 ("take" | "create", _) => BackupCmd::Create,
@@ -397,7 +400,14 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
                     confirm: msg.content.contains("?confirm"),
                 },
                 ("delete", Some(id)) => BackupCmd::Delete { id },
-                _ => return say(app, msg, "Usage: `backups [take | load ID | delete ID | clear]`").await,
+                _ => {
+                    return say(
+                        app,
+                        msg,
+                        "Usage: `backups [take | load ID | delete ID | clear]`",
+                    )
+                    .await
+                }
             };
             let text = backup_cmd(app, gid, (msg.author.id, &actor), cmd).await?;
             return say(app, msg, &text).await;

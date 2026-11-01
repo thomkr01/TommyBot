@@ -75,13 +75,15 @@ pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: b
     // Heat panic: every message from these accounts is deleted and timed out until it ends.
     raiders.insert(user.get());
     let until = crate::app::now_secs() + cfg.duration_secs as i64;
-    let log = Log::new("Heat Panic Mode Triggered!", ALERT)
-        .text(&format!(
-            "{ARROW} {} raiders will be timed out on every message for {}.",
-            raiders.len(),
-            embed::duration(cfg.duration_secs as i64)
-        ));
-    app.heat_raiders.lock().unwrap().insert(gid.get(), (raiders, until));
+    let log = Log::new("Heat Panic Mode Triggered!", ALERT).text(&format!(
+        "{ARROW} {} raiders will be timed out on every message for {}.",
+        raiders.len(),
+        embed::duration(cfg.duration_secs as i64)
+    ));
+    app.heat_raiders
+        .lock()
+        .unwrap()
+        .insert(gid.get(), (raiders, until));
     send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
     Ok(())
 }
@@ -232,7 +234,10 @@ async fn report(app: &App, gid: Id<GuildMarker>, sum: &backup::Summary) -> Log {
         ));
         for u in who.iter().filter_map(Value::as_u64) {
             let frags = data["fragments"][u.to_string()].as_u64().unwrap_or(0);
-            log = log.text(&format!("{ARROW} {} [{frags} fragments] 🧍", embed::user(u)));
+            log = log.text(&format!(
+                "{ARROW} {} [{frags} fragments] 🧍",
+                embed::user(u)
+            ));
         }
     }
     let col = |c: backup::Counts| {

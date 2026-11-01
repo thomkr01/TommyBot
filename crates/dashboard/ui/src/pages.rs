@@ -44,7 +44,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
             let member = if c["staff"] == true { format!("{member}, Admins and Moderators roles with their permits") } else { member };
             let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
-            msg.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine}", role("quarantine_role")));
+            msg.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
         }) });
     };
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();

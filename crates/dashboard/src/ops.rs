@@ -18,8 +18,8 @@ use std::{
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
-use totp_rs::Secret;
 use tommybot_antinuke::Inverse;
+use totp_rs::Secret;
 
 type ActionRow = (
     i64,
@@ -500,7 +500,11 @@ async fn claim_key(
             .fetch_optional(&mut *tx)
             .await?;
             match secret.flatten() {
-                Some(s) if auth::totp(&s, "rescue")?.check_current(code).unwrap_or(false) => {
+                Some(s)
+                    if auth::totp(&s, "rescue")?
+                        .check_current(code)
+                        .unwrap_or(false) =>
+                {
                     sqlx::query("delete from rescue_key where guild_id = $1")
                         .bind(guild)
                         .execute(&mut *tx)
@@ -533,12 +537,32 @@ async fn rescue_claim(State(st): State<AppState>, s: Sess, Json(b): Json<Claim>)
         .parse()
         .map_err(|_| ApiError::BadRequest("bad guild id".into()))?;
     if !claim_allowed(s.user_id) {
-        return Err(ApiError::Forbidden("too many attempts, try again in 10 minutes"));
+        return Err(ApiError::Forbidden(
+            "too many attempts, try again in 10 minutes",
+        ));
     }
     let (_, config) = crate::store::current(&st.db, guild).await?;
-    let r = claim_key(&st.db, guild, s.user_id, (b.key.as_deref().map(str::trim), b.code.as_deref().map(str::trim))).await;
-    let what = if r.is_ok() { "claimed Extra Owner with the rescue key" } else { "failed a rescue claim" };
-    log_change(&st, &config, format!("{} (<@{}>) {what}", s.username, s.user_id)).await;
+    let r = claim_key(
+        &st.db,
+        guild,
+        s.user_id,
+        (
+            b.key.as_deref().map(str::trim),
+            b.code.as_deref().map(str::trim),
+        ),
+    )
+    .await;
+    let what = if r.is_ok() {
+        "claimed Extra Owner with the rescue key"
+    } else {
+        "failed a rescue claim"
+    };
+    log_change(
+        &st,
+        &config,
+        format!("{} (<@{}>) {what}", s.username, s.user_id),
+    )
+    .await;
     r?;
     Ok(Json(json!({"ok": true})))
 }
@@ -634,10 +658,17 @@ mod tests {
         sqlx::query("insert into rescue_key (guild_id, key_hash, totp_secret) values ($1, 'x', $2) on conflict (guild_id) do update set totp_secret = $2")
             .bind(g).bind(&secret).execute(&db).await.unwrap();
         assert!(claim_key(&db, g, 6, (None, Some("000000"))).await.is_err());
-        let code = auth::totp(&secret, "rescue").unwrap().generate_current().unwrap();
+        let code = auth::totp(&secret, "rescue")
+            .unwrap()
+            .generate_current()
+            .unwrap();
         claim_key(&db, g, 6, (None, Some(&code))).await.unwrap();
         assert!(claim_key(&db, g, 6, (None, Some(&code))).await.is_err());
-        sqlx::query("delete from extra_owners where guild_id = $1").bind(g).execute(&db).await.unwrap();
+        sqlx::query("delete from extra_owners where guild_id = $1")
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -323,7 +323,7 @@ pub(super) static SETUP: Module = Module {
     names: &["setup", "config"],
     title: "Setup Panel:",
     per_page: 0,
-    footer: "Auto setup (roles, log channels): Dashboard wizard",
+    footer: "Quarantine role and log channels: w!setup run · Everything else: Dashboard wizard",
     rows: &[
         r!("1", "Anti Nuke", "antinuke.enabled", Kind::Bool, |c| on(c.antinuke.enabled)),
         r!("2", "Auto Mod", "automod.enabled", Kind::Bool, |c| on(c.automod.enabled)),

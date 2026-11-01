@@ -59,8 +59,13 @@ pub enum Cmd {
 pub enum BackupCmd {
     Create,
     List,
-    Load { id: String, confirm: bool },
-    Delete { id: String },
+    Load {
+        id: String,
+        confirm: bool,
+    },
+    Delete {
+        id: String,
+    },
     /// Deletes every backup (`w!backups clear`, `/backups purge`).
     Clear,
 }
@@ -610,7 +615,10 @@ mod tests {
         assert_eq!(
             parse(
                 "backups",
-                &sub("load", vec![opt("id", CommandOptionValue::String("dh0mfu".into()))]),
+                &sub(
+                    "load",
+                    vec![opt("id", CommandOptionValue::String("dh0mfu".into()))]
+                ),
                 None
             ),
             Ok(Cmd::Backup(BackupCmd::Load {
