@@ -66,6 +66,7 @@ pub async fn message_menu(
         msg.channel_id,
         cmd,
         None,
+        None,
     )
     .await
 }
@@ -374,6 +375,26 @@ async fn act(
                 Err(_) => refused("Could not delete the message, it may be gone"),
             });
         }
+        "cases" => {
+            let cmd = ModCmd::CasesView {
+                case: None,
+                user: Some(target.get()),
+                by: None,
+                kind: None,
+            };
+            let text = modcmds::run(
+                app,
+                gid,
+                owner,
+                who,
+                Id::new(channel as u64),
+                cmd,
+                None,
+                None,
+            )
+            .await?;
+            return Ok(Outcome { text, line: None });
+        }
         "warn" => (ModKind::Warn, "Warn"),
         "timeout" => (ModKind::Timeout, "Timeout"),
         "kick" => (ModKind::Kick, "Kick"),
@@ -601,10 +622,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(?e, action, "report action failed");
-            refused(format!(
-                "Something went wrong: {}",
-                crate::commands::why(&e)
-            ))
+            refused(format!("Something went wrong: {}", crate::confirm::why(&e)))
         });
     if let Some((line, closes)) = line {
         if closes {

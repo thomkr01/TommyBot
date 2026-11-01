@@ -19,15 +19,17 @@ use twilight_model::{
     },
 };
 use twilight_util::builder::command::{
-    BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder, SubCommandBuilder, UserBuilder,
+    AttachmentBuilder, BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder,
+    SubCommandBuilder, UserBuilder,
 };
 
 use crate::{
     app::App,
-    commands::{self, Action, ModKind, Pending},
+    commands::{self, ModKind},
+    confirm::{self, Action, Pending},
     modcmds::{self, ModCmd},
     prefix::Flags,
-    reports,
+    reply, reports,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -46,6 +48,9 @@ pub enum Cmd {
     },
     Unlock {
         kind: Option<LockKind>,
+    },
+    LockUpdate {
+        text: String,
     },
     Revert {
         target: Id<UserMarker>,
@@ -144,12 +149,54 @@ fn dur(o: &[CommandDataOption], name: &str) -> Result<Option<i64>, String> {
         .transpose()
 }
 
+/// `/ban add|remove`, `/timeout add|remove`, `/quarantine add|remove` and `/lock add|remove|update`
+/// share the handlers of the plain commands: returns the handler's name and the subcommand's options.
+fn flatten<'a>(name: &'a str, o: &'a [CommandDataOption]) -> (&'a str, &'a [CommandDataOption]) {
+    match o.first() {
+        Some(CommandDataOption {
+            name: sub,
+            value: CommandOptionValue::SubCommand(so),
+        }) if matches!(name, "ban" | "timeout" | "quarantine" | "lock") => {
+            let n = match (name, sub.as_str()) {
+                ("ban", "remove") => "unban",
+                ("timeout", "remove") => "untimeout",
+                ("quarantine", "remove") => "unquarantine",
+                ("lock", "remove") => "unlock",
+                ("lock", "update") => "lockupdate",
+                _ => name,
+            };
+            (n, so)
+        }
+        _ => (name, o),
+    }
+}
+
+/// URL of the `proof:` attachment, wherever it sits in the options.
+fn proof_url(
+    data: &twilight_model::application::interaction::application_command::CommandData,
+) -> Option<String> {
+    let find = |o: &[CommandDataOption]| {
+        o.iter().find_map(|o| match o.value {
+            CommandOptionValue::Attachment(id) if o.name == "proof" => Some(id),
+            _ => None,
+        })
+    };
+    let id = find(&data.options).or_else(|| {
+        data.options.iter().find_map(|o| match &o.value {
+            CommandOptionValue::SubCommand(so) => find(so),
+            _ => None,
+        })
+    })?;
+    Some(data.resolved.as_ref()?.attachments.get(&id)?.url.clone())
+}
+
 /// `target_id` is the clicked user of a context-menu command.
 pub fn parse(
     name: &str,
     o: &[CommandDataOption],
     target_id: Option<Id<GenericMarker>>,
 ) -> Result<Cmd, String> {
+    let (name, o) = flatten(name, o);
     let kind = match name {
         "ban" | "Ban" | "softban" => ModKind::Ban,
         "kick" | "Kick" => ModKind::Kick,
@@ -171,6 +218,11 @@ pub fn parse(
                 None => None,
             };
             return Ok(Cmd::Unlock { kind });
+        }
+        "lockupdate" => {
+            return Ok(Cmd::LockUpdate {
+                text: string(o, "message").ok_or("missing message")?.into(),
+            })
         }
         "backups" => return backup(o),
         "Quarantine" | "Sanitize & Dehoist" => {
@@ -211,7 +263,8 @@ pub fn parse(
         duration_s,
         points: int(o, "points").unwrap_or(1) as i32,
         flags: Flags {
-            soft: name == "softban",
+            soft: name == "softban" || flag(o, "soft"),
+            dm: flag(o, "dm"),
             ..Default::default()
         },
     })
@@ -220,16 +273,32 @@ pub fn parse(
 pub fn definitions() -> Vec<Command> {
     let user = || UserBuilder::new("user", "Target member").required(true);
     let reason = || StringBuilder::new("reason", "Reason for the case");
+    let dm = || BooleanBuilder::new("dm", "Tell the member by DM");
+    let proof = || AttachmentBuilder::new("proof", "Screenshot or file as evidence");
     let guild_only = |b: CommandBuilder| b.contexts([InteractionContextType::Guild]).build();
     let chat = |n: &str, d: &str| CommandBuilder::new(n, d, CommandType::ChatInput);
     let menu = |n: &str| CommandBuilder::new(n, "", CommandType::User);
     let mut defs = crate::modslash::definitions();
     defs.extend([
         guild_only(
-            chat("ban", "Ban a member")
-                .option(user())
-                .option(reason())
-                .option(StringBuilder::new("duration", "Length, e.g. 7d")),
+            chat("ban", "Ban or unban a member")
+                .option(
+                    SubCommandBuilder::new("add", "Ban a member")
+                        .option(user())
+                        .option(reason())
+                        .option(StringBuilder::new("duration", "Length, e.g. 7d"))
+                        .option(BooleanBuilder::new(
+                            "soft",
+                            "Ban and unban to delete recent messages",
+                        ))
+                        .option(dm())
+                        .option(proof()),
+                )
+                .option(
+                    SubCommandBuilder::new("remove", "Unban a user")
+                        .option(user())
+                        .option(reason()),
+                ),
         ),
         guild_only(
             chat(
@@ -242,36 +311,61 @@ pub fn definitions() -> Vec<Command> {
         guild_only(
             chat("kick", "Kick a member")
                 .option(user())
-                .option(reason()),
+                .option(reason())
+                .option(dm())
+                .option(proof()),
         ),
         guild_only(
-            chat("timeout", "Time a member out")
-                .option(user())
-                .option(StringBuilder::new(
-                    "duration",
-                    "Length, e.g. 10m (default from settings)",
-                ))
-                .option(reason()),
+            chat("timeout", "Time a member out or lift it")
+                .option(
+                    SubCommandBuilder::new("add", "Time a member out")
+                        .option(user())
+                        .option(StringBuilder::new(
+                            "duration",
+                            "Length, e.g. 10m (default from settings)",
+                        ))
+                        .option(reason())
+                        .option(dm())
+                        .option(proof()),
+                )
+                .option(
+                    SubCommandBuilder::new("remove", "Remove a member's timeout")
+                        .option(user())
+                        .option(reason())
+                        .option(dm())
+                        .option(proof()),
+                ),
         ),
         guild_only(
             chat("warn", "Warn a member")
                 .option(user())
                 .option(reason().required(true))
-                .option(IntegerBuilder::new("points", "Warn points (default 1)").min_value(1)),
+                .option(IntegerBuilder::new("points", "Warn points (default 1)").min_value(1))
+                .option(dm())
+                .option(proof()),
         ),
         guild_only(
-            chat("lock", "Lock the server")
-                .option(StringBuilder::new(
-                    "type",
-                    "server, blind, role, kick, ban or all",
-                ))
-                .option(StringBuilder::new("duration", "Unlock after, e.g. 30m")),
-        ),
-        guild_only(
-            chat("unlock", "Unlock the server").option(StringBuilder::new(
-                "type",
-                "Only this lock: server, role, kick, ban or all",
-            )),
+            chat("lock", "Lock or unlock the server")
+                .option(
+                    SubCommandBuilder::new("add", "Lock the server")
+                        .option(StringBuilder::new(
+                            "type",
+                            "server, blind, role, kick, ban or all",
+                        ))
+                        .option(StringBuilder::new("duration", "Unlock after, e.g. 30m")),
+                )
+                .option(
+                    SubCommandBuilder::new("remove", "Unlock the server").option(
+                        StringBuilder::new(
+                            "type",
+                            "Only this lock: server, role, kick, ban or all",
+                        ),
+                    ),
+                )
+                .option(
+                    SubCommandBuilder::new("update", "Post an update about the active lock")
+                        .option(StringBuilder::new("message", "The update").required(true)),
+                ),
         ),
         guild_only(
             chat("revert", "Undo a member's recent logged actions")
@@ -317,6 +411,7 @@ pub fn definitions() -> Vec<Command> {
             CommandType::Message,
         )),
     ]);
+    defs.extend(crate::general::definitions());
     defs
 }
 
@@ -348,7 +443,8 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<()> {
         )
         .await?;
     let mut confirm = None;
-    let text = match run(app, i, data, &mut confirm).await {
+    let mut embeds = vec![];
+    let text = match run(app, i, data, &mut confirm, &mut embeds).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(?e, command = %data.name, "slash command failed");
@@ -357,7 +453,8 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<()> {
     };
     client
         .update_response(&i.token)
-        .content(Some(&text))
+        .content(Some(text.as_str()).filter(|t| !t.is_empty()))
+        .embeds(Some(embeds.as_slice()))
         .components(confirm.as_ref().map(std::slice::from_ref))
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?;
@@ -370,6 +467,7 @@ async fn run(
     i: &Interaction,
     data: &twilight_model::application::interaction::application_command::CommandData,
     confirm: &mut Option<Component>,
+    out: &mut Vec<twilight_model::channel::message::Embed>,
 ) -> Result<String> {
     let (Some(gid), Some(actor_id)) = (i.guild_id, i.author_id()) else {
         return Ok("Server only".into());
@@ -377,6 +475,13 @@ async fn run(
     if data.kind == CommandType::Message {
         return reports::message_menu(app, data, gid, actor_id).await;
     }
+    if let Some(words) = crate::general::slash_words(&data.name, &data.options) {
+        let (text, embeds, row) = crate::general::slash(app, gid, actor_id, words).await?;
+        *out = embeds;
+        *confirm = row;
+        return Ok(text);
+    }
+    let proof = proof_url(data);
     let cmd = match parse(&data.name, &data.options, data.target_id) {
         Ok(c) => c,
         Err(e) => return Ok(e),
@@ -396,7 +501,7 @@ async fn run(
         if data.kind == CommandType::User || !(cfg_confirm && job.needs_confirm()) {
             return Ok(None);
         }
-        let (text, row) = commands::stash_confirm(app, i.id.get(), job).await?;
+        let (text, row) = confirm::stash_confirm(app, i.id.get(), job).await?;
         *confirm = Some(row);
         Ok(Some(text))
     };
@@ -415,11 +520,12 @@ async fn run(
                 reason: reason.clone(),
                 duration_s,
                 flags,
+                proof: proof.clone(),
             };
             if let Some(q) = ask(action).await? {
                 return Ok(q);
             }
-            commands::apply_dm(
+            let text = commands::apply_dm(
                 app,
                 gid,
                 owner,
@@ -430,13 +536,28 @@ async fn run(
                 duration_s,
                 points,
                 flags,
+                proof.as_deref(),
             )
-            .await
+            .await?;
+            if !app.cfg(gid.get()).await?.misc.compact_replies {
+                *out =
+                    reply::result_embeds(kind.name(), &[text], reason.as_deref(), actor_id.get());
+                return Ok(String::new());
+            }
+            Ok(text)
         }
         Cmd::Lock { kind, duration_s } => {
             crate::lockdown::command(app, gid, &actor, false, kind, duration_s).await
         }
         Cmd::Unlock { kind } => crate::lockdown::command(app, gid, &actor, true, kind, None).await,
+        Cmd::LockUpdate { text } => {
+            let ch = i
+                .channel
+                .as_ref()
+                .map(|c| c.id)
+                .ok_or(anyhow::anyhow!("no channel"))?;
+            crate::lockdown::update(app, gid, ch, (actor_id, &actor), &text).await
+        }
         Cmd::Revert { target, since_s } => {
             commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
         }
@@ -451,11 +572,14 @@ async fn run(
                 cmd: c.clone(),
                 channel: ch,
                 reason: reason.clone(),
+                proof: proof.clone(),
             };
             if let Some(q) = ask(action).await? {
                 return Ok(q);
             }
-            modcmds::run(
+            let target = c.target().map(Id::new);
+            let dm_name = c.dm_name();
+            let text = modcmds::run(
                 app,
                 gid,
                 owner,
@@ -463,8 +587,19 @@ async fn run(
                 ch,
                 c,
                 reason.as_deref(),
+                proof.as_deref(),
             )
-            .await
+            .await?;
+            if let (Some(t), true, true) = (
+                target,
+                text.starts_with("Case #"),
+                flag(flatten(&data.name, &data.options).1, "dm"),
+            ) {
+                let hide = app.cfg(gid.get()).await?.misc.hide_staff_in_dms;
+                let who = (!hide).then_some(actor_id.get());
+                reply::dm(app, t, &reply::dm_text(dm_name, reason.as_deref(), who)).await;
+            }
+            Ok(text)
         }
     }
 }
@@ -478,6 +613,38 @@ mod tests {
             name: name.into(),
             value,
         }
+    }
+
+    #[test]
+    fn add_remove_subcommands_reach_the_plain_handlers() {
+        let sub = |n: &str, o| [opt(n, CommandOptionValue::SubCommand(o))];
+        let u = || opt("user", CommandOptionValue::User(Id::new(7)));
+        let o = sub("remove", vec![u()]);
+        assert!(matches!(
+            parse("timeout", &o, None),
+            Ok(Cmd::Ext(ModCmd::Untimeout { user: 7 }, None))
+        ));
+        let o = sub(
+            "add",
+            vec![u(), opt("dm", CommandOptionValue::Boolean(true))],
+        );
+        let Ok(Cmd::Mod { flags, .. }) = parse("ban", &o, None) else {
+            panic!("ban add")
+        };
+        assert!(flags.dm);
+        let o = sub(
+            "update",
+            vec![opt(
+                "message",
+                CommandOptionValue::String("back soon".into()),
+            )],
+        );
+        assert_eq!(
+            parse("lock", &o, None),
+            Ok(Cmd::LockUpdate {
+                text: "back soon".into()
+            })
+        );
     }
 
     #[test]

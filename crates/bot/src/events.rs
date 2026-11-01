@@ -18,7 +18,8 @@ use twilight_model::{
 };
 
 use crate::{
-    antinuke, app::App, automod, commands, metrics, prefix, reports, slash, tickets, verify,
+    antinuke, app::App, automod, commands, confirm, metrics, prefix, reports, slash, tickets,
+    verify,
 };
 
 fn guild_of(ev: &Event) -> Option<u64> {
@@ -183,14 +184,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
-                let quarantined = m.content.starts_with(&pfx) && sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM quarantines WHERE guild_id=$1 AND user_id=$2)",
-                )
-                .bind(gid.get() as i64)
-                .bind(m.author.id.get() as i64)
-                .fetch_one(&app.pool)
-                .await?;
-                if let (false, Some(rest)) = (quarantined, m.content.strip_prefix(&pfx)) {
+                if let Some(rest) = m.content.strip_prefix(&pfx).filter(|r| !r.is_empty()) {
+                    if commands::ignored(app, m, gid, rest).await? {
+                        return Ok(());
+                    }
                     if !crate::general::try_run(app, m, rest).await?
                         && !crate::settings::try_run(app, m, rest).await?
                     {
@@ -235,7 +232,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?
-                && !commands::handle_confirm(app, &i.0).await?
+                && !confirm::handle_confirm(app, &i.0).await?
                 && !reports::handle(app, &i.0).await?
                 && !crate::appeals::handle(app, &i.0).await?
                 && !crate::settings::handle(app, &i.0).await?

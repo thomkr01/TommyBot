@@ -322,7 +322,7 @@ pub(super) static MISC: Module = Module {
 
 /// Wick's `w!setup` walks through these; the roles and channels themselves are made by the dashboard wizard.
 pub(super) static SETUP: Module = Module {
-    names: &["setup", "config"],
+    names: &["setup"],
     title: "Setup Panel:",
     per_page: 0,
     footer: "Quarantine role and log channels: w!setup run · Everything else: Dashboard wizard",

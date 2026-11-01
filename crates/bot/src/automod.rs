@@ -59,6 +59,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             gid,
             m.author.id,
             am.strike.strike_timeout_ms / 1000,
+            "Automod",
         )
         .await;
     }
@@ -262,7 +263,14 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             )
             .await;
         }
-        timeout(&app.http, gid, m.author.id, act.timeout_ms / 1000).await?;
+        timeout(
+            &app.http,
+            gid,
+            m.author.id,
+            act.timeout_ms / 1000,
+            "Automod",
+        )
+        .await?;
     }
     let reason = if act.purge {
         "Message spam (strike cap)"
@@ -404,13 +412,14 @@ async fn filter_action(
                     reason: Some("automod filter"),
                     points: cfg.misc.warn_base_points,
                     duration_s: None,
+                    proof: None,
                     inverse: None,
                 },
             )
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        FilterAction::Timeout => timeout(&app.http, gid, uid, secs).await?,
+        FilterAction::Timeout => timeout(&app.http, gid, uid, secs, "Automod").await?,
         FilterAction::Kick => {
             app.http.remove_guild_member(gid, uid).await?;
         }
@@ -713,13 +722,23 @@ async fn native_action(
                     reason: Some(WHY),
                     points: cfg.misc.warn_base_points,
                     duration_s: None,
+                    proof: None,
                     inverse: None,
                 },
             )
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        BotAction::Timeout => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
+        BotAction::Timeout => {
+            timeout(
+                &app.http,
+                gid,
+                uid,
+                cfg.misc.timeout_secs() as i64,
+                "Automod",
+            )
+            .await?
+        }
         BotAction::Kick => punish(app, cfg, gid, uid.get(), Action::Kick, WHY).await?,
         BotAction::Ban => punish(app, cfg, gid, uid.get(), Action::Ban, WHY).await?,
         BotAction::Lock => {
@@ -840,14 +859,24 @@ async fn punish(
                     reason: Some(why),
                     points: cfg.misc.warn_base_points,
                     duration_s: None,
+                    proof: None,
                     inverse: None,
                 },
             )
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        Action::Timeout(0) => timeout(&app.http, gid, uid, cfg.misc.timeout_secs() as i64).await?,
-        Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000).await?,
+        Action::Timeout(0) => {
+            timeout(
+                &app.http,
+                gid,
+                uid,
+                cfg.misc.timeout_secs() as i64,
+                "Automod",
+            )
+            .await?
+        }
+        Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000, "Automod").await?,
         Action::Timeout(_) => return Ok(()),
         Action::Kick => {
             app.http.remove_guild_member(gid, uid).await?;

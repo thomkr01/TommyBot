@@ -36,6 +36,14 @@ pub fn crossed(thresholds: &[Threshold], before: i32, after: i32) -> Option<Thre
         .cloned()
 }
 
+/// The nearest threshold above `points`: how far away the next punishment is.
+pub fn next(thresholds: &[Threshold], points: i32) -> Option<&Threshold> {
+    thresholds
+        .iter()
+        .filter(|t| t.points > points)
+        .min_by_key(|t| t.points)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,6 +65,8 @@ mod tests {
             },
         ];
         assert_eq!(crossed(&ts, 0, 2), None);
+        assert_eq!(next(&ts, 4).map(|t| t.points), Some(6));
+        assert!(next(&ts, 9).is_none());
         assert_eq!(
             crossed(&ts, 0, 3).unwrap().action,
             Action::Timeout { secs: 600 }

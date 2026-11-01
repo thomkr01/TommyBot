@@ -3,9 +3,16 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use tommybot_core::{cases, permits::Level};
+use tommybot_core::permits::Level;
 use tommybot_logging::embed::{self, Log, BLUE, GREEN, NO, YES};
 use twilight_model::{
+    application::{
+        command::{Command, CommandType},
+        interaction::{
+            application_command::{CommandDataOption, CommandOptionValue},
+            InteractionContextType,
+        },
+    },
     channel::message::{Component, Embed},
     gateway::payload::incoming::MessageCreate,
     guild::Permissions,
@@ -17,10 +24,12 @@ use twilight_model::{
 
 use crate::{
     app::{now_secs, App},
+    info::{role_info, server_info, user_info},
     metrics,
     settings::{self, send},
     targets, welcome,
 };
+use twilight_util::builder::command::{CommandBuilder, SubCommandBuilder, UserBuilder};
 
 /// (name, aliases, permit, usage, what). Permit "" is anyone, "*" any permit, "owner" Owner or Extra Owner.
 const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
@@ -56,13 +65,8 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "serverinfo",
         "Server info",
     ),
-    (
-        "setup",
-        &["config"],
-        "*",
-        "setup",
-        "Setup panel and config overview",
-    ),
+    ("setup", &[], "*", "setup", "Setup panel"),
+    ("config", &[], "*", "config", "Config overview"),
     (
         "statics",
         &["s"],
@@ -273,6 +277,13 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
     ),
     ("ncases", &[], "cases", "ncases [ID]", "Anti-nuke cases"),
     (
+        "backups",
+        &["backup"],
+        "backups",
+        "backups [take | load ID ?confirm | delete ID | clear]",
+        "Server backups",
+    ),
+    (
         "notes",
         &["note"],
         "notes_view",
@@ -299,6 +310,7 @@ const CATEGORIES: [(&str, &[&str]); 3] = [
         "Settings Commands:",
         &[
             "setup",
+            "config",
             "statics",
             "heat",
             "hfilters",
@@ -340,6 +352,7 @@ const CATEGORIES: [(&str, &[&str]); 3] = [
             "closecase",
             "ncases",
             "notes",
+            "backups",
         ],
     ),
 ];
@@ -412,174 +425,6 @@ fn links(app: &App) -> Vec<Component> {
             components: b,
         },
     )]
-}
-
-fn created_secs(id: u64) -> i64 {
-    (((id >> 22) + 1_420_070_400_000) / 1000) as i64
-}
-
-fn yes(b: bool) -> &'static str {
-    if b {
-        YES
-    } else {
-        NO
-    }
-}
-
-/// Names of the dangerous permission bits in `perms`.
-fn dangerous(perms: u64) -> String {
-    const NAMES: [(u64, &str); 9] = [
-        (1 << 3, "Administrator"),
-        (1 << 1, "Kick Members"),
-        (1 << 2, "Ban Members"),
-        (1 << 4, "Manage Channels"),
-        (1 << 5, "Manage Server"),
-        (1 << 13, "Manage Messages"),
-        (1 << 28, "Manage Roles"),
-        (1 << 29, "Manage Webhooks"),
-        (1 << 40, "Moderate Members"),
-    ];
-    let names: Vec<_> = NAMES
-        .iter()
-        .filter(|(b, _)| perms & b != 0)
-        .map(|(_, n)| *n)
-        .collect();
-    if names.is_empty() {
-        NO.into()
-    } else {
-        names.join(", ")
-    }
-}
-
-fn level_name(l: &Level) -> String {
-    match l {
-        Level::None => "None".into(),
-        Level::Custom { rank, .. } => format!("Permit (rank {rank})"),
-        Level::TrustedAdmin => "Trusted Admin".into(),
-        Level::ExtraOwner => "Extra Owner".into(),
-        Level::Owner => "Owner".into(),
-    }
-}
-
-async fn user_info(app: &App, gid: Id<GuildMarker>, uid: Id<UserMarker>) -> Result<Embed> {
-    let cfg = app.cfg(gid.get()).await?;
-    let info = app.guild_info(gid).await?;
-    let member = match app.http.guild_member(gid, uid).await {
-        Ok(m) => Some(m.model().await?),
-        Err(_) => None,
-    };
-    let user = match &member {
-        Some(m) => m.user.clone(),
-        None => app.http.user(uid).await?.model().await?,
-    };
-    let created = created_secs(uid.get());
-    let mut e = Log::new(&format!("{}'s Info:", user.name), BLUE)
-        .thumbnail(&user)
-        .user("User", uid.get())
-        .line("Created", &format!("<t:{created}:R>"));
-    let Some(m) = member else {
-        let banned = app.http.ban(gid, uid).await.is_ok();
-        return Ok(e
-            .line("In Server", NO)
-            .line("Banned", yes(banned))
-            .line("Bot", yes(user.bot))
-            .build());
-    };
-    if let Some(j) = m.joined_at {
-        e = e.line("Joined", &format!("<t:{}:R>", j.as_secs()));
-    }
-    let young = now_secs() - created < cfg.joingate.min_age_ms() / 1000;
-    let suspicious = format!(
-        "{} No Avatar\n{} Account Younger Than {}d",
-        yes(user.avatar.is_none()),
-        yes(young),
-        cfg.joingate.min_age_days
-    );
-    let points = cases::warn_points(&app.pool, gid.get() as i64, uid.get() as i64).await?;
-    let wl = &cfg.whitelist;
-    let on = |l: &tommybot_core::sections::WhitelistList| {
-        l.users.contains(&uid) || m.roles.iter().any(|r| l.roles.contains(r))
-    };
-    let whitelists = format!(
-        "{} Spam\n{} Ping\n{} Advertising\n{} @everyone\n{} Quarantine",
-        yes(on(&wl.spam)),
-        yes(on(&wl.mentions)),
-        yes(on(&wl.invites)),
-        yes(on(&wl.everyone)),
-        yes(cfg.antinuke.quarantine_whitelist.contains(&uid))
-    );
-    let perms = m
-        .roles
-        .iter()
-        .chain([&gid.cast()])
-        .filter_map(|r| info.role_perms.get(r))
-        .fold(0, |a, p| a | p);
-    let level = app.level(gid, info.owner, uid).await?;
-    Ok(e.inline("Suspicious Status:", &suspicious)
-        .inline("Whitelist:", &whitelists)
-        .inline("Warn Points:", &format!("`{points}`"))
-        .inline("Dangerous Permissions:", &dangerous(perms))
-        .inline("TommyBot Permissions:", &level_name(&level))
-        .build())
-}
-
-async fn role_info(app: &App, gid: Id<GuildMarker>, rid: u64) -> Result<Option<Embed>> {
-    let roles = app.http.roles(gid).await?.models().await?;
-    let Some(r) = roles.into_iter().find(|r| r.id.get() == rid) else {
-        return Ok(None);
-    };
-    let cfg = app.cfg(gid.get()).await?;
-    let wl = &cfg.whitelist;
-    let main = cfg.lockdown.main_roles.contains(&r.id);
-    let whitelists = format!(
-        "{} Spam\n{} Ping\n{} Advertising\n{} @everyone",
-        yes(wl.spam.roles.contains(&r.id)),
-        yes(wl.mentions.roles.contains(&r.id)),
-        yes(wl.invites.roles.contains(&r.id)),
-        yes(wl.everyone.roles.contains(&r.id))
-    );
-    Ok(Some(
-        Log::new(&format!("{}'s Info:", r.name), BLUE)
-            .line("Role", &embed::role(rid))
-            .line("Created", &format!("<t:{}:R>", created_secs(rid)))
-            .line("Position", &format!("`{}`", r.position))
-            .inline(
-                "Details:",
-                &format!(
-                    "{} Managed\n{} Mentionable\n{} Hoisted\n{} Main Role",
-                    yes(r.managed),
-                    yes(r.mentionable),
-                    yes(r.hoist),
-                    yes(main)
-                ),
-            )
-            .inline("Whitelist:", &whitelists)
-            .inline("Dangerous Permissions:", &dangerous(r.permissions.bits()))
-            .build(),
-    ))
-}
-
-async fn server_info(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
-    let g = app.http.guild(gid).with_counts(true).await?.model().await?;
-    let channels = app.http.guild_channels(gid).await?.models().await?.len();
-    Ok(Log::new(&format!("{}'s Info:", g.name), BLUE)
-        .line("Owner", &embed::user(g.owner_id.get()))
-        .line("Created", &format!("<t:{}:R>", created_secs(gid.get())))
-        .line(
-            "Members",
-            &format!("`{}`", g.approximate_member_count.unwrap_or_default()),
-        )
-        .line("Roles", &format!("`{}`", g.roles.len()))
-        .line("Channels", &format!("`{channels}`"))
-        .line(
-            "Boosts",
-            &format!(
-                "`{}` (tier {})",
-                g.premium_subscription_count.unwrap_or_default(),
-                u8::from(g.premium_tier)
-            ),
-        )
-        .build())
 }
 
 /// `ncases`: the latest anti-nuke cases, or one case by id.
@@ -750,6 +595,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
             | "info"
             | "roleinfo"
             | "serverinfo"
+            | "config"
             | "ncases"
             | "tshoot"
     ) {
@@ -760,7 +606,92 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
     if !allowed(&level, perm) || (level == Level::None && cfg.misc.ignore_no_permit) {
         return Ok(true);
     }
+    let (text, embed, rows) = answer(app, gid, msg.author.id, &level, name, &words).await?;
+    send(app, msg, &text, embed, rows).await?;
+    Ok(true)
+}
+
+/// `/about`, `/ping`, `/help`, `/invite`, `/commands`, `/info user|server` as the words of the prefix command.
+pub fn slash_words(name: &str, o: &[CommandDataOption]) -> Option<Vec<String>> {
+    if !matches!(
+        name,
+        "about" | "ping" | "help" | "invite" | "commands" | "info"
+    ) {
+        return None;
+    }
+    let mut w = vec![name.to_string()];
+    if let Some(CommandDataOption {
+        name: sub,
+        value: CommandOptionValue::SubCommand(so),
+    }) = o.first()
+    {
+        match (sub.as_str(), crate::slash::user(so, "user")) {
+            ("server", _) => w.push("-server".into()),
+            (_, Some(u)) => w.push(format!("<@{u}>")),
+            _ => {}
+        }
+    }
+    Some(w)
+}
+
+pub fn definitions() -> Vec<Command> {
+    let chat = |n: &str, d: &str| {
+        CommandBuilder::new(n, d, CommandType::ChatInput).contexts([InteractionContextType::Guild])
+    };
+    let mut defs: Vec<Command> = [
+        ("about", "About TommyBot"),
+        ("ping", "Latency, uptime and memory"),
+        ("help", "Help panel and links"),
+        ("invite", "Add TommyBot to a server"),
+        ("commands", "The commands you can use"),
+    ]
+    .map(|(n, d)| chat(n, d).build())
+    .into();
+    defs.push(
+        chat("info", "Info about a member, user or the server")
+            .option(
+                SubCommandBuilder::new("user", "A member or any user")
+                    .option(UserBuilder::new("user", "Default: you")),
+            )
+            .option(SubCommandBuilder::new("server", "This server"))
+            .build(),
+    );
+    defs
+}
+
+/// Slash entry: the answer of a general command as (text, embeds, button row).
+pub async fn slash(
+    app: &App,
+    gid: Id<GuildMarker>,
+    invoker: Id<UserMarker>,
+    words: Vec<String>,
+) -> Result<(String, Vec<Embed>, Option<Component>)> {
+    let Some(&(name, _, perm, ..)) = lookup(&words[0]) else {
+        return Ok(("Unknown command".into(), vec![], None));
+    };
+    let owner = app.guild_info(gid).await?.owner;
+    let level = app.level(gid, owner, invoker).await?;
+    if !allowed(&level, perm) {
+        return Ok(("You lack the permit for this command".into(), vec![], None));
+    }
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    let (text, embed, rows) = answer(app, gid, invoker, &level, name, &words).await?;
+    Ok((text, embed.into_iter().collect(), rows.into_iter().next()))
+}
+
+/// The reply of command `name`; `words` are the typed words, the command first.
+async fn answer(
+    app: &App,
+    gid: Id<GuildMarker>,
+    invoker: Id<UserMarker>,
+    level: &Level,
+    name: &str,
+    words: &[&str],
+) -> Result<(String, Option<Embed>, Vec<Component>)> {
+    let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
     let arg = words.get(1).copied();
+    let text = |t: &str| Ok((t.to_string(), None, vec![]));
+    let embed = |e| Ok((String::new(), Some(e), vec![]));
     match name {
         "about" => {
             let up =
@@ -771,18 +702,15 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
                 .line("Uptime", &format!("`{}`", embed::duration(up)))
                 .line("Price", "Everything is free")
                 .build();
-            send(app, msg, "", Some(e), links(app)).await?;
+            Ok((String::new(), Some(e), links(app)))
         }
         "commands" => {
-            let (e, pages) = commands_page(&level, &pfx, 0);
-            send(
-                app,
-                msg,
-                "",
+            let (e, pages) = commands_page(level, &pfx, 0);
+            Ok((
+                String::new(),
                 Some(e),
-                vec![settings::page_row(msg.author.id.get(), "cmds", 0, pages)],
-            )
-            .await?;
+                vec![settings::page_row(invoker.get(), "cmds", 0, pages)],
+            ))
         }
         "help" => {
             let e = Log::new("TommyBot Help Panel", BLUE)
@@ -799,13 +727,13 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
                     &format!("`{pfx}setup`, then `{pfx}heat`, `{pfx}an`, `{pfx}jg`..."),
                 )
                 .build();
-            send(app, msg, "", Some(e), links(app)).await?;
+            Ok((String::new(), Some(e), links(app)))
         }
         "invite" => {
             let e = Log::new("Invite TommyBot!", BLUE)
                 .text("Add TommyBot to your server with the button below.")
                 .build();
-            send(app, msg, "", Some(e), links(app)).await?;
+            Ok((String::new(), Some(e), links(app)))
         }
         "ping" => {
             let t = Instant::now();
@@ -820,26 +748,53 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
                 .map_or("unknown".into(), |pages| {
                     format!("{} MB", pages * 4096 / 1_048_576)
                 });
-            let e = Log::new("TommyBot Status:", GREEN)
-                .line(
-                    "Gateway Latency",
-                    &if gw == 0 {
-                        "measuring".into()
-                    } else {
-                        format!("`{gw}ms`")
-                    },
-                )
-                .line("API Latency", &format!("`{rest_ms}ms`"))
-                .line("Uptime", &format!("`{}`", embed::duration(up)))
-                .line("RAM", &format!("`{ram}`"))
-                .build();
-            send(app, msg, "", Some(e), vec![]).await?;
+            embed(
+                Log::new("TommyBot Status:", GREEN)
+                    .line(
+                        "Gateway Latency",
+                        &if gw == 0 {
+                            "measuring".into()
+                        } else {
+                            format!("`{gw}ms`")
+                        },
+                    )
+                    .line("API Latency", &format!("`{rest_ms}ms`"))
+                    .line("Uptime", &format!("`{}`", embed::duration(up)))
+                    .line("RAM", &format!("`{ram}`"))
+                    .build(),
+            )
         }
-        "serverinfo" => send(app, msg, "", Some(server_info(app, gid).await?), vec![]).await?,
+        "config" => {
+            let cfg = app.cfg(gid.get()).await?;
+            let g = app.http.guild(gid).await?.model().await?;
+            let role = cfg
+                .antinuke
+                .quarantine_role
+                .map_or(NO.to_string(), |r| embed::role(r.get()));
+            let sys = |on: bool| if on { YES } else { NO };
+            embed(
+                Log::new(&format!("{}'s Config Overview", g.name), BLUE)
+                    .section("Essential Roles")
+                    .line("Quarantine Role", &role)
+                    .section("Major Systems")
+                    .line("Anti Nuke", sys(cfg.antinuke.enabled))
+                    .line("Heat System", sys(cfg.automod.enabled))
+                    .line("Verification", sys(cfg.verification.enabled))
+                    .line("Join Gate", sys(cfg.joingate.enabled))
+                    .line(
+                        "Join Raid",
+                        sys(cfg.joinraid.as_ref().is_some_and(|r| r.enabled)),
+                    )
+                    .build(),
+            )
+        }
+        "serverinfo" => server_info(app, gid, invoker).await,
         "roleinfo" | "info" => {
-            let staff = level != Level::None;
+            let staff = *level != Level::None;
             let e = match arg {
-                Some("-server" | "-guild" | "-g") if staff => Some(server_info(app, gid).await?),
+                Some("-server" | "-guild" | "-g") if staff => {
+                    return server_info(app, gid, invoker).await
+                }
                 _ if name == "roleinfo" || arg.is_some_and(|a| a.starts_with("<@&")) => {
                     let id = arg
                         .and_then(|a| a.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok());
@@ -848,7 +803,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
                         _ => None,
                     }
                 }
-                None => Some(user_info(app, gid, msg.author.id).await?),
+                None => Some(user_info(app, gid, invoker).await?),
                 Some(a) => {
                     let digits = a.trim_matches(|c: char| !c.is_ascii_digit());
                     match digits.parse::<u64>() {
@@ -860,28 +815,24 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
                         }
                         _ => match targets::resolve(app, gid, &words[1..].join(" ")).await? {
                             Ok(u) => Some(user_info(app, gid, u).await?),
-                            Err(e) => return send(app, msg, &e, None, vec![]).await.map(|_| true),
+                            Err(e) => return text(&e),
                         },
                     }
                 }
             };
             match e {
-                Some(e) => send(app, msg, "", Some(e), vec![]).await?,
-                None => send(app, msg, "Nothing found", None, vec![]).await?,
+                Some(e) => embed(e),
+                None => text("Nothing found"),
             }
         }
-        "ncases" => send(app, msg, "", Some(ncases(app, gid, arg).await?), vec![]).await?,
-        "tshoot" if arg == Some("lockdown") => {
-            let text = if allowed(&level, "owner") {
-                tshoot_lockdown(app, gid).await?
-            } else {
-                "Only the owner or an Extra Owner can run this".into()
-            };
-            send(app, msg, &text, None, vec![]).await?;
-        }
-        _ => send(app, msg, &tshoot(app, gid), None, vec![]).await?,
+        "ncases" => embed(ncases(app, gid, arg).await?),
+        "tshoot" if arg == Some("lockdown") => text(&if allowed(level, "owner") {
+            tshoot_lockdown(app, gid).await?
+        } else {
+            "Only the owner or an Extra Owner can run this".into()
+        }),
+        _ => text(&tshoot(app, gid)),
     }
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -914,14 +865,5 @@ mod tests {
         assert!(e.description.unwrap().starts_with("❯ `w!ban` Ban"));
         let (e, _) = commands_page(&Level::None, "w!", 0);
         assert!(e.description.unwrap().contains("`w!ping`"));
-    }
-
-    #[test]
-    fn dangerous_names() {
-        assert_eq!(dangerous(0), NO);
-        assert_eq!(
-            dangerous((1 << 3) | (1 << 2) | (1 << 10)),
-            "Administrator, Ban Members"
-        );
     }
 }

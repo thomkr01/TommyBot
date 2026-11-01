@@ -444,6 +444,7 @@ async fn open_case(
             reason: Some(why),
             points: 0,
             duration_s: None,
+            proof: None,
             inverse: Some(json!({"op": "unquarantine", "user": actor.get()})),
         },
     )
