@@ -505,8 +505,7 @@ fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
             bg.get_pixel(x, y).0[0] < 128,
         ) {
             (true, _, _) => t,
-            (_, true, _) => custom(decoy).unwrap_or(d),
-            (_, _, true) => d,
+            (_, true, _) | (_, _, true) => d,
             _ => Rgb([255, 255, 255]),
         }
     });
