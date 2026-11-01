@@ -1,9 +1,17 @@
 name: tommybot
 
+# Cap container logs so they cannot fill the disk.
+x-logging: &logging
+  logging:
+    options:
+      max-size: 10m
+      max-file: "3"
+
 services:
   postgres:
     image: postgres:16
     restart: unless-stopped
+    <<: *logging
     environment:
       POSTGRES_USER: tommybot
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -21,12 +29,12 @@ services:
       context: .
       target: bot
     restart: unless-stopped
+    <<: *logging
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
-      SUPPORT_URL: ${SUPPORT_URL:-}
       DATABASE_URL: postgres://tommybot:${POSTGRES_PASSWORD}@postgres:5432/tommybot
       RUST_LOG: ${RUST_LOG:-info}
       # Links in the welcome message.
@@ -38,11 +46,13 @@ services:
       context: .
       target: dashboard
     restart: unless-stopped
+    <<: *logging
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "${DASHBOARD_PORT:-8080}:8080"
+      # Localhost only: Docker's port rules bypass ufw. Reach it from outside via the tunnel or a proxy.
+      - "127.0.0.1:${DASHBOARD_PORT:-8080}:8080"
     environment:
       DATABASE_URL: postgres://tommybot:${POSTGRES_PASSWORD}@postgres:5432/tommybot
       DASHBOARD_URL: ${DASHBOARD_URL:?set DASHBOARD_URL in .env}
@@ -53,6 +63,16 @@ services:
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
       SUPPORT_URL: ${SUPPORT_URL:-}
       RUST_LOG: ${RUST_LOG:-info}
+
+  # Cloudflare Tunnel to the dashboard. Off unless COMPOSE_PROFILES=tunnel; see DEPLOY.md.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: [tunnel]
+    restart: unless-stopped
+    <<: *logging
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
 
 volumes:
   pgdata:
