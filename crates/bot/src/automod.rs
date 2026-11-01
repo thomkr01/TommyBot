@@ -52,6 +52,16 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if !am.enabled || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
     }
+    if crate::panic::is_raider(app, gid, m.author.id) {
+        app.http.delete_message(m.channel_id, m.id).await.ok();
+        return timeout(
+            &app.http,
+            gid,
+            m.author.id,
+            am.strike.strike_timeout_ms / 1000,
+        )
+        .await;
+    }
     let wl = &cfg.whitelist;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
     let any_categories = [&wl.spam, &wl.invites, &wl.mentions, &wl.everyone]
@@ -242,7 +252,8 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     }
     if am.strike.enabled {
         if cfg.misc.show_reason_on_auto {
-            let note = crate::appeals::note(&cfg.appeals, gid).filter(|_| act.timeout_ms > 300_000);
+            let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
+                .filter(|_| act.timeout_ms > 300_000);
             let text = "You were timed out by automod: message spam";
             reply::dm(
                 app,
@@ -799,13 +810,16 @@ async fn punish(
         } else {
             format!("Automod action: {action:?}")
         };
-        let note = crate::appeals::note(&cfg.appeals, gid).filter(|_| match action {
-            Action::Ban => true,
-            // Wick: short automatic timeouts (5 minutes or less) get no appeal link.
-            Action::Timeout(0) => cfg.misc.timeout_secs() > 300,
-            Action::Timeout(ms) => ms > 300_000,
-            _ => false,
-        });
+        let note =
+            crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid).filter(|_| {
+                match action {
+                    Action::Ban => true,
+                    // Wick: short automatic timeouts (5 minutes or less) get no appeal link.
+                    Action::Timeout(0) => cfg.misc.timeout_secs() > 300,
+                    Action::Timeout(ms) => ms > 300_000,
+                    _ => false,
+                }
+            });
         reply::dm(
             app,
             uid,

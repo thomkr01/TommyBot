@@ -175,7 +175,7 @@ pub async fn apply_dm(
     let cfg = app.cfg(gid.get()).await?;
     let soft = flags.soft && kind == ModKind::Ban;
     // One DM before the action: a banned user can't be DMed afterwards.
-    let note = appeals::note(&cfg.appeals, gid)
+    let note = appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
         .filter(|_| matches!(kind, ModKind::Ban | ModKind::Timeout) && !soft);
     let told = (flags.dm || cfg.misc.always_dm).then(|| {
         let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());
@@ -378,6 +378,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         | "slowmode" | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc"
         | "editreason" | "closecase" | "caseoff" | "opencase" | "caseon" | "clearwarns"
         | "warns" | "modcases" => return modcmds::run_prefix(app, msg, p).await,
+        "backups" => return backup_prefix(app, msg, gid, &p).await,
         _ => return Ok(()),
     };
     let owner = app.guild_info(gid).await?.owner;
@@ -811,7 +812,49 @@ pub(crate) async fn say(app: &App, msg: &MessageCreate, text: &str) -> Result<()
     Ok(())
 }
 
-/// `/backup create|list|load|delete`. `load` previews unless `confirm` is set.
+/// `w!backups take|load ID|delete ID|clear` and its Wick aliases.
+async fn backup_prefix(
+    app: &App,
+    msg: &MessageCreate,
+    gid: Id<GuildMarker>,
+    p: &Parsed,
+) -> Result<()> {
+    let owner = app.guild_info(gid).await?.owner;
+    let actor = app.level(gid, owner, msg.author.id).await?;
+    if actor == permits::Level::None {
+        return Ok(());
+    }
+    let mut args = msg.content.split_whitespace().skip(1);
+    // `bload dh0mfu`-style aliases carry the subcommand in `p.kind`.
+    let sub = p
+        .kind
+        .clone()
+        .or_else(|| args.next().map(str::to_lowercase));
+    let id = args.next().map(str::to_owned);
+    let cmd = match (sub.as_deref().unwrap_or("list"), id) {
+        ("take" | "create", _) => BackupCmd::Create,
+        ("list", _) => BackupCmd::List,
+        ("clear", _) => BackupCmd::Clear,
+        ("load", Some(id)) => BackupCmd::Load {
+            id,
+            confirm: msg.content.contains("?confirm"),
+        },
+        ("delete", Some(id)) => BackupCmd::Delete { id },
+        _ => {
+            return say(
+                app,
+                msg,
+                "Usage: `backups [take | load ID | delete ID | clear]`",
+            )
+            .await
+        }
+    };
+    let text = backup_cmd(app, gid, (msg.author.id, &actor), cmd).await?;
+    say(app, msg, &text).await
+}
+
+/// `/backups create|list|load|delete|purge` and `w!backups take|load|delete|clear`. `load`
+/// previews unless `confirm` is set.
 pub async fn backup_cmd(
     app: &App,
     gid: Id<GuildMarker>,
@@ -825,23 +868,33 @@ pub async fn backup_cmd(
         return Ok(msg);
     }
     Ok(match cmd {
-        BackupCmd::Create => format!("Saved backup #{}", backup::save(app, gid).await?),
+        BackupCmd::Create => match backup::save(app, gid, Some(actor_id.get())).await {
+            Ok(code) => format!("Saved backup `{code}`"),
+            Err(e) => e.to_string(),
+        },
         BackupCmd::List => {
             let rows = backup::list(app, gid).await?;
             if rows.is_empty() {
                 "No backups yet".into()
             } else {
                 rows.iter()
-                    .map(|(id, at, r, c)| format!("`#{id}` <t:{at}:R>: {r} roles, {c} channels"))
+                    .map(|(code, at, r, c, by)| {
+                        let by = by.map_or("TommyBot".into(), |u| format!("<@{u}>"));
+                        format!("`{code}` {by} <t:{at}:R>: {r} roles, {c} channels")
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
         }
-        BackupCmd::Load { id, confirm } => backup::load(app, gid, id, confirm).await?,
-        BackupCmd::Delete { id } => match backup::delete(app, gid, id).await? {
-            true => format!("Deleted backup #{id}"),
-            false => format!("No backup #{id}"),
+        BackupCmd::Load { id, confirm } => backup::load(app, gid, &id, confirm).await?,
+        BackupCmd::Delete { id } => match backup::delete(app, gid, Some(&id)).await? {
+            true => format!("Deleted backup `{id}`"),
+            false => format!("No backup `{id}`"),
         },
+        BackupCmd::Clear => {
+            backup::delete(app, gid, None).await?;
+            "Deleted all backups".into()
+        }
     })
 }
 

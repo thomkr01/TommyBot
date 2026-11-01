@@ -26,6 +26,9 @@ pub struct NukeCase {
     pub id: String,
     pub quarantined: Vec<u64>,
     pub reverted: Vec<Inverse>,
+    /// Undone actions per culprit, for the panic report.
+    #[serde(default)]
+    pub fragments: HashMap<u64, u32>,
 }
 
 impl NukeCase {
@@ -34,6 +37,7 @@ impl NukeCase {
             id: case_id(seed),
             quarantined: vec![],
             reverted: vec![],
+            fragments: HashMap::new(),
         }
     }
 
@@ -41,7 +45,9 @@ impl NukeCase {
         if !self.quarantined.contains(&executor) {
             self.quarantined.push(executor);
         }
+        let before = self.reverted.len();
         self.reverted.extend(ops);
+        *self.fragments.entry(executor).or_default() += (self.reverted.len() - before) as u32;
     }
 }
 
@@ -60,6 +66,18 @@ impl PanicTracker {
             executors,
             hits: HashMap::new(),
         }
+    }
+
+    /// Distinct accounts counted for this guild inside the window, before the next `record`.
+    pub fn involved(&self, guild: u64, now: Instant) -> HashSet<u64> {
+        let live = |t: &Instant| now.duration_since(*t) < self.window;
+        self.hits
+            .get(&guild)
+            .into_iter()
+            .flatten()
+            .filter(|(t, _)| live(t))
+            .map(|(_, u)| *u)
+            .collect()
     }
 
     /// Call on every quarantine verdict. True means start panic mode (resets the guild).
@@ -236,5 +254,24 @@ mod tests {
         assert!(!webhook_whitelisted(Some((true, true)), false)); // user-created: no inheritance
         assert!(!webhook_whitelisted(None, false)); // uncached: owner ignored
         assert!(webhook_whitelisted(None, true));
+    }
+
+    #[test]
+    fn case_counts_fragments_per_culprit_and_panic_lists_involved() {
+        let mut c = NukeCase::new(1);
+        c.add(
+            7,
+            [
+                Inverse::DeleteWebhook { id: 1 },
+                Inverse::DeleteWebhook { id: 2 },
+            ],
+        );
+        c.add(7, [Inverse::DeleteWebhook { id: 3 }]);
+        assert_eq!(c.fragments[&7], 3);
+        let mut t = PanicTracker::new(Duration::from_secs(60), 3);
+        let now = Instant::now();
+        t.record(1, 10, now);
+        t.record(1, 11, now);
+        assert_eq!(t.involved(1, now), HashSet::from([10, 11]));
     }
 }

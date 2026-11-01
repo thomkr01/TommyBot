@@ -183,7 +183,14 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
-                if let Some(rest) = m.content.strip_prefix(&pfx) {
+                let quarantined = m.content.starts_with(&pfx) && sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM quarantines WHERE guild_id=$1 AND user_id=$2)",
+                )
+                .bind(gid.get() as i64)
+                .bind(m.author.id.get() as i64)
+                .fetch_one(&app.pool)
+                .await?;
+                if let (false, Some(rest)) = (quarantined, m.content.strip_prefix(&pfx)) {
                     if !crate::general::try_run(app, m, rest).await?
                         && !crate::settings::try_run(app, m, rest).await?
                     {
@@ -200,10 +207,12 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
         Event::ChannelCreate(c) => {
             app.note_parent(&c.0);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g))
+            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::setup::enforce_quarantine(app, c).await.ok();
         }
         Event::ChannelUpdate(c) => {
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            crate::setup::enforce_quarantine(app, c).await.ok();
             crate::catch::keep_top(app, c).await?;
         }
         Event::ChannelDelete(c) => {
