@@ -55,8 +55,8 @@ fn check(f: &AppealField, a: &str) -> Result<String, String> {
         }
         return Ok(picked.join(", "));
     }
-    let min = f.min.unwrap_or(usize::from(f.required));
     let max = f.max.unwrap_or(MAX_ANSWER).min(MAX_ANSWER);
+    let min = f.min.unwrap_or(usize::from(f.required)).min(max);
     let n = a.chars().count();
     if n == 0 && !f.required {
         return Ok("Not answered.".into());
@@ -597,6 +597,13 @@ mod tests {
             check(&field(&[], false, false), " ").unwrap(),
             "Not answered."
         );
+    }
+
+    #[test]
+    fn min_above_max_still_accepts_a_max_length_answer() {
+        let mut f = field(&[], false, true);
+        f.min = Some(20);
+        assert!(check(&f, "0123456789").is_ok());
     }
 
     #[test]

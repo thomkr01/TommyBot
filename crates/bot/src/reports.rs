@@ -6,10 +6,7 @@ use tommybot_logging::{
     Log, LogKind,
 };
 use twilight_model::{
-    application::interaction::{
-        application_command::CommandData, modal::ModalInteractionComponent, Interaction,
-        InteractionData,
-    },
+    application::interaction::{application_command::CommandData, Interaction, InteractionData},
     channel::{
         message::{
             component::{ActionRow, Button, ButtonStyle, Component, TextInput, TextInputStyle},
@@ -267,15 +264,6 @@ async fn open_modal(app: &App, i: &Interaction, data: &CommandData) -> Result<()
     Ok(())
 }
 
-fn typed(c: &ModalInteractionComponent) -> Option<String> {
-    match c {
-        ModalInteractionComponent::TextInput(t) => Some(t.value.clone()),
-        ModalInteractionComponent::ActionRow(r) => r.components.iter().find_map(typed),
-        ModalInteractionComponent::Label(l) => typed(&l.component),
-        _ => None,
-    }
-}
-
 async fn submit_report(app: &App, i: &Interaction, ids: &str, reason: &str) -> Result<()> {
     let client = app.http.interaction(Id::new(app.me.get()));
     let defer = InteractionResponse {
@@ -402,7 +390,6 @@ async fn act(
         )),
         text,
     };
-    // A banned member cannot be warned any more.
     if kind == ModKind::Warn && app.http.ban(gid, target).await.is_ok() {
         return Ok(attempted("This user is already banned".into()));
     }
@@ -436,6 +423,12 @@ async fn act(
 }
 
 const PER_PAGE: i64 = 8;
+
+/// The page to show (clamped) and the page count for `total` cases.
+fn paging(page: i64, total: i64) -> (i64, i64) {
+    let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
+    (page.clamp(0, pages - 1), pages)
+}
 
 /// "User Info": an overview embed and the member's cases, paged with ⏮ ◀ ▶ ⏭ ✖. `arg` is empty for
 /// the first press (needs the Manage Reports permit) or `page:slot` / `x` from the pager.
@@ -481,8 +474,7 @@ async fn user_info(
             .bind(target)
             .fetch_one(&app.pool)
             .await?;
-    let pages = ((total + PER_PAGE - 1) / PER_PAGE).max(1);
-    let page = page.clamp(0, pages - 1);
+    let (page, pages) = paging(page, total);
     let rows: Vec<(i32, String, bool, i64)> = sqlx::query_as(
         "SELECT case_no, kind, active, extract(epoch from created_at)::bigint FROM cases
          WHERE guild_id=$1 AND user_id=$2 ORDER BY case_no DESC LIMIT $3 OFFSET $4",
@@ -574,7 +566,11 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             return Ok(true);
         }
         Some(InteractionData::ModalSubmit(m)) if m.custom_id.starts_with(MODAL) => {
-            let reason = m.components.iter().find_map(typed).unwrap_or_default();
+            let reason = m
+                .components
+                .iter()
+                .find_map(crate::verify::typed_text)
+                .unwrap_or_default();
             submit_report(app, i, &m.custom_id[MODAL.len()..], reason.trim()).await?;
             return Ok(true);
         }
@@ -660,4 +656,14 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn paging_clamps_and_counts() {
+        assert_eq!(super::paging(5, 0), (0, 1));
+        assert_eq!(super::paging(9, 17), (2, 3));
+        assert_eq!(super::paging(1, 16), (1, 2));
+    }
 }

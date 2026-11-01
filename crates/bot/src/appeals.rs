@@ -3,7 +3,7 @@ use anyhow::Result;
 use tommybot_core::sections::AppealsCfg;
 use tommybot_logging::embed::{HANDLED, RED};
 use twilight_model::{
-    application::interaction::{modal::ModalInteractionComponent, Interaction, InteractionData},
+    application::interaction::{Interaction, InteractionData},
     channel::message::{
         component::{ActionRow, Component, TextInput, TextInputStyle},
         embed::EmbedField,
@@ -31,15 +31,6 @@ pub fn note(cfg: &AppealsCfg, guild: Id<GuildMarker>) -> Option<String> {
 }
 
 const MODAL: &str = "appealm:";
-
-fn reply_of(c: &ModalInteractionComponent) -> Option<String> {
-    match c {
-        ModalInteractionComponent::TextInput(t) => Some(t.value.clone()),
-        ModalInteractionComponent::ActionRow(r) => r.components.iter().find_map(reply_of),
-        ModalInteractionComponent::Label(l) => reply_of(&l.component),
-        _ => None,
-    }
-}
 
 /// Applies a decision from the buttons on an appeal log. `Err` is the private refusal text.
 async fn decide(
@@ -183,7 +174,10 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         Some(InteractionData::MessageComponent(c)) => (c.custom_id.as_str(), String::new()),
         Some(InteractionData::ModalSubmit(m)) => (
             m.custom_id.as_str(),
-            m.components.iter().find_map(reply_of).unwrap_or_default(),
+            m.components
+                .iter()
+                .find_map(crate::verify::typed_text)
+                .unwrap_or_default(),
         ),
         _ => return Ok(false),
     };
@@ -197,7 +191,6 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         return Ok(false);
     };
     if !modal && act != "dismiss" {
-        // Approve and Deny ask for an optional reply first.
         let input = Component::TextInput(TextInput {
             id: None,
             custom_id: "reply".into(),

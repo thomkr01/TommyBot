@@ -155,7 +155,6 @@ pub fn AppealForm(guild: String) -> impl IntoView {
                             let input = if opts.is_empty() {
                                 if f["long"] == true { view! { <textarea maxlength=max on:input=on></textarea> }.into_any() } else { view! { <input maxlength=max on:input=on /> }.into_any() }
                             } else if f["multi"] == true {
-                                // Picked options are kept one per line.
                                 view! { <div class="pick">{opts.into_iter().map(|o| { let o2 = o.clone(); view! { <label><input type="checkbox" on:change=move |e| answers.update(|a| {
                                     let mut picked: Vec<String> = a[n].lines().filter(|l| *l != o2).map(String::from).collect();
                                     if event_target_checked(&e) { picked.push(o2.clone()) }

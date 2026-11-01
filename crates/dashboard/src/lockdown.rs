@@ -59,7 +59,6 @@ async fn status(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> 
     .bind(guild)
     .fetch_optional(&st.db)
     .await?;
-    // Every active lock; several kinds can be on at once.
     let locks: Vec<Value> = rows
         .iter()
         .map(|(snap, at)| {
