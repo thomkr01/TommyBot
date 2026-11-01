@@ -58,7 +58,7 @@ docker compose down            # stop (add -v to also delete the database)
 
 Day-to-day setup happens in the dashboard. The bot also answers slash commands in Discord; type `/` to see them.
 
-To run in production, use a Linux host and put a reverse proxy such as Caddy or nginx in front of the dashboard. Set `DASHBOARD_URL` to the https address and add the matching redirect in the Developer Portal.
+To run on a server, see [DEPLOY.md](DEPLOY.md).
 
 ### Without Docker
 
