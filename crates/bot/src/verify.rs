@@ -21,6 +21,8 @@ use twilight_model::{
         component::{ActionRow, Button, ButtonStyle, Component, TextInput, TextInputStyle},
         Embed, MessageFlags,
     },
+    channel::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
+    guild::Permissions,
     http::{
         attachment::Attachment,
         interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
@@ -199,6 +201,11 @@ pub async fn on_join(
     if is_bot || !v.enabled || !must_verify(&v.verify, suspicious, false) {
         return;
     }
+    if v.channel.is_none() {
+        if let Err(e) = ensure_channel(app, gid).await {
+            tracing::warn!(?e, "creating the verification channel failed");
+        }
+    }
     if v.verify.quarantine_on_join {
         if let Err(e) = crate::antinuke::quarantine(app, gid, user).await {
             tracing::warn!(?e, "quarantining an unverified joiner failed");
@@ -219,6 +226,55 @@ pub async fn on_join(
     {
         tracing::warn!(?e, "scheduling the verification deadline failed");
     }
+}
+
+static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// First join after setup with no verification channel (`s 12`): create one that unverified
+/// members can read but verified ones do not see, save it and post the button.
+async fn ensure_channel(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+    let _one_at_a_time = CHANNEL_LOCK.lock().await;
+    let cfg = app.cfg(gid.get()).await?;
+    if cfg.verification.channel.is_some() {
+        return Ok(());
+    }
+    let role = |id: Id<RoleMarker>, allow: Permissions, deny: Permissions| PermissionOverwrite {
+        id: id.cast(),
+        kind: PermissionOverwriteType::Role,
+        allow,
+        deny,
+    };
+    let none = Permissions::empty();
+    let read = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+    let mut overwrites = vec![role(gid.cast(), read, Permissions::SEND_MESSAGES)];
+    overwrites.extend(
+        cfg.antinuke
+            .quarantine_role
+            .map(|q| role(q, read, Permissions::SEND_MESSAGES)),
+    );
+    overwrites.extend(
+        cfg.verification
+            .roles
+            .iter()
+            .map(|&r| role(r, none, Permissions::VIEW_CHANNEL)),
+    );
+    let ch = app
+        .http
+        .create_guild_channel(gid, "verification")
+        .permission_overwrites(&overwrites)
+        .await?
+        .model()
+        .await?;
+    let saved = crate::settings::save(app, gid, app.me.get(), &["verification"], |doc| {
+        doc["verification"]["channel"] = serde_json::json!(ch.id.to_string());
+        Ok(())
+    })
+    .await?;
+    if let Err(e) = saved {
+        tracing::warn!(e, "saving the verification channel failed");
+    }
+    setup(app, gid).await?;
+    Ok(())
 }
 
 /// The dashboard page passed Turnstile and sign-in: hand out the roles if the server still asks for web verification.
@@ -479,6 +535,47 @@ fn challenge_embed(body: &str, notes: bool, png: bool, limit_ms: i64) -> Embed {
     e.build()
 }
 
+/// Swaps the captcha image in the member's ephemeral message every `every` ms until it is
+/// solved, expires or the interaction token runs out (15 minutes).
+async fn regenerate(
+    app: &App,
+    client: &twilight_http::client::InteractionClient<'_>,
+    token: &str,
+    key: (u64, u64),
+    expires: i64,
+    every: i64,
+    v: &VerifyCfg,
+) {
+    let stop = expires.min(now_secs() * 1000 + 14 * 60_000);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(every as u64)).await;
+        let (code, png) = new_captcha(&v.captcha);
+        let live = {
+            let mut codes = app.captchas.lock().unwrap();
+            // A newer Verify click replaces the entry (new expiry): this message is then stale.
+            let live = now_secs() * 1000 < stop && codes.get(&key).is_some_and(|e| e.1 == expires);
+            if live {
+                codes.get_mut(&key).unwrap().0 = code;
+            }
+            live
+        };
+        let embeds = [challenge_embed(PROMPT, v.show_notes, true, v.time_limit_ms)];
+        let file = [Attachment::from_bytes("captcha.png".into(), png, 1)];
+        let enter = [row(button("Answer", &format!("{ENTER}{}", key.0)))];
+        if !live
+            || client
+                .update_response(token)
+                .embeds(Some(&embeds))
+                .attachments(&file)
+                .components(Some(&enter))
+                .await
+                .is_err()
+        {
+            return;
+        }
+    }
+}
+
 /// The text a member typed, wherever the modal nests the input.
 fn typed_text(c: &ModalInteractionComponent) -> Option<String> {
     match c {
@@ -572,16 +669,16 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                             (code, Some(png), PROMPT.to_string())
                         }
                     };
+                    let png_shown = png.is_some();
                     let embed = challenge_embed(
                         &body,
                         v.show_notes && png.is_some(),
                         png.is_some(),
                         v.time_limit_ms,
                     );
-                    app.captchas
-                        .lock()
-                        .unwrap()
-                        .insert((gid.get(), user.get()), code);
+                    let key = (gid.get(), user.get());
+                    let expires = now_secs() * 1000 + v.time_limit_ms;
+                    app.captchas.lock().unwrap().insert(key, (code, expires));
                     let enter = [row(button("Answer", &format!("{ENTER}{gid}")))];
                     let embeds = [embed];
                     let file = png.map(|p| [Attachment::from_bytes("captcha.png".into(), p, 1)]);
@@ -614,6 +711,10 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                             u = u.attachments(f);
                         }
                         u.components(Some(&enter)).await?;
+                        if let (Some(every), true) = (v.regen_ms, png_shown) {
+                            regenerate(app, &client, &i.token, key, expires, every.max(5_000), v)
+                                .await;
+                        }
                     }
                 }
             }
@@ -655,9 +756,9 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             let solved = {
                 let mut codes = app.captchas.lock().unwrap();
                 let key = (gid.get(), user.get());
-                let ok = codes
-                    .get(&key)
-                    .is_some_and(|e| e.eq_ignore_ascii_case(typed.trim()));
+                let ok = codes.get(&key).is_some_and(|(code, expires)| {
+                    *expires > now_secs() * 1000 && code.eq_ignore_ascii_case(typed.trim())
+                });
                 if ok {
                     codes.remove(&key);
                 }

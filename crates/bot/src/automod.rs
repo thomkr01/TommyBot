@@ -6,7 +6,7 @@ use tommybot_automod::{
     discord_api::BotAction,
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
-    join::{gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
+    join::{account_created_ms, gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
     lockdown::JoinLock,
     store,
     strike::strike,
@@ -17,7 +17,7 @@ use tommybot_core::{
     sections::{AutomodCfg, FilterAction, FilterCfg, FiltersCfg, WhitelistList},
 };
 use tommybot_logging::{
-    embed::{channel, clip, duration, ALERT, ARROW, ORANGE, RED, YES},
+    embed::{channel, clip, duration, ALERT, ARROW, DONE, ORANGE, RED, YES},
     Log, LogKind,
 };
 use twilight_model::{
@@ -131,13 +131,15 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         upper_chars,
         lower_chars,
         from_webhook: m.webhook_id.is_some(),
+        // Wick's hidden factor: no avatar, or younger than the join gate's minimum age.
+        suspicious_account: m.author.avatar.is_none()
+            || now - account_created_ms(m.author.id.get()) < cfg.joingate.min_age_ms(),
         whitelist: Whitelist {
             spam: partner || listed(&wl.spam),
             mention_spam: listed(&wl.mentions),
             advertising: partner || listed(&wl.invites),
             everyone: partner || listed(&wl.everyone),
         },
-        ..Default::default()
     };
     if facts.blacklisted_words > 0 && app.whitelisted(gid, m.author.id, "words").await? {
         facts.blacklisted_words = 0;
@@ -217,7 +219,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     crate::panic::note(app, gid, m.author.id, true).await?;
     let tripped = tripped_filter(&breakdown, f, bad_site);
     if let Some((fc, factor)) = tripped {
-        if let Some(action) = fc.action {
+        // Timeout without its own duration uses the Auto Timeouts, so it goes through the strikes.
+        let own =
+            |a: &FilterAction| *a != FilterAction::Timeout || fc.duration_secs.unwrap_or(0) > 0;
+        if let Some(action) = fc.action.filter(own) {
             return filter_action(app, &cfg, gid, m, action, (factor, fc.duration_secs)).await;
         }
     }
@@ -501,8 +506,19 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         };
         return punish(app, &cfg, gid, user.id.get(), action, "join lock").await;
     }
+    let invite = used_invite(app, gid).await;
+    if let Some((code, inviter)) = &invite {
+        let log = Log::new("Invite Used", DONE)
+            .user("Member", user.id.get())
+            .line("Invite", &format!("`{code}`"))
+            .line("Inviter", inviter);
+        if let Err(e) = send_log(app, gid.get(), LogKind::Member, log).await {
+            tracing::warn!(?e, "invite log failed");
+        }
+    }
     let name = cure(&user.name);
     let j = Joiner {
+        invite: invite.as_ref().map(|i| i.0.as_str()),
         id: user.id.get(),
         name: &name,
         has_avatar: user.avatar.is_some(),
@@ -530,6 +546,66 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     Ok(())
 }
 
+/// The invite the next joiner used: the one whose use count grew since the last join, or the
+/// only one that vanished (a last use deletes it). Needs Manage Server; without it nothing is
+/// tracked. Returns (code, inviter name).
+async fn used_invite(app: &App, gid: Id<GuildMarker>) -> Option<(String, String)> {
+    let list = app
+        .http
+        .guild_invites(gid)
+        .await
+        .ok()?
+        .models()
+        .await
+        .ok()?;
+    let now: HashMap<String, u64> = list
+        .iter()
+        .map(|i| (i.code.clone(), i.uses.unwrap_or(0)))
+        .collect();
+    let old = app.invites.lock().unwrap().insert(gid.get(), now.clone())?;
+    let who = |code: &str| {
+        list.iter()
+            .find(|i| i.code == code)
+            .and_then(|i| i.inviter.as_ref())
+            .map_or("unknown".into(), |u| u.name.clone())
+    };
+    if let Some((code, _)) = now
+        .iter()
+        .find(|(c, n)| **n > old.get(*c).copied().unwrap_or(0))
+    {
+        return Some((code.clone(), who(code)));
+    }
+    let mut gone = old.keys().filter(|c| !now.contains_key(*c));
+    match (gone.next(), gone.next()) {
+        (Some(code), None) => Some((code.clone(), "unknown".into())),
+        _ => None,
+    }
+}
+
+/// The public report page of a raid, when the dashboard URL is configured.
+pub fn raid_url(code: &str) -> Option<String> {
+    let base = std::env::var("DASHBOARD_URL")
+        .ok()
+        .filter(|b| !b.is_empty())?;
+    Some(format!("{}/raid/{code}", base.trim_end_matches('/')))
+}
+
+/// Wick shows the first 8 digits of the id next to the name.
+fn short_id(id: u64) -> String {
+    id.to_string().chars().take(8).collect()
+}
+
+/// `<10 random>_<last 10 digits of the guild id>`: names a raid on the public report page.
+fn raid_code(gid: u64) -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let random: String = (0..10)
+        .map(|_| char::from(b"abcdefghijklmnopqrstuvwxyz0123456789"[rng.gen_range(0..36)]))
+        .collect();
+    let id = gid.to_string();
+    format!("{random}_{}", &id[id.len().saturating_sub(10)..])
+}
+
 async fn join_raid(
     app: &App,
     cfg: &GuildCfg,
@@ -539,27 +615,38 @@ async fn join_raid(
     suspicious: bool,
     now: i64,
 ) -> Result<()> {
-    let (out, started, names) = {
+    let (out, started, names, invites, code) = {
         let mut raids = app.raids.lock().unwrap();
         let d = raids.entry(gid.get()).or_default();
         let out = d.on_join(j, suspicious, raid, now);
+        if out.triggered || d.code.is_empty() {
+            d.code = raid_code(gid.get());
+        }
         let names: Vec<String> = out
             .flagged
             .iter()
             .map(|id| d.name_of(*id).unwrap_or_default().to_string())
             .collect();
-        (out, d.started, names)
+        let invites: Vec<String> = out
+            .flagged
+            .iter()
+            .map(|id| d.invite_of(*id).unwrap_or_default().to_string())
+            .collect();
+        (out, d.started, names, invites, d.code.clone())
     };
     if !out.flagged.is_empty() {
         let ids: Vec<i64> = out.flagged.iter().map(|&id| id as i64).collect();
         let logged = sqlx::query(
-            "insert into raid_log (guild_id, raid_ms, user_id, name)
-             select $1, $2, * from unnest($3::bigint[], $4::text[]) on conflict do nothing",
+            "insert into raid_log (guild_id, raid_ms, user_id, name, invite_code, code)
+             select $1, $2, u, n, nullif(i, ''), $6
+             from unnest($3::bigint[], $4::text[], $5::text[]) as t(u, n, i) on conflict do nothing",
         )
         .bind(gid.get() as i64)
         .bind(started)
         .bind(&ids)
         .bind(&names)
+        .bind(&invites)
+        .bind(&code)
         .execute(&app.pool)
         .await;
         if let Err(e) = logged {
@@ -571,7 +658,7 @@ async fn join_raid(
             &app.pool,
             gid.get() as i64,
             "raid_end",
-            serde_json::json!({ "until_ms": now + raid.active_ms, "started_ms": started }),
+            serde_json::json!({ "until_ms": now + raid.active_ms, "started_ms": started, "code": code }),
             (now / 1000) + raid.active_ms / 1000,
         )
         .await?;
@@ -606,19 +693,16 @@ async fn join_raid(
                     .iter()
                     .zip(&names)
                     .take(40)
-                    .map(|(u, n)| format!("`{u} | {n}`")))
+                    .map(|(u, n)| format!("`{} | {n}`", short_id(*u))))
                 .chain(
                     (out.flagged.len() > 40).then(|| format!("+{} more", out.flagged.len() - 40)),
                 )
                 .collect::<Vec<_>>()
                 .join("\n"),
             );
-        let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
-        if !base.is_empty() {
-            log = log.text(&format!(
-                "{ARROW} [Every caught account]({}/#/{gid}/raid_log)",
-                base.trim_end_matches('/')
-            ));
+        log = log.field("Code:", &format!("`{code}`"));
+        if let Some(url) = raid_url(&code) {
+            log = log.text(&format!("{ARROW} [Every caught account]({url})"));
         }
         send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
     }
@@ -792,11 +876,15 @@ async fn punish(
     let uid = Id::new(user);
     let punishing = !matches!(action, Action::Log | Action::Timeout(..=-1));
     if punishing && cfg.joingate.dm_punished {
-        let text = if cfg.misc.show_reason_on_auto {
+        let mut text = if cfg.misc.show_reason_on_auto {
             format!("Automod action: {action:?} ({why})")
         } else {
             format!("Automod action: {action:?}")
         };
+        if cfg.joingate.expose_min_age && why.starts_with("join gate") {
+            let min = duration(cfg.joingate.min_age_ms() / 1000);
+            text.push_str(&format!("\nMinimum account age: `{min}`"));
+        }
         let note = crate::appeals::note(&cfg.appeals, gid)
             .filter(|_| matches!(action, Action::Ban | Action::Timeout(_)));
         reply::dm(
@@ -850,6 +938,13 @@ async fn punish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raid_code_ends_in_the_guild_id() {
+        let c = raid_code(123_456_789_012_345_678);
+        let (random, id) = c.split_once('_').unwrap();
+        assert_eq!((random.len(), id), (10, "9012345678"));
+    }
 
     #[test]
     fn disabled_filters_lose_their_weight() {

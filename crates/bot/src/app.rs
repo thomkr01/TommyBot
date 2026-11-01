@@ -120,8 +120,10 @@ pub struct App {
     /// Phishing and NSFW domain lists, refreshed in the background.
     pub sites: tommybot_automod::sites::Sites,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
-    /// Pending image-captcha answers per (guild, user); lost on restart, the member just clicks again.
-    pub captchas: Mutex<HashMap<(u64, u64), String>>,
+    /// Pending image-captcha answers and their expiry (ms) per (guild, user); lost on restart, the member just clicks again.
+    pub captchas: Mutex<HashMap<(u64, u64), (String, i64)>>,
+    /// Invite uses per guild at the last join, to see which invite the next joiner used.
+    pub invites: Mutex<HashMap<u64, HashMap<String, u64>>>,
     pub mentions: Mutex<HashMap<u64, MentionWatch>>,
     /// Mentions per (guild, user) for the mentions filter's hour cap.
     pub pings: Mutex<HashMap<(u64, u64), MentionWatch>>,
@@ -169,6 +171,7 @@ impl App {
             sites: Default::default(),
             raids: Default::default(),
             captchas: Default::default(),
+            invites: Default::default(),
             mentions: Default::default(),
             pings: Default::default(),
             channels: Default::default(),

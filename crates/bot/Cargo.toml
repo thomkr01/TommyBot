@@ -20,6 +20,7 @@ tommybot-antinuke.workspace = true
 tommybot-automod.workspace = true
 tommybot-logging.workspace = true
 captcha = "1"
+rand = "0.8"
 # Same version captcha already pulls in.
 image = { version = "0.24", default-features = false, features = ["png"] }
 decancer = "3"

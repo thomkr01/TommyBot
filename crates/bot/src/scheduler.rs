@@ -16,7 +16,7 @@ use twilight_model::id::{marker::UserMarker, Id};
 use crate::{
     app::{now_secs, App},
     backup, commands,
-    events::send_log,
+    events::{send_log, send_log_link},
     lockdown, metrics, panic, verify,
 };
 
@@ -105,15 +105,24 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             .bind(job.payload["started_ms"].as_i64().unwrap_or(0))
             .fetch_one(&app.pool)
             .await?;
-            send_log(
-                app,
-                gid.get(),
-                LogKind::JoinRaid,
-                Log::new("🕵 Join Raid Report!", DONE).text(&format!(
-                    "{YES} `{caught}` users have been caught by the join raid."
-                )),
-            )
-            .await?
+            let mut log = Log::new("🕵 Join Raid Report!", DONE).text(&format!(
+                "{YES} `{caught}` users have been caught by the join raid."
+            ));
+            let code = job.payload["code"].as_str().unwrap_or_default();
+            match crate::automod::raid_url(code).filter(|_| caught > 0) {
+                Some(url) => {
+                    log = log.text(&format!("› `{code}`"));
+                    send_log_link(
+                        app,
+                        gid.get(),
+                        LogKind::JoinRaid,
+                        log,
+                        ("Full Raid Report ↗", url),
+                    )
+                    .await?
+                }
+                None => send_log(app, gid.get(), LogKind::JoinRaid, log).await?,
+            }
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
