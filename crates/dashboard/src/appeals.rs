@@ -411,7 +411,7 @@ async fn decide(
         let verdict = if b.accept { "approved" } else { "denied" };
         let mut text = format!("Your {kind} appeal (#{id}) was {verdict}.");
         if !reply.is_empty() {
-            text += &format!("\nReply from the staff: {reply}");
+            text.push_str(&format!("\nReply from the staff: {reply}"));
         }
         let dm = st
             .discord
