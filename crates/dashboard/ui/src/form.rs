@@ -439,13 +439,15 @@ pub fn Section(
                 {move || { let c = &cs[at.get()]; let all = fields.get();
                     let fs: Vec<Value> = c.fields.iter().filter_map(|(p, l)| all.iter().find(|f| f["path"] == *p).map(|f| { let mut f = f.clone(); if !l.is_empty() { f["title"] = json!(l); } f })).collect();
                     let act = act.clone();
-                    view! {
+                    // Placeholder rows hold the card's height until the schema arrives.
+                    let fs = if all.is_empty() { view! { <div class="skel"></div><div class="skel"></div> }.into_any() } else { fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view().into_any() };
+                    view! { <div class="enter">
                         <h2>{c.title}</h2><p class="muted">{c.desc}</p>
                         {c.notes.iter().map(|t| view! { <p class="note">{*t}</p> }).collect_view()}
-                        <div class="split"><div>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}
+                        <div class="split"><div>{fs}
                             {c.action.map(|(label, path)| view! { <button class="go" disabled=move || val.get() != orig.get() on:click=move |_| act(path)>{label}</button> })}</div>
                             <div class="preview">{move || (cs[at.get_untracked()].preview)(&val.get(), &dc.get())}</div></div>
-                    } }}
+                    </div> } }}
                 <p class="muted">{move || format!("{} / {}", at.get() + 1, cs.len())}</p>
             </div>
             <button class="nav" aria-label="next" on:click=move |_| if at.get() + 1 < cs.len() { at.update(|i| *i += 1) } else if let Some(n) = next { n.run(()) }>{crate::icons::icon("page_next")}</button>
@@ -467,6 +469,8 @@ pub fn Section(
             Ok(last)
         }, version, msg, need);
     };
+    // Read per card, not in the grouping closure: rebuilding the cards on every switch flip cut the knob's animation.
+    let off = Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));
     view! {
         {card_view}
         <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| if loaded.get() { raw_editor(val, n.get_value(), msg).into_any() } else { view! { <p class="muted">"Loading..."</p> }.into_any() })>
@@ -485,19 +489,24 @@ pub fn Section(
                     }
                     // A system that is switched off rings its cards red (the card holding the switch stays plain).
                     let sec = n.get_value();
-                    let off = val.get()[&sec]["enabled"] == json!(false);
                     let switch = format!("{sec}.enabled");
-                    groups.into_iter().map(|(g, fs)| { let ring = off && !fs.iter().any(|f| f["path"] == switch.as_str()); view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}{ring.then(|| view! { <details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{format!("Your whole {sec} is disabled, the settings of this card have no effect.")}</p></details> })}</div> } }).collect_view()
+                    let note = format!("Your whole {sec} is disabled, the settings of this card have no effect.");
+                    groups.into_iter().map(|(g, fs)| {
+                        let plain = fs.iter().any(|f| f["path"] == switch.as_str());
+                        let ring = move || !plain && off.get();
+                        let note = note.clone();
+                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}<Show when=ring><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{note.clone()}</p></details></Show></div> }
+                    }).collect_view()
                 }}
             </div>
             <details><summary>"Advanced (raw JSON)"</summary>
                 {raw_editor(val, n.get_value(), msg)}
             </details>
         </Show>
-        <Show when=move || val.get() != orig.get()>
+        <AnimatedShow when=Signal::derive(move || val.get() != orig.get()) hide_class="out" hide_delay=OUT>
             <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| val.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
-        </Show>
-        <Show when=move || !msg.get().is_empty()><p class="toast" role="status" on:click=move |_| msg.set(String::new())>{move || msg.get()}</p></Show>
+        </AnimatedShow>
+        <Toast msg />
         <StepUp need enrolled />
     }
 }

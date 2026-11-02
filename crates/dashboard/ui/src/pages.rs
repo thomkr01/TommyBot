@@ -57,8 +57,8 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         <div class="card">
             <div class="split">
                 <div><h2>{move || format!("{} Setup Process", guilds.get().iter().find(|x| x["id"] == g_id.as_str()).and_then(|x| x["name"].as_str().map(String::from)).unwrap_or_default())}</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
-                <Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) color=Some("var(--primary)") />
-                <svg class="wizart" viewBox="0 0 120 120" aria-hidden="true"><path d="M60 8 104 26v32c0 28-19 46-44 54C35 104 16 86 16 58V26z" fill="var(--primary)" opacity=".25" stroke="var(--primary)" stroke-width="4"/><path d="m40 60 14 14 28-30" fill="none" stroke="var(--primary)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div class="brand"><Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) /></div>
+                <svg class="wizart" viewBox="0 0 120 120" aria-hidden="true"><defs><linearGradient id="tb-brand" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFA36C"/><stop offset=".35" stop-color="#FF6F91"/><stop offset=".7" stop-color="#9B7BFF"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient></defs><path d="M60 8 104 26v32c0 28-19 46-44 54C35 104 16 86 16 58V26z" fill="url(#tb-brand)" fill-opacity=".25" stroke="url(#tb-brand)" stroke-width="4"/><path class="tick" d="m40 60 14 14 28-30" fill="none" stroke="url(#tb-brand)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </div>
             <h2>"Steps"</h2>
             <div class="steps">
@@ -66,13 +66,13 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             </div>
             <div class="chips"><span class="chip blue">"You can choose a certain step if you want."</span><span class="chip orange">"The full setup could take around 3 minutes of your time."</span></div>
         </div>
-        {move || match step.get() {
+        {move || view! { <div class="enter">{match step.get() {
             0 => {
                 let (all, run) = (auto.clone(), auto.clone());
                 view! { <div class="card">
                     <h2>"Initial Setup"</h2>
                     <p>"TommyBot needs to do some magic in your server: it creates #tommybot-logs and #mod-logs, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
-                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].map(|t| view! { <li class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
+                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].into_iter().enumerate().map(|(i, t)| view! { <li style=format!("--i:{i}") class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
                     <p>"Like Wick, it makes #tommybot-logs and #mod-logs; every other log goes to #tommybot-logs until you give it a channel under Logging > Customize. Custom also makes a channel for the types you tick."</p>
                     <button on:click=move |_| all(None)>"Auto Setup"</button>
                     <button on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
@@ -86,7 +86,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
             9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a class="btn go" href=format!("#/{}/overview", g)>"Go to Overview"</a></div> }.into_any(),
             i => { let (name, cards) = CARDS[i - 1]; view! { <Section guild=g.clone() name=name.to_string() cards next=Callback::new(move |_| step.update(|i| *i += 1)) enrolled /> }.into_any() }
-        }}
+        }}</div> }}
         <p><Show when=move || matches!(step.get(), 0 | 8)><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
         <StepUp need enrolled />
     }
@@ -114,6 +114,8 @@ const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
 fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl IntoView {
     let (cfg, version, on) = (RwSignal::new(json!({})), RwSignal::new(0i64), RwSignal::new(default));
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    // Locked while the config loads and while a save runs, so the knob never shows a state the server does not have.
+    let busy = RwSignal::new(true);
     let g = guild.clone();
     spawn_local(async move {
         if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
@@ -121,15 +123,23 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
             on.set(v["config"][section]["enabled"].as_bool().unwrap_or(default));
             if v["config"][section].is_object() { cfg.set(v["config"][section].clone()); }
         }
+        busy.set(false);
     });
     let change = move |e| {
         let x = event_target_checked(&e);
+        let before = cfg.get_untracked();
         cfg.update(|c| c["enabled"] = json!(x));
         let (g, v, value) = (guild.clone(), version.get_untracked(), cfg.get_untracked());
         on.set(x);
-        run_act(async move { api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await }, msg, need, move |r| version.set(r["version"].as_i64().unwrap_or(0)));
+        busy.set(true);
+        run_act(async move {
+            let r = api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await;
+            if r.is_err() { cfg.set(before); on.set(!x); }
+            busy.set(false);
+            r
+        }, msg, need, move |r| { msg.set(String::new()); version.set(r["version"].as_i64().unwrap_or(0)) });
     };
-    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
+    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
 }
 
 #[component]
