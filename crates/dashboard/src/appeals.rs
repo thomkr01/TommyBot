@@ -32,7 +32,7 @@ type MineRow = (
 
 const MAX_ANSWER: usize = 1000;
 
-/// Validates one answer with Wick's texts and returns what is stored. A multi choice answer is the
+/// Validates one answer with its texts and returns what is stored. A multi choice answer is the
 /// picked options, one per line.
 fn check(f: &AppealField, a: &str) -> Result<String, String> {
     let a = a.trim();

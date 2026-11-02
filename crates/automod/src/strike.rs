@@ -1,4 +1,4 @@
-//! Strikes after a heat trigger, with Wick's reoffend multiplier (1m, 1m, 11m cap, 22m, 44m).
+//! Strikes after a heat trigger, with a reoffend multiplier (1m, 1m, 11m cap, 22m, 44m).
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ mod tests {
     const M: i64 = 60_000;
 
     #[test]
-    fn wick_example_sequence() {
+    fn example_sequence() {
         let cfg = StrikeCfg::default();
         let mut s = StrikeState::default();
         let mut now = 0;

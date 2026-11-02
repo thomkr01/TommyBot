@@ -473,7 +473,7 @@ pub async fn command(
     let kind = match kind {
         Some(k) => k,
         None => {
-            // Wick: a bare `lock` while locked shows what is locked.
+            // A bare `lock` while locked shows what is locked.
             let active = active(app, gid).await?;
             if !active.is_empty() {
                 let list: Vec<String> = active.iter().map(lock_name).collect();

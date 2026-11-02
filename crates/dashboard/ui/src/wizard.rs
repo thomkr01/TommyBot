@@ -1,4 +1,4 @@
-//! Wick's wizard cards: a few settings at a time with a live preview of what they change.
+//! Wizard cards: a few settings at a time with a live preview of what they change.
 use crate::form::{name_of, strs};
 use leptos::prelude::*;
 use serde_json::Value;

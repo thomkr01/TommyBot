@@ -141,7 +141,7 @@ pub(super) static HEAT: Module = Module {
     ],
 };
 
-/// Wick's panel shows filters 6-9 in this order; the rest of the order is ours.
+/// Panel shows filters 6-9 in this order; the rest of the order is ours.
 static HFILTERS_ROWS: [Row; 58] = {
     let [a1, a2, a3, a4] = filter!("1", "Normal Message Heat", "regular", regular; base, "per message");
     let [b1, b2, b3, b4] = filter!("2", "Similar Message Repetition Heat", "similar", similar; similarity, "at full similarity");
@@ -151,7 +151,7 @@ static HFILTERS_ROWS: [Row; 58] = {
     let [f1, f2, f3, f4] = filter!("6", "Malicious Websites Heat", "bad_sites", bad_sites; malicious, "per message");
     let f5 = r!("6d", "Anti-Scam", "automod.filters.scam_links.enabled", Kind::Bool, |c| on(c.automod.filters.scam_links.enabled));
     let [g1, g2, g3, g4] = filter!("7", "Emojis Heat", "emojis", emojis; per_emoji, "per emoji");
-    // Wick has one Message Characters filter; status and action follow the uppercase one, the lowercase one keeps rows 10a-10c.
+    // The panel has one Message Characters filter; status and action follow the uppercase one, the lowercase one keeps rows 10a-10c.
     let [_, h2, h3, _] = filter!("8", "Uppercase Characters Heat", "chars_upper", chars_upper; per_upper, "per uppercased character");
     let h1 = group!("8", "Message Characters Heat");
     let h4 = r!("8c", "LC Heat", "automod.heat.per_lower", Kind::Num(1.0), |c| format!("{} per lowercased character", pct(c.automod.heat.per_lower)));
@@ -324,7 +324,7 @@ pub(super) static MISC: Module = Module {
         r!("2i", "Remove Main Roles On TO", "misc.remove_main_roles_on_timeout", Kind::Bool, |c| on(c.misc.remove_main_roles_on_timeout)),
         group!("3", "Warn Settings"),
         r!("3a", "Status", "misc.auto_warn_actions", Kind::Bool, |c| on(c.misc.auto_warn_actions)),
-        // Wick has one warn action; ours is a list, so the prefix edits its first entry.
+        // The panel has one warn action; ours is a list, so the prefix edits its first entry.
         r!("3b", "Warn Action", "misc.warn_actions.0.action", Kind::Choice(&[("timeout", "\"timeout\""), ("kick", "\"kick\""), ("ban", "\"ban\"")]), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| format!("{:?}", t.action))),
         r!("3c", "Max Warns", "misc.warn_actions.0.points", Kind::Int(1, 1000), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| t.points.to_string())),
         r!("4", "Compact Outputs", "misc.compact_replies", Kind::Bool, |c| on(c.misc.compact_replies)),
@@ -336,7 +336,7 @@ pub(super) static MISC: Module = Module {
     ],
 };
 
-/// Wick's `w!setup` walks through these; the roles and channels themselves are made by the dashboard wizard.
+/// `w!setup` walks through these; the roles and channels themselves are made by the dashboard wizard.
 pub(super) static SETUP: Module = Module {
     names: &["setup"],
     title: "Setup Panel:",
@@ -362,7 +362,7 @@ pub fn module(name: &str) -> Option<&'static Module> {
     MODULES.iter().copied().find(|m| m.names.contains(&name))
 }
 
-/// Numbers an older panel used for a row that Wick numbers differently.
+/// Numbers an older panel used for a row that the panel numbers differently.
 pub(super) fn alias<'a>(m: &Module, code: &'a str) -> &'a str {
     match (m.names[0], code) {
         ("joingate", "9") => "1b",

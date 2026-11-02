@@ -59,7 +59,7 @@ impl Action {
         Action::Unban,
     ];
 
-    /// Wick's defaults (per minute, per hour, heat %); None: watched only when configured.
+    /// Defaults (per minute, per hour, heat %); None: watched only when configured.
     pub fn default_limit(self) -> Option<(u32, u32, u32)> {
         Some(match self {
             Action::Ban | Action::Kick => (5, 15, 20),
@@ -94,7 +94,7 @@ impl Action {
         )
     }
 
-    /// Wick's "Kicks & Bans" card: kicks share the ban limit and counter.
+    /// "Kicks & Bans" card: kicks share the ban limit and counter.
     pub fn card(self) -> Action {
         if self == Action::Kick {
             Action::Ban

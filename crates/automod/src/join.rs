@@ -69,7 +69,7 @@ pub enum Filter {
 }
 
 impl Filter {
-    /// Wick's trigger action for the card when none is saved.
+    /// Trigger action for the card when none is saved.
     pub fn default_action(self) -> Action {
         match self {
             Filter::InviteInName => Action::Timeout(0),
@@ -106,7 +106,7 @@ pub struct GateCfg {
     pub require_all: bool,
 }
 
-/// One Join Gate card: its status switch and trigger action (None: the card's Wick default).
+/// One Join Gate card: its status switch and trigger action (None: the card default).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(from = "GateFilterRepr")]
 pub struct GateFilter {
@@ -343,7 +343,7 @@ pub struct RaidCfg {
     pub id_flag_min: Option<usize>,
     #[serde(default)]
     pub id_granularity: IdGranularity,
-    /// Accounts created this close to a bucket count toward its matches (Wick: "Margin: 1h").
+    /// Accounts created this close to a bucket count toward its matches ("Margin: 1h").
     /// Old configs stored a bucket count under `id_margin`; it reads as a few ms, i.e. no margin.
     #[serde(default, alias = "id_margin")]
     pub id_margin_ms: i64,
@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_cards_have_a_switch_and_wick_default_actions() {
+    fn gate_cards_have_a_switch_and_default_actions() {
         let cfg: GateCfg = serde_json::from_value(serde_json::json!({
             "no_avatar": "Ban",
             "account_age": null,

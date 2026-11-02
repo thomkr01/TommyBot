@@ -163,7 +163,7 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         upper_chars,
         lower_chars,
         from_webhook: m.webhook_id.is_some(),
-        // Wick's hidden factor: no avatar, or younger than the join gate's minimum age.
+        // Hidden factor: no avatar, or younger than the join gate's minimum age.
         suspicious_account: m.author.avatar.is_none()
             || now - account_created_ms(m.author.id.get()) < cfg.joingate.min_age_ms(),
         whitelist: Whitelist {
@@ -412,7 +412,7 @@ async fn strike_member(
         }
         h.take_msgs()
     });
-    // Wick deletes every message that built the heat, so they go in one bulk delete per channel.
+    // Automod deletes every message that built the heat, so they go in one bulk delete per channel.
     let mut msgs = with_msg(tracked, msg.map(|id| (ch.get(), id.get())));
     if cfg.misc.purge_last_100 || act.purge {
         if let Err(e) = reply::purge_user(app, ch, user).await {
@@ -577,7 +577,7 @@ pub(crate) fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
     h
 }
 
-/// The filter behind the biggest heat contribution, with Wick's "Factor" text for it.
+/// The filter behind the biggest heat contribution, with "Factor" text for it.
 fn tripped_filter<'a>(
     b: &Breakdown,
     f: &'a FiltersCfg,
@@ -719,7 +719,7 @@ async fn filter_action(
     .await
 }
 
-/// Wick's automod log title: "*name has been warned!*".
+/// Automod log title: "*name has been warned!*".
 fn action_title(name: &str, action: FilterAction) -> String {
     match action {
         FilterAction::Delete => format!("*{name}'s message has been deleted!*"),

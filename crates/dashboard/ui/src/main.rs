@@ -27,7 +27,7 @@ use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
 use channels::ChannelSetup;
 
-/// Sidebar like Wick's, only with the pages TommyBot has.
+/// Sidebar with only with the pages TommyBot has.
 const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("channel_setup", "Channel Setup"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
@@ -54,7 +54,7 @@ const FILTER_PAGES: &[(&str, &str, &str)] = &[
     ("links", "Link Blacklist", "Target websites found in messages that you manage."),
 ];
 
-/// (small label, big title) like Wick's page header; no title means the server name.
+/// (small label, big title) page header; no title means the server name.
 fn title(p: &str) -> (String, Option<String>) {
     let two = |a: &str, b: &str| (a.to_string(), Some(b.to_string()));
     match p {
@@ -197,7 +197,7 @@ fn App() -> impl IntoView {
         }
     });
     view! {
-        <Show when=move || me.get().is_some() fallback=|| view! { <main><img class="hero" src="/logo.svg" alt="" width="128" height="128" /><h1>"TommyBot"</h1><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a></main> }>
+        <Show when=move || me.get().is_some() fallback=|| view! { <main><img class="hero" src="/logo.svg" alt="" width="128" height="128" /><h1>"TommyBot"</h1><p class="muted">"Fast, free server security: anti-nuke, automod, join gate and logs, all set up from here."</p><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a></main> }>
             <header>
                 <button class="ghost menu-btn" aria-label="menu" aria-expanded=move || nav_open.get().to_string() on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/"><img src="/logo.svg" alt="" width="32" height="32" />"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>

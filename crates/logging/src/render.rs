@@ -20,7 +20,7 @@ use twilight_model::{
 /// Discord snowflakes count milliseconds from this epoch.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
-/// Wick's "Go to Message" / "Go to Channel" link button under a log.
+/// "Go to Message" / "Go to Channel" link button under a log.
 pub type Link = (&'static str, String);
 
 pub fn message_edit(old: Option<&str>, msg: &Message) -> (Embed, Option<Link>) {
@@ -176,7 +176,7 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
 
     let mut log =
         Log::new(&words(&name), color(a)).maybe_user("Responsible", e.user_id.map(Id::get));
-    // Overwrite entries target the channel; Wick shows the role or member as the target.
+    // Overwrite entries target the channel; The log shows the role or member as the target.
     let channel = if overwrite {
         e.target_id.map(Id::get)
     } else {
@@ -207,7 +207,7 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
     log = changes(log, e, kind, overwrite, created, deleted);
     log = additional_info(log, opts);
 
-    // Wick links the channel of channel and thread logs, except when it is gone.
+    // Logs link the channel of channel and thread logs, except when it is gone.
     let link = match (kind, e.guild_id, channel.or(e.target_id.map(Id::get))) {
         (LogKind::Channel | LogKind::Thread, Some(g), Some(c)) if !deleted => Some((
             "Go to Channel",
@@ -220,13 +220,12 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         kind,
         event: LogEvent::from_action(a),
         channel: None,
-        user: None,
         embed: log.build(),
         link,
     })
 }
 
-/// Wick's "Settings" (created), "Previous Settings" (deleted) or "Changes" (updated) section.
+/// "Settings" (created), "Previous Settings" (deleted) or "Changes" (updated) section.
 fn changes(
     mut log: Log,
     e: &AuditLogEntry,
@@ -251,7 +250,7 @@ fn changes(
         };
         let (old, new) = (v.get("old_value"), v.get("new_value"));
         log = match v["key"].as_str().unwrap_or("?") {
-            // Changes twilight cannot decode, and ids the target line already shows (Wick keeps the overwrite's).
+            // Changes twilight cannot decode, and ids the target line already shows (the log keeps the overwrite's).
             "other" => log,
             "id" if !overwrite => log,
             "type" if overwrite => {
@@ -290,7 +289,7 @@ fn changes(
     log
 }
 
-/// The audit entry's options, as Wick's "Additional Information" section.
+/// The audit entry's options, as the "Additional Information" section.
 fn additional_info(mut log: Log, opts: Option<&AuditLogOptionalEntryInfo>) -> Log {
     let info: Vec<(&str, String)> = opts
         .map(|o| {
@@ -410,7 +409,7 @@ fn value(key: &str, kind: LogKind, v: Option<&Value>) -> String {
     }
 }
 
-/// A change value as Wick shows it: names for channel types, hex colours.
+/// A change value as the log shows it: names for channel types, hex colours.
 fn show(key: &str, kind: LogKind, v: Option<&Value>) -> String {
     match (key, v) {
         (_, None | Some(Value::Null)) => "none".into(),
@@ -505,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn change_values_read_like_wick() {
+    fn change_values_read_well() {
         let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
             "action_type": 10, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
             "changes": [

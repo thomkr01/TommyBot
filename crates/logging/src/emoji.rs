@@ -106,7 +106,7 @@ pub const SERVERS: Emoji = e("server", "▸");
 pub const CLOCK: Emoji = e("clock", "▸");
 
 /// The icon in front of a `**Label:**` line, matched on words in the label (first match wins),
-/// like Wick's per-field icons. Unknown labels keep the plain arrow.
+/// per-field icons. Unknown labels keep the plain arrow.
 pub fn for_label(label: &str) -> Emoji {
     const BY_WORD: &[(&str, &str)] = &[
         ("kicked", "kick"),

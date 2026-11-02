@@ -497,7 +497,7 @@ async fn run(
     // Asks for a Confirm click when the server wants one; the buttons are handled in `commands`.
     let mut ask = async |action| -> Result<Option<String>> {
         let job = Pending::new(gid, actor_id, action);
-        // User context menus act at once (Wick: no reason, no confirm).
+        // User context menus act at once (no reason, no confirm).
         if data.kind == CommandType::User || !(cfg_confirm && job.needs_confirm()) {
             return Ok(None);
         }

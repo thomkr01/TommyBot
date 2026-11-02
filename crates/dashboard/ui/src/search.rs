@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn routes_match_the_router() {
-        assert_eq!(route("logging", Some("wick_essential")), "logging/wick/essential");
+        assert_eq!(route("logging", Some("tommybot_essential")), "logging/tommybot/essential");
         assert_eq!(route("automod", Some("spam_text")), "filters/spam_text");
         assert_eq!(route("automod", None), "automod");
         assert_eq!(route("panic", None), "antinuke_panic");

@@ -79,7 +79,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     <h2>"Initial Setup"</h2>
                     <p>"TommyBot needs to do some magic in your server: it creates #tommybot-logs and #mod-logs, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
                     <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].into_iter().enumerate().map(|(i, t)| view! { <li style=format!("--i:{i}") class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
-                    <p>"Like Wick, it makes #tommybot-logs and #mod-logs; every other log goes to #tommybot-logs until you give it a channel under Logging > Customize. Custom also makes a channel for the types you tick."</p>
+                    <p>"It makes #tommybot-logs and #mod-logs; every other log goes to #tommybot-logs until you give it a channel under Logging > Customize. Custom also makes a channel for the types you tick."</p>
                     <button on:click=move |_| all(None)>"Auto Setup"</button>
                     <button class="ghost" class:on=custom on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
                     <Show when=move || custom.get()>
@@ -327,17 +327,17 @@ pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
     }
 }
 
-/// Logging page: Wick and Discord tabs, each with essential and customize sub-tabs.
+/// Logging page: TommyBot and Discord tabs, each with essential and customize sub-tabs.
 #[component]
 pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let tab = if tab == "discord" { "discord" } else { "wick" };
+    let tab = if tab == "discord" { "discord" } else { "tommybot" };
     let sub = if sub == "customize" { "customize" } else { "essential" };
     let part = format!("{tab}_{sub}");
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Bumped after a setup so the form below reloads the config the setup changed.
     let fresh = RwSignal::new(0u32);
     let g = guild.clone();
-    // Optional, beyond Wick: private "Logs" and "Staff" categories with a channel per log type that has none yet.
+    // Optional: private "Logs" and "Staff" categories with a channel per log type that has none yet.
     let setup = move |_| {
         let g = g.clone();
         run_act(async move {
@@ -350,7 +350,7 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
         <div class="row"><button on:click=setup>"Create a channel per log type"</button><Toast msg /></div>
         <StepUp need enrolled />
         <div class="tabs">
-            <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"tommybot"</a>
+            <a class:on=tab == "tommybot" href=format!("#/{guild}/logging/tommybot/{sub}")>"tommybot"</a>
             <a class:on=tab == "discord" href=format!("#/{guild}/logging/discord/{sub}")>"discord"</a>
         </div>
         <div class="tabs">
@@ -358,13 +358,13 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
             <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
         </div>
         {move || { fresh.track(); let (g, part) = (guild.clone(), part.clone()); view! {
-            {(tab == "wick").then(|| view! { <RouteNote guild=g.clone() customize=sub == "customize" /> })}
+            {(tab == "tommybot").then(|| view! { <RouteNote guild=g.clone() customize=sub == "customize" /> })}
             <Section guild=g name="logging".to_string() part enrolled />
         } }}
     }
 }
 
-/// Wick's note under Wick Logs listing the types that have their own channel, and the empty state on
+/// Note under TommyBot logs listing the types that have their own channel, and the empty state on
 /// the customize tab.
 #[component]
 fn RouteNote(guild: String, customize: bool) -> impl IntoView {

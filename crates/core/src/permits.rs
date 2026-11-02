@@ -115,7 +115,7 @@ const fn flag(key: &'static str, label: &'static str, help: &'static str) -> Per
     }
 }
 
-/// Everything a permit can hold, in the order the editor shows it (Wick's five-section layout).
+/// Everything a permit can hold, in the order the editor shows it (five-section layout).
 pub const CATALOG: &[PermSection] = &[
     PermSection {
         id: "immunity",
@@ -304,7 +304,7 @@ pub fn check(
     if actor_id == target_id {
         return Err(Denied::SelfTarget);
     }
-    // Any permit holder is protected, except from quarantine (Wick: permit holders can be quarantined).
+    // Any permit holder is protected, except from quarantine (permit holders can be quarantined).
     if target.immune() || (*target != Level::None && perm != "quarantine") {
         return Err(Denied::TargetProtected);
     }

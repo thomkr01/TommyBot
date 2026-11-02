@@ -63,7 +63,7 @@ def logging_cfg():
                           f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
 
 
-# Wick's default, as the wizard's Auto Setup makes it: everything in tommybot-logs, staff actions in mod-logs.
+# Default, as the wizard's Auto Setup makes it: everything in tommybot-logs, staff actions in mod-logs.
 LOG_ROUTES = {"tommybot-logs": "fallback", "mod-logs": "mod_command"}
 
 
@@ -138,7 +138,7 @@ def spam():
         call("DELETE", f"/channels/{chan}/messages/{i}", soft=True)
     # Once heat trips, the messages that built it go too, so nothing of the flood is left.
     print(f"cleaned: webhook e2e-spammer and {len(left)} leftover messages in #general")
-    # Hooks of verified bots are exempt (Wick's popular bots), and Discord flags the attacker as one.
+    # Hooks of verified bots are exempt (popular bots), and Discord flags the attacker as one.
     owner = call("GET", f"/users/{hook['user']['id']}")
     if owner.get("public_flags", 0) & 1 << 16:
         print("SKIP spam webhook delete: the attacker is a verified bot, so its hook is exempt")

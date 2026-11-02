@@ -1,4 +1,4 @@
-//! Wick's Discord-side config. `w!<module>` shows a numbered panel; `VALUE ?set N`, `N ?on` / `N ?off`
+//! Discord-side config. `w!<module>` shows a numbered panel; `VALUE ?set N`, `N ?on` / `N ?off`
 //! and `OBJ ?add N` / `OBJ ?remove N` change it. The numbers are public API (people memorise
 //! `w!jg 3c`), so never renumber a row: add new ones after the last.
 use anyhow::Result;
@@ -307,7 +307,7 @@ pub fn apply(doc: &mut Value, path: &str, e: Edit) {
     }
 }
 
-/// Wick: Trusted Admins may not change Miscellaneous or Anti-Nuke; everyone else needs Dashboard Edit.
+/// Trusted Admins may not change Miscellaneous or Anti-Nuke; everyone else needs Dashboard Edit.
 pub fn may_edit(level: &Level, section: &str) -> bool {
     match section {
         "misc" | "antinuke" | "panic" | "backups" => {
@@ -356,7 +356,7 @@ fn entries(m: &Module, cfg: &GuildCfg, dash: &str) -> Vec<(String, String)> {
                     Kind::Group => String::new(),
                     _ => format!("{ARROW} {val}"),
                 };
-                // Wick shows a module's on/off state as a toggle next to the Status title.
+                // The panel shows a module's on/off state as a toggle next to the Status title.
                 let toggle = match (row.kind, row.name) {
                     (Kind::Bool, "Status") if (row.get)(cfg) == "Enabled" => format!(" {ON}"),
                     (Kind::Bool, "Status") => format!(" {OFF}"),
@@ -409,7 +409,7 @@ fn button(icon: Emoji, id: String, style: ButtonStyle, disabled: bool) -> Compon
     }))
 }
 
-/// Wick's `≪ ‹ › ≫ ✖` row, drawn with the custom page emojis. The custom id carries the invoker, the panel and the target page, so no
+/// `≪ ‹ › ≫ ✖` row, drawn with the custom page emojis. The custom id carries the invoker, the panel and the target page, so no
 /// state is kept; the last field only keeps ids unique when two buttons lead to the same page.
 pub fn page_row(invoker: u64, kind: &str, page: usize, pages: usize) -> Component {
     let id = |to: usize, slot: &str| format!("{PAGE}{invoker}:{kind}:{to}:{slot}");
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_wick_syntax() {
+    fn parses_prefix_syntax() {
         assert_eq!(parse_op(""), Ok(Op::Show(0)));
         assert_eq!(parse_op("2"), Ok(Op::Show(1)));
         assert_eq!(parse_op("3c ?on"), Ok(Op::Toggle("3c".into(), true)));

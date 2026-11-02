@@ -16,7 +16,7 @@ use crate::{
     events::send_log,
 };
 
-/// Wick 4.6.0: a webhook is exempt if its owner is whitelisted (bot-made hooks only, user hooks have
+/// A webhook is exempt if its owner is whitelisted (bot-made hooks only, user hooks have
 /// an exposed token) or it is listed itself; when the webhook cannot be fetched only the list counts.
 pub(crate) async fn webhook_exempt(
     app: &App,
@@ -48,7 +48,7 @@ pub(crate) async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Resu
         let owner = h.user.as_ref().map(|u| u.id);
         if let Some(owner) = owner {
             if let Entry::Vacant(e) = immune.entry(owner.get()) {
-                // Verified bots stand in for Wick's popular bots.
+                // Verified bots stand in for popular bots.
                 let verified = h
                     .user
                     .as_ref()

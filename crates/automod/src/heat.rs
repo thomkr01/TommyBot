@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 #[serde(default)]
 pub struct HeatCfg {
     pub max: f64,
-    /// Fraction of total heat lost per second (0.05 = 5%/s, Wick's default).
+    /// Fraction of total heat lost per second (0.05 = 5%/s, default).
     pub decay_per_sec: f64,
     pub base: f64,
     pub per_char: f64,
