@@ -65,4 +65,7 @@ jobs:
       - name: Workspace
         run: cargo audit
       - name: Dashboard UI
-        run: cargo audit --file crates/dashboard/ui/Cargo.lock
+        # The UI lockfile is not committed, so audit what a fresh build resolves.
+        run: |
+          cargo generate-lockfile --manifest-path crates/dashboard/ui/Cargo.toml
+          cargo audit --file crates/dashboard/ui/Cargo.lock
