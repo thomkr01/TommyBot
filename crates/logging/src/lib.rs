@@ -668,8 +668,16 @@ mod tests {
         let out = logger.flush(t0 + HOLD);
         assert_eq!(out.len(), 1);
         let d = out[0].embed.description.as_deref().unwrap();
-        assert!(d.starts_with("▸ **Responsible:** <@10> *`10`*\n▸ **Author:** <@20> *`20`*\n▸ **Channel:** <#30>"), "{d}");
-        assert!(d.ends_with("```diff\n- hi\n```\n▸ **Attachments:** cat.png"), "{d}");
+        assert!(
+            d.starts_with(
+                "▸ **Responsible:** <@10> *`10`*\n▸ **Author:** <@20> *`20`*\n▸ **Channel:** <#30>"
+            ),
+            "{d}"
+        );
+        assert!(
+            d.ends_with("```diff\n- hi\n```\n▸ **Attachments:** cat.png"),
+            "{d}"
+        );
         assert!(logger.flush(t0 + HOLD).is_empty());
     }
 

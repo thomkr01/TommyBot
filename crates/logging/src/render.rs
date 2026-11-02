@@ -52,9 +52,17 @@ pub fn message_delete(
     deleter: Option<Id<UserMarker>>,
 ) -> Embed {
     let sent = ((id.get() >> 22) + DISCORD_EPOCH_MS) / 1000;
-    let mut log = Log::new("Message Deleted", RED)
-        .maybe_user("Responsible", deleter.map(Id::get))
-        .maybe_user("Author", cached.map(|c| c.author.get()))
+    let mut log = Log::new("Message Deleted", RED);
+    // No deleter means the author deleted it (or nobody knows); either way there is no name to show.
+    for (label, id) in [
+        ("Responsible", deleter),
+        ("Author", cached.map(|c| c.author)),
+    ] {
+        if let Some(id) = id {
+            log = log.user(label, id.get());
+        }
+    }
+    log = log
         .line("Channel", &embed::channel(channel.get()))
         .line("Sent", &format!("<t:{sent}:F>"))
         .time()
