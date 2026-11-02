@@ -68,10 +68,9 @@ pub(crate) async fn target_above_bot(
     if target == info.owner {
         return Ok(true);
     }
-    let top = match app.http.guild_member(gid, target).await {
-        Ok(m) => Some(top_position(&info.roles, &m.model().await?.roles)),
-        Err(_) => None, // not in the server
-    };
+    let top = crate::http_err::member(&app.http, gid, target)
+        .await?
+        .map(|m| top_position(&info.roles, &m.roles));
     Ok(above_bot(top, info.bot_top, false))
 }
 
@@ -341,7 +340,8 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         if cfg.misc.delete_invocation {
             let owner = app.guild_info(gid).await?.owner;
             if app.level(gid, owner, msg.author.id).await? != permits::Level::None {
-                app.http.delete_message(msg.channel_id, msg.id).await.ok();
+                let r = app.http.delete_message(msg.channel_id, msg.id).await;
+                crate::http_err::best_effort(r, "delete command message");
             }
         }
     }

@@ -48,7 +48,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         return Ok(());
     }
     if crate::panic::is_raider(app, gid, m.author.id) {
-        app.http.delete_message(m.channel_id, m.id).await.ok();
+        crate::http_err::best_effort(
+            app.http.delete_message(m.channel_id, m.id).await,
+            "automod delete",
+        );
         return timeout(
             &app.http,
             gid,
@@ -250,7 +253,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .unwrap()
             .get_mut(&key)
             .map(|(_, h)| h.take_msgs());
-        app.http.delete_message(m.channel_id, m.id).await.ok();
+        crate::http_err::best_effort(
+            app.http.delete_message(m.channel_id, m.id).await,
+            "automod delete",
+        );
         reply::purge_ids(app, &tracked.unwrap_or_default()).await;
         return crate::webhooks::delete_new_webhooks(app, gid).await;
     }
@@ -273,9 +279,14 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         }
         h.take_msgs()
     });
-    app.http.delete_message(m.channel_id, m.id).await.ok();
+    crate::http_err::best_effort(
+        app.http.delete_message(m.channel_id, m.id).await,
+        "automod delete",
+    );
     if cfg.misc.purge_last_100 || act.purge {
-        reply::purge_user(app, m.channel_id, m.author.id).await.ok();
+        if let Err(e) = reply::purge_user(app, m.channel_id, m.author.id).await {
+            tracing::warn!(?e, "automod purge failed");
+        }
         let others: Vec<_> = tracked
             .unwrap_or_default()
             .into_iter()
@@ -463,7 +474,10 @@ async fn filter_action(
     (factor, duration_secs): (&str, Option<i64>),
 ) -> Result<()> {
     let uid = m.author.id;
-    app.http.delete_message(m.channel_id, m.id).await.ok();
+    crate::http_err::best_effort(
+        app.http.delete_message(m.channel_id, m.id).await,
+        "automod delete",
+    );
     if action != FilterAction::Delete && cfg.automod.strike.reset_heat_on_timeout {
         if let Some((s, _)) = app.heat.lock().unwrap().get_mut(&(gid.get(), uid.get())) {
             s.value = 0.0;

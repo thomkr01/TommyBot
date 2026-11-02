@@ -9,6 +9,7 @@ mod confirm;
 mod events;
 mod general;
 mod hierarchy;
+mod http_err;
 mod info;
 mod invites;
 mod lockdown;

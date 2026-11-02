@@ -45,7 +45,11 @@ pub struct Rule {
 impl Api {
     pub fn new(token: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // A hung request would otherwise hold its caller (a lockdown, a rule sync) forever.
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
             token: token.into(),
         }
     }

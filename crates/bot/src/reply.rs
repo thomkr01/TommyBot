@@ -12,6 +12,7 @@ use twilight_model::id::{
 };
 
 use crate::app::{now_secs, App};
+use crate::http_err::{best_effort, gone};
 
 /// Compact replies are one line; the full form adds moderator and reason.
 pub fn case_text(
@@ -152,13 +153,21 @@ pub fn dm_text(kind: &str, reason: Option<&str>, actor: Option<u64>) -> String {
     s + format!(". Reason: {}", reason.unwrap_or("none given")).as_str()
 }
 
-/// Best effort: closed DMs are normal, so failures are ignored.
+/// Best effort: closed DMs are normal, other failures are logged.
 pub async fn dm(app: &App, user: Id<UserMarker>, text: &str) {
-    let Ok(ch) = app.http.create_private_channel(user).await else {
-        return;
+    let ch = match app.http.create_private_channel(user).await {
+        Ok(ch) => ch.model().await.ok(),
+        Err(e) => {
+            best_effort(Err::<(), _>(e), "open DM");
+            None
+        }
     };
-    let Ok(ch) = ch.model().await else { return };
-    app.http.create_message(ch.id).content(text).await.ok();
+    if let Some(ch) = ch {
+        best_effort(
+            app.http.create_message(ch.id).content(text).await,
+            "send DM",
+        );
+    }
 }
 
 /// Queued as a job so it survives restarts and never blocks the handler.
@@ -175,13 +184,12 @@ pub async fn delete_later(
     Ok(())
 }
 
-/// Scheduler arm for `delete_message`; an already deleted message is fine.
+/// Scheduler arm for `delete_message`; the scheduler drops the job when the message is already gone.
 pub async fn run_delete(app: &App, payload: &Value) -> Result<()> {
     let id = |k: &str| payload[k].as_u64().with_context(|| format!("no {k}"));
     app.http
         .delete_message(Id::new(id("channel")?), Id::new(id("message")?))
-        .await
-        .ok();
+        .await?;
     Ok(())
 }
 
@@ -201,7 +209,16 @@ pub async fn purge_user(app: &App, channel: Id<ChannelMarker>, user: Id<UserMark
 
 /// Deletes tracked (channel, message) pairs, one bulk delete per channel; too old ones are skipped.
 pub async fn purge_ids(app: &App, msgs: &[(u64, u64)]) {
-    let cutoff_ms = (now_secs() - 14 * 86_400 + 60) * 1000;
+    for (c, ids) in batches(msgs, now_secs()) {
+        if let Err(e) = delete_batch(app, Id::new(c), &ids).await {
+            tracing::warn!(?e, channel = c, "purging tracked messages failed");
+        }
+    }
+}
+
+/// Groups messages younger than 14 days by channel, at most 100 per group (Discord's bulk delete cap).
+fn batches(msgs: &[(u64, u64)], now: i64) -> Vec<(u64, Vec<Id<MessageMarker>>)> {
+    let cutoff_ms = (now - 14 * 86_400 + 60) * 1000;
     let mut by_channel: HashMap<u64, Vec<Id<MessageMarker>>> = HashMap::new();
     for &(c, m) in msgs {
         // Snowflake timestamp: ms since the Discord epoch in the top bits.
@@ -209,9 +226,14 @@ pub async fn purge_ids(app: &App, msgs: &[(u64, u64)]) {
             by_channel.entry(c).or_default().push(Id::new(m));
         }
     }
-    for (c, ids) in by_channel {
-        delete_batch(app, Id::new(c), &ids).await.ok();
-    }
+    by_channel
+        .into_iter()
+        .flat_map(|(c, ids)| {
+            ids.chunks(100)
+                .map(|ch| (c, ch.to_vec()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 async fn delete_batch(
@@ -221,9 +243,11 @@ async fn delete_batch(
 ) -> Result<()> {
     match ids {
         [] => {}
-        [one] => {
-            app.http.delete_message(channel, *one).await?;
-        }
+        // Already deleted (by the author or another moderator) is fine.
+        [one] => match app.http.delete_message(channel, *one).await {
+            Err(e) if !gone(&e) => return Err(e.into()),
+            _ => {}
+        },
         _ => {
             app.http.delete_messages(channel, ids).await?;
         }
@@ -295,6 +319,21 @@ mod tests {
             .clone()
             .unwrap()
             .contains("▸ Unlocked"));
+    }
+
+    #[test]
+    fn batches_cap_at_100_and_skip_old() {
+        // A snowflake made "now" in ms since the Discord epoch.
+        let now = 1_800_000_000;
+        let fresh = ((now as u64 * 1000) - 1_420_070_400_000) << 22;
+        let old = ((now as u64 - 15 * 86_400) * 1000 - 1_420_070_400_000) << 22;
+        let mut msgs: Vec<(u64, u64)> = (0..150).map(|i| (1, fresh + i)).collect();
+        msgs.push((1, old));
+        msgs.push((2, fresh));
+        let mut b = batches(&msgs, now);
+        b.sort_by_key(|(c, ids)| (*c, std::cmp::Reverse(ids.len())));
+        let sizes: Vec<_> = b.iter().map(|(c, ids)| (*c, ids.len())).collect();
+        assert_eq!(sizes, [(1, 100), (1, 50), (2, 1)]);
     }
 
     #[test]

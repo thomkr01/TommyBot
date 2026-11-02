@@ -243,7 +243,10 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             }
         }
         if let Some(c) = snap.locked_channel {
-            app.http.delete_channel(Id::new(c)).await.ok();
+            crate::http_err::best_effort(
+                app.http.delete_channel(Id::new(c)).await,
+                "delete lock channel",
+            );
         }
         lifted += 1;
     }
@@ -301,11 +304,12 @@ pub async fn update(
     let e = log.build();
     let locked = locks.iter().find_map(|s| s.locked_channel).map(Id::new);
     for ch in std::iter::once(channel).chain(locked.filter(|c| *c != channel)) {
-        app.http
+        let r = app
+            .http
             .create_message(ch)
             .embeds(std::slice::from_ref(&e))
-            .await
-            .ok();
+            .await;
+        crate::http_err::best_effort(r, "post lock update");
     }
     Ok("Lock update posted".into())
 }

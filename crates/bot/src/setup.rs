@@ -102,11 +102,12 @@ pub async fn run(app: &App, msg: &MessageCreate, gid: Id<GuildMarker>) -> Result
         shown.store(n, Relaxed);
         let e = progress(n, None).build();
         async move {
-            app.http
+            let r = app
+                .http
                 .update_message(m.channel_id, m.id)
                 .embeds(Some(&[e]))
-                .await
-                .ok();
+                .await;
+            crate::http_err::best_effort(r, "update setup progress");
         }
     };
     let log = match steps(app, gid, tick).await {
@@ -172,19 +173,21 @@ where
             deny: Some(deny),
         };
         // shortcut: a channel the bot cannot manage is skipped; run setup again after fixing access.
-        http.update_channel_permission(c.id, &o).await.ok();
+        let r = http.update_channel_permission(c.id, &o).await;
+        crate::http_err::best_effort(r, "deny quarantine role in channel");
     }
     tick(6).await;
     if let Some(pos) = u64::try_from(info.bot_top - 1).ok().filter(|p| *p > 0) {
-        http.update_role_positions(
-            gid,
-            &[RolePosition {
-                id: role,
-                position: pos,
-            }],
-        )
-        .await
-        .ok();
+        let r = http
+            .update_role_positions(
+                gid,
+                &[RolePosition {
+                    id: role,
+                    position: pos,
+                }],
+            )
+            .await;
+        crate::http_err::best_effort(r, "move quarantine role");
     }
     tick(7).await;
     let main = match cfg.logging.fallback {

@@ -206,16 +206,10 @@ impl App {
         owner: Id<UserMarker>,
         user: Id<UserMarker>,
     ) -> Result<Level> {
-        let roles: Vec<i64> = match self.http.guild_member(guild, user).await {
-            Ok(r) => r
-                .model()
-                .await?
-                .roles
-                .iter()
-                .map(|r| r.get() as i64)
-                .collect(),
-            Err(_) => vec![],
-        };
+        let roles: Vec<i64> = crate::http_err::member(&self.http, guild, user)
+            .await?
+            .map(|m| m.roles.iter().map(|r| r.get() as i64).collect())
+            .unwrap_or_default();
         permits::resolve(
             &self.pool,
             guild.get() as i64,
