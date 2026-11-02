@@ -1,17 +1,26 @@
 # TommyBot
 
-A Discord moderation bot written in Rust, modelled on Wick and Sapphire. It protects a server from raids, nukes and spam, and comes with a web dashboard so every setting can be changed without commands. All features are free.
+TommyBot is a fast, all-in-one Discord security and moderation bot written in Rust. It stops raids, nukes and spam within seconds, puts back what an attacker broke, and keeps a full record of everything that happens on your server. Every setting lives in a clean web dashboard, so you never have to memorise a command. Every feature is free: no premium tier and no paywall.
+
+## Why TommyBot
+
+- **Built in Rust**: one small process, low memory use and no garbage-collector pauses, so it reacts while an attack is still happening.
+- **Undo for everything**: optional backups every 3 hours, automatic revert of deleted channels and roles, and a log entry for every action it takes.
+- **Staff without dangerous rights**: moderators work through permits instead of Discord permissions, so a hacked staff account can do little and everything it does can be reverted.
+- **Survives restarts**: timed locks, temp bans and half-finished reverts pick up where they stopped.
+- **Everything free**: every feature, for every server.
 
 ## Features
 
-- **Anti-nuke**: limits on mass bans, kicks and channel or role deletion, with automatic revert and panic mode
-- **Automod**: spam and link filters with strikes and punishments
-- **Join gate and lockdown**: screen new members, lock channels during a raid
-- **Verification**: captcha and web-based member verification
-- **Logging**: message, member, role, channel and moderation logs
-- **Appeals and cases**: ban appeals, notes, reports and a full case history
-- **Permits**: staff get no Discord permissions; the bot does the moderation, so a compromised staff account is limited and revertible
-- **Web dashboard**: configure everything in the browser after logging in with Discord
+- **Anti-nuke and panic mode**: limits on mass bans, kicks, channel, role and webhook changes, with quarantine, automatic revert and a panic lockdown.
+- **Automod**: a heat system that scores every message for spam, mentions, links, invites, caps, emojis and more, catches coordinated spam across accounts, and punishes with escalating strikes.
+- **Join gate and join raid**: screen new accounts and bots, and lock the server when a raid starts.
+- **Lockdown**: lock one channel, a category or the whole server, on a timer if you like, and unlock exactly what was locked.
+- **Verification**: captcha in Discord or on the web.
+- **Logging**: message, member, role, channel, voice and moderation logs in tidy embeds, sent only to private log channels.
+- **Appeals, reports and cases**: ban and timeout appeals, a report button for members, notes and a searchable case history.
+- **Tickets, embeds and Discord AutoMod**: a ticket panel, an embed builder and control of Discord's own AutoMod rules.
+- **Web dashboard**: log in with Discord, run the setup wizard and change every setting in the browser, protected by two-factor login.
 
 ## Installation
 

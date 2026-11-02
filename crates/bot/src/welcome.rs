@@ -100,7 +100,7 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
             components: links,
         })]
     };
-    // Like Wick: tell whoever added the bot, and fall back to the server when their DMs are closed.
+    // Tell whoever added the bot, and fall back to the server when their DMs are closed.
     if let Some(adder) = bot_adder(app, g.id, app.me).await {
         let dm = async {
             let ch = app

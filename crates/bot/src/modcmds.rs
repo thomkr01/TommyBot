@@ -196,7 +196,7 @@ impl ModCmd {
         }
     }
 
-    /// Wick takes several members for these; the prefix runs one copy per member.
+    /// These take several members; the prefix runs one copy per member.
     fn with_user(&self, u: u64) -> Option<Self> {
         Some(match self {
             Self::Unban { .. } => Self::Unban { user: u },
@@ -251,7 +251,7 @@ impl ModCmd {
     }
 }
 
-/// Text and embeds for a finished command: result embeds, or Wick's count lines when compact.
+/// Text and embeds for a finished command: result embeds, or count lines when compact.
 pub(crate) fn reply_parts(
     kind: Option<&str>,
     compact: bool,
@@ -775,7 +775,7 @@ pub async fn run(
             }
             ModCmd::Verify { user } => {
                 let cfg = app.cfg(gid.get()).await?;
-                // Wick's verify also ends a quarantine.
+                // Verify also ends a quarantine.
                 let held: Option<(i64,)> = sqlx::query_as(
                     "SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2",
                 )

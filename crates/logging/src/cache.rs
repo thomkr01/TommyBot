@@ -8,22 +8,30 @@ use twilight_model::id::{
 };
 
 /// Discord does not send deleted or old message content, so we keep recent messages ourselves.
-pub const TTL: Duration = Duration::from_secs(30 * 60);
-/// Per guild. Oldest entries go first once this is reached.
-pub const CAPACITY: usize = 10_000;
+pub const TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Per guild (about 15 MB at full size). Oldest entries go first once this is reached.
+pub const CAPACITY: usize = 50_000;
 
 #[derive(Clone, Debug)]
 pub struct CachedMessage {
     pub author: Id<UserMarker>,
     pub content: String,
+    /// File names of the message's attachments.
+    pub attachments: Vec<String>,
     inserted: Instant,
 }
 
 impl CachedMessage {
-    pub fn new(author: Id<UserMarker>, content: String, now: Instant) -> Self {
+    pub fn new(
+        author: Id<UserMarker>,
+        content: String,
+        attachments: Vec<String>,
+        now: Instant,
+    ) -> Self {
         Self {
             author,
             content,
+            attachments,
             inserted: now,
         }
     }
@@ -99,7 +107,7 @@ mod tests {
     use super::*;
 
     fn msg(now: Instant) -> CachedMessage {
-        CachedMessage::new(Id::new(9), "hi".into(), now)
+        CachedMessage::new(Id::new(9), "hi".into(), vec![], now)
     }
 
     #[test]

@@ -2,13 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use twilight_model::{
     guild::audit_log::AuditLogEventType as A,
-    id::{
-        marker::{ChannelMarker, UserMarker},
-        Id,
-    },
+    id::{marker::ChannelMarker, Id},
 };
 
-/// Log types. Discord event types and Wick's own log types share one routing table.
+/// Log types. Discord event types and our own log types share one routing table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogKind {
@@ -188,7 +185,7 @@ pub struct CustomLog {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogConfig {
-    /// Receives every log type without its own route (Wick's `#wick-logs`).
+    /// Receives every log type without its own route (`#tommybot-logs`).
     pub fallback: Option<Id<ChannelMarker>>,
     pub routes: HashMap<LogKind, Id<ChannelMarker>>,
     /// One channel per Discord event type.
@@ -197,8 +194,6 @@ pub struct LogConfig {
     pub custom: Vec<CustomLog>,
     /// Message logs from these channels are dropped.
     pub ignored_channels: HashSet<Id<ChannelMarker>>,
-    /// Message and member logs for these users are dropped.
-    pub ignored_users: HashSet<Id<UserMarker>>,
 }
 
 impl LogConfig {
@@ -213,7 +208,7 @@ impl LogConfig {
                     .or_else(|| self.events.get(&e).copied())
             })
             .or_else(|| self.routes.get(&kind).copied());
-        // Wick: mod logs never go to the general log channel; voice logs are too noisy for it.
+        // Mod logs never go to the general log channel; voice logs are too noisy for it.
         if matches!(kind, LogKind::ModCommand | LogKind::Voice) {
             routed
         } else {

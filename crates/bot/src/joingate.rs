@@ -304,7 +304,7 @@ pub(crate) async fn punish(
             crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid).filter(|_| {
                 match action {
                     Action::Ban => true,
-                    // Wick: short automatic timeouts (5 minutes or less) get no appeal link.
+                    // Short automatic timeouts (5 minutes or less) get no appeal link.
                     Action::Timeout(0) => cfg.misc.timeout_secs() > 300,
                     Action::Timeout(ms) => ms > 300_000,
                     _ => false,

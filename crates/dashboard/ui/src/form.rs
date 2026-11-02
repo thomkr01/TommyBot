@@ -41,7 +41,7 @@ pub fn name_of(dc: &Value, key: &str, id: &str) -> String {
     items(dc, key).into_iter().find(|(i, _)| i == id).map_or_else(|| id.to_string(), |(_, l)| l)
 }
 
-/// Wick's wording for the stored option values; anything else just gets a capital letter.
+/// Wording for the stored option values; anything else just gets a capital letter.
 fn opt_label(v: &str) -> String {
     match v {
         "Nothing" => "Keep Unverified".into(),
@@ -83,7 +83,7 @@ fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
         .map(|x| (x["id"].as_str().unwrap_or("").to_string(), format!("{pre}{}", x["name"].as_str().unwrap_or("?")))).collect()).unwrap_or_default()
 }
 
-/// Wick's member select: chips of the picked users, a search box that also takes a pasted ID.
+/// Member select: chips of the picked users, a search box that also takes a pasted ID.
 #[component]
 fn UserPick(get: Signal<Value>, set: Callback<Value>) -> impl IntoView {
     let g = StoredValue::new(crate::hash().into_iter().next().unwrap_or_default());

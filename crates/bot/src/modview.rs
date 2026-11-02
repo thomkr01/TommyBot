@@ -8,7 +8,7 @@ use crate::app::App;
 
 const PER_PAGE: usize = 10;
 
-/// Wick's `?t` codes (B, UB, K, TIMEOUT, WA, Q, UQ) and plain kind names, singular or plural.
+/// `?t` codes (B, UB, K, TIMEOUT, WA, Q, UQ) and plain kind names, singular or plural.
 pub(crate) fn case_kind(t: Option<&str>) -> Result<Option<String>, String> {
     let Some(t) = t else { return Ok(None) };
     let kind = match t.trim_end_matches('s') {
@@ -28,7 +28,7 @@ pub(crate) fn case_kind(t: Option<&str>) -> Result<Option<String>, String> {
     Ok(Some(kind.into()))
 }
 
-/// Fancy Unicode folded to plain letters (Wick: 𝓽𝓲𝓶𝓶𝔂 -> timmy), then leading symbols trimmed.
+/// Fancy Unicode folded to plain letters (𝓽𝓲𝓶𝓶𝔂 -> timmy), then leading symbols trimmed.
 pub(crate) fn sanitized(name: &str) -> String {
     let cured = if name.is_ascii() {
         name.to_string()
@@ -119,7 +119,7 @@ pub(crate) async fn cases_page(
     Ok((e, pages))
 }
 
-/// A single note as text; `note_embed` turns the same text into Wick's card.
+/// A single note as text; `note_embed` turns the same text into a card.
 pub(crate) fn note_text(id: &str, user: u64, by: u64, text: &str) -> String {
     format!("Note: {id} ✅\nMember: <@{user}>\nModerator: <@{by}>\nContent: {text}")
 }
@@ -138,7 +138,7 @@ pub(crate) fn note_embed(text: &str) -> Embed {
     e.field("Content", content).build()
 }
 
-/// One note as `note_text`, or the notes as Wick's "Mod Notes (N):" list, newest first.
+/// One note as `note_text`, or the notes as the "Mod Notes (N):" list, newest first.
 pub(crate) async fn view_notes(
     app: &App,
     g: i64,

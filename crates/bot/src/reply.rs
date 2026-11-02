@@ -34,7 +34,7 @@ pub fn case_text(
     s
 }
 
-/// One reply for all targets. Compact mode turns several targets into Wick's count lines; failures stay listed.
+/// One reply for all targets. Compact mode turns several targets into count lines; failures stay listed.
 pub fn summary(
     kind: &str,
     compact: bool,
@@ -61,12 +61,12 @@ pub fn summary(
     s
 }
 
-/// Wick's "Add Reason" pointer for actions run without a reason.
+/// "Add Reason" pointer for actions run without a reason.
 pub fn add_reason_hint(case_no: i64) -> String {
     format!("\nAdd Reason: `/cases modify case:{case_no} reason:`")
 }
 
-/// Wick's two result embeds: "Timeout Result:" and its kin, and a pointer to add a reason when none was given.
+/// Two result embeds: "Timeout Result:" and its kin, and a pointer to add a reason when none was given.
 pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: u64) -> Vec<Embed> {
     let (title, done) = match kind {
         "ban" => ("Ban Result:", "Banned:"),

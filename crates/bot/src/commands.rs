@@ -268,7 +268,7 @@ pub async fn apply_dm(
     Ok(text)
 }
 
-/// Wick stays silent for quarantined members and in a voice channel's chat (purge excepted).
+/// The bot stays silent for quarantined members and in a voice channel's chat (purge excepted).
 pub async fn ignored(
     app: &App,
     msg: &MessageCreate,
@@ -479,7 +479,7 @@ pub(crate) fn audit_reason(reason: Option<&str>, actor: Id<UserMarker>) -> Strin
     )
 }
 
-/// Wick's mod log: no title, Case / Type / Moderator columns, then Target, Duration and Reason.
+/// Mod log: no title, Case / Type / Moderator columns, then Target, Duration and Reason.
 pub(crate) async fn mod_log(
     app: &App,
     gid: Id<GuildMarker>,
@@ -579,7 +579,7 @@ pub(crate) async fn apply_warn_actions(
         Some(&why),
     )
     .await;
-    // Wick clears the warns once the punishment is applied.
+    // The bot clears the warns once the punishment is applied.
     cases::reset_warns(&app.pool, gid, uid).await?;
     Ok(Some((
         format!("<@{uid}> reached {} warn points: {:?}", t.points, t.action),
@@ -671,7 +671,7 @@ pub(crate) async fn say_embeds(
     Ok(())
 }
 
-/// `w!backups take|load ID|delete ID|clear` and its Wick aliases.
+/// `w!backups take|load ID|delete ID|clear` and its aliases.
 async fn backup_prefix(
     app: &App,
     msg: &MessageCreate,

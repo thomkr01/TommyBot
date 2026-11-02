@@ -32,7 +32,7 @@ type MineRow = (
 
 const MAX_ANSWER: usize = 1000;
 
-/// Validates one answer with Wick's texts and returns what is stored. A multi choice answer is the
+/// Validates one answer with its texts and returns what is stored. A multi choice answer is the
 /// picked options, one per line.
 fn check(f: &AppealField, a: &str) -> Result<String, String> {
     let a = a.trim();
@@ -241,6 +241,7 @@ async fn submit(
         )
         .line("Member", &format!("{} [{}]", s.username, s.user_id))
         .line("Appeal", &format!("`#{id}`"))
+        .time()
         .text(&format!("{} Review it on the dashboard.", embed::ARROW));
         for (f, a) in fields.iter().zip(&given) {
             log = log.field(&format!("{}:", f.label), a);

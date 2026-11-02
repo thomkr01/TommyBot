@@ -15,7 +15,7 @@ pub use tommybot_core::sections::SENSITIVE;
 
 /// Level and step-up a write to `section` needs.
 pub fn write_bar(section: &str) -> (Level, bool) {
-    // Wick: Trusted Admins cannot change Miscellaneous or Anti-Nuke (and Panic).
+    // Trusted Admins cannot change Miscellaneous or Anti-Nuke (and Panic).
     match section {
         "misc" => (Level::Owner, false),
         "antinuke" | "panic" => (Level::Owner, true),

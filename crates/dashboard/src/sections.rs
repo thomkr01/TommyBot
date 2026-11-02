@@ -135,11 +135,11 @@ async fn members_route(
 #[derive(Deserialize)]
 struct Setup {
     expected_version: i32,
-    /// Log channels to create besides the essential two; absent means only those two, like Wick.
+    /// Log channels to create besides the essential two; absent means only those two.
     logs: Option<Vec<String>>,
 }
 
-/// Wick's default staff permits, made with a role each when a server has none:
+/// Default staff permits, made with a role each when a server has none:
 /// (name, rank, perms, whitelist). Admins are created first so they sit above Moderators.
 const STAFF: [(&str, i32, &[&str], &[&str]); 2] = [
     (
@@ -178,7 +178,7 @@ const STAFF: [(&str, i32, &[&str], &[&str]); 2] = [
     ),
 ];
 
-/// Wick's quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
+/// Quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
 const QUARANTINE_DENY: &str = "1051712";
 
 async fn auto_setup(
@@ -246,7 +246,7 @@ async fn auto_setup(
     ))
 }
 
-/// Wick's "Setup channel": a #verify-here channel only unverified members see, holding the
+/// "Setup channel": a #verify-here channel only unverified members see, holding the
 /// verify button. An already set verification channel is reused.
 async fn verify_channel(
     State(st): State<AppState>,
@@ -519,7 +519,7 @@ async fn create(
         .to_string())
 }
 
-/// Wick's log types, each with its own channel: (config path, channel name).
+/// Log types, each with its own channel: (config path, channel name).
 const LOG_CHANNELS: [(&[&str], &str); 11] = [
     (&["logging", "fallback"], "tommybot-logs"),
     (&["logging", "routes", "mod_command"], "mod-logs"),
@@ -595,7 +595,7 @@ async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<us
     Some(failed)
 }
 
-/// Wick's essential logs, always created: the main log channel and the mod log.
+/// Essential logs, always created: the main log channel and the mod log.
 const ESSENTIAL: [&str; 2] = ["tommybot-logs", "mod-logs"];
 
 /// Staff-facing channels, kept in their own "Staff" category instead of "Logs".
@@ -631,7 +631,7 @@ async fn category(
 /// Creates the missing log channels under "Logs" (reports and appeals under "Staff"), and
 /// sets them in `config`.
 /// `only` adds the named channels to the essentials ("discord-logs" for the Discord events);
-/// `None` makes just the essentials, as Wick's Auto Setup does. Returns the names of the channels it created; nothing when all have one.
+/// `None` makes just the essentials, as Auto Setup does. Returns the names of the channels it created; nothing when all have one.
 async fn log_channels(
     st: &AppState,
     guild: i64,

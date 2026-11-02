@@ -1,4 +1,4 @@
-//! Wick's log layout, shared by every log in the bot: a bold title, a colour bar, then
+//! Log layout, shared by every log in the bot: a bold title, a colour bar, then
 //! description lines that start with an arrow (`▸ **Responsible:** @user *`id`*`), bold section
 //! headings ("Changes", "Previous Settings") and red/green diff blocks for before/after text.
 use twilight_model::{channel::message::Embed, user::User};
@@ -6,7 +6,7 @@ use twilight_util::builder::embed::{
     EmbedAuthorBuilder, EmbedBuilder, EmbedFieldBuilder, EmbedFooterBuilder, ImageSource,
 };
 
-/// Colours sampled from Wick's screenshots: Discord logs (create, update, delete) and Wick's own
+/// Log colours: Discord logs (create, update, delete) and our own
 /// logs (alerts and reports).
 pub const GREEN: u32 = 0x1BE725;
 pub const ORANGE: u32 = 0xE77E1B;
@@ -71,13 +71,13 @@ impl Log {
         self
     }
 
-    /// A line as given, for Wick's ✅/❌ status lines and free text.
+    /// A line as given, for ✅/❌ status lines and free text.
     pub fn text(mut self, text: &str) -> Self {
         self.lines.push(text.into());
         self
     }
 
-    /// `▸ <time>` with the current time, as on Wick's Discord logs.
+    /// `▸ <time>` with the current time, as on Discord logs.
     pub fn time(self) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -91,7 +91,7 @@ impl Log {
         self
     }
 
-    /// Red `- old` and green `+ new` diff blocks, Wick's before/after display.
+    /// Red `- old` and green `+ new` diff blocks, before/after display.
     pub fn diff(mut self, old: Option<&str>, new: Option<&str>) -> Self {
         for (sign, text) in [("-", old), ("+", new)] {
             if let Some(t) = text {
@@ -122,7 +122,7 @@ impl Log {
         self.line(label, &id.map_or("Unknown".into(), user))
     }
 
-    /// A field below the description, for Wick's columns ("Initial Flags:", "Roles:").
+    /// A field below the description, for columns ("Initial Flags:", "Roles:").
     pub fn field(mut self, name: &str, value: &str) -> Self {
         self.fields.push((field_name(name), value.into(), false));
         self
@@ -140,7 +140,7 @@ impl Log {
         self
     }
 
-    /// Wick's report layout: the title sits in the author line next to the avatar.
+    /// Report layout: the title sits in the author line next to the avatar.
     pub fn author(mut self, u: &User, text: &str) -> Self {
         let mut a = EmbedAuthorBuilder::new(clip(text, 256));
         if let Ok(src) = ImageSource::url(avatar(u)) {
@@ -159,7 +159,7 @@ impl Log {
     /// instead of rejected.
     pub fn build(self) -> Embed {
         let mut left = TOTAL - self.title.chars().count();
-        // Wick's mod logs have no title, and Discord rejects an empty one.
+        // Mod logs have no title, and Discord rejects an empty one.
         let mut embed = if self.title.is_empty() {
             self.embed
         } else {
@@ -213,7 +213,7 @@ pub fn avatar(u: &User) -> String {
     }
 }
 
-/// Wick's short durations: `45s`, `30m`, `2h`, `7d`.
+/// Short durations: `45s`, `30m`, `2h`, `7d`.
 pub fn duration(secs: i64) -> String {
     match secs {
         s if s >= 86_400 && s % 86_400 == 0 => format!("{}d", s / 86_400),
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn wick_lines_and_diff() {
+    fn lines_and_diff() {
         let e = Log::new("Message Edited", ORANGE)
             .user("Responsible", 7)
             .section("Changes")

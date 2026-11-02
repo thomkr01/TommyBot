@@ -21,7 +21,7 @@ pub const MAX: usize = 1000;
 /// Discord refuses bulk deletes of messages older than 14 days (a minute of margin).
 const BULK_AGE_S: i64 = 14 * 86_400 - 60;
 
-/// Wick's purge types plus the role and webhook targets. A purge keeps messages matching all of them.
+/// Purge types plus the role and webhook targets. A purge keeps messages matching all of them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Filter {
     Embeds,
@@ -47,7 +47,7 @@ pub enum Filter {
 pub const TYPES: &str = "embeds, suspicious, bots, mentions, reactions, emojis, text, noavatar, norole, attachments, links, after ID, before ID, equals TEXT, has TEXT, starts TEXT, webhook ID";
 
 impl Filter {
-    /// `?t TYPE [input]` with Wick's aliases.
+    /// `?t TYPE [input]` with aliases.
     pub fn parse(kind: &str, input: Option<&str>) -> Result<Self, String> {
         let text = || {
             input

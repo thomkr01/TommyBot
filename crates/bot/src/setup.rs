@@ -1,5 +1,5 @@
 //! `w!setup run`: the Quarantine role and log channels, built step by step in one embed that is
-//! edited as each step finishes (Wick's setup, features §3). The dashboard wizard does more
+//! edited as each step finishes (setup, features §3). The dashboard wizard does more
 //! (Member role, staff permits); this is the part that runs from chat.
 use anyhow::Result;
 use serde_json::json;
@@ -25,7 +25,7 @@ use crate::{
     settings::{apply, save, Edit},
 };
 
-/// Wick's quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
+/// Quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
 const QUARANTINE_DENY: u64 = 1_051_712;
 
 /// `misc.enforce_quarantine_perms`: puts the quarantine overwrite back on a channel that lacks it.

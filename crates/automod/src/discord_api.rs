@@ -167,7 +167,7 @@ pub enum BotAction {
     Lock,
 }
 
-/// Wick's "Mention Scope" for a mention rule: the bot only runs the rule's actions once a member
+/// "Mention Scope" for a mention rule: the bot only runs the rule's actions once a member
 /// (`user`) or the whole server (`server`) hit the rule `triggers` times within `duration_s`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -191,7 +191,7 @@ impl Default for MentionScope {
 #[serde(default)]
 pub struct DiscordAutomodCfg {
     pub actions: std::collections::HashMap<String, Vec<BotAction>>,
-    /// Rule id -> its Wick-style mention scope.
+    /// Rule id -> its mention scope.
     pub scopes: std::collections::HashMap<String, MentionScope>,
     /// Rule id -> lock submode of its Lock action ("channel", "server", "kick", "ban", "invites");
     /// missing means the server-wide lockdown kind.

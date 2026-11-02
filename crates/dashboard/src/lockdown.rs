@@ -146,7 +146,7 @@ async fn unlock(
 }
 
 /// Text-like channels with whether a server lock already denies sending there ("locked") and
-/// whether @everyone cannot see them ("private"); Wick flags both in its channel list.
+/// whether @everyone cannot see them ("private"); the dashboard flags both in its channel list.
 async fn channels(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
     let (_, c) = crate::store::current(&st.db, guild).await?;
@@ -197,7 +197,7 @@ struct UpdateBody {
     text: String,
 }
 
-/// Wick's "Send an update": a message to the people locked out, posted in the `#server-locked`
+/// "Send an update": a message to the people locked out, posted in the `#server-locked`
 /// channel of a hidden-channels lock, else in the Mod Logs channel.
 async fn send_update(
     State(st): State<AppState>,
@@ -306,7 +306,7 @@ async fn check(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     Ok(Json(json!(problems(&st, guild).await?)))
 }
 
-/// Wick's single Apply Fix button: applies every automatic fix the check found.
+/// Single Apply Fix button: applies every automatic fix the check found.
 async fn fix(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
     let fixes: Vec<Fix> = problems(&st, guild)
@@ -423,7 +423,7 @@ async fn set_bot_actions(
     spec: &RuleSpec,
 ) -> Result<(), ApiError> {
     let (version, mut config) = crate::store::current(&st.db, guild).await?;
-    // Wick-style mention scopes live next to the bot actions; Discord's own scope is on the rule.
+    // Mention scopes live next to the bot actions; Discord's own scope is on the rule.
     let scope = (spec.trigger == "mention" && matches!(spec.scope.as_str(), "user" | "server"))
         .then(|| MentionScope {
             scope: spec.scope.clone(),
@@ -495,7 +495,7 @@ async fn update_rule(
     Ok(Json(json!({"ok": true})))
 }
 
-/// Wick's "Migrate words to Discord's AutoMod": one copy of the local word blacklist into a new
+/// "Migrate words to Discord's AutoMod": one copy of the local word blacklist into a new
 /// keyword rule, then the local lists are cleared. Regex patterns stay local (rules have no regex here).
 async fn migrate_words(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;

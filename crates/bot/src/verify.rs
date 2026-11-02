@@ -149,7 +149,7 @@ async fn guild_name(app: &App, gid: Id<GuildMarker>) -> String {
         .unwrap_or_else(|_| "the server".into())
 }
 
-/// Wick's "2 minutes" wording for the verification period.
+/// "2 minutes" wording for the verification period.
 fn period(ms: i64) -> String {
     let s = ms / 1000;
     match s {
@@ -448,7 +448,7 @@ pub(crate) async fn grant(
     Ok(())
 }
 
-/// Wick's "name's Verification Result:" log.
+/// "name's Verification Result:" log.
 fn result_log(u: &User, color: u32, status: &str) -> Log {
     Log::new(&format!("{}'s Verification Result:", u.name), color)
         .thumbnail(u)

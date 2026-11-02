@@ -40,7 +40,7 @@ pub struct LogMessage {
     pub channel_id: Id<ChannelMarker>,
     pub kind: LogKind,
     pub embed: Embed,
-    /// Wick's link button under the log ("Go to Message").
+    /// Link button under the log ("Go to Message").
     pub link: Option<render::Link>,
     /// File name and text: the cached content of a bulk delete. Discord stores it, the bot keeps nothing.
     pub file: Option<(String, String)>,
@@ -50,7 +50,6 @@ pub(crate) struct Entry {
     kind: LogKind,
     event: Option<LogEvent>,
     channel: Option<Id<ChannelMarker>>,
-    user: Option<Id<UserMarker>>,
     embed: Embed,
     link: Option<render::Link>,
 }
@@ -115,9 +114,8 @@ impl Logger {
                 return out;
             };
             let cached = self.cache.remove(guild, m.id);
-            let user = cached.as_ref().map(|c| c.author);
             if let Some(log) = cfg.target(LogKind::Message, Some(LogEvent::MessageDelete)) {
-                if !ignored(cfg, Some(m.channel_id), user) {
+                if !ignored(cfg, Some(m.channel_id)) {
                     let held = HeldDelete {
                         at: now,
                         log,
@@ -153,7 +151,7 @@ impl Logger {
                 .map(|c| format!("{}: {}\n", c.author, c.content))
                 .collect();
             if let Some(log) = cfg.target(LogKind::Message, Some(LogEvent::MessageDeleteBulk)) {
-                if !ignored(cfg, Some(m.channel_id), None) {
+                if !ignored(cfg, Some(m.channel_id)) {
                     let name = ids
                         .first()
                         .map(|i| render::bulk_file(*i))
@@ -173,14 +171,12 @@ impl Logger {
         if let Event::MemberRemove(m) = event {
             if !self.removed_by_audit(m.user.id, now) {
                 if let Some(log) = cfg.target(LogKind::Member, None) {
-                    if !ignored(cfg, None, Some(m.user.id)) {
-                        self.leaves.push_back(HeldLeave {
-                            at: now,
-                            log,
-                            user: m.user.id,
-                            embed: render::member_remove(&m.user),
-                        });
-                    }
+                    self.leaves.push_back(HeldLeave {
+                        at: now,
+                        log,
+                        user: m.user.id,
+                        embed: render::member_remove(&m.user),
+                    });
                 }
             }
             return out;
@@ -189,7 +185,7 @@ impl Logger {
             return out;
         };
         if let Some(channel_id) = cfg.target(entry.kind, entry.event) {
-            if !ignored(cfg, entry.channel, entry.user) {
+            if !ignored(cfg, entry.channel) {
                 out.push(LogMessage {
                     channel_id,
                     kind: entry.kind,
@@ -260,7 +256,12 @@ impl Logger {
         match event {
             Event::MessageCreate(m) => {
                 if let Some(guild) = m.guild_id {
-                    let cached = CachedMessage::new(m.author.id, m.content.clone(), now);
+                    let cached = CachedMessage::new(
+                        m.author.id,
+                        m.content.clone(),
+                        files(&m.attachments),
+                        now,
+                    );
                     self.cache.insert(guild, m.id, cached, now);
                 }
                 None
@@ -272,7 +273,12 @@ impl Logger {
                     .cache
                     .get(guild, msg.id, now)
                     .map(|c| c.content.clone());
-                let cached = CachedMessage::new(msg.author.id, msg.content.clone(), now);
+                let cached = CachedMessage::new(
+                    msg.author.id,
+                    msg.content.clone(),
+                    files(&msg.attachments),
+                    now,
+                );
                 self.cache.insert(guild, msg.id, cached, now);
                 // Embed-only updates keep the content and are not worth a log.
                 if old.as_deref() == Some(msg.content.as_str()) {
@@ -283,7 +289,6 @@ impl Logger {
                     kind: LogKind::Message,
                     event: Some(LogEvent::MessageUpdate),
                     channel: Some(msg.channel_id),
-                    user: Some(msg.author.id),
                     embed,
                     link,
                 })
@@ -292,7 +297,6 @@ impl Logger {
                 kind: LogKind::Member,
                 event: None,
                 channel: None,
-                user: Some(m.member.user.id),
                 embed: render::member_add(&m.member.user),
                 link: None,
             }),
@@ -308,7 +312,6 @@ impl Logger {
                     kind: LogKind::Voice,
                     event: None,
                     channel: new.or(old),
-                    user: Some(user),
                     embed: render::voice(user, old, new)?,
                     link: None,
                 })
@@ -396,14 +399,13 @@ impl Logger {
     }
 }
 
-/// Whether a log for this channel or user is on an ignore list.
-fn ignored(
-    cfg: &LogConfig,
-    channel: Option<Id<ChannelMarker>>,
-    user: Option<Id<UserMarker>>,
-) -> bool {
+fn files(a: &[twilight_model::channel::Attachment]) -> Vec<String> {
+    a.iter().map(|a| a.filename.clone()).collect()
+}
+
+/// Whether a log for this channel is on the ignore list.
+fn ignored(cfg: &LogConfig, channel: Option<Id<ChannelMarker>>) -> bool {
     channel.is_some_and(|c| cfg.ignored_channels.contains(&c))
-        || user.is_some_and(|u| cfg.ignored_users.contains(&u))
 }
 
 #[cfg(test)]
@@ -616,7 +618,7 @@ mod tests {
         let now = Instant::now();
         let mut logger = Logger::new(Id::new(1));
         for (id, text) in [(7, "first"), (8, "second")] {
-            let c = CachedMessage::new(Id::new(20), text.into(), now);
+            let c = CachedMessage::new(Id::new(20), text.into(), vec![], now);
             logger.cache.insert(Id::new(9), Id::new(id), c, now);
         }
         let bulk = |ids: Vec<u64>| {
@@ -651,7 +653,7 @@ mod tests {
         logger.cache.insert(
             Id::new(9),
             Id::new(7),
-            CachedMessage::new(Id::new(20), "hi".into(), t0),
+            CachedMessage::new(Id::new(20), "hi".into(), vec!["cat.png".into()], t0),
             t0,
         );
         let delete =
@@ -666,8 +668,16 @@ mod tests {
         let out = logger.flush(t0 + HOLD);
         assert_eq!(out.len(), 1);
         let d = out[0].embed.description.as_deref().unwrap();
-        assert!(d.starts_with("▸ **Responsible:** <@10> *`10`*"));
-        assert!(d.ends_with("```diff\n- hi\n```\n▸ **Author:** <@20> *`20`*"));
+        assert!(
+            d.starts_with(
+                "▸ **Responsible:** <@10> *`10`*\n▸ **Author:** <@20> *`20`*\n▸ **Channel:** <#30>"
+            ),
+            "{d}"
+        );
+        assert!(
+            d.ends_with("```diff\n- hi\n```\n▸ **Attachments:** cat.png"),
+            "{d}"
+        );
         assert!(logger.flush(t0 + HOLD).is_empty());
     }
 

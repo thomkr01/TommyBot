@@ -209,6 +209,7 @@ async fn report(
             msg.author.name, msg.author.id
         ))
         .text(&format!("{AGE} **Creation:** <t:{created}:F>"))
+        .time()
         .field(
             "Reported Message:",
             &if content.is_empty() {
@@ -281,6 +282,7 @@ pub async fn file_native(
         .text(&format!(
             "<@{target}>'s message was blocked by Discord AutoMod rule `{rule}`"
         ))
+        .time()
         .field(
             "Blocked Message:",
             &if content.is_empty() {
@@ -310,7 +312,7 @@ pub async fn file_native(
 
 const MODAL: &str = "reportm:";
 
-/// Report Message asks for a reason first (Wick's "Report Message" modal).
+/// Report Message asks for a reason first ("Report Message" modal).
 #[allow(deprecated)]
 async fn open_modal(app: &App, i: &Interaction, data: &CommandData) -> Result<()> {
     let msg = data
@@ -729,7 +731,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             .execute(&app.pool)
             .await?;
         }
-        // Wick keeps the report's history in an "Action Log" field and turns the log green.
+        // It keeps the report's history in an "Action Log" field and turns the log green.
         if let Some(mut embed) = i.message.as_ref().and_then(|m| m.embeds.first().cloned()) {
             match embed.fields.iter_mut().find(|f| f.name == ACTION_LOG) {
                 // A field holds 1024 characters; a very long history just stops growing.

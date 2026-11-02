@@ -1,4 +1,4 @@
-//! Bot-side actions for Discord's native AutoMod rules, with Wick-style mention scopes.
+//! Bot-side actions for Discord's native AutoMod rules, with mention scopes.
 use anyhow::Result;
 use std::collections::HashMap;
 use tommybot_automod::{
@@ -22,7 +22,7 @@ use crate::{
     lockdown, reports,
 };
 
-/// Recent hits of rules with a Wick-style mention scope, by (guild, rule, member or 0 for the server).
+/// Recent hits of rules with a mention scope, by (guild, rule, member or 0 for the server).
 type ScopeHits = std::sync::Mutex<HashMap<(u64, u64, u64), Vec<i64>>>;
 static MENTION_HITS: std::sync::LazyLock<ScopeHits> = std::sync::LazyLock::new(Default::default);
 

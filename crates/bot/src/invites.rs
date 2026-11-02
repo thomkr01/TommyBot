@@ -53,7 +53,7 @@ pub fn raid_url(code: &str) -> Option<String> {
     Some(format!("{}/raid/{code}", base.trim_end_matches('/')))
 }
 
-/// Wick shows the first 8 digits of the id next to the name.
+/// The log shows the first 8 digits of the id next to the name.
 pub fn short_id(id: u64) -> String {
     id.to_string().chars().take(8).collect()
 }

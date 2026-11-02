@@ -1,4 +1,4 @@
-//! Wick-style prefix syntax: `ban @a @b 5d ?r reason ?dm`.
+//! Prefix syntax: `ban @a @b 5d ?r reason ?dm`.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Parsed {
     pub command: String,
@@ -17,7 +17,7 @@ pub struct Parsed {
     pub flags: Flags,
 }
 
-/// Wick's command aliases -> (canonical command, implied `?t` type).
+/// Command aliases -> (canonical command, implied `?t` type).
 fn alias(cmd: &str) -> (&str, Option<&str>) {
     match cmd {
         "b" => ("ban", None),

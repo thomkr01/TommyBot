@@ -1,4 +1,4 @@
-//! Wick's general commands: about, commands, help (and `-h` after any command), invite, ping, info,
+//! General commands: about, commands, help (and `-h` after any command), invite, ping, info,
 //! ncases and tshoot.
 use std::time::Instant;
 use tommybot_logging::emoji::{
@@ -407,7 +407,7 @@ fn cpu_percent(up_secs: i64) -> String {
 pub fn about_page(page: usize) -> (Embed, usize) {
     let page = page.min(1);
     let e = if page == 0 {
-        Log::new("About TommyBot:", BLUE).text("A Rust moderation bot: anti-nuke, heat automod, join gate, join raid, verification and logs.")
+        Log::new("About TommyBot:", BLUE).text("Fast, all-in-one server security written in Rust: anti-nuke with automatic revert, heat automod, join gate, join raid, verification, lockdown and logs. Every feature is free.")
     } else {
         let up = now_secs() - metrics::STARTED.load(std::sync::atomic::Ordering::Relaxed) as i64;
         Log::new("About TommyBot [Nerdy Stats]:", BLUE)
@@ -559,7 +559,7 @@ fn tshoot(app: &App, gid: Id<GuildMarker>) -> Embed {
     tshoot_embed(&lines.map(|l| format!("{YES} {l}")).join("\n"), started)
 }
 
-/// Wick's troubleshooting embed: result lines, then the finished block.
+/// Troubleshooting embed: result lines, then the finished block.
 fn tshoot_embed(lines: &str, started: Instant) -> Embed {
     Log::new("TommyBot Troubleshooting:", BLUE)
         .text(lines)

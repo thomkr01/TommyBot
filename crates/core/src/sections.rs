@@ -192,7 +192,7 @@ impl Default for FilterCfg {
     }
 }
 
-/// Per-filter switches (Wick's Filters page). Filters default on, as the global weights always applied.
+/// Per-filter switches (Filters page). Filters default on, as the global weights always applied.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct FiltersCfg {
@@ -295,7 +295,7 @@ pub struct WordsCfg {
 impl Default for WordsCfg {
     fn default() -> Self {
         Self {
-            // Wick's word blacklist warns by default.
+            // Word blacklist warns by default.
             filter: FilterCfg {
                 action: Some(FilterAction::Warn),
                 ..FilterCfg::default()
@@ -354,7 +354,7 @@ pub struct WhitelistCfg {
     pub mentions: WhitelistList,
     /// @everyone and @here.
     pub everyone: WhitelistList,
-    /// Wick's partnering channels static: spam, @everyone and invites are allowed there.
+    /// Partnering channels static: spam, @everyone and invites are allowed there.
     pub partner_channels: Vec<Id<ChannelMarker>>,
 }
 
@@ -469,7 +469,7 @@ impl Default for AppealsCfg {
     }
 }
 
-/// Wick's Miscellaneous page.
+/// Miscellaneous page.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct MiscCfg {
@@ -535,7 +535,7 @@ impl Default for MiscCfg {
 }
 
 impl MiscCfg {
-    /// Discord allows timeouts up to 28 days; 0 means the maximum (Wick's "permanent").
+    /// Discord allows timeouts up to 28 days; 0 means the maximum ("permanent").
     pub fn timeout_secs(&self) -> u64 {
         match self.default_timeout_secs {
             0 => 28 * 86_400,
@@ -596,7 +596,7 @@ impl Default for PanicCfg {
     }
 }
 
-/// Server backups: the 3-hour auto backup is off until a guild turns it on. The rest are Wick's
+/// Server backups: the 3-hour auto backup is off until a guild turns it on. The rest are the
 /// restore filters (`anr`), used by anti-nuke reverts and panic mode, never by `/backup load`.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -744,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn antinuke_limits_fall_back_to_wick_defaults() {
+    fn antinuke_limits_fall_back_to_defaults() {
         let c: AntinukeCfg = serde_json::from_value(json!({"limits": {
             "Ban": {"per_minute": 2}, "RoleCreate": {"enabled": false}, "BotAdd": {"per_minute": 1, "per_hour": 2},
             "Timeout": {"enabled": true}

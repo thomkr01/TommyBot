@@ -196,37 +196,37 @@ const GATE_ACTIONS: &[&str] = &["Log", "Warn", "Timeout", "Kick", "Ban"];
 pub fn schema() -> Vec<Value> {
     let mut log = vec![
         ti(
-            pg(f("fallback", "channel"), "wick_essential"),
+            pg(f("fallback", "channel"), "tommybot_essential"),
             "TommyBot logs",
         ),
         ti(
             pg(
                 fg("Channels", "routes.mod_command", "channel"),
-                "wick_essential",
+                "tommybot_essential",
             ),
             "Mod logs",
         ),
         pg(
             fg("Ignored", "ignored_channels", "channels"),
-            "wick_customize",
+            "tommybot_customize",
         ),
     ];
     log.extend(LOG_KINDS.iter().filter(|k| **k != "mod_command").map(|k| {
         let help = match *k {
             "report" => "Message reports by your members will go to this channel where you and your moderators can interact and deal with them.",
-            "auto_mod" => "All of Wick's automod actions will be sent to this channel.",
-            "anti_nuke" => "All of Wick's antinuke actions will be sent to this channel.",
-            "verification" => "All of Wick's verification results will be sent to this channel.",
-            "join_gate" => "Logs of Wick's join filters will go to this channel.",
+            "auto_mod" => "All automod actions from TommyBot will be sent to this channel.",
+            "anti_nuke" => "All antinuke actions from TommyBot will be sent to this channel.",
+            "verification" => "All verification results from TommyBot will be sent to this channel.",
+            "join_gate" => "Join Gate logs will go to this channel.",
             "join_raid" => "Join raid triggers and results will be sent to this channel.",
             "panic" => "Panic mode triggers and results will be sent to this channel.",
             "appeal" => "New ban and timeout appeals will be sent to this channel.",
             "voice" => "Voice joins, leaves and moves. Only logged once you pick a channel here.",
-            _ => "Logs of this type will go to this channel instead of the Wick Logs channel.",
+            _ => "Logs of this type will go to this channel instead of the TommyBot logs channel.",
         };
         pg(
             hp(fg("Log types", &format!("routes.{k}"), "channel"), help),
-            "wick_customize",
+            "tommybot_customize",
         )
     }));
     log.extend(LogEvent::ALL.iter().map(|e| {
@@ -532,7 +532,7 @@ pub fn schema() -> Vec<Value> {
             "Act only when every enabled filter matches",
         ),
     ];
-    // (key, card, status label, filter whose Wick default action the select shows).
+    // (key, card, status label, filter whose default action the select shows).
     for (k, card, status, filter) in [
         (
             "unauthorized_bot",
@@ -1056,7 +1056,7 @@ mod tests {
     use crate::api;
 
     #[test]
-    fn gate_actions_show_wick_defaults() {
+    fn gate_actions_show_defaults() {
         let gate = schema()
             .into_iter()
             .find(|s| s["name"] == "joingate")

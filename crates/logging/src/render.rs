@@ -20,13 +20,13 @@ use twilight_model::{
 /// Discord snowflakes count milliseconds from this epoch.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
-/// Wick's "Go to Message" / "Go to Channel" link button under a log.
+/// "Go to Message" / "Go to Channel" link button under a log.
 pub type Link = (&'static str, String);
 
 pub fn message_edit(old: Option<&str>, msg: &Message) -> (Embed, Option<Link>) {
     let embed = Log::new("Message Edited", ORANGE)
-        .user("Responsible", msg.author.id.get())
-        .line("Target", &embed::channel(msg.channel_id.get()))
+        .user("Author", msg.author.id.get())
+        .line("Channel", &embed::channel(msg.channel_id.get()))
         .time()
         .section("Changes")
         .text(&embed::label_head("Content"))
@@ -51,22 +51,28 @@ pub fn message_delete(
     cached: Option<&CachedMessage>,
     deleter: Option<Id<UserMarker>>,
 ) -> Embed {
+    let sent = ((id.get() >> 22) + DISCORD_EPOCH_MS) / 1000;
     let mut log = Log::new("Message Deleted", RED);
-    if let Some(d) = deleter {
-        log = log.user("Responsible", d.get());
+    // No deleter means the author deleted it (or nobody knows); either way there is no name to show.
+    for (label, id) in [
+        ("Responsible", deleter),
+        ("Author", cached.map(|c| c.author)),
+    ] {
+        if let Some(id) = id {
+            log = log.user(label, id.get());
+        }
     }
     log = log
+        .line("Channel", &embed::channel(channel.get()))
+        .line("Sent", &format!("<t:{sent}:F>"))
         .time()
-        .section("Previous Settings")
-        .line("Channel", &format!("<#{channel}>"))
-        .line("Id", &id.to_string())
         .text(&embed::label_head("Content"))
         .diff(
             Some(cached.map_or("(content not cached)", |c| c.content.as_str())),
             None,
         );
-    if let Some(c) = cached {
-        log = log.user("Author", c.author.get());
+    if let Some(c) = cached.filter(|c| !c.attachments.is_empty()) {
+        log = log.line("Attachments", &c.attachments.join(", "));
     }
     log.build()
 }
@@ -124,10 +130,12 @@ pub fn voice(
 }
 
 pub fn member_remove(user: &User) -> Embed {
+    let created = ((user.id.get() >> 22) + DISCORD_EPOCH_MS) / 1000;
     Log::new("Member Leave", RED)
         .thumbnail(user)
         .user("Target", user.id.get())
         .time()
+        .line("Creation", &format!("<t:{created}:F> (<t:{created}:R>)"))
         .build()
 }
 
@@ -176,7 +184,7 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
 
     let mut log =
         Log::new(&words(&name), color(a)).maybe_user("Responsible", e.user_id.map(Id::get));
-    // Overwrite entries target the channel; Wick shows the role or member as the target.
+    // Overwrite entries target the channel; The log shows the role or member as the target.
     let channel = if overwrite {
         e.target_id.map(Id::get)
     } else {
@@ -194,9 +202,19 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
             }
         })
     } else {
-        e.target_id.map(|t| target_ref(kind, t.get()))
+        e.target_id.map(|t| match (kind, change_name(e)) {
+            // A webhook id alone says nothing; its name is in the changes.
+            (LogKind::Webhook, Some(n)) => format!("{n} `{t}`"),
+            _ => target_ref(kind, t.get()),
+        })
     };
     if let Some(t) = target {
+        // Discord renders a mention of the @everyone role (its id is the guild id) as "@@everyone".
+        let everyone = e.guild_id.map(|g| format!("<@&{g}>"));
+        let t = match everyone {
+            Some(m) if t.starts_with(&m) => t.replacen(&m, "@everyone", 1),
+            _ => t,
+        };
         log = log.line("Target", &t);
     }
     log = log.time();
@@ -207,7 +225,7 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
     log = changes(log, e, kind, overwrite, created, deleted);
     log = additional_info(log, opts);
 
-    // Wick links the channel of channel and thread logs, except when it is gone.
+    // Logs link the channel of channel and thread logs, except when it is gone.
     let link = match (kind, e.guild_id, channel.or(e.target_id.map(Id::get))) {
         (LogKind::Channel | LogKind::Thread, Some(g), Some(c)) if !deleted => Some((
             "Go to Channel",
@@ -220,13 +238,12 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         kind,
         event: LogEvent::from_action(a),
         channel: None,
-        user: None,
         embed: log.build(),
         link,
     })
 }
 
-/// Wick's "Settings" (created), "Previous Settings" (deleted) or "Changes" (updated) section.
+/// "Settings" (created), "Previous Settings" (deleted) or "Changes" (updated) section.
 fn changes(
     mut log: Log,
     e: &AuditLogEntry,
@@ -251,13 +268,11 @@ fn changes(
         };
         let (old, new) = (v.get("old_value"), v.get("new_value"));
         log = match v["key"].as_str().unwrap_or("?") {
-            // Changes twilight cannot decode, and ids the target line already shows (Wick keeps the overwrite's).
-            "other" => log,
-            "id" if !overwrite => log,
-            "type" if overwrite => {
-                let member = if deleted { old } else { new }.is_some_and(|v| v == 1 || v == "1");
-                log.line("Type", if member { "Member" } else { "Role" })
-            }
+            // Changes twilight cannot decode, and the id and type the target line already shows.
+            "other" | "id" => log,
+            "type" if overwrite => log,
+            // The target line names a new or removed webhook already.
+            "name" if kind == LogKind::Webhook && (created || deleted) => log,
             "$add" => log.line("Roles Added", &roles(new)),
             "$remove" => log.line("Roles Removed", &roles(new)),
             key @ ("permissions" | "allow" | "deny") => {
@@ -279,10 +294,17 @@ fn changes(
                 }
                 l
             }
-            key if created => log.line(&words(key), &value(key, kind, new)),
-            key if deleted => log.line(&words(key), &value(key, kind, old)),
+            // A new or removed thing's unset values (off, 0, empty) carry no information.
+            key if (created || deleted)
+                && key != "type"
+                && unset(if created { new } else { old }) =>
+            {
+                log
+            }
+            key if created => log.line(&label(key), &value(key, kind, new)),
+            key if deleted => log.line(&label(key), &value(key, kind, old)),
             key => log
-                .text(&embed::label_head(&words(key)))
+                .text(&embed::label_head(&label(key)))
                 .diff(Some(&show(key, kind, old)), Some(&show(key, kind, new))),
         };
     }
@@ -290,19 +312,12 @@ fn changes(
     log
 }
 
-/// The audit entry's options, as Wick's "Additional Information" section.
+/// The audit entry's options, as the "Additional Information" section. An overwrite's id, type
+/// and role name are left out: the target line already shows them.
 fn additional_info(mut log: Log, opts: Option<&AuditLogOptionalEntryInfo>) -> Log {
     let info: Vec<(&str, String)> = opts
         .map(|o| {
             [
-                ("Id", o.id.map(|i| i.to_string())),
-                ("Role Name", o.role_name.clone()),
-                (
-                    "Type",
-                    o.kind
-                        .as_deref()
-                        .map(|k| if k == "1" { "Member" } else { "Role" }.into()),
-                ),
                 ("Count", o.count.clone()),
                 ("Delete Member Days", o.delete_member_days.clone()),
                 ("Members Removed", o.members_removed.clone()),
@@ -390,6 +405,19 @@ fn perm_names(p: Permissions) -> String {
         .join(", ")
 }
 
+/// The `name` change's new value, else its old one.
+fn change_name(e: &AuditLogEntry) -> Option<String> {
+    e.changes.iter().find_map(|c| {
+        let v = serde_json::to_value(c).ok()?;
+        (v["key"] == "name").then(|| {
+            v["new_value"]
+                .as_str()
+                .or(v["old_value"].as_str())
+                .map(str::to_owned)
+        })?
+    })
+}
+
 fn target_ref(kind: LogKind, id: u64) -> String {
     match kind {
         LogKind::Channel | LogKind::Thread => embed::channel(id),
@@ -410,7 +438,19 @@ fn value(key: &str, kind: LogKind, v: Option<&Value>) -> String {
     }
 }
 
-/// A change value as Wick shows it: names for channel types, hex colours.
+/// A change value as the log shows it: names for channel types, hex colours.
+/// No value, `false`, `0`, `""` or `[]`.
+fn unset(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => !b,
+        Some(Value::Number(n)) => n.as_f64() == Some(0.0),
+        Some(Value::String(s)) => s.is_empty() || s == "0",
+        Some(Value::Array(a)) => a.is_empty(),
+        Some(Value::Object(o)) => o.is_empty(),
+    }
+}
+
 fn show(key: &str, kind: LogKind, v: Option<&Value>) -> String {
     match (key, v) {
         (_, None | Some(Value::Null)) => "none".into(),
@@ -419,6 +459,13 @@ fn show(key: &str, kind: LogKind, v: Option<&Value>) -> String {
         ("type", Some(Value::Number(n))) if matches!(kind, LogKind::Channel | LogKind::Thread) => {
             channel_type(n.as_u64().unwrap_or(u64::MAX)).into()
         }
+        ("type", Some(Value::Number(n))) if kind == LogKind::Webhook => match n.as_u64() {
+            Some(1) => "Incoming",
+            Some(2) => "Channel Follower",
+            Some(3) => "Application",
+            _ => "Unknown",
+        }
+        .into(),
         (_, Some(Value::String(s))) => s.clone(),
         (_, Some(v)) => v.to_string(),
     }
@@ -441,6 +488,11 @@ fn channel_type(t: u64) -> &'static str {
 }
 
 /// `CamelCase` to `Camel Case`, `snake_case` to `Snake case`.
+/// A change key as a label: `channel_id` reads "Channel", since the value is the channel itself.
+fn label(key: &str) -> String {
+    words(key.strip_suffix("_id").unwrap_or(key))
+}
+
 fn words(s: &str) -> String {
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
@@ -499,13 +551,45 @@ mod tests {
         let entry = audit(&e).unwrap();
         let d = entry.embed.description.unwrap();
         assert!(d.contains("▸ **Channel:** <#30> *`30`*\n▸ **Target:** <@&40> *`40`*"));
-        assert!(d.contains("**Settings**\n▸ **Id:** 40\n▸ **Type:** Role\n❎ **Denied:**\n▸ **Additions:** Send Messages"));
-        assert!(d.ends_with("**Additional Information**\n▸ **Id:** `40`\n▸ **Role Name:** `Quarantine`\n▸ **Type:** `Role`"));
+        assert!(d.ends_with("**Settings**\n❎ **Denied:**\n▸ **Additions:** Send Messages"));
+        assert!(!d.contains("Additional Information"));
         assert_eq!(entry.link.unwrap().1, "https://discord.com/channels/9/30");
     }
 
     #[test]
-    fn change_values_read_like_wick() {
+    fn created_things_skip_unset_values_and_name_webhook_types() {
+        let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
+            "action_type": 50, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "60",
+            "changes": [
+                { "key": "channel_id", "new_value": "30" },
+                { "key": "name", "new_value": "hook" },
+                { "key": "type", "new_value": 1 },
+                { "key": "avatar_hash", "new_value": null },
+                { "key": "nsfw", "new_value": false }
+            ]
+        }))
+        .unwrap();
+        let d = audit(&e).unwrap().embed.description.unwrap();
+        assert!(
+            d.ends_with("**Settings**\n▸ **Channel:** <#30> *`30`*\n▸ **Type:** Incoming"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn everyone_overwrite_target_has_one_at_sign() {
+        let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
+            "action_type": 15, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
+            "options": { "id": "9", "type": "0", "role_name": "@everyone" },
+            "changes": [{ "key": "deny", "old_value": "2048" }]
+        }))
+        .unwrap();
+        let d = audit(&e).unwrap().embed.description.unwrap();
+        assert!(d.contains("▸ **Target:** @everyone *`9`*"));
+    }
+
+    #[test]
+    fn change_values_read_well() {
         let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
             "action_type": 10, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
             "changes": [
@@ -516,7 +600,7 @@ mod tests {
         }))
         .unwrap();
         let d = audit(&e).unwrap().embed.description.unwrap();
-        assert!(d.ends_with("**Settings**\n▸ **Type:** Text\n▸ **Permission overwrites:** 0"));
+        assert!(d.ends_with("**Settings**\n▸ **Type:** Text"), "{d}");
         let v = serde_json::json!("5");
         assert_eq!(value("channel_id", LogKind::Invite, Some(&v)), "<#5> *`5`*");
         assert_eq!(show("channel_id", LogKind::Invite, Some(&v)), "5");

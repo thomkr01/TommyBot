@@ -255,7 +255,7 @@ pub fn plan(
 
 pub fn kind_from(name: &str, channel: Option<u64>) -> Option<LockKind> {
     Some(match name {
-        // Wick's codes: c channel, sc channels (server), k kick, b ban, r roles, s/all everything.
+        // Codes: c channel, sc channels (server), k kick, b ban, r roles, s/all everything.
         "server" | "sc" => LockKind::Server,
         "blind" => LockKind::Blind,
         "role" | "roles" | "r" => LockKind::Role,
