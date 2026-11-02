@@ -26,7 +26,7 @@ The bot keeps data in a PostgreSQL database. It stores:
 | **Dashboard two-factor setup** (your user ID and TOTP secret). | Optional second factor for dashboard changes. | Until you remove it or deletion is requested. |
 | **Rescue keys** (a hash of the key, not the key itself). | Lets a server owner reclaim bot ownership if they lose their Discord account. | Until the key is used or deletion is requested. |
 
-Message content is not written to the database. The bot keeps a short-term in-memory cache of recent messages (up to 10,000 messages, for 30 minutes, then discarded) so it can log edits and deletions. This cache is lost when the bot restarts.
+Message content is not written to the database. The bot keeps a short-term in-memory cache of recent messages (up to 50,000 messages per server, for 24 hours, then discarded) so it can log edits and deletions. This cache is lost when the bot restarts.
 
 The bot does not sell data, show ads, or send data to third parties beyond Discord and the hosting provider that runs the bot.
 
