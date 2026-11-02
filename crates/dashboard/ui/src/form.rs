@@ -439,10 +439,12 @@ pub fn Section(
                 {move || { let c = &cs[at.get()]; let all = fields.get();
                     let fs: Vec<Value> = c.fields.iter().filter_map(|(p, l)| all.iter().find(|f| f["path"] == *p).map(|f| { let mut f = f.clone(); if !l.is_empty() { f["title"] = json!(l); } f })).collect();
                     let act = act.clone();
+                    // Placeholder rows hold the card's height until the schema arrives.
+                    let fs = if all.is_empty() { view! { <div class="skel"></div><div class="skel"></div> }.into_any() } else { fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view().into_any() };
                     view! { <div class="enter">
                         <h2>{c.title}</h2><p class="muted">{c.desc}</p>
                         {c.notes.iter().map(|t| view! { <p class="note">{*t}</p> }).collect_view()}
-                        <div class="split"><div>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}
+                        <div class="split"><div>{fs}
                             {c.action.map(|(label, path)| view! { <button class="go" disabled=move || val.get() != orig.get() on:click=move |_| act(path)>{label}</button> })}</div>
                             <div class="preview">{move || (cs[at.get_untracked()].preview)(&val.get(), &dc.get())}</div></div>
                     </div> } }}
@@ -501,10 +503,10 @@ pub fn Section(
                 {raw_editor(val, n.get_value(), msg)}
             </details>
         </Show>
-        <Show when=move || val.get() != orig.get()>
+        <AnimatedShow when=Signal::derive(move || val.get() != orig.get()) hide_class="out" hide_delay=OUT>
             <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| val.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
-        </Show>
-        <Show when=move || !msg.get().is_empty()><p class="toast" role="status" on:click=move |_| msg.set(String::new())>{move || msg.get()}</p></Show>
+        </AnimatedShow>
+        <Toast msg />
         <StepUp need enrolled />
     }
 }
