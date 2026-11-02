@@ -197,6 +197,12 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
         e.target_id.map(|t| target_ref(kind, t.get()))
     };
     if let Some(t) = target {
+        // Discord renders a mention of the @everyone role (its id is the guild id) as "@@everyone".
+        let everyone = e.guild_id.map(|g| format!("<@&{g}>"));
+        let t = match everyone {
+            Some(m) if t.starts_with(&m) => t.replacen(&m, "@everyone", 1),
+            _ => t,
+        };
         log = log.line("Target", &t);
     }
     log = log.time();
@@ -250,13 +256,9 @@ fn changes(
         };
         let (old, new) = (v.get("old_value"), v.get("new_value"));
         log = match v["key"].as_str().unwrap_or("?") {
-            // Changes twilight cannot decode, and ids the target line already shows (the log keeps the overwrite's).
-            "other" => log,
-            "id" if !overwrite => log,
-            "type" if overwrite => {
-                let member = if deleted { old } else { new }.is_some_and(|v| v == 1 || v == "1");
-                log.line("Type", if member { "Member" } else { "Role" })
-            }
+            // Changes twilight cannot decode, and the id and type the target line already shows.
+            "other" | "id" => log,
+            "type" if overwrite => log,
             "$add" => log.line("Roles Added", &roles(new)),
             "$remove" => log.line("Roles Removed", &roles(new)),
             key @ ("permissions" | "allow" | "deny") => {
@@ -289,19 +291,12 @@ fn changes(
     log
 }
 
-/// The audit entry's options, as the "Additional Information" section.
+/// The audit entry's options, as the "Additional Information" section. An overwrite's id, type
+/// and role name are left out: the target line already shows them.
 fn additional_info(mut log: Log, opts: Option<&AuditLogOptionalEntryInfo>) -> Log {
     let info: Vec<(&str, String)> = opts
         .map(|o| {
             [
-                ("Id", o.id.map(|i| i.to_string())),
-                ("Role Name", o.role_name.clone()),
-                (
-                    "Type",
-                    o.kind
-                        .as_deref()
-                        .map(|k| if k == "1" { "Member" } else { "Role" }.into()),
-                ),
                 ("Count", o.count.clone()),
                 ("Delete Member Days", o.delete_member_days.clone()),
                 ("Members Removed", o.members_removed.clone()),
@@ -498,9 +493,21 @@ mod tests {
         let entry = audit(&e).unwrap();
         let d = entry.embed.description.unwrap();
         assert!(d.contains("▸ **Channel:** <#30> *`30`*\n▸ **Target:** <@&40> *`40`*"));
-        assert!(d.contains("**Settings**\n▸ **Id:** 40\n▸ **Type:** Role\n❎ **Denied:**\n▸ **Additions:** Send Messages"));
-        assert!(d.ends_with("**Additional Information**\n▸ **Id:** `40`\n▸ **Role Name:** `Quarantine`\n▸ **Type:** `Role`"));
+        assert!(d.ends_with("**Settings**\n❎ **Denied:**\n▸ **Additions:** Send Messages"));
+        assert!(!d.contains("Additional Information"));
         assert_eq!(entry.link.unwrap().1, "https://discord.com/channels/9/30");
+    }
+
+    #[test]
+    fn everyone_overwrite_target_has_one_at_sign() {
+        let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
+            "action_type": 15, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
+            "options": { "id": "9", "type": "0", "role_name": "@everyone" },
+            "changes": [{ "key": "deny", "old_value": "2048" }]
+        }))
+        .unwrap();
+        let d = audit(&e).unwrap().embed.description.unwrap();
+        assert!(d.contains("▸ **Target:** @everyone *`9`*"));
     }
 
     #[test]
