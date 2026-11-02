@@ -140,6 +140,8 @@ pub struct App {
     pub channels: Mutex<HashMap<u64, ChannelActivity>>,
     /// Name pair last punished by the post-join username check, so unrelated member updates do not repeat it.
     pub punished_names: Mutex<HashMap<(u64, u64), String>>,
+    /// Last public command per (guild, member), in ms.
+    pub cmd_cooldown: Mutex<HashMap<(u64, u64), i64>>,
     /// Anti-nuke heat per (guild, staff member) for panic mode's heat algorithm.
     pub nuke_heat: Mutex<HashMap<(u64, u64), HeatState>>,
     /// The open nuke case per guild and when it last grew; a long quiet gap starts a new case.
@@ -160,7 +162,19 @@ pub struct PanicRun {
     pub lock_mod_commands: bool,
 }
 
+/// Anyone may run the public commands, so each member gets one per this many ms.
+const CMD_COOLDOWN_MS: i64 = 3_000;
+
 impl App {
+    /// True (and the clock restarts) when the member's last public command is old enough.
+    pub fn cooled_down(&self, guild: u64, user: u64) -> bool {
+        cool(
+            &mut self.cmd_cooldown.lock().unwrap(),
+            (guild, user),
+            crate::automod::now_ms(),
+        )
+    }
+
     pub fn new(
         http: Client,
         restore_http: Client,
@@ -188,6 +202,7 @@ impl App {
             pings: Default::default(),
             channels: Default::default(),
             punished_names: Default::default(),
+            cmd_cooldown: Default::default(),
             nuke_heat: Default::default(),
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),
@@ -325,5 +340,28 @@ mod tests {
         assert_eq!(c.logging.fallback, Some(Id::new(42)));
         assert_eq!(c.lockdown.main_roles, vec![Id::new(9)]);
         assert!(!GuildCfg::parse(&json!({})).automod.enabled);
+    }
+}
+
+fn cool(last: &mut HashMap<(u64, u64), i64>, key: (u64, u64), now: i64) -> bool {
+    if last.len() > 10_000 {
+        last.retain(|_, t| now - *t < CMD_COOLDOWN_MS);
+    }
+    if last.get(&key).is_some_and(|t| now - t < CMD_COOLDOWN_MS) {
+        return false;
+    }
+    last.insert(key, now);
+    true
+}
+
+#[cfg(test)]
+mod cooldown_tests {
+    #[test]
+    fn one_public_command_per_window() {
+        let mut m = Default::default();
+        assert!(super::cool(&mut m, (1, 2), 0));
+        assert!(!super::cool(&mut m, (1, 2), 2_999));
+        assert!(super::cool(&mut m, (1, 3), 10));
+        assert!(super::cool(&mut m, (1, 2), 3_000));
     }
 }

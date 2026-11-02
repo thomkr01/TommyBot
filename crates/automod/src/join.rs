@@ -184,19 +184,22 @@ impl GateCfg {
             .unwrap_or(i64::from(self.min_age_days) * DAY_MS)
     }
 
-    pub fn name_matches(&self, name: &str) -> bool {
-        self.username_terms.iter().any(|t| term_matches(t, name))
-            || self
-                .username_strict
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(name))
+    /// `names` holds one name per line (username, display name, nickname).
+    pub fn name_matches(&self, names: &str) -> bool {
+        names.lines().any(|name| {
+            self.username_terms.iter().any(|t| term_matches(t, name))
+                || self
+                    .username_strict
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(name))
+        })
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Joiner<'a> {
     pub id: u64,
-    /// Already passed through confusable/Unicode sanitizing (e.g. `decancer`) by the caller.
+    /// Username and display name, one per line, already cured of lookalikes by the caller.
     pub name: &'a str,
     pub has_avatar: bool,
     pub is_bot: bool,
@@ -449,7 +452,7 @@ impl RaidDetector {
         self.joins.push(JoinRec {
             id: j.id,
             at: now,
-            name: j.name.to_lowercase(),
+            name: j.name.lines().next().unwrap_or_default().to_lowercase(),
             has_avatar: j.has_avatar,
             suspicious,
             invite: j.invite.map(Into::into),
@@ -774,6 +777,9 @@ mod tests {
             1
         );
         assert!(gate(&joiner(id_aged(9 * DAY_MS, 0), "admins", true), &cfg, NOW).is_empty());
+        // The display name on the second line counts too.
+        let both = joiner(id_aged(9 * DAY_MS, 0), "abc123\nadmin", true);
+        assert_eq!(gate(&both, &cfg, NOW).len(), 1);
     }
 
     #[test]

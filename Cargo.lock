@@ -2606,7 +2606,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "captcha",
- "decancer",
  "image",
  "rand 0.8.8",
  "serde",
@@ -2639,6 +2638,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "decancer",
  "reqwest",
  "serde",
  "serde_json",

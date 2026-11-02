@@ -300,18 +300,19 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         }
     }
     match ev {
-        // Webhook posts count as bots but still carry heat, so they reach automod (never commands).
-        Event::MessageCreate(m) if !m.author.bot || m.webhook_id.is_some() => {
+        // Webhook and app posts count as bots but still reach automod (never commands).
+        Event::MessageCreate(m)
+            if !m.author.bot || m.webhook_id.is_some() || m.interaction_metadata.is_some() =>
+        {
             if crate::catch::on_message(app, m).await? {
                 return Ok(());
             }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
                 if let Some(rest) = m.content.strip_prefix(&pfx).filter(|r| !r.is_empty()) {
-                    if commands::ignored(app, m, gid, rest).await? {
-                        return Ok(());
-                    }
-                    if !crate::general::try_run(app, m, rest).await?
+                    // An ignored command still goes through automod below.
+                    if !commands::ignored(app, m, gid, rest).await?
+                        && !crate::general::try_run(app, m, rest).await?
                         && !crate::settings::try_run(app, m, rest).await?
                     {
                         if let Some(parsed) = prefix::parse(rest) {
@@ -324,7 +325,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         }
         // Discord also sends updates for link previews; only real edits are checked again.
         Event::MessageUpdate(m)
-            if m.edited_timestamp.is_some() && (!m.author.bot || m.webhook_id.is_some()) =>
+            if m.edited_timestamp.is_some()
+                && (!m.author.bot
+                    || m.webhook_id.is_some()
+                    || m.interaction_metadata.is_some()) =>
         {
             automod::on_edit(app, &m.0).await?;
         }

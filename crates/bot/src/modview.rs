@@ -38,7 +38,7 @@ pub(crate) fn sanitized(name: &str) -> String {
             .chars()
             .filter(|c| c.is_ascii() || c.is_alphanumeric())
             .collect();
-        crate::joingate::cure(&letters)
+        tommybot_automod::filters::cure(&letters)
     };
     let ascii: String = cured
         .chars()
