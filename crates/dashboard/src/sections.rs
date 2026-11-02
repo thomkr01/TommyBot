@@ -233,6 +233,7 @@ async fn auto_setup(
     let quarantine_failed = quarantine_channels(&st, guild, &role).await;
     api::log_change(
         &st,
+        guild,
         &config,
         format!(
             "{} (<@{}>) ran auto-setup -> config v{version}",
@@ -348,6 +349,7 @@ async fn catch_channel(
     tx.commit().await?;
     api::log_change(
         &st,
+        guild,
         &config,
         format!(
             "{} (<@{}>) set up the catch channel -> config v{version}",
@@ -449,6 +451,7 @@ async fn tickets_setup(
         .await?;
     api::log_change(
         &st,
+        guild,
         &config,
         format!(
             "{} (<@{}>) set up tickets -> config v{version}",
@@ -555,6 +558,7 @@ async fn log_setup(
     tx.commit().await?;
     api::log_change(
         &st,
+        guild,
         &config,
         format!(
             "{} (<@{}>) created the log channels -> config v{version}",

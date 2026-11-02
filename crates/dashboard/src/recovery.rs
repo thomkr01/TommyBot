@@ -55,6 +55,7 @@ async fn announce(st: &AppState, s: &Sess, guild: i64, what: &str) -> Result<(),
     let (_, config) = store::current(&st.db, guild).await?;
     log_change(
         st,
+        guild,
         &config,
         format!("{} (<@{}>) {what}", s.username, s.user_id),
     )

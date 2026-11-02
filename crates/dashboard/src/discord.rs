@@ -1,5 +1,11 @@
 use anyhow::Result;
 use serde::Deserialize;
+use std::time::{Duration, Instant};
+use tommybot_automod::lockdown::VIEW_CHANNEL;
+
+/// How long owner and member lookups are reused, so page loads do not drain the bot's rate limit.
+const MEMO_TTL: Duration = Duration::from_secs(30);
+const ADMINISTRATOR: u64 = 1 << 3;
 
 #[derive(Clone)]
 pub struct Discord {
@@ -10,6 +16,8 @@ pub struct Discord {
     pub redirect_uri: String,
     /// Overridable (`DISCORD_API_BASE`) so the e2e script can point it at a mock.
     pub api: String,
+    /// Bot GETs by path, with when they were fetched (None: 404).
+    pub memo: crate::Shared<String, (Instant, Option<serde_json::Value>)>,
 }
 
 #[derive(Deserialize)]
@@ -135,34 +143,70 @@ impl Discord {
             .header("Authorization", format!("Bot {}", self.bot_token))
     }
 
-    pub async fn guild_owner(&self, guild: i64) -> Result<String> {
-        #[derive(Deserialize)]
-        struct G {
-            owner_id: String,
+    /// A bot GET reused for [`MEMO_TTL`]; None when Discord answers 404.
+    async fn memo_get(&self, path: String) -> Result<Option<serde_json::Value>> {
+        let hit = self.memo.lock().unwrap().get(&path).cloned();
+        if let Some((_, v)) = hit.filter(|(at, _)| at.elapsed() < MEMO_TTL) {
+            return Ok(v);
         }
-        let g: G = self
-            .bot(format!("/guilds/{guild}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let r = self.bot(path.clone()).send().await?;
+        let v = if r.status() == 404 {
+            None
+        } else {
+            Some(r.error_for_status()?.json().await?)
+        };
+        let mut m = self.memo.lock().unwrap();
+        // shortcut: prunes the whole map on insert, fine for one process with a few thousand users.
+        m.retain(|_, (at, _)| at.elapsed() < MEMO_TTL);
+        m.insert(path, (Instant::now(), v.clone()));
+        Ok(v)
+    }
+
+    pub async fn guild_owner(&self, guild: i64) -> Result<String> {
+        let g = self.memo_get(format!("/guilds/{guild}")).await?;
+        g.as_ref()
+            .and_then(|g| g["owner_id"].as_str())
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("guild {guild} not found"))
+    }
+
+    /// The member's role ids, or None when they are not in the guild.
+    pub async fn member(&self, guild: i64, user: &str) -> Result<Option<Vec<String>>> {
+        let m = self
+            .memo_get(format!("/guilds/{guild}/members/{user}"))
             .await?;
-        Ok(g.owner_id)
+        Ok(m.map(|m| {
+            m["roles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.as_str().map(String::from))
+                .collect()
+        }))
+    }
+
+    /// Whether `ch` is in `guild` and hidden from @everyone, the bot's rule for log channels.
+    pub async fn private_channel_of(&self, guild: i64, ch: &str) -> Result<bool> {
+        let c = self
+            .call(reqwest::Method::GET, &format!("/channels/{ch}"), None)
+            .await?;
+        if c["guild_id"].as_str() != Some(&guild.to_string()) {
+            return Ok(false);
+        }
+        let g = self.memo_get(format!("/guilds/{guild}")).await?;
+        let base = g
+            .as_ref()
+            .and_then(|g| g["roles"].as_array())
+            .into_iter()
+            .flatten()
+            .find(|r| r["id"].as_str() == Some(&guild.to_string()))
+            .and_then(|r| r["permissions"].as_str()?.parse().ok())
+            .unwrap_or(0);
+        Ok(!everyone_sees(base, &c, guild))
     }
 
     pub async fn member_roles(&self, guild: i64, user: &str) -> Result<Vec<String>> {
-        #[derive(Deserialize)]
-        struct M {
-            roles: Vec<String>,
-        }
-        let r = self
-            .bot(format!("/guilds/{guild}/members/{user}"))
-            .send()
-            .await?;
-        if r.status() == 404 {
-            return Ok(vec![]);
-        }
-        Ok(r.error_for_status()?.json::<M>().await?.roles)
+        Ok(self.member(guild, user).await?.unwrap_or_default())
     }
 
     /// Bot-authenticated call for the less common endpoints; returns the JSON body (Null when empty).
@@ -225,6 +269,25 @@ impl Discord {
     }
 }
 
+/// Whether @everyone can read `ch` (a Discord channel object), as the bot's `everyone_sees`.
+fn everyone_sees(base: u64, ch: &serde_json::Value, guild: i64) -> bool {
+    if base & ADMINISTRATOR != 0 {
+        return true;
+    }
+    let bits = |o: &serde_json::Value, k: &str| {
+        o[k].as_str()
+            .and_then(|b| b.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let (allow, deny) = ch["permission_overwrites"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|o| o["id"].as_str() == Some(&guild.to_string()))
+        .map_or((0, 0), |o| (bits(o, "allow"), bits(o, "deny")));
+    ((base & !deny) | allow) & VIEW_CHANNEL != 0
+}
+
 pub(crate) fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -234,4 +297,20 @@ pub(crate) fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn everyone_sees_follows_base_and_overwrite() {
+        let ow = |allow: u64, deny: u64| json!({"permission_overwrites": [{"id": "9", "allow": allow.to_string(), "deny": deny.to_string()}]});
+        assert!(everyone_sees(VIEW_CHANNEL, &json!({}), 9));
+        assert!(!everyone_sees(VIEW_CHANNEL, &ow(0, VIEW_CHANNEL), 9));
+        assert!(!everyone_sees(0, &json!({}), 9));
+        assert!(everyone_sees(0, &ow(VIEW_CHANNEL, 0), 9));
+        assert!(everyone_sees(ADMINISTRATOR, &ow(0, VIEW_CHANNEL), 9));
+    }
 }

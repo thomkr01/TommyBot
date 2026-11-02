@@ -1009,6 +1009,47 @@ pub fn schema() -> Vec<Value> {
     .collect()
 }
 
+/// Ids held in `v`: a string or number, or an array of them.
+fn flat(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) if !s.is_empty() => out.push(s.clone()),
+        Value::Number(n) => out.push(n.to_string()),
+        Value::Array(a) => a.iter().for_each(|x| flat(x, out)),
+        _ => {}
+    }
+}
+
+/// Channel and role ids the schema's fields of `section` hold in `v`, as (channels, roles).
+pub fn ids(section: &str, v: &Value) -> (Vec<String>, Vec<String>) {
+    let (mut ch, mut ro) = (vec![], vec![]);
+    for sec in schema() {
+        for fd in sec["fields"].as_array().into_iter().flatten() {
+            if fd["section"].as_str().or(sec["name"].as_str()) != Some(section) {
+                continue;
+            }
+            let path = format!(
+                "/{}",
+                fd["path"].as_str().unwrap_or_default().replace('.', "/")
+            );
+            let at = v.pointer(&path).unwrap_or(&Value::Null);
+            let items = || at.as_array().into_iter().flatten();
+            match fd["kind"].as_str().unwrap_or_default() {
+                "channel" | "channels" | "category" | "categories" => flat(at, &mut ch),
+                "role" | "roles" => flat(at, &mut ro),
+                "customs" => items().for_each(|c| flat(&c["channel"], &mut ch)),
+                "profiles" => items().for_each(|p| {
+                    flat(&p["roles"], &mut ro);
+                    for k in ["channels", "categories", "exclude"] {
+                        flat(&p[k], &mut ch);
+                    }
+                }),
+                _ => {}
+            }
+        }
+    }
+    (ch, ro)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1035,6 +1076,23 @@ mod tests {
     }
 
     #[test]
+    fn ids_follow_field_kinds() {
+        let v = json!({"fallback": "1", "routes": {"report": 2}, "events": {"member_kick": ""},
+            "custom": [{"channel": "3", "events": []}], "ignored_channels": ["4"], "other": "9"});
+        let (ch, ro) = ids("logging", &v);
+        let mut ch = ch;
+        ch.sort();
+        ch.dedup();
+        assert_eq!(ch, ["1", "2", "3", "4"]);
+        assert!(ro.is_empty());
+        let p = json!({"profiles": [{"roles": ["7"], "categories": ["8"], "exclude": ["9"]}]});
+        assert_eq!(
+            ids("channel_profiles", &p),
+            (vec!["8".into(), "9".into()], vec!["7".into()])
+        );
+    }
+
+    #[test]
     fn every_schema_path_deserializes() {
         let mut objs: std::collections::BTreeMap<String, Value> = Default::default();
         for sec in schema() {
@@ -1042,7 +1100,7 @@ mod tests {
                 let sample = match fd["kind"].as_str().unwrap() {
                     "bool" => json!(true),
                     "int" => json!(5),
-                    "float" | "pct" => json!(1.5),
+                    "float" | "pct" => json!(0.5),
                     "text" | "color" => json!("x"),
                     "list" => json!(["1"]),
                     "choice" => fd["options"]

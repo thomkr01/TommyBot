@@ -1,8 +1,9 @@
 use crate::{ApiError, AppState};
 use axum::{
-    extract::{FromRequestParts, Query, State},
+    extract::{FromRequestParts, Query, Request, State},
     http::{request::Parts, Method},
-    response::{IntoResponse, Redirect},
+    middleware::Next,
+    response::{IntoResponse, Redirect, Response},
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -11,9 +12,83 @@ use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::json;
+use std::time::{Duration as StdDuration, Instant};
 use totp_rs::{Algorithm, Secret, TOTP};
 
 const STEP_UP_MINUTES: i64 = 10;
+/// Wrong TOTP codes allowed per user within `TOTP_WINDOW`.
+const TOTP_FAILS: usize = 5;
+const TOTP_WINDOW: StdDuration = StdDuration::from_secs(600);
+/// Requests a session may make at once, refilled at `RATE` per second.
+const BURST: f64 = 20.0;
+const RATE: f64 = 20.0;
+
+#[derive(Default)]
+pub struct TotpAttempts {
+    fails: Vec<Instant>,
+    last_step: u64,
+}
+
+impl TotpAttempts {
+    fn locked(&mut self, now: Instant) -> bool {
+        self.fails.retain(|t| now.duration_since(*t) < TOTP_WINDOW);
+        self.fails.len() >= TOTP_FAILS
+    }
+
+    /// Accepts `step` (the time step the code matched) once; a miss or a replay counts as a failure.
+    fn accept(&mut self, step: Option<u64>, now: Instant) -> bool {
+        match step.filter(|s| *s > self.last_step) {
+            Some(s) => {
+                self.last_step = s;
+                true
+            }
+            None => {
+                self.fails.push(now);
+                false
+            }
+        }
+    }
+}
+
+pub struct Bucket {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Bucket {
+    fn take(&mut self, now: Instant) -> bool {
+        self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * RATE).min(BURST);
+        self.at = now;
+        let ok = self.tokens >= 1.0;
+        if ok {
+            self.tokens -= 1.0;
+        }
+        ok
+    }
+}
+
+/// 429 for a session that sends more than `BURST` requests at once (Discord's limit is the bot's, shared).
+pub async fn rate_limit(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    if let Some(sid) = CookieJar::from_headers(req.headers()).get("sid") {
+        let now = Instant::now();
+        let ok = {
+            let mut m = st.rate.lock().unwrap();
+            if m.len() > 10_000 {
+                m.retain(|_, b| now.duration_since(b.at).as_secs_f64() < BURST / RATE);
+            }
+            m.entry(sid.value().to_string())
+                .or_insert(Bucket {
+                    tokens: BURST,
+                    at: now,
+                })
+                .take(now)
+        };
+        if !ok {
+            return ApiError::TooMany.into_response();
+        }
+    }
+    next.run(req).await
+}
 
 pub fn token() -> String {
     let mut b = [0u8; 32];
@@ -214,11 +289,23 @@ pub async fn totp_verify(
         .fetch_optional(&st.db)
         .await?
         .ok_or(ApiError::Forbidden("totp not enrolled"))?;
-    if !totp(&secret, &s.username)?
-        .check_current(&c.code)
+    let totp = totp(&secret, &s.username)?;
+    let now_step = std::time::UNIX_EPOCH
+        .elapsed()
         .map_err(anyhow::Error::from)?
+        .as_secs()
+        / 30;
+    // Same window as `check_current` (skew 1), but we need the step to refuse a replay.
+    let step = (now_step - 1..=now_step + 1).find(|t| totp.generate(t * 30) == c.code);
     {
-        return Err(ApiError::Forbidden("invalid code"));
+        let mut m = st.totp.lock().unwrap();
+        let a = m.entry(s.user_id).or_default();
+        if a.locked(Instant::now()) {
+            return Err(ApiError::TooMany);
+        }
+        if !a.accept(step, Instant::now()) {
+            return Err(ApiError::Forbidden("invalid code"));
+        }
     }
     sqlx::query("update dash_totp set confirmed = true where user_id = $1")
         .bind(s.user_id)
@@ -244,5 +331,33 @@ mod tests {
             assert!(csrf_ok(&m, Some("t"), "t"));
         }
         assert!(csrf_ok(&Method::GET, None, "t"));
+    }
+
+    #[test]
+    fn totp_locks_after_five_misses_and_refuses_replay() {
+        let now = Instant::now();
+        let mut a = TotpAttempts::default();
+        assert!(a.accept(Some(100), now));
+        assert!(!a.accept(Some(100), now), "same step twice");
+        assert!(!a.accept(Some(99), now), "older step");
+        assert!(a.accept(Some(101), now));
+        for _ in 0..3 {
+            assert!(!a.locked(now));
+            a.accept(None, now);
+        }
+        assert!(a.locked(now));
+        assert!(!a.locked(now + TOTP_WINDOW), "misses expire");
+    }
+
+    #[test]
+    fn bucket_allows_burst_then_refills() {
+        let now = Instant::now();
+        let mut b = Bucket {
+            tokens: BURST,
+            at: now,
+        };
+        assert!((0..20).all(|_| b.take(now)));
+        assert!(!b.take(now));
+        assert!(b.take(now + StdDuration::from_millis(100)));
     }
 }
