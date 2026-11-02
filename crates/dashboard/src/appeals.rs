@@ -241,6 +241,7 @@ async fn submit(
         )
         .line("Member", &format!("{} [{}]", s.username, s.user_id))
         .line("Appeal", &format!("`#{id}`"))
+        .time()
         .text(&format!("{} Review it on the dashboard.", embed::ARROW));
         for (f, a) in fields.iter().zip(&given) {
             log = log.field(&format!("{}:", f.label), a);

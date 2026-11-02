@@ -209,6 +209,7 @@ async fn report(
             msg.author.name, msg.author.id
         ))
         .text(&format!("{AGE} **Creation:** <t:{created}:F>"))
+        .time()
         .field(
             "Reported Message:",
             &if content.is_empty() {
@@ -281,6 +282,7 @@ pub async fn file_native(
         .text(&format!(
             "<@{target}>'s message was blocked by Discord AutoMod rule `{rule}`"
         ))
+        .time()
         .field(
             "Blocked Message:",
             &if content.is_empty() {

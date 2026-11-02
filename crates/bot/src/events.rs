@@ -160,13 +160,14 @@ async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     Ok(())
 }
 
+/// Every log sent here ends with the date and time it happened.
 pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Result<()> {
     match app.cfg(guild).await?.logging.target(kind, None) {
         Some(ch) => send(
             app,
             ch,
             "",
-            &embed.build(),
+            &embed.time().build(),
             None,
             &AllowedMentions::default(),
         )
@@ -192,9 +193,16 @@ pub async fn send_log_pinging(
         roles: roles.to_vec(),
         ..Default::default()
     };
-    send(app, ch, pings.trim_end(), &embed.build(), None, &mentions)
-        .await
-        .map(drop)
+    send(
+        app,
+        ch,
+        pings.trim_end(),
+        &embed.time().build(),
+        None,
+        &mentions,
+    )
+    .await
+    .map(drop)
 }
 
 /// Like [`send_log`] with a link button under the embed.
@@ -212,7 +220,7 @@ pub async fn send_log_link(
         app,
         ch,
         "",
-        &embed.build(),
+        &embed.time().build(),
         Some(&link),
         &AllowedMentions::default(),
     )
@@ -241,7 +249,6 @@ async fn forget_log_channel(app: &App, gid: Id<GuildMarker>, c: &Channel) -> Res
     let name = c.name.as_deref().unwrap_or("unknown");
     let embed = Log::new("Log Channel Deleted", RED)
         .line("Channel", &format!("#{name} (`{}`)", c.id))
-        .time()
         .text("Its logs now go to the main log channel. Pick a new channel on the dashboard.");
     send_log(app, gid.get(), LogKind::Server, embed).await
 }
