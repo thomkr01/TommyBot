@@ -8,7 +8,6 @@ use tommybot_automod::{
 };
 use tommybot_logging::{embed::verify_panel, emoji::AS_NAMES, Log};
 use twilight_model::{
-    channel::message::Embed,
     http::interaction::{InteractionResponse, InteractionResponseType},
     id::Id,
 };
@@ -31,10 +30,6 @@ fn log(l: Log) -> Value {
     let end = d[at..].find(':').map_or(at, |e| at + e);
     v["embeds"][0]["description"] = json!(format!("{}0{}", &d[..at], &d[end..]));
     v
-}
-
-fn embeds(e: &[Embed]) -> Value {
-    json!({ "embeds": e })
 }
 
 fn interaction(r: InteractionResponse) -> Value {
@@ -86,7 +81,7 @@ fn messages() -> Value {
     };
     json!({
         "names": {"users": {MEMBER.to_string(): "member", YOU.to_string(): "you", ROGUE.to_string(): "rogue-admin"}, "channels": {GENERAL.to_string(): "general"}},
-        "ban_result": embeds(&reply::result_embeds("ban", &[full], Some("toxic"), YOU)),
+        "ban_result": json!({"embeds": reply::result_embeds("ban", &[full], Some("toxic"), YOU)}),
         "ban_compact": {"content": reply::summary("ban", true, &[compact], Some("toxic"), YOU)},
         "automod_warn": log(automod::filter_log("member", FilterAction::Warn, "Use of blacklisted words", (GENERAL, "you all suck"), MEMBER)),
         "automod_kick": log(automod::filter_log("member", FilterAction::Kick, "Posting an invite link", (GENERAL, "Join my server everyone discord.gg/example"), MEMBER)),
@@ -111,8 +106,11 @@ fn previews_match_the_bot() {
     let path = format!("{DIR}/messages.json");
     if std::env::var_os("UPDATE_PREVIEWS").is_some() {
         std::fs::write(&path, &got).unwrap();
-        let (_, png) = verify::new_captcha(&Default::default());
-        std::fs::write(format!("{DIR}/captcha.png"), png).unwrap();
+        // A captcha is random, so keep the one there is.
+        let png = format!("{DIR}/captcha.png");
+        if !std::path::Path::new(&png).exists() {
+            std::fs::write(png, verify::new_captcha(&Default::default()).1).unwrap();
+        }
     }
     let want = std::fs::read_to_string(&path).unwrap_or_default();
     assert!(

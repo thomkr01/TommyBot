@@ -87,7 +87,6 @@ fn embed(e: &Value) -> AnyView {
 /// A message the bot sends: content, embeds, button rows; flag 64 marks it "only you can see this".
 pub fn bot(m: &Value) -> AnyView {
     let content = m["content"].as_str().unwrap_or("");
-    let rows = m["components"].as_array().cloned().unwrap_or_default();
     view! {
         <div class="dmsg">
             <img class="avatar" src="/logo.svg" alt="" />
@@ -95,7 +94,7 @@ pub fn bot(m: &Value) -> AnyView {
                 <b>"TommyBot "</b><span class="chip">"APP"</span>" "<small class="muted">{now()}</small>
                 {(!content.is_empty()).then(|| view! { <div class="md" inner_html=md(content) /> })}
                 {m["embeds"].as_array().into_iter().flatten().map(embed).collect_view()}
-                {rows.iter().map(|r| view! { <div class="drow">{r["components"].as_array().into_iter().flatten().map(button).collect_view()}</div> }).collect_view()}
+                {m["components"].as_array().into_iter().flatten().map(|r| view! { <div class="drow">{r["components"].as_array().into_iter().flatten().map(button).collect_view()}</div> }).collect_view()}
                 {(m["flags"] == 64).then(|| view! { <small class="muted eph">"Only you can see this • "<span style="color:#00a8fc">"Dismiss message"</span></small> })}
             </div>
         </div>
