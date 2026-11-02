@@ -318,6 +318,9 @@ pub fn may_edit(level: &Level, section: &str) -> bool {
     }
 }
 
+/// Sections the dashboard only saves after a TOTP step-up (its `access::SENSITIVE`); panels just show them.
+const STEP_UP: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
+
 const GREY: u32 = 0x2B2D31;
 
 fn dashboard_link(gid: u64) -> String {
@@ -659,6 +662,14 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
     let section = row.path.split('.').next().unwrap_or_default();
     if !row.path.is_empty() && !may_edit(&level, section) {
         send(app, msg, "You may not change this setting", None, vec![]).await?;
+        return Ok(true);
+    }
+    if STEP_UP.contains(&section) {
+        let text = format!(
+            "This setting needs 2FA, so change it on the {}",
+            dashboard_link(gid.get())
+        );
+        send(app, msg, &text, None, vec![]).await?;
         return Ok(true);
     }
     let ids = match (row.kind, &op) {
