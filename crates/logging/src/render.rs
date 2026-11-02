@@ -280,10 +280,17 @@ fn changes(
                 }
                 l
             }
-            key if created => log.line(&words(key), &value(key, kind, new)),
-            key if deleted => log.line(&words(key), &value(key, kind, old)),
+            // A new or removed thing's unset values (off, 0, empty) carry no information.
+            key if (created || deleted)
+                && key != "type"
+                && unset(if created { new } else { old }) =>
+            {
+                log
+            }
+            key if created => log.line(&label(key), &value(key, kind, new)),
+            key if deleted => log.line(&label(key), &value(key, kind, old)),
             key => log
-                .text(&embed::label_head(&words(key)))
+                .text(&embed::label_head(&label(key)))
                 .diff(Some(&show(key, kind, old)), Some(&show(key, kind, new))),
         };
     }
@@ -405,6 +412,18 @@ fn value(key: &str, kind: LogKind, v: Option<&Value>) -> String {
 }
 
 /// A change value as the log shows it: names for channel types, hex colours.
+/// No value, `false`, `0`, `""` or `[]`.
+fn unset(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => !b,
+        Some(Value::Number(n)) => n.as_f64() == Some(0.0),
+        Some(Value::String(s)) => s.is_empty() || s == "0",
+        Some(Value::Array(a)) => a.is_empty(),
+        Some(Value::Object(o)) => o.is_empty(),
+    }
+}
+
 fn show(key: &str, kind: LogKind, v: Option<&Value>) -> String {
     match (key, v) {
         (_, None | Some(Value::Null)) => "none".into(),
@@ -413,6 +432,13 @@ fn show(key: &str, kind: LogKind, v: Option<&Value>) -> String {
         ("type", Some(Value::Number(n))) if matches!(kind, LogKind::Channel | LogKind::Thread) => {
             channel_type(n.as_u64().unwrap_or(u64::MAX)).into()
         }
+        ("type", Some(Value::Number(n))) if kind == LogKind::Webhook => match n.as_u64() {
+            Some(1) => "Incoming",
+            Some(2) => "Channel Follower",
+            Some(3) => "Application",
+            _ => "Unknown",
+        }
+        .into(),
         (_, Some(Value::String(s))) => s.clone(),
         (_, Some(v)) => v.to_string(),
     }
@@ -435,6 +461,11 @@ fn channel_type(t: u64) -> &'static str {
 }
 
 /// `CamelCase` to `Camel Case`, `snake_case` to `Snake case`.
+/// A change key as a label: `channel_id` reads "Channel", since the value is the channel itself.
+fn label(key: &str) -> String {
+    words(key.strip_suffix("_id").unwrap_or(key))
+}
+
 fn words(s: &str) -> String {
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
@@ -499,6 +530,25 @@ mod tests {
     }
 
     #[test]
+    fn created_things_skip_unset_values_and_name_webhook_types() {
+        let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
+            "action_type": 50, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "60",
+            "changes": [
+                { "key": "channel_id", "new_value": "30" },
+                { "key": "type", "new_value": 1 },
+                { "key": "avatar_hash", "new_value": null },
+                { "key": "nsfw", "new_value": false }
+            ]
+        }))
+        .unwrap();
+        let d = audit(&e).unwrap().embed.description.unwrap();
+        assert!(
+            d.ends_with("**Settings**\n▸ **Channel:** <#30> *`30`*\n▸ **Type:** Incoming"),
+            "{d}"
+        );
+    }
+
+    #[test]
     fn everyone_overwrite_target_has_one_at_sign() {
         let e: AuditLogEntry = serde_json::from_value(serde_json::json!({
             "action_type": 15, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "30",
@@ -522,7 +572,7 @@ mod tests {
         }))
         .unwrap();
         let d = audit(&e).unwrap().embed.description.unwrap();
-        assert!(d.ends_with("**Settings**\n▸ **Type:** Text\n▸ **Permission overwrites:** 0"));
+        assert!(d.ends_with("**Settings**\n▸ **Type:** Text"), "{d}");
         let v = serde_json::json!("5");
         assert_eq!(value("channel_id", LogKind::Invite, Some(&v)), "<#5> *`5`*");
         assert_eq!(show("channel_id", LogKind::Invite, Some(&v)), "5");
