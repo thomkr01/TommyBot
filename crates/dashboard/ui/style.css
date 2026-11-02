@@ -118,9 +118,9 @@ a.btn.go { background:var(--ok); border-color:var(--ok); color:#000; }
 button.link { background:none; border:0; padding:0; color:inherit; text-transform:none; font-weight:400; }
 button.warn { background:var(--warn); border-color:var(--warn); color:#000; }
 header details div p { margin:0; padding:8px 12px; }
-.tabs { flex-wrap:wrap; } .bar { max-width:calc(100vw - 32px); flex-wrap:wrap; }
+.tabs { flex-wrap:wrap; } .bar { max-width:calc(100vw - 32px); }
 /* Light theme: the dark-theme text colours are too pale on white. */
 [data-theme=light] .ok { color:#0a7a36; } [data-theme=light] .info { color:#0369a1; } [data-theme=light] .warn { color:#b45309; } [data-theme=light] .err { color:#c8102e; }
 [data-theme=light] .chip.ok, [data-theme=light] button.warn { color:#000; }
-@media (max-width:600px) { header { gap:8px; padding:0 12px; } header .logo { display:none; } header .search { flex:1; min-width:0; } header .search input { width:100%; max-width:none; } .embed .fields { grid-template-columns:1fr; } }
+@media (max-width:600px) { header { gap:8px; padding:0 12px; } header .logo, header .sp { display:none; } header .search { flex:1; min-width:0; } header .search input { width:100%; max-width:none; } .embed .fields { grid-template-columns:1fr; } }
 button.link.err { color:var(--bad); }
