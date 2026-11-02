@@ -88,6 +88,9 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
 /// Locks the guild unless an active lock already covers the same part (its snapshot would save
 /// locked perms).
 pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<bool> {
+    if lock_thread(app, &kind, true).await? {
+        return Ok(true);
+    }
     let active = store::locks(&app.pool, gid.get()).await?;
     if active
         .iter()
@@ -161,6 +164,20 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
     Ok(true)
 }
 
+/// Threads cannot have permission overwrites, so a channel lock there locks the thread itself.
+/// Returns false when `kind` is not a thread's channel lock.
+async fn lock_thread(app: &App, kind: &LockKind, locked: bool) -> Result<bool> {
+    let LockKind::Channel(c) = *kind else {
+        return Ok(false);
+    };
+    let c = Id::new(c);
+    if !app.http.channel(c).await?.model().await?.kind.is_thread() {
+        return Ok(false);
+    }
+    app.http.update_thread(c).locked(locked).await?;
+    Ok(true)
+}
+
 /// Kinds of the guild's active locks, oldest first.
 pub async fn active(app: &App, gid: Id<GuildMarker>) -> Result<Vec<LockKind>> {
     Ok(store::locks(&app.pool, gid.get())
@@ -200,6 +217,11 @@ async fn announce(app: &App, gid: Id<GuildMarker>, log: Log) {
 
 /// Lifts the active locks that overlap `which`, or all of them; returns how many were lifted.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
+    if let Some(k) = which {
+        if lock_thread(app, k, false).await? {
+            return Ok(1);
+        }
+    }
     let (mut lifted, mut failed) = (0, 0);
     for snap in store::locks(&app.pool, gid.get()).await? {
         let hit = match (which, &snap.kind) {

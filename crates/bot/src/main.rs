@@ -1,3 +1,4 @@
+mod activity;
 mod antinuke;
 mod app;
 mod appeals;
@@ -120,7 +121,8 @@ async fn main() -> Result<()> {
         | Intents::AUTO_MODERATION_EXECUTION
         | Intents::GUILD_MESSAGES
         | Intents::MESSAGE_CONTENT
-        | Intents::GUILD_VOICE_STATES;
+        | Intents::GUILD_VOICE_STATES
+        | Intents::GUILD_MESSAGE_REACTIONS;
     let mut shard = Shard::new(ShardId::ONE, cfg.discord_token, intents);
 
     let stop = shutdown_signal();

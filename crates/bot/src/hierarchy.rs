@@ -1,13 +1,16 @@
 //! Per-guild owner, roles, channel parents and the bot's top role, so a hierarchy check costs one call.
 use anyhow::Result;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
-use twilight_model::id::{
-    marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
-    Id,
+use twilight_model::{
+    guild::Permissions,
+    id::{
+        marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
+        Id,
+    },
 };
 
 use crate::app::App;
@@ -20,6 +23,8 @@ pub struct GuildInfo {
     pub role_perms: HashMap<Id<RoleMarker>, u64>,
     /// Channel -> its category (threads are not listed).
     pub parents: HashMap<Id<ChannelMarker>, Id<ChannelMarker>>,
+    /// Every channel but threads.
+    pub channels: HashSet<Id<ChannelMarker>>,
     pub bot_top: i64,
     fetched: Instant,
 }
@@ -45,13 +50,9 @@ impl App {
         let owner = self.http.guild(gid).await?.model().await?.owner_id;
         let all = self.http.roles(gid).await?.models().await?;
         let roles: HashMap<_, _> = all.iter().map(|r| (r.id, r.position)).collect();
-        let parents = self
-            .http
-            .guild_channels(gid)
-            .await?
-            .models()
-            .await?
-            .into_iter()
+        let all_channels = self.http.guild_channels(gid).await?.models().await?;
+        let parents = all_channels
+            .iter()
             .filter_map(|c| Some((c.id, c.parent_id?)))
             .collect();
         let me = self.http.guild_member(gid, self.me).await?.model().await?;
@@ -60,6 +61,7 @@ impl App {
             bot_top: top_position(&roles, &me.roles),
             role_perms: all.iter().map(|r| (r.id, r.permissions.bits())).collect(),
             parents,
+            channels: all_channels.iter().map(|c| c.id).collect(),
             roles,
             fetched: Instant::now(),
         });
@@ -69,6 +71,66 @@ impl App {
 
     pub fn invalidate_guild(&self, gid: Id<GuildMarker>) {
         self.guilds.lock().unwrap().remove(&gid);
+    }
+
+    /// Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
+    pub async fn staff_by_perms(
+        &self,
+        cfg: &crate::app::GuildCfg,
+        gid: Id<GuildMarker>,
+        roles: &[Id<RoleMarker>],
+    ) -> bool {
+        const BITS: Permissions = Permissions::ADMINISTRATOR
+            .union(Permissions::KICK_MEMBERS)
+            .union(Permissions::BAN_MEMBERS)
+            .union(Permissions::MANAGE_CHANNELS)
+            .union(Permissions::MANAGE_GUILD)
+            .union(Permissions::MANAGE_MESSAGES)
+            .union(Permissions::MANAGE_ROLES)
+            .union(Permissions::MANAGE_WEBHOOKS);
+        // A failed lookup must not switch automod off.
+        !cfg.misc.staff_only_permitted
+            && self.guild_info(gid).await.is_ok_and(|info| {
+                roles
+                    .iter()
+                    .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
+            })
+    }
+
+    /// The channel and category whitelists apply to: a thread's parent channel, and that
+    /// channel's category.
+    pub async fn channel_scope(
+        &self,
+        gid: Id<GuildMarker>,
+        ch: Id<ChannelMarker>,
+    ) -> Result<(Id<ChannelMarker>, Option<Id<ChannelMarker>>)> {
+        let info = self.guild_info(gid).await?;
+        let channel = if info.channels.contains(&ch) {
+            ch
+        } else {
+            let known = self.thread_parents.lock().unwrap().get(&ch).copied();
+            match known {
+                Some(p) => p,
+                None => {
+                    let p = self.http.channel(ch).await?.model().await?.parent_id;
+                    if let Some(p) = p {
+                        self.note_thread(ch, p);
+                    }
+                    p.unwrap_or(ch)
+                }
+            }
+        };
+        Ok((channel, info.parents.get(&channel).copied()))
+    }
+
+    /// Remembers a thread's parent channel (from thread events or a fetch).
+    pub fn note_thread(&self, thread: Id<ChannelMarker>, parent: Id<ChannelMarker>) {
+        let mut m = self.thread_parents.lock().unwrap();
+        // shortcut: past the cap everything is dropped and refetched once per thread.
+        if m.len() > 50_000 {
+            m.clear();
+        }
+        m.insert(thread, parent);
     }
 
     /// Remembers a created or deleted channel's category until its audit entry arrives.

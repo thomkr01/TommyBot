@@ -391,6 +391,18 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         }
         Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
+        Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
+        Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,
+        Event::ThreadUpdate(t) => {
+            if let Some(p) = t.parent_id {
+                app.note_thread(t.id, p);
+            }
+        }
+        Event::ThreadListSync(s) => s
+            .threads
+            .iter()
+            .filter_map(|t| Some((t.id, t.parent_id?)))
+            .for_each(|(t, p)| app.note_thread(t, p)),
         _ => {}
     }
     Ok(())
