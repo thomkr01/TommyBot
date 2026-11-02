@@ -212,10 +212,13 @@ def emojis():
     icons = {f[:-4] for f in os.listdir("assets/icons") if f.endswith(".svg")}
     missing = sorted(icons - set(have))
     chan = text_channel("general")
-    set_config("logging", {"fallback": chan})
+    # Logs go to the log channel, never #general, and the rest of the logging setup stays.
+    log_chan = text_channel("tommybot-logs")
+    set_config("logging", {**logging_cfg(), "fallback": log_chan})
     locked = lock()
     me = call("GET", "/users/@me")["id"]
-    logs = [m for m in call("GET", f"/channels/{chan}/messages?limit=10") if m["author"]["id"] == me and m["embeds"]]
+    logs = [m for m in call("GET", f"/channels/{log_chan}/messages?limit=10")
+            if m["author"]["id"] == me and m["embeds"]]
     text = json.dumps([m["embeds"] for m in logs])
     in_log = "<:channel_text:" in text and "<:clock:" in text
     row = [{"type": 2, "style": 2, "custom_id": f"e2e-{n}", "emoji": {"id": have.get(n), "name": n}} for n in
