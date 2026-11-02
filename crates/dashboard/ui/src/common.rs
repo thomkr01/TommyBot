@@ -95,24 +95,61 @@ pub fn Head(guild: String, page: String, #[prop(optional)] big: Option<String>) 
 }
 
 /// Runs a request, routing `step_up_required` to the prompt and other errors to `msg`.
-pub fn run_act(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, msg: RwSignal<String>, need: RwSignal<bool>, ok: impl FnOnce(Value) + 'static) {
+pub fn run_act(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, msg: Msg, need: RwSignal<bool>, ok: impl FnOnce(Value) + 'static) {
     spawn_local(async move {
         match fut.await {
             Ok(v) => ok(v),
             Err(e) if e == "step_up_required" => need.set(true),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
 }
 
-/// Click-to-close message; keeps its last text while it fades out.
+/// A toast's text and whether it reports a failure.
+#[derive(Clone, Copy, Default)]
+pub struct Msg { text: RwSignal<String>, bad: RwSignal<bool> }
+
+impl Msg {
+    pub fn ok(self, t: impl Into<String>) { self.bad.set(false); self.text.set(t.into()) }
+    pub fn err(self, e: impl Into<String>) { self.bad.set(true); self.text.set(e.into()) }
+    pub fn clear(self) { self.text.set(String::new()) }
+    pub fn get(self) -> String { self.text.get() }
+}
+
+/// Click-to-close message, red-edged for failures; keeps its last text while it fades out.
 #[component]
-pub fn Toast(msg: RwSignal<String>) -> impl IntoView {
+pub fn Toast(msg: Msg) -> impl IntoView {
     let text = Memo::new(move |prev: Option<&String>| { let m = msg.get(); if m.is_empty() { prev.cloned().unwrap_or_default() } else { m } });
-    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" role="status" on:click=move |_| msg.set(String::new())>{move || text.get()}</p></AnimatedShow> }
+    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}</p></AnimatedShow> }
 }
 
 /// Runs a save, recording the new version.
-pub fn run_save(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, version: RwSignal<i64>, msg: RwSignal<String>, need: RwSignal<bool>) {
-    run_act(fut, msg, need, move |v| { version.set(v["version"].as_i64().unwrap_or(0)); msg.set(format!("Saved as version {}", version.get_untracked())); });
+pub fn run_save(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, version: RwSignal<i64>, msg: Msg, need: RwSignal<bool>) {
+    run_act(fut, msg, need, move |v| { version.set(v["version"].as_i64().unwrap_or(0)); msg.ok(format!("Saved as version {}", version.get_untracked())); });
+}
+
+fn focusables(root: &web_sys::Element) -> Vec<web_sys::HtmlElement> {
+    use wasm_bindgen::JsCast;
+    let Ok(l) = root.query_selector_all("button:not([disabled]), input:not([disabled]), select, textarea, a[href]") else { return vec![] };
+    (0..l.length()).filter_map(|i| l.item(i)?.dyn_into().ok()).collect()
+}
+
+/// Escape closes a dialog and Tab cycles inside it; `e` is the dialog's own keydown.
+pub fn dialog_keys(e: &leptos::ev::KeyboardEvent, close: impl FnOnce()) {
+    use wasm_bindgen::JsCast;
+    if e.key() == "Escape" { return close() }
+    if e.key() != "Tab" { return }
+    let Some(root) = e.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) else { return };
+    let list = focusables(&root);
+    let (Some(first), Some(last)) = (list.first(), list.last()) else { return };
+    let active = web_sys::window().and_then(|w| w.document()).and_then(|d| d.active_element());
+    let on = |el: &web_sys::HtmlElement| active.as_ref().is_some_and(|a| a.is_same_node(Some(el)));
+    let to = if e.shift_key() && on(first) { last } else if !e.shift_key() && on(last) { first } else { return };
+    e.prevent_default();
+    let _ = to.focus();
+}
+
+/// Moves focus into a dialog once it is on the page.
+pub fn focus_on_open(r: NodeRef<leptos::html::Div>) {
+    Effect::new(move || if let Some(d) = r.get() { if let Some(f) = focusables(&d).first() { let _ = f.focus(); } });
 }

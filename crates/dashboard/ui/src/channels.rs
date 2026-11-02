@@ -11,12 +11,12 @@ fn lines(v: &Value, key: &str) -> Vec<String> {
 #[component]
 pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let preview = RwSignal::new(None::<Vec<String>>);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let (gp, ga) = (guild.clone(), guild.clone());
-    let show = move |_| { let g = gp.clone(); msg.set(String::new()); run_act(async move { api("GET", &format!("/api/guilds/{g}/channel-setup/preview"), None).await }, msg, need, move |v| preview.set(Some(lines(&v, "lines")))) };
+    let show = move |_| { let g = gp.clone(); msg.clear(); run_act(async move { api("GET", &format!("/api/guilds/{g}/channel-setup/preview"), None).await }, msg, need, move |v| preview.set(Some(lines(&v, "lines")))) };
     let apply = Callback::new(move |_: ()| { let g = ga.clone(); preview.set(None); run_act(async move { api("POST", &format!("/api/guilds/{g}/channel-setup/apply"), None).await }, msg, need, move |v| {
         let failed = lines(&v, "failed");
-        msg.set(format!("Applied {} overwrite(s), backup #{} taken first (Backups can revert it).{}", v["applied"], v["backup"], if failed.is_empty() { String::new() } else { format!(" Failed:\n{}", failed.join("\n")) }));
+        msg.ok(format!("Applied {} overwrite(s), backup #{} taken first (Backups can revert it).{}", v["applied"], v["backup"], if failed.is_empty() { String::new() } else { format!(" Failed:\n{}", failed.join("\n")) }));
     }) });
     view! {
         <Section guild=guild.clone() name="channel_profiles".to_string() enrolled />
@@ -31,7 +31,7 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
                     <Show when={let n = lines.len(); move || n > 0}><button on:click=move |_| apply.run(())>"Apply"</button></Show>
                 </div>
             })}
-            <pre class="info">{move || msg.get()}</pre>
+            <Toast msg />
         </div>
         <StepUp need enrolled />
     }

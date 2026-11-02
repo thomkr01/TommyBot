@@ -21,7 +21,7 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let dc = RwSignal::new(json!({}));
     let catalog = RwSignal::new(json!([]));
     let version = RwSignal::new(0i64);
-    let msg = RwSignal::new(String::new());
+    let msg = Msg::default();
     let need = RwSignal::new(false);
     let open = RwSignal::new(None::<i32>); // permit being edited
     let tab = RwSignal::new(0u8);
@@ -53,7 +53,9 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let dialog = move |i: i32| {
         let n = i.max(0) as usize;
         let ids = (i < 0).then_some(if i == -1 { "eo" } else { "ta" });
-        view! { <div class="modal" role="dialog" aria-modal="true" aria-label="Edit permit" on:keydown=move |e| if e.key() == "Escape" { cfg.set(snap.get_untracked()); open.set(None) }><div class="card">
+        let r = NodeRef::new();
+        focus_on_open(r);
+        view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Edit permit" on:keydown=move |e| dialog_keys(&e, || { cfg.set(snap.get_untracked()); open.set(None) })><div class="card">
             <div class="tabs">
                 <button class:on=move || tab.get() == 0 on:click=move |_| tab.set(0)>"General"</button>
                 {(i >= 0).then(|| view! { <button class:on=move || tab.get() == 1 on:click=move |_| { section.set(None); tab.set(1) }>"Permissions"</button> })}
@@ -118,8 +120,8 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     <button class="ghost" title="Edit Permit" on:click=move |_| start(i as i32)>"Edit"</button></td></tr>
             }).collect_view()}
         </tbody></table>
-        <AnimatedShow when=Signal::derive(move || deleting.get().is_some()) hide_class="out" hide_delay=OUT>{move || del.get().map(|n| view! { <div class="modal" role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| if e.key() == "Escape" { deleting.set(None) }><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get_untracked()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
-            <div class="row"><button class="ghost" on:click=move |_| deleting.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); deleting.set(None) }>"Delete"</button></div></div></div> })}
+        <AnimatedShow when=Signal::derive(move || deleting.get().is_some()) hide_class="out" hide_delay=OUT>{move || del.get().map(|n| { let r = NodeRef::new(); focus_on_open(r); view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| dialog_keys(&e, || deleting.set(None))><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get_untracked()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
+            <div class="row"><button class="ghost" on:click=move |_| deleting.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); deleting.set(None) }>"Delete"</button></div></div></div> } })}
 </AnimatedShow>
         <AnimatedShow when=Signal::derive(move || open.get().is_some()) hide_class="out" hide_delay=OUT>{move || dlg.get().map(|i| dialog(i))}</AnimatedShow>
         <AnimatedShow when=Signal::derive(move || cfg.get() != orig.get()) hide_class="out" hide_delay=OUT>

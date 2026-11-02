@@ -27,7 +27,7 @@ const LOCKS: [(&str, &str, &str, Covers); 4] = [
 #[component]
 pub fn LockdownManage(guild: String) -> impl IntoView {
     let status = RwSignal::new(json!({}));
-    let msg = RwSignal::new(String::new());
+    let msg = Msg::default();
     let (secs, single) = (RwSignal::new(0i64), RwSignal::new(false));
     let channel = RwSignal::new(String::new());
     let chans = RwSignal::new(Vec::<Value>::new());
@@ -35,7 +35,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
     let load = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/lockdown", g.get_value()), None).await {
             Ok(v) => status.set(v),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     load();
@@ -44,8 +44,8 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
     });
     let act = move |path: &'static str, body: Value| spawn_local(async move {
         match api("POST", &format!("/api/guilds/{}/lockdown/{path}", g.get_value()), Some(body)).await {
-            Ok(_) => { msg.set("Sent. It takes effect within a few seconds.".into()); later(6000, load); }
-            Err(e) => msg.set(e),
+            Ok(_) => { msg.ok("Sent. It takes effect within a few seconds."); later(6000, load); }
+            Err(e) => msg.err(e),
         }
     });
     let lock = move |kind: &'static str, channel: Option<String>| act("lock", json!({"kind": kind, "channel": channel, "duration_s": (secs.get_untracked() > 0).then(|| secs.get_untracked())}));
@@ -111,7 +111,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
                 <button class="danger" disabled=move || channel.get().is_empty() on:click=move |_| lock("channel", Some(channel.get_untracked()))>"Lock"</button>
             </div>
         </Show>
-        <p class="info">{move || msg.get()}</p>
+        <Toast msg />
         </div>
     }
 }
@@ -119,12 +119,12 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
 #[component]
 pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let problems = RwSignal::new(None::<Vec<Value>>);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = StoredValue::new(guild.clone());
     let check = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/lockdown/check", g.get_value()), None).await {
             Ok(v) => problems.set(v.as_array().cloned()),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     check();
@@ -138,7 +138,7 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
             <Show when=move || problems.get().is_some_and(|p| p.is_empty())><p class="ok">"No lockdown compatibility issues found."</p></Show>
             {move || problems.get().unwrap_or_default().into_iter().map(|p| view! { <div class="row"><span class="warn">{s(&p["text"]).replace("<@&", "role ").replace("<#", "channel ").replace('>', "")}</span></div> }).collect_view()}
             <button class="ghost" on:click=move |_| check()>"Check again"</button>
-            <p class="err">{move || msg.get()}</p>
+            <Toast msg />
         </div>
         <Section guild=guild.clone() name="lockdown".to_string() enrolled />
         <StepUp need enrolled />
@@ -169,7 +169,7 @@ fn blank_rule(name: &str, trigger: &str) -> Value {
 #[component]
 fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>, done: impl Fn() + Clone + 'static) -> impl IntoView {
     let val = RwSignal::new(rule.get_untracked().unwrap_or_default());
-    let msg = RwSignal::new(String::new());
+    let msg = Msg::default();
     let id = val.get_untracked()["id"].as_str().map(String::from);
     let creating = id.is_none();
     let trigger = move || s(&val.get()["trigger"]);
@@ -183,7 +183,7 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
                     Some(id) => api("PUT", &format!("/api/guilds/{g}/discord-rules/{id}"), Some(body)).await,
                     None => api("POST", &format!("/api/guilds/{g}/discord-rules"), Some(body)).await,
                 };
-                match r { Ok(_) => done(), Err(e) => msg.set(e) }
+                match r { Ok(_) => done(), Err(e) => msg.err(e) }
             });
         }
     };
@@ -229,7 +229,7 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
             // Discord takes categories in the same exempt list as channels.
             {fld("exempt_channels", "categories", "Whitelisted Categories")}
             {fld("exempt_channels", "channels", "Whitelisted Channels")}
-            <div class="row"><button on:click=save>{if creating { "Create" } else { "Save" }}</button><button class="ghost" on:click=move |_| rule.set(None)>"Cancel"</button><span class="err">{move || msg.get()}</span></div>
+            <div class="row"><button on:click=save>{if creating { "Create" } else { "Save" }}</button><button class="ghost" on:click=move |_| rule.set(None)>"Cancel"</button><Toast msg /></div>
         </div>
     }
 }
@@ -237,13 +237,13 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
 #[component]
 pub fn DiscordRules(guild: String) -> impl IntoView {
     let rules = RwSignal::new(Vec::<Value>::new());
-    let (msg, dc, editing) = (RwSignal::new(String::new()), RwSignal::new(json!({})), RwSignal::new(None::<Value>));
+    let (msg, dc, editing) = (Msg::default(), RwSignal::new(json!({})), RwSignal::new(None::<Value>));
     let (picking, loaded) = (RwSignal::new(false), RwSignal::new(false));
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/discord-rules", g.get_value()), None).await {
-            Ok(v) => { rules.set(v.as_array().cloned().unwrap_or_default()); msg.set(String::new()); }
-            Err(e) => msg.set(e),
+            Ok(v) => { rules.set(v.as_array().cloned().unwrap_or_default()); msg.clear(); }
+            Err(e) => msg.err(e),
         }
         loaded.set(true);
     });
@@ -254,7 +254,7 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
     let call = move |method: &'static str, path: String, body: Option<Value>| spawn_local(async move {
         match api(method, &format!("/api/guilds/{}/discord-rules{path}", g.get_value()), body).await {
             Ok(_) => load(),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     view! {
@@ -270,16 +270,16 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
                 on:click=move |_| if confirm("Copy your word blacklist into a new Discord AutoMod rule and clear the local lists? This cannot be undone.") {
                     spawn_local(async move {
                         match api("POST", &format!("/api/guilds/{}/discord-rules-migrate-words", g.get_value()), None).await {
-                            Ok(_) => { load(); msg.set("Words migrated.".into()); }
-                            Err(e) => msg.set(e),
+                            Ok(_) => { load(); msg.ok("Words migrated."); }
+                            Err(e) => msg.err(e),
                         }
                     });
                 }>"Migrate words to Discord's AutoMod"</button>
             <button class="go" on:click=move |_| picking.set(true)>"+ Create"</button>
-            <span class="err">{move || msg.get()}</span>
+            <Toast msg />
         </div>
         <Show when=move || loaded.get() && rules.get().is_empty()>
-            <div class="card empty"><p class="warn">"No Discord AutoMod rules found."</p></div>
+            <p class="card empty muted">"No Discord AutoMod rules found."</p>
         </Show>
         <Show when=move || picking.get()>
             <div class="card"><h2>"Create a rule"</h2>

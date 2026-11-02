@@ -325,6 +325,8 @@ async fn withdraw(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -
 struct Filter {
     kind: Option<String>,
     q: Option<String>,
+    #[serde(default)]
+    page: i64,
 }
 
 async fn list(
@@ -339,11 +341,12 @@ async fn list(
         "select id, user_id::text, username, kind, answers, status, created_at from appeals
          where guild_id = $1 and ($2::text is null or kind = $2)
            and ($3 = '' or user_id::text = $3 or username ilike '%' || $3 || '%')
-         order by (status = 'open') desc, created_at desc limit 200",
+         order by (status = 'open') desc, created_at desc limit 50 offset $4",
     )
     .bind(guild)
     .bind(f.kind.filter(|k| k == "ban" || k == "timeout"))
     .bind(q.trim())
+    .bind(crate::records::offset(f.page))
     .fetch_all(&st.db)
     .await?;
     Ok(Json(json!(rows.into_iter().map(|(id, user_id, username, kind, answers, status, at)|

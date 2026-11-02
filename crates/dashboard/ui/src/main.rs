@@ -36,8 +36,8 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports"), ("tickets", "Tickets"), ("catch", "Catch Channel")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("embeds", "Embed Builder"), ("rescue", "Rescue Key")]),
 ];
-/// Groups Wick has; the rest are TommyBot extras that stay folded until visited.
-const WICK_GROUPS: [&str; 3] = ["Auto Mod", "Anti Nuke", "Server Joins"];
+/// Groups that start open; the rest stay folded until visited.
+const OPEN_GROUPS: [&str; 4] = ["Auto Mod", "Anti Nuke", "Server Joins", "Moderation"];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
 const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
 const RAID_TABS: &[(&str, &str)] = &[("joinraid", "Settings"), ("raid_log", "Raid Log")];
@@ -121,7 +121,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let (diff, set_diff) = signal(String::new());
     let version = RwSignal::new(0i64);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let load = {
         let g = guild.clone();
         move || { let g = g.clone(); spawn_local(async move {
@@ -155,7 +155,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 }
             }
         </For>
-        <p>{move || msg.get()}</p>
+        <Toast msg />
         <StepUp need enrolled />
         <pre>{move || diff.get()}</pre>
     }
@@ -175,6 +175,7 @@ fn App() -> impl IntoView {
     let pages = StoredValue::new(TOP.iter().chain(NAV.iter().flat_map(|(_, i)| i.iter())).copied().collect::<Vec<_>>());
     let guild = Signal::derive(move || route.get().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())));
     let (nav_open, set_nav_open) = signal(false);
+    window_event_listener(leptos::ev::keydown, move |e| if e.key() == "Escape" { set_nav_open.set(false) });
     let (filter, set_filter) = signal(String::new());
     let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
     let load_guilds = move || async move {
@@ -198,7 +199,7 @@ fn App() -> impl IntoView {
     view! {
         <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a></main> }>
             <header>
-                <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
+                <button class="ghost menu-btn" aria-label="menu" aria-expanded=move || nav_open.get().to_string() on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/">"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
@@ -208,6 +209,7 @@ fn App() -> impl IntoView {
                 </details>
             </header>
             <div class="shell">
+                <Show when=move || nav_open.get()><div class="scrim" on:click=move |_| set_nav_open.set(false)></div></Show>
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
                         None => view! { <a href="#/">"Servers"</a> }.into_any(),
@@ -216,7 +218,7 @@ fn App() -> impl IntoView {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
                             let hits = search::counts(search);
-                            let link = |p: &str, t: &str| { let n: usize = hits.iter().filter(|(k, _)| *k == p || k.starts_with(&format!("{p}/"))).map(|(_, n)| n).sum(); let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{matches!(p, "logging" | "discord_automod").then(|| view! { <span class="chip new">"new"</span> })}{(n > 0).then(|| view! { <span class="chip hits">{n}</span> })}</a> } };
+                            let link = |p: &str, t: &str| { let n: usize = hits.iter().filter(|(k, _)| *k == p || k.starts_with(&format!("{p}/"))).map(|(_, n)| n).sum(); let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{(n > 0).then(|| view! { <span class="chip hits">{n}</span> })}</a> } };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -226,7 +228,7 @@ fn App() -> impl IntoView {
                             view! {
                                 <a class="srv" href="#/" title="Switch server">{icon}{name}<button class="refresh" on:click=move |e| { e.prevent_default(); e.stop_propagation(); spawn_local(load_guilds()) }>"refresh server"</button></a>
                                 {TOP.iter().map(|(p, t)| link(p, t)).collect_view()}
-                                {NAV.iter().map(|(grp, items)| view! { <details open=WICK_GROUPS.contains(grp) || items.iter().any(|(p, _)| *p == page)><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
+                                {NAV.iter().map(|(grp, items)| view! { <details open=OPEN_GROUPS.contains(grp) || items.iter().any(|(p, _)| *p == page)><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
                             }.into_any()
                         }
                     }}

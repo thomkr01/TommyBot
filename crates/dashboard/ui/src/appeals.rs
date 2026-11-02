@@ -10,17 +10,18 @@ fn s(v: &Value) -> String {
 #[component]
 pub fn AppealList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
-    let (kind, q, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (kind, q, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), Msg::default());
     let loaded = RwSignal::new(false);
-    let g = StoredValue::new(guild);
+    let (g, page) = (StoredValue::new(guild), RwSignal::new(0i64));
     let load = move || spawn_local(async move {
-        let path = format!("/api/guilds/{}/appeals?kind={}&q={}", g.get_value(), kind.get_untracked(), js_sys::encode_uri_component(&q.get_untracked()));
+        let path = format!("/api/guilds/{}/appeals?kind={}&q={}&page={}", g.get_value(), kind.get_untracked(), js_sys::encode_uri_component(&q.get_untracked()), page.get_untracked());
         match api("GET", &path, None).await {
-            Ok(v) => { msg.set(String::new()); set_rows.set(v.as_array().cloned().unwrap_or_default()) }
-            Err(e) => msg.set(e),
+            Ok(v) => { msg.clear(); set_rows.set(v.as_array().cloned().unwrap_or_default()) }
+            Err(e) => msg.err(e),
         }
         loaded.set(true);
     });
+    let first = move || { page.set(0); load() };
     load();
     let reply = RwSignal::new(String::new());
     let decide = move |id: i64, accept: bool, blacklist: bool, dismiss: bool| spawn_local(async move {
@@ -28,20 +29,20 @@ pub fn AppealList(guild: String) -> impl IntoView {
         let body = json!({"accept": accept, "blacklist": blacklist, "dismiss": dismiss, "reply": reply.get_untracked()});
         match api("POST", &path, Some(body)).await {
             Ok(_) => load(),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     view! {
         <div class="card row">
             <div class="chips">
-                {["ban", "timeout"].map(|k| view! { <button class="ghost" class:on=move || kind.get() == k on:click=move |_| { kind.set(if kind.get_untracked() == k { String::new() } else { k.into() }); load() }>{k}</button> }).collect_view()}
+                {["ban", "timeout"].map(|k| view! { <button class="ghost" class:on=move || kind.get() == k on:click=move |_| { kind.set(if kind.get_untracked() == k { String::new() } else { k.into() }); first() }>{k}</button> }).collect_view()}
             </div>
-            <input placeholder="User ID/tag" aria-label="user ID or tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
-            <button class="ghost" on:click=move |_| load()>"Search"</button>
+            <input placeholder="User ID/tag" aria-label="user ID or tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| first() />
+            <button class="ghost" on:click=move |_| first()>"Search"</button>
             <input placeholder="Reply to the member (optional)" aria-label="reply to the member" prop:value=reply on:input=move |e| reply.set(event_target_value(&e)) />
-            <span class="err">{move || msg.get()}</span>
+            <Toast msg />
         </div>
-        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No pending appeals.."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No pending appeals."</p></Show>
         <For each=move || rows.get() key=|r| (r["id"].as_i64(), r["status"].as_str().map(String::from)) let:r>
             {
                 let id = r["id"].as_i64().unwrap_or(0);
@@ -60,6 +61,7 @@ pub fn AppealList(guild: String) -> impl IntoView {
                 </div> }
             }
         </For>
+        {crate::records::pager(page, move || rows.get().len(), load)}
     }
 }
 
@@ -67,21 +69,21 @@ pub fn AppealList(guild: String) -> impl IntoView {
 #[component]
 pub fn Blacklist(guild: String, base: &'static str, #[prop(optional)] purge: bool) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
-    let (user, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (user, msg) = (RwSignal::new(String::new()), Msg::default());
     let loaded = RwSignal::new(false);
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/{base}/blacklist", g.get_value()), None).await {
             Ok(v) => set_rows.set(v.as_array().cloned().unwrap_or_default()),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
         loaded.set(true);
     });
     load();
     let post = move |path: String, body: Option<Value>| spawn_local(async move {
         match api("POST", &format!("/api/guilds/{}/{base}/blacklist{path}", g.get_value()), body).await {
-            Ok(_) => { msg.set(String::new()); load() }
-            Err(e) => msg.set(e),
+            Ok(_) => { msg.clear(); load() }
+            Err(e) => msg.err(e),
         }
     });
     view! {
@@ -89,9 +91,9 @@ pub fn Blacklist(guild: String, base: &'static str, #[prop(optional)] purge: boo
             <input placeholder="User ID" aria-label="user ID" prop:value=user on:input=move |e| user.set(event_target_value(&e)) />
             <button on:click=move |_| post(String::new(), Some(json!({"user_id": user.get_untracked()})))>"Blacklist user"</button>
             <Show when=move || purge><button class="ghost" on:click=move |_| if confirm("Remove every user from the appeals blacklist?") { post("/purge".into(), None) }>"Purge all"</button></Show>
-            <span class="err">{move || msg.get()}</span>
+            <Toast msg />
         </div>
-        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No blacklisted users.."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No blacklisted users."</p></Show>
         <For each=move || rows.get() key=|r| s(&r["user_id"]) let:r>
             {
                 let id = s(&r["user_id"]);
@@ -106,7 +108,7 @@ pub fn Blacklist(guild: String, base: &'static str, #[prop(optional)] purge: boo
 #[component]
 pub fn AppealForm(guild: String) -> impl IntoView {
     let info = RwSignal::new(Value::Null);
-    let (answers, msg, done) = (RwSignal::new(Vec::<String>::new()), RwSignal::new(String::new()), RwSignal::new(false));
+    let (answers, msg, done) = (RwSignal::new(Vec::<String>::new()), Msg::default(), RwSignal::new(false));
     let g = StoredValue::new(guild);
     let mine = RwSignal::new(Vec::<Value>::new());
     let load_mine = move || spawn_local(async move {
@@ -118,24 +120,24 @@ pub fn AppealForm(guild: String) -> impl IntoView {
     let withdraw = move |_| spawn_local(async move {
         match api("POST", &format!("/api/appeal/{}/withdraw", g.get_value()), None).await {
             Ok(_) => load_mine(),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     spawn_local(async move {
         match api("GET", &format!("/api/appeal/{}", g.get_value()), None).await {
             Ok(v) => { answers.set(vec![String::new(); v["fields"].as_array().map_or(0, Vec::len)]); info.set(v) }
-            Err(e) => msg.set(if e == "not found" { "Appeals are not enabled in this server.".into() } else { e }),
+            Err(e) => msg.err(if e == "not found" { "Appeals are not enabled in this server.".into() } else { e }),
         }
     });
     let submit = move |_| spawn_local(async move {
         match api("POST", &format!("/api/appeal/{}", g.get_value()), Some(json!({"answers": answers.get_untracked()}))).await {
             Ok(_) => done.set(true),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     view! {
         <div class="head"><h1>"Appeal"</h1></div>
-        <p class="err">{move || msg.get()}</p>
+        <Toast msg />
         <For each=move || mine.get() key=|r| (r["id"].as_i64(), r["status"].as_str().map(String::from)) let:r>
             {
                 let open = r["status"] == "open";
