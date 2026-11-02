@@ -41,7 +41,6 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .iter()
                 .find(|p| p.0 == *channel && p.1 == *role)
                 .map_or((0, 0), |p| (p.2, p.3));
-            // Forums are written to through threads, so those bits go too.
             let o = PermissionOverwrite {
                 id: Id::new(*role),
                 kind: PermissionOverwriteType::Role,

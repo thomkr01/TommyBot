@@ -11,7 +11,7 @@ pub enum Level {
 }
 
 /// Sections that need Admin + TOTP step-up (spec 2.5.5).
-pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
+pub use tommybot_core::sections::SENSITIVE;
 
 /// Level and step-up a write to `section` needs.
 pub fn write_bar(section: &str) -> (Level, bool) {

@@ -388,6 +388,9 @@ impl WhitelistList {
 
 pub const MAX_APPEAL_FIELDS: usize = 6;
 
+/// Sections the dashboard saves only after a TOTP step-up, so prefix panels may not edit them.
+pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppealField {
     pub label: String,
