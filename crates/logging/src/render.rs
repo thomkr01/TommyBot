@@ -25,8 +25,8 @@ pub type Link = (&'static str, String);
 
 pub fn message_edit(old: Option<&str>, msg: &Message) -> (Embed, Option<Link>) {
     let embed = Log::new("Message Edited", ORANGE)
-        .user("Responsible", msg.author.id.get())
-        .line("Target", &embed::channel(msg.channel_id.get()))
+        .user("Author", msg.author.id.get())
+        .line("Channel", &embed::channel(msg.channel_id.get()))
         .time()
         .section("Changes")
         .text(&embed::label_head("Content"))
@@ -51,22 +51,20 @@ pub fn message_delete(
     cached: Option<&CachedMessage>,
     deleter: Option<Id<UserMarker>>,
 ) -> Embed {
-    let mut log = Log::new("Message Deleted", RED);
-    if let Some(d) = deleter {
-        log = log.user("Responsible", d.get());
-    }
-    log = log
+    let sent = ((id.get() >> 22) + DISCORD_EPOCH_MS) / 1000;
+    let mut log = Log::new("Message Deleted", RED)
+        .maybe_user("Responsible", deleter.map(Id::get))
+        .maybe_user("Author", cached.map(|c| c.author.get()))
+        .line("Channel", &embed::channel(channel.get()))
+        .line("Sent", &format!("<t:{sent}:F>"))
         .time()
-        .section("Previous Settings")
-        .line("Channel", &format!("<#{channel}>"))
-        .line("Id", &id.to_string())
         .text(&embed::label_head("Content"))
         .diff(
             Some(cached.map_or("(content not cached)", |c| c.content.as_str())),
             None,
         );
-    if let Some(c) = cached {
-        log = log.user("Author", c.author.get());
+    if let Some(c) = cached.filter(|c| !c.attachments.is_empty()) {
+        log = log.line("Attachments", &c.attachments.join(", "));
     }
     log.build()
 }
@@ -124,10 +122,12 @@ pub fn voice(
 }
 
 pub fn member_remove(user: &User) -> Embed {
+    let created = ((user.id.get() >> 22) + DISCORD_EPOCH_MS) / 1000;
     Log::new("Member Leave", RED)
         .thumbnail(user)
         .user("Target", user.id.get())
         .time()
+        .line("Creation", &format!("<t:{created}:F> (<t:{created}:R>)"))
         .build()
 }
 
@@ -194,7 +194,11 @@ pub fn audit(e: &AuditLogEntry) -> Option<Entry> {
             }
         })
     } else {
-        e.target_id.map(|t| target_ref(kind, t.get()))
+        e.target_id.map(|t| match (kind, change_name(e)) {
+            // A webhook id alone says nothing; its name is in the changes.
+            (LogKind::Webhook, Some(n)) => format!("{n} `{t}`"),
+            _ => target_ref(kind, t.get()),
+        })
     };
     if let Some(t) = target {
         // Discord renders a mention of the @everyone role (its id is the guild id) as "@@everyone".
@@ -389,6 +393,19 @@ fn perm_names(p: Permissions) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The `name` change's new value, else its old one.
+fn change_name(e: &AuditLogEntry) -> Option<String> {
+    e.changes.iter().find_map(|c| {
+        let v = serde_json::to_value(c).ok()?;
+        (v["key"] == "name").then(|| {
+            v["new_value"]
+                .as_str()
+                .or(v["old_value"].as_str())
+                .map(str::to_owned)
+        })?
+    })
 }
 
 fn target_ref(kind: LogKind, id: u64) -> String {

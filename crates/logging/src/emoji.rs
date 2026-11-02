@@ -118,6 +118,8 @@ pub fn for_label(label: &str) -> Emoji {
         ("inviter", "moderator_field"),
         ("owner", "owner"),
         ("author", "member"),
+        ("attachment", "attachments"),
+        ("sent", "calendar"),
         ("member", "member"),
         ("user", "member"),
         ("target", "target"),

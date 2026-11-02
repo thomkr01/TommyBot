@@ -256,7 +256,12 @@ impl Logger {
         match event {
             Event::MessageCreate(m) => {
                 if let Some(guild) = m.guild_id {
-                    let cached = CachedMessage::new(m.author.id, m.content.clone(), now);
+                    let cached = CachedMessage::new(
+                        m.author.id,
+                        m.content.clone(),
+                        files(&m.attachments),
+                        now,
+                    );
                     self.cache.insert(guild, m.id, cached, now);
                 }
                 None
@@ -268,7 +273,12 @@ impl Logger {
                     .cache
                     .get(guild, msg.id, now)
                     .map(|c| c.content.clone());
-                let cached = CachedMessage::new(msg.author.id, msg.content.clone(), now);
+                let cached = CachedMessage::new(
+                    msg.author.id,
+                    msg.content.clone(),
+                    files(&msg.attachments),
+                    now,
+                );
                 self.cache.insert(guild, msg.id, cached, now);
                 // Embed-only updates keep the content and are not worth a log.
                 if old.as_deref() == Some(msg.content.as_str()) {
@@ -387,6 +397,10 @@ impl Logger {
             })
             .map(|d| d.executor)
     }
+}
+
+fn files(a: &[twilight_model::channel::Attachment]) -> Vec<String> {
+    a.iter().map(|a| a.filename.clone()).collect()
 }
 
 /// Whether a log for this channel is on the ignore list.
@@ -604,7 +618,7 @@ mod tests {
         let now = Instant::now();
         let mut logger = Logger::new(Id::new(1));
         for (id, text) in [(7, "first"), (8, "second")] {
-            let c = CachedMessage::new(Id::new(20), text.into(), now);
+            let c = CachedMessage::new(Id::new(20), text.into(), vec![], now);
             logger.cache.insert(Id::new(9), Id::new(id), c, now);
         }
         let bulk = |ids: Vec<u64>| {
@@ -639,7 +653,7 @@ mod tests {
         logger.cache.insert(
             Id::new(9),
             Id::new(7),
-            CachedMessage::new(Id::new(20), "hi".into(), t0),
+            CachedMessage::new(Id::new(20), "hi".into(), vec!["cat.png".into()], t0),
             t0,
         );
         let delete =
@@ -654,8 +668,8 @@ mod tests {
         let out = logger.flush(t0 + HOLD);
         assert_eq!(out.len(), 1);
         let d = out[0].embed.description.as_deref().unwrap();
-        assert!(d.starts_with("▸ **Responsible:** <@10> *`10`*"));
-        assert!(d.ends_with("```diff\n- hi\n```\n▸ **Author:** <@20> *`20`*"));
+        assert!(d.starts_with("▸ **Responsible:** <@10> *`10`*\n▸ **Author:** <@20> *`20`*\n▸ **Channel:** <#30>"), "{d}");
+        assert!(d.ends_with("```diff\n- hi\n```\n▸ **Attachments:** cat.png"), "{d}");
         assert!(logger.flush(t0 + HOLD).is_empty());
     }
 
