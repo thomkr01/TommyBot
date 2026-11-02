@@ -46,7 +46,19 @@ pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Leve
         .await
     };
     let discord_owner = is_discord_owner(st, s, guild).await?;
-    let (extra_owner, trusted_admin) = (flag("extra_owners").await?, flag("trusted_admins").await?);
+    let (mut extra_owner, mut trusted_admin) =
+        (flag("extra_owners").await?, flag("trusted_admins").await?);
+    // A banned or departed EO/TA keeps the table row, so the list alone never grants access.
+    if !discord_owner
+        && (extra_owner || trusted_admin)
+        && st
+            .discord
+            .member(guild, &s.user_id.to_string())
+            .await?
+            .is_none()
+    {
+        (extra_owner, trusted_admin) = (false, false);
+    }
     let perms = if discord_owner || extra_owner || trusted_admin {
         vec![]
     } else {
@@ -142,13 +154,24 @@ pub struct Put {
     value: Value,
 }
 
-pub(crate) async fn log_change(st: &AppState, config: &Value, text: String) {
+pub(crate) async fn log_change(st: &AppState, guild: i64, config: &Value, text: String) {
     if let Some(ch) = config["logging"]["config_changes"]
         .as_str()
         .map(String::from)
     {
         let d = st.discord.clone();
         tokio::spawn(async move {
+            match d.private_channel_of(guild, &ch).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return tracing::warn!(
+                        guild,
+                        ch,
+                        "config-changes log skipped: channel is public or in another server"
+                    )
+                }
+                Err(e) => return tracing::warn!("config-changes log check failed: {e:#}"),
+            }
             let log =
                 tommybot_logging::Log::new("Configuration Changed", tommybot_logging::embed::BLUE)
                     .text(&text)
@@ -157,6 +180,58 @@ pub(crate) async fn log_change(st: &AppState, config: &Value, text: String) {
                 tracing::warn!("config-changes log failed: {e:#}");
             }
         });
+    }
+}
+
+/// The first id `new` adds that is not one of the guild's channels or roles.
+fn foreign_id(
+    section: &str,
+    new: &Value,
+    old: &Value,
+    channels: &Value,
+    roles: &Value,
+) -> Option<String> {
+    let (old_ch, old_ro) = crate::schema::ids(section, old);
+    let (ch, ro) = crate::schema::ids(section, new);
+    let known = |list: &Value, id: &String| {
+        list.as_array()
+            .into_iter()
+            .flatten()
+            .any(|x| x["id"].as_str() == Some(id))
+    };
+    // Ids already stored are left alone, so a deleted channel never blocks saving the rest.
+    ch.into_iter()
+        .filter(|id| !old_ch.contains(id))
+        .find(|id| !known(channels, id))
+        .or_else(|| {
+            ro.into_iter()
+                .filter(|id| !old_ro.contains(id))
+                .find(|id| !known(roles, id))
+        })
+}
+
+/// The bot is in many servers: a section may only point at this guild's channels and roles.
+async fn check_ids(
+    st: &AppState,
+    guild: i64,
+    section: &str,
+    new: &Value,
+    old: &Value,
+) -> Result<(), ApiError> {
+    if foreign_id(section, new, old, &Value::Null, &Value::Null).is_none() {
+        return Ok(());
+    }
+    let get = |p| async move {
+        st.discord
+            .call(reqwest::Method::GET, &format!("/guilds/{guild}/{p}"), None)
+            .await
+    };
+    let (channels, roles) = (get("channels").await?, get("roles").await?);
+    match foreign_id(section, new, old, &channels, &roles) {
+        Some(id) => Err(ApiError::BadRequest(format!(
+            "{id} is not a channel or role of this server"
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -176,6 +251,7 @@ pub async fn put_section(
     let (min, step_up) = access::write_bar(&section);
     require(&st, &s, guild, min, step_up).await?;
     let (_, mut config) = store::current(&st.db, guild).await?;
+    check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
     config[&section] = b.value;
     let web = matches!(section.as_str(), "verification" | "lockdown");
     if let Some(e) = tommybot_automod::join::web_mode_error(&config).filter(|_| web) {
@@ -186,6 +262,7 @@ pub async fn put_section(
     tx.commit().await?;
     log_change(
         &st,
+        guild,
         &config,
         format!(
             "{} (<@{}>) changed `{section}` -> config v{version}",
@@ -222,6 +299,7 @@ pub async fn put_permits(
     tx.commit().await?;
     log_change(
         &st,
+        guild,
         &config,
         format!(
             "{} (<@{}>) changed `permits` -> config v{version}",
@@ -279,6 +357,12 @@ pub async fn rollback(
     // Config may hold sensitive sections and permits, so a rollback needs the same bar as editing them.
     let level = require(&st, &s, guild, Level::Admin, true).await?;
     let old = version(&st, guild, v).await?;
+    let (_, now) = store::current(&st.db, guild).await?;
+    if level < rollback_bar(&old, &now) {
+        return Err(ApiError::Forbidden(
+            "this rollback changes a section only owners can edit",
+        ));
+    }
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
     if let Some(p) = old.get("permits") {
@@ -296,6 +380,7 @@ pub async fn rollback(
     tx.commit().await?;
     log_change(
         &st,
+        guild,
         &old,
         format!(
             "{} (<@{}>) rolled config back to v{v} -> v{version}",
@@ -304,6 +389,23 @@ pub async fn rollback(
     )
     .await;
     Ok(Json(json!({"version": version})))
+}
+
+/// The highest level any section a rollback from `now` to `old` changes needs (permits are checked apart).
+fn rollback_bar(old: &Value, now: &Value) -> Level {
+    let keys = |v: &Value| {
+        v.as_object()
+            .into_iter()
+            .flat_map(|o| o.keys().cloned())
+            .collect::<Vec<_>>()
+    };
+    keys(old)
+        .into_iter()
+        .chain(keys(now))
+        .filter(|k| k != "permits" && old.get(k) != now.get(k))
+        .map(|k| access::write_bar(&k).0)
+        .max()
+        .unwrap_or(Level::None)
 }
 
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is.
@@ -348,6 +450,9 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
                 return Err(ApiError::BadRequest(format!("{d} cannot be blacklisted")));
             }
         }
+        // A wrongly typed heat block is reported by the AutomodCfg parse below.
+        let heat = serde_json::from_value(v["heat"].clone()).unwrap_or_default();
+        heat_ok(&heat).map_err(|e| ApiError::BadRequest(e.into()))?;
     }
     if section == "misc" && v["warn_actions"].as_array().is_some_and(|a| a.len() > 5) {
         return Err(ApiError::BadRequest("at most 5 warn actions".into()));
@@ -379,10 +484,78 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
 }
 
+/// Bounds that keep the heat model meaningful: a max to reach, decay below 100%/s, no negative weights.
+fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
+    if h.max <= 0.0 {
+        return Err("heat max must be above 0");
+    }
+    if !(0.0..1.0).contains(&h.decay_per_sec) {
+        return Err("heat decay must be at least 0 and below 1");
+    }
+    let weights = serde_json::to_value(h).unwrap_or_default();
+    if weights
+        .as_object()
+        .into_iter()
+        .flatten()
+        .any(|(_, w)| w.as_f64().is_some_and(|w| w < 0.0))
+    {
+        return Err("heat weights cannot be negative");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod logging_validate_tests {
-    use super::validate;
+    use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rollback_needs_the_bar_of_every_changed_section() {
+        let now = json!({"automod": {"enabled": true}, "antinuke": {"enabled": true}, "permits": {"ta": []}});
+        let mut old = now.clone();
+        assert_eq!(rollback_bar(&old, &now), Level::None);
+        old["permits"] = json!({"ta": ["1"]});
+        assert_eq!(
+            rollback_bar(&old, &now),
+            Level::None,
+            "permits are checked apart"
+        );
+        old["automod"]["enabled"] = json!(false);
+        assert_eq!(rollback_bar(&old, &now), Level::Editor);
+        old.as_object_mut().unwrap().remove("antinuke");
+        assert_eq!(
+            rollback_bar(&old, &now),
+            Level::Owner,
+            "a dropped section counts"
+        );
+    }
+
+    #[test]
+    fn foreign_ids_are_refused_unless_already_stored() {
+        let (channels, roles) = (json!([{"id": "1"}]), json!([{"id": "5"}]));
+        let check = |new, old| foreign_id("logging", &new, &old, &channels, &roles);
+        assert_eq!(check(json!({"fallback": "1"}), json!({})), None);
+        assert_eq!(check(json!({"fallback": "2"}), json!({})), Some("2".into()));
+        assert_eq!(
+            check(json!({"fallback": "2"}), json!({"fallback": "2"})),
+            None
+        );
+        assert_eq!(
+            check(json!({"fallback": "5"}), json!({})),
+            Some("5".into()),
+            "a role is not a channel"
+        );
+    }
+
+    #[test]
+    fn heat_bounds() {
+        let heat = |h| validate("automod", &json!({"heat": h}));
+        assert!(heat(json!({})).is_ok());
+        assert!(heat(json!({"max": 0})).is_err());
+        assert!(heat(json!({"decay_per_sec": 1})).is_err());
+        assert!(heat(json!({"decay_per_sec": -0.1})).is_err());
+        assert!(heat(json!({"per_emoji": -1})).is_err());
+    }
 
     #[test]
     fn discord_domains_cannot_be_blacklisted() {

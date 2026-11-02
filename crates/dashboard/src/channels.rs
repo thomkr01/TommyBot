@@ -231,6 +231,7 @@ async fn apply(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     let (_, config) = store::current(&st.db, guild).await?;
     log_change(
         &st,
+        guild,
         &config,
         format!(
             "{} (<@{}>) applied the channel setup: {applied} overwrite(s), {} failed, backup #{backup}",

@@ -291,6 +291,7 @@ async fn fix(
     let (_, c) = crate::store::current(&st.db, guild).await?;
     log_change(
         &st,
+        guild,
         &c,
         format!(
             "{} (<@{}>) stripped dangerous permissions from role(s) `{}`",
@@ -407,6 +408,7 @@ async fn revert(
         let (_, c) = crate::store::current(&st.db, guild).await?;
         log_change(
             &st,
+            guild,
             &c,
             format!(
                 "{} (<@{}>) reverted {done} action(s)",
@@ -559,6 +561,7 @@ async fn rescue_claim(State(st): State<AppState>, s: Sess, Json(b): Json<Claim>)
     };
     log_change(
         &st,
+        guild,
         &config,
         format!("{} (<@{}>) {what}", s.username, s.user_id),
     )

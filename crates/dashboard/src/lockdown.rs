@@ -241,6 +241,7 @@ pub(crate) async fn audit(
     let (_, c) = crate::store::current(&st.db, guild).await?;
     log_change(
         st,
+        guild,
         &c,
         format!(
             "{} (<@{}>) {what} from the dashboard",
