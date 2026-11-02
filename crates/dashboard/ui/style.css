@@ -15,7 +15,7 @@ body { margin:0; background:var(--page) fixed; background-color:var(--b1); color
 a { color:inherit; }
 .shell { display:flex; min-height:calc(100vh - 80px); }
 header { position:sticky; top:0; z-index:30; height:80px; display:flex; align-items:center; gap:16px; padding:0 24px; background:color-mix(in srgb, var(--b2) 60%, transparent); backdrop-filter:blur(16px); box-shadow:0 1px 3px #0006; }
-header .logo { font-weight:700; font-size:22px; text-decoration:none; } header .sp { flex:1; }
+header .logo { display:flex; align-items:center; gap:10px; font-weight:700; font-size:22px; text-decoration:none; } img.hero { display:block; margin-top:32px; } header .sp { flex:1; }
 header .menu-btn { display:none; }
 .i { display:inline-block; width:1.15em; height:1.15em; vertical-align:-.2em; } .i svg { display:block; width:100%; height:100%; }
 header details { position:relative; margin:0; } header summary { list-style:none; cursor:pointer; width:40px; height:40px; border-radius:50%; background:var(--primary); display:grid; place-items:center; font-weight:700; color:var(--on-primary); }
