@@ -286,7 +286,10 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
     }
     if !fresh {
         // Sent before the punishment landed: remove it, the burst was already punished once.
-        app.http.delete_message(m.channel_id, m.id).await.ok();
+        crate::http_err::best_effort(
+            app.http.delete_message(m.channel_id, m.id).await,
+            "automod delete",
+        );
         return Ok(());
     }
     if m.webhook_id.is_some() {
@@ -353,14 +356,18 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
             .filter(|_| act.timeout_ms > 300_000)
             .map_or(String::new(), |n| format!("\n{n}"));
-        timeout(
+        if let Err(e) = timeout(
             &app.http,
             gid,
             m.author.id,
             act.timeout_ms / 1000,
             "Automod",
         )
-        .await?;
+        .await
+        {
+            action_failed(app, gid, m.author.id.get(), "Timeout", &e).await;
+            return Err(e);
+        }
         // Only after it worked: a failed timeout must not tell them they were timed out.
         reply::dm(
             app,
@@ -555,17 +562,37 @@ async fn filter_action(
                 store::save_strikes(&app.pool, gid.get(), uid.get(), &st).await?;
             }
         }
-        FilterAction::Timeout => {
-            timeout(&app.http, gid, uid, secs, "Automod").await?;
-            auto_case(app, gid, uid, "timeout", factor, Some(secs)).await?;
-        }
-        FilterAction::Kick => {
-            app.http.remove_guild_member(gid, uid).await?;
-            auto_case(app, gid, uid, "kick", factor, None).await?;
-        }
-        FilterAction::Ban => {
-            app.http.create_ban(gid, uid).await?;
-            auto_case(app, gid, uid, "ban", factor, None).await?;
+        FilterAction::Timeout | FilterAction::Kick | FilterAction::Ban => {
+            let (kind, done, secs) = match action {
+                FilterAction::Timeout => (
+                    "timeout",
+                    timeout(&app.http, gid, uid, secs, "Automod").await,
+                    Some(secs),
+                ),
+                FilterAction::Kick => (
+                    "kick",
+                    app.http
+                        .remove_guild_member(gid, uid)
+                        .await
+                        .map(drop)
+                        .map_err(Into::into),
+                    None,
+                ),
+                _ => (
+                    "ban",
+                    app.http
+                        .create_ban(gid, uid)
+                        .await
+                        .map(drop)
+                        .map_err(Into::into),
+                    None,
+                ),
+            };
+            if let Err(e) = done {
+                action_failed(app, gid, uid.get(), kind, &e).await;
+                return Err(e);
+            }
+            auto_case(app, gid, uid, kind, factor, secs).await?;
         }
     }
     send_log(
