@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|purge|emojis|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
+Usage: live.py spam|lock|mention_lock|nuke|purge|emojis|edit|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
@@ -199,8 +199,13 @@ def lock():
             values ({GUILD}, 'lock', '{{"kind": "channel", "channel": {chan}, "duration_s": 15}}', now())""")
     locked = wait_for(locks, lambda n: n > 0)
     send = 1 << 11
-    everyone = [o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == GUILD]
-    denied = bool(everyone) and int(everyone[0]["deny"]) & send != 0
+    # The snapshot is saved before the overwrite lands (crash safety), so poll the overwrite too.
+    for _ in range(10):
+        everyone = [o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == GUILD]
+        denied = bool(everyone) and int(everyone[0]["deny"]) & send != 0
+        if denied:
+            break
+        time.sleep(1)
     unlocked = wait_for(locks, lambda n: n == 0)
     everyone = [o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == GUILD]
     back = not everyone or int(everyone[0]["deny"]) & send == 0
@@ -279,9 +284,36 @@ def purge():
     return check(noted and all(f"e2e purge {i}" in text for i in range(3)),
                  f"purge: file attached={bool(files)} with all 3 messages, embed it replies to names it={noted}")
 
+def edit():
+    """An edit that sneaks a masked invite into a clean message: automod must delete it and log."""
+    set_config("automod", {"enabled": True, "monitor_webhooks": True})
+    since = snowflake_now()
+    chan = text_channel("general")
+    # Hooks of a whitelisted bot (TommyBot itself) are exempt, so the attacker makes this one.
+    hook = call("POST", f"/channels/{chan}/webhooks", os.environ.get("ATTACKER_TOKEN"), {"name": "e2e-editor"})
+    base = f"/webhooks/{hook['id']}/{hook['token']}"
+    sent = call("POST", base + "?wait=true", body={"content": "e2e edit: nothing to see"}, auth=False)
+    time.sleep(2)
+    first = call("GET", f"/channels/{chan}/messages/{sent['id']}", soft=True) is not None
+    call("PATCH", f"{base}/messages/{sent['id']}", body={"content": "e2e edit: [docs](https://discord.gg/e2etest)"},
+         auth=False, soft=True)
+    gone = False
+    for _ in range(10):
+        time.sleep(2)
+        if call("GET", f"/channels/{chan}/messages/{sent['id']}", soft=True) is None:
+            gone = True
+            break
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    if not gone:
+        call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+    set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True})
+    print("cleaned: webhook e2e-editor and its message")
+    return check(first and gone and logged("auto_mod", since),
+                 f"edit: clean message kept={first}, deleted after masked-invite edit={gone}, automod logged")
+
 
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
-             "purge": purge, "emojis": emojis}
+             "purge": purge, "emojis": emojis, "edit": edit}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
