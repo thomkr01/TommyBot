@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::json;
 use std::time::{Duration, Instant};
 use tommybot_automod::lockdown::VIEW_CHANNEL;
 
@@ -223,6 +224,25 @@ impl Discord {
             .text()
             .await?;
         Ok(serde_json::from_str(&text).unwrap_or_default())
+    }
+
+    /// DMs `user` plain text with mentions disabled.
+    pub async fn dm(&self, user: i64, text: &str) -> Result<()> {
+        let ch = self
+            .call(
+                reqwest::Method::POST,
+                "/users/@me/channels",
+                Some(json!({"recipient_id": user.to_string()})),
+            )
+            .await?;
+        let ch = ch["id"].as_str().context("no DM channel id")?;
+        self.call(
+            reqwest::Method::POST,
+            &format!("/channels/{ch}/messages"),
+            Some(json!({"content": text, "allowed_mentions": {"parse": []}})),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Like `call` but hands back the raw response, for callers that branch on the status.

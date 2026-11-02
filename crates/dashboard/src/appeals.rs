@@ -426,27 +426,8 @@ async fn decide(
         if !reply.is_empty() {
             text.push_str(&format!("\nReply from the staff: {reply}"));
         }
-        let dm = st
-            .discord
-            .call(
-                Method::POST,
-                "/users/@me/channels",
-                Some(json!({"recipient_id": user.to_string()})),
-            )
-            .await;
-        if let Some(ch) = dm.ok().and_then(|c| c["id"].as_str().map(String::from)) {
-            let body = json!({"content": text, "allowed_mentions": {"parse": []}});
-            if let Err(e) = st
-                .discord
-                .call(
-                    Method::POST,
-                    &format!("/channels/{ch}/messages"),
-                    Some(body),
-                )
-                .await
-            {
-                tracing::warn!(?e, "appeal verdict DM failed");
-            }
+        if let Err(e) = st.discord.dm(user, &text).await {
+            tracing::warn!(?e, "appeal verdict DM failed");
         }
     }
     Ok(Json(json!({"ok": true})))

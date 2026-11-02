@@ -267,39 +267,16 @@ pub async fn totp_enroll(
     }
     let secret = Secret::generate_secret().to_encoded().to_string();
     let dm_code = format!("{:06}", rand::rngs::OsRng.next_u32() % 1_000_000);
-    dm_enroll_code(&st, s.user_id, &dm_code).await?;
+    // The code goes to the logged-in Discord account, which a stolen session cookie can't read.
+    st.discord
+        .dm(s.user_id, &format!("Your TommyBot authenticator setup code is **{dm_code}**. If you didn't start this, don't share it: someone may have your dashboard session."))
+        .await
+        .map_err(|_| ApiError::BadRequest("couldn't DM you; allow DMs from server members and try again".into()))?;
     sqlx::query("insert into dash_totp (user_id, secret, dm_code) values ($1,$2,$3) on conflict (user_id) do update set secret = $2, dm_code = $3")
         .bind(s.user_id).bind(&secret).bind(&dm_code).execute(&st.db).await?;
     Ok(Json(
         json!({"secret": secret, "uri": totp(&secret, &s.username)?.get_url()}),
     ))
-}
-
-/// DMs the enrollment code to the logged-in Discord account; a stolen session cookie can't read it.
-async fn dm_enroll_code(st: &AppState, user: i64, code: &str) -> Result<(), ApiError> {
-    const NO_DM: &str = "couldn't DM you; allow DMs from server members and try again";
-    let ch = st
-        .discord
-        .call(
-            Method::POST,
-            "/users/@me/channels",
-            Some(json!({"recipient_id": user.to_string()})),
-        )
-        .await
-        .map_err(|_| ApiError::BadRequest(NO_DM.into()))?;
-    let ch = ch["id"]
-        .as_str()
-        .ok_or(ApiError::BadRequest(NO_DM.into()))?;
-    let text = format!("Your TommyBot authenticator setup code is **{code}**. If you didn't start this, ignore it and log out of the dashboard everywhere.");
-    st.discord
-        .call(
-            Method::POST,
-            &format!("/channels/{ch}/messages"),
-            Some(json!({"content": text, "allowed_mentions": {"parse": []}})),
-        )
-        .await
-        .map_err(|_| ApiError::BadRequest(NO_DM.into()))?;
-    Ok(())
 }
 
 #[derive(Deserialize)]
