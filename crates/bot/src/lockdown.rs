@@ -2,7 +2,7 @@
 use anyhow::Result;
 use tommybot_automod::{
     discord_api::MAX_INVITE_PAUSE_MS,
-    lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot, SEND_MESSAGES},
+    lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot, SILENCE},
     store,
 };
 use tommybot_logging::emoji::LOCKDOWN;
@@ -42,14 +42,11 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .find(|p| p.0 == *channel && p.1 == *role)
                 .map_or((0, 0), |p| (p.2, p.3));
             // Forums are written to through threads, so those bits go too.
-            let silenced = SEND_MESSAGES
-                | (Permissions::SEND_MESSAGES_IN_THREADS | Permissions::CREATE_PUBLIC_THREADS)
-                    .bits();
             let o = PermissionOverwrite {
                 id: Id::new(*role),
                 kind: PermissionOverwriteType::Role,
-                allow: Some(Permissions::from_bits_truncate(allow & !silenced)),
-                deny: Some(Permissions::from_bits_truncate(deny | silenced)),
+                allow: Some(Permissions::from_bits_truncate(allow & !SILENCE)),
+                deny: Some(Permissions::from_bits_truncate(deny | SILENCE)),
             };
             app.http
                 .update_channel_permission(Id::new(*channel), &o)
@@ -124,7 +121,14 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
         })
         .collect();
     let main_roles: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
-    let mut plan = plan(&kind, gid.get(), &main_roles, &info, bot_position);
+    let mut plan = plan(
+        &kind,
+        gid.get(),
+        &main_roles,
+        &info,
+        bot_position,
+        cfg.lockdown_prefs.voice,
+    );
     if let LockKind::Channel(c) = kind {
         let ch = app.http.channel(Id::new(c)).await?.model().await?;
         plan.snapshot.prior = ch
@@ -450,7 +454,7 @@ mod tests {
         };
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let gid = 4_000_000_000_000_000_000 + std::process::id() as u64;
-        let p = plan(&LockKind::Join(JoinLock::Kick), gid, &[], &[], 0);
+        let p = plan(&LockKind::Join(JoinLock::Kick), gid, &[], &[], 0, false);
         store::save_lock(&pool, gid, &p.snapshot).await.unwrap();
         assert_eq!(
             load_join_lock(&pool, gid).await.unwrap(),

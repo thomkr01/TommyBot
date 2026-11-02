@@ -943,6 +943,10 @@ pub fn schema() -> Vec<Value> {
                     dv(fg("Lock scope", "pause_invites", "bool"), true),
                     "Pause invites when kicking new members",
                 ),
+                ti(
+                    fg("Lock scope", "voice", "bool"),
+                    "Lock voice too (connect, speak, soundboard, stream)",
+                ),
             ],
         ),
         (
