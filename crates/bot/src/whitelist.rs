@@ -181,7 +181,7 @@ fn allowed(kind: char, level: &Level) -> Vec<bool> {
 }
 
 fn prompt(kind: char, id: u64) -> Embed {
-    embed::Log::new("🎟️ Interactive Whitelist", ORANGE)
+    embed::Log::new("📋 Interactive Whitelist", ORANGE)
         .text(&format!("Target: {}", mention(kind, id)))
         .build()
 }
@@ -352,7 +352,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             match saved {
                 Ok(doc) => {
                     let now = current(&GuildCfg::parse(&doc), kind, id);
-                    let mut e = embed::Log::new("🎟️ Interactive Whitelist", GREEN);
+                    let mut e = embed::Log::new("📋 Interactive Whitelist", GREEN);
                     for (t, (_, label, _)) in TYPES.iter().enumerate().filter(|(t, _)| ok[*t]) {
                         e = e.text(&format!("{} {label}", if now[t] { YES } else { NO }));
                     }
