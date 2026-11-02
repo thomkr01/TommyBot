@@ -1,7 +1,7 @@
 //! Heat scoring. `heat()` is a pure function returning per-filter contributions so a log can
 //! say *why* someone triggered.
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -334,6 +334,46 @@ impl HeatState {
     }
 }
 
+/// The same text from several members within seconds: a spam raid where every account stays under
+/// its own heat. The first members to post it are not flagged, only those who join in.
+#[derive(Debug, Default)]
+pub struct Crowd {
+    /// (guild, text hash) -> (member, ms) of recent posts.
+    seen: HashMap<(u64, u64), Vec<(u64, i64)>>,
+}
+
+impl Crowd {
+    const USERS: usize = 3;
+    const WINDOW_MS: i64 = 30_000;
+    /// Short texts ("gg", "hi") are said by many at once; links count at any length.
+    const MIN_CHARS: usize = 30;
+
+    pub fn on_text(&mut self, guild: u64, user: u64, text: &str, now: i64) -> bool {
+        use std::hash::{Hash, Hasher};
+        let norm: String = crate::filters::cure(text)
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect();
+        if norm.chars().count() < Self::MIN_CHARS && crate::filters::urls(text).is_empty() {
+            return false;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        norm.hash(&mut h);
+        let fresh = |v: &mut Vec<(u64, i64)>| v.retain(|&(_, at)| now - at < Self::WINDOW_MS);
+        if self.seen.len() > 50_000 {
+            self.seen.retain(|_, v| {
+                fresh(v);
+                !v.is_empty()
+            });
+        }
+        let posts = self.seen.entry((guild, h.finish())).or_default();
+        fresh(posts);
+        posts.retain(|&(u, _)| u != user);
+        posts.push((user, now));
+        posts.len() >= Self::USERS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +602,23 @@ mod tests {
         let hook = heat(&m, &UserHistory::default(), &cfg);
         assert!(hook.total() > normal.total());
         assert!(normal.parts.iter().any(|p| p.0 == "newlines"));
+    }
+
+    #[test]
+    fn crowd_flags_the_third_member_with_the_same_text() {
+        let mut c = Crowd::default();
+        let spam = "join my server for free nitro giveaway now!!";
+        assert!(!c.on_text(1, 10, spam, 0));
+        assert!(!c.on_text(1, 10, spam, 1)); // the same member again is not a crowd
+        assert!(!c.on_text(1, 11, "JOIN my server for FREE nitro giveaway now", 2));
+        assert!(c.on_text(1, 12, spam, 3));
+        assert!(!c.on_text(2, 13, spam, 4), "other guilds are separate");
+        assert!(!c.on_text(1, 14, spam, 40_000), "window passed");
+        for u in 20..30 {
+            assert!(!c.on_text(1, u, "gg", 50_000), "short chat is not a crowd");
+        }
+        assert!(!c.on_text(1, 30, "https://x.example", 60_000));
+        assert!(!c.on_text(1, 31, "https://x.example", 60_001));
+        assert!(c.on_text(1, 32, "https://x.example", 60_002));
     }
 }

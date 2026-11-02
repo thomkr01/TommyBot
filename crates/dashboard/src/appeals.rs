@@ -199,6 +199,19 @@ async fn submit(
     let kind = punishment(&st, guild, s.user_id)
         .await?
         .ok_or(ApiError::Forbidden("you are not banned or timed out here"))?;
+    // Withdraw and appeal again must not become a way to flood staff.
+    let today: i64 = sqlx::query_scalar(
+        "select count(*) from appeals where guild_id = $1 and user_id = $2 and created_at > now() - interval '1 day'",
+    )
+    .bind(guild)
+    .bind(s.user_id)
+    .fetch_one(&st.db)
+    .await?;
+    if today >= 3 {
+        return Err(ApiError::Forbidden(
+            "you sent 3 appeals today, try again tomorrow",
+        ));
+    }
     let answers: Vec<Value> = fields
         .iter()
         .zip(&given)

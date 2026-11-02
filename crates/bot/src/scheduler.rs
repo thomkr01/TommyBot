@@ -97,7 +97,15 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
-        "verify_grant" => verify::web_grant(app, gid, user(&job.payload)?).await?,
+        "verify_grant" => {
+            let same_ip: Vec<u64> = job.payload["same_ip"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str()?.parse().ok())
+                .collect();
+            verify::web_grant(app, gid, user(&job.payload)?, &same_ip).await?
+        }
         "raid_end" => {
             let caught: i64 = sqlx::query_scalar(
                 "select count(*) from raid_log where guild_id = $1 and raid_ms = $2",

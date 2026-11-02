@@ -280,7 +280,13 @@ async fn ensure_channel(app: &App, gid: Id<GuildMarker>) -> Result<()> {
 }
 
 /// The dashboard page passed Turnstile and sign-in: hand out the roles if the server still asks for web verification.
-pub async fn web_grant(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
+/// `same_ip`: members who verified from the same IP in the last day (alt accounts, or a shared network).
+pub async fn web_grant(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    same_ip: &[u64],
+) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let v = &cfg.verification;
     if !v.enabled || !matches!(v.verify.mode, VerifyMode::Web | VerifyMode::ThirdParty) {
@@ -297,6 +303,19 @@ pub async fn web_grant(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) ->
         .any(|r| v.roles.contains(r))
     {
         return Ok(());
+    }
+    if !same_ip.is_empty() {
+        // Only logged: families, schools and mobile networks share addresses too.
+        let others = same_ip
+            .iter()
+            .map(|u| format!("<@{u}>"))
+            .collect::<Vec<_>>();
+        let log = Log::new("Possible Alt Account", ALERT)
+            .user("Member", user.get())
+            .line("Same IP as", &others.join(", "));
+        if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
+            tracing::warn!(?e, "alt log failed");
+        }
     }
     grant(app, gid, user, v).await
 }
