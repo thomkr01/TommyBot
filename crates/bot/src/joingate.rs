@@ -108,6 +108,49 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     Ok(())
 }
 
+/// The alert when a join raid starts: what happens next and the first flagged accounts.
+pub(crate) fn raid_trigger_log(
+    raid: &RaidCfg,
+    flagged: &[(u64, &str)],
+    code: &str,
+    url: Option<String>,
+) -> Log {
+    let mut log = Log::new("🕵 Join Raid Trigger!", ALERT)
+        .text(&format!(
+            "{YES} TommyBot has identified a weird join pattern."
+        ))
+        .text(&format!(
+            "{ARROW} Flagged accounts joining for the next `{}` will be **{}**.",
+            duration(raid.active_ms / 1000),
+            match raid.action {
+                Action::Log => "logged",
+                Action::Warn => "warned",
+                Action::Timeout(_) => "timed out",
+                Action::Kick => "kicked",
+                Action::Ban => "banned",
+            }
+        ))
+        .text(&format!(
+            "{ARROW} A full report will be posted once the duration ends."
+        ))
+        .field(
+            "Initial Flags:",
+            // 40 IDs stay under Discord's 1024-character field limit; the page lists all
+            &(flagged
+                .iter()
+                .take(40)
+                .map(|(u, n)| format!("`{} | {n}`", crate::invites::short_id(*u))))
+            .chain((flagged.len() > 40).then(|| format!("+{} more", flagged.len() - 40)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        );
+    log = log.field("Code:", &format!("`{code}`"));
+    if let Some(url) = url {
+        log = log.text(&format!("{ARROW} [Every caught account]({url})"));
+    }
+    log
+}
+
 async fn join_raid(
     app: &App,
     cfg: &GuildCfg,
@@ -169,43 +212,13 @@ async fn join_raid(
             .iter()
             .filter_map(|r| r.parse().ok().map(Id::new))
             .collect();
-        let mut log = Log::new("🕵 Join Raid Trigger!", ALERT)
-            .text(&format!(
-                "{YES} TommyBot has identified a weird join pattern."
-            ))
-            .text(&format!(
-                "{ARROW} Flagged accounts joining for the next `{}` will be **{}**.",
-                duration(raid.active_ms / 1000),
-                match raid.action {
-                    Action::Log => "logged",
-                    Action::Warn => "warned",
-                    Action::Timeout(_) => "timed out",
-                    Action::Kick => "kicked",
-                    Action::Ban => "banned",
-                }
-            ))
-            .text(&format!(
-                "{ARROW} A full report will be posted once the duration ends."
-            ))
-            .field(
-                "Initial Flags:",
-                // 40 IDs stay under Discord's 1024-character field limit; the page lists all
-                &(out
-                    .flagged
-                    .iter()
-                    .zip(&names)
-                    .take(40)
-                    .map(|(u, n)| format!("`{} | {n}`", crate::invites::short_id(*u))))
-                .chain(
-                    (out.flagged.len() > 40).then(|| format!("+{} more", out.flagged.len() - 40)),
-                )
-                .collect::<Vec<_>>()
-                .join("\n"),
-            );
-        log = log.field("Code:", &format!("`{code}`"));
-        if let Some(url) = crate::invites::raid_url(&code) {
-            log = log.text(&format!("{ARROW} [Every caught account]({url})"));
-        }
+        let flagged: Vec<(u64, &str)> = out
+            .flagged
+            .iter()
+            .copied()
+            .zip(names.iter().map(String::as_str))
+            .collect();
+        let log = raid_trigger_log(raid, &flagged, &code, crate::invites::raid_url(&code));
         send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
     }
     let auto_lock = cfg.automod.auto_lockdown.enabled;

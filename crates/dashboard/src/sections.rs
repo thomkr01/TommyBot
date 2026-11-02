@@ -288,6 +288,13 @@ async fn verify_channel(
     )
     .await?;
     config["verification"]["channel"] = json!(channel);
+    // The same panel as the bot's `verifysetup`, so both look alike in Discord.
+    let server = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}"), None)
+        .await?;
+    let (embed, buttons) =
+        tommybot_logging::embed::verify_panel(server["name"].as_str().unwrap_or("the server"));
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
@@ -295,13 +302,7 @@ async fn verify_channel(
         .call(
             Method::POST,
             &format!("/channels/{channel}/messages"),
-            Some(json!({
-                "embeds": [{"title": "Verification Required!", "color": 0x0D9DF8,
-                    "description": "To access the server, you need to pass the verification first."}],
-                "components": [{"type": 1, "components": [
-                    {"type": 2, "style": 3, "label": "Verify", "custom_id": "verify:start"}
-                ]}]
-            })),
+            Some(json!({"embeds": [embed], "components": [buttons]})),
         )
         .await?;
     Ok(Json(json!({"version": version, "channel": channel})))

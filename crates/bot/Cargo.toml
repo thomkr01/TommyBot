@@ -23,3 +23,6 @@ captcha = "1"
 rand = "0.8"
 # Same version captcha already pulls in.
 image = { version = "0.24", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tommybot-logging = { workspace = true, features = ["preview"] }

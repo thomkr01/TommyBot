@@ -22,6 +22,8 @@ mod modview;
 mod native;
 mod panic;
 mod prefix;
+#[cfg(test)]
+mod previews;
 mod purge;
 mod reply;
 mod reports;

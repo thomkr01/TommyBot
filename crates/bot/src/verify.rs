@@ -54,10 +54,9 @@ pub struct VerificationCfg {
     pub verify: VerifyCfg,
 }
 
-const START: &str = "verify:start";
-const HELP: &str = "verify:help";
+use tommybot_logging::embed::{verify_panel, VERIFY_HELP as HELP, VERIFY_START as START};
 // The enter and code ids end in the guild id: a DM interaction has no guild of its own.
-const ENTER: &str = "verify:enter:";
+pub(crate) const ENTER: &str = "verify:enter:";
 const CODE: &str = "verify:code:";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -91,20 +90,7 @@ fn decide(cfg: &VerificationCfg, raid_active: bool, suspicious: bool, has_role: 
 }
 
 pub(crate) fn button(label: &str, id: &str) -> Component {
-    styled_button(label, id, ButtonStyle::Primary)
-}
-
-fn styled_button(label: &str, id: &str, style: ButtonStyle) -> Component {
-    Component::Button(Button {
-        id: None,
-        custom_id: Some(id.into()),
-        disabled: false,
-        emoji: None,
-        label: Some(label.into()),
-        style,
-        url: None,
-        sku_id: None,
-    })
+    tommybot_logging::embed::button(label, id, ButtonStyle::Primary)
 }
 
 pub(crate) fn row(c: Component) -> Component {
@@ -120,21 +106,7 @@ pub async fn setup(app: &App, gid: Id<GuildMarker>) -> Result<String> {
     let Some(ch) = cfg.verification.channel else {
         return Ok("Set a verification channel on the dashboard first.".into());
     };
-    let embed = EmbedBuilder::new()
-        .color(GREEN)
-        .title("🧩 Verification Required!")
-        .description(format!(
-            "To access `{}`, you need to pass the verification first.\n{ARROW} Press on the **Verify** button below.",
-            guild_name(app, gid).await
-        ))
-        .build();
-    let buttons = Component::ActionRow(ActionRow {
-        id: None,
-        components: vec![
-            styled_button("Verify", START, ButtonStyle::Success),
-            styled_button("Help", HELP, ButtonStyle::Secondary),
-        ],
-    });
+    let (embed, buttons) = verify_panel(&guild_name(app, gid).await);
     app.http
         .create_message(ch)
         .embeds(&[embed])
@@ -371,7 +343,7 @@ pub(crate) fn ephemeral(
     }
 }
 
-fn passed_embed(server: &str) -> Embed {
+pub(crate) fn passed_embed(server: &str) -> Embed {
     EmbedBuilder::new()
         .color(GREEN)
         .title("You have been verified!")
@@ -381,7 +353,7 @@ fn passed_embed(server: &str) -> Embed {
         .build()
 }
 
-fn embed_reply(embed: Embed) -> InteractionResponse {
+pub(crate) fn embed_reply(embed: Embed) -> InteractionResponse {
     InteractionResponse {
         kind: InteractionResponseType::ChannelMessageWithSource,
         data: Some(InteractionResponseData {
@@ -393,7 +365,10 @@ fn embed_reply(embed: Embed) -> InteractionResponse {
 }
 
 fn web_link(gid: Id<GuildMarker>) -> InteractionResponse {
-    let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
+    web_link_at(&std::env::var("DASHBOARD_URL").unwrap_or_default(), gid)
+}
+
+pub(crate) fn web_link_at(base: &str, gid: Id<GuildMarker>) -> InteractionResponse {
     let mut r = ephemeral(
         InteractionResponseType::ChannelMessageWithSource,
         Some("The dashboard URL is not configured, ask the server staff."),
@@ -469,7 +444,7 @@ fn rgb(hex: &str) -> Option<Rgb<u8>> {
 }
 
 /// The code and its PNG. Sync so the non-Send generator never crosses an await.
-fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
+pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let (w, h) = (c.width.clamp(150, 300), c.height.clamp(60, 200));
     // The library draws 40 px text on a fixed 400x300 canvas: crop a smaller or larger box and scale it to
     // w x h. These bounds keep the crop inside the canvas and the text mostly inside the crop.
@@ -575,7 +550,11 @@ fn new_sum() -> (String, String) {
     let r = std::collections::hash_map::RandomState::new()
         .build_hasher()
         .finish();
-    let (a, b) = (r % 9 + 1, (r >> 8) % 9 + 1);
+    sum(r % 9 + 1, (r >> 8) % 9 + 1)
+}
+
+/// The question and its answer.
+pub(crate) fn sum(a: u64, b: u64) -> (String, String) {
     (format!("What is {a} + {b}?"), (a + b).to_string())
 }
 
@@ -585,10 +564,10 @@ fn guild_of(i: &Interaction, id: &str) -> Option<Id<GuildMarker>> {
         .or_else(|| id.rsplit(':').next()?.parse().ok().map(Id::new))
 }
 
-const PROMPT: &str = "Please type the captcha below to be able to access this server!";
+pub(crate) const PROMPT: &str = "Please type the captcha below to be able to access this server!";
 const NOTES: &str = "\n\n**Additional Notes:**\n› Type out the traced colored characters from left to right.\n› Ignore the decoy characters spread-around.\n› You don't have to respect characters cases (upper/lower case)!";
 
-fn challenge_embed(body: &str, notes: bool, png: bool, limit_ms: i64) -> Embed {
+pub(crate) fn challenge_embed(body: &str, notes: bool, png: bool, limit_ms: i64) -> Embed {
     let mut e = EmbedBuilder::new()
         .color(GREEN)
         .title("🧩 Hello! Are you human? Let's find out!")

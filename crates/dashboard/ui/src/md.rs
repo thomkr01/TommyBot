@@ -54,9 +54,11 @@ fn emph(s: &str) -> String {
 pub fn inline(s: &str) -> String {
     // code spans and links are stashed first so the emphasis passes leave their insides (and URLs) alone
     let (mut out, mut kept, mut rest) = (String::new(), Vec::new(), s);
-    while let Some(i) = rest.find(['`', '[']) {
+    while let Some(i) = rest.find(['`', '[', '&']) {
         let t = &rest[i..];
-        let hit = if let Some(c) = t.strip_prefix('`') {
+        let hit = if t.starts_with('&') {
+            t.strip_prefix("&lt;").and_then(|r| r.find("&gt;").filter(|&e| e < 80).and_then(|e| token(&r[..e]).map(|h| (e + 8, h))))
+        } else if let Some(c) = t.strip_prefix('`') {
             c.find('`').filter(|&n| n > 0).map(|n| (n + 2, format!("<code>{}</code>", &c[..n])))
         } else {
             t.find("](").and_then(|m| t[m + 2..].find(')').map(|e| (m, &t[m + 2..m + 2 + e])))
@@ -94,6 +96,34 @@ pub fn md(s: &str) -> String {
     }).collect()
 }
 
+/// Discord's `<@id>`, `<#id>`, `<@&id>`, `<:emoji:id>` and `<t:unix:style>` (inside, still escaped) as HTML.
+fn token(t: &str) -> Option<String> {
+    let id = |s: &str| s.parse::<u64>().ok().map(|n| n.to_string());
+    let pill = |text: String| Some(format!("<span class=\"mention\">{}</span>", esc(&text)));
+    if let Some(r) = t.strip_prefix("@&amp;") {
+        let r = id(r)?;
+        return pill(format!("@{}", crate::discord::name("roles", &r).unwrap_or("unknown-role".into())));
+    }
+    if let Some(r) = t.strip_prefix('@') {
+        let r = id(r.trim_start_matches('!'))?;
+        return pill(format!("@{}", crate::discord::name("users", &r).unwrap_or("unknown-user".into())));
+    }
+    if let Some(r) = t.strip_prefix('#') {
+        let r = id(r)?;
+        return pill(format!("#{}", crate::discord::name("channels", &r).unwrap_or("unknown".into())));
+    }
+    if let Some(r) = t.strip_prefix("t:") {
+        let (n, style) = r.split_once(':').unwrap_or((r, "f"));
+        return Some(format!("<span class=\"ts\">{}</span>", crate::discord::time(n.parse().ok()?, style)));
+    }
+    let (name, eid) = t.strip_prefix("a:").unwrap_or(t).strip_prefix(':')?.split_once(':')?;
+    let eid = id(eid)?;
+    Some(match crate::icons::svg(name) {
+        "" => format!("<img class=\"emo\" alt=\":{name}:\" src=\"https://cdn.discordapp.com/emojis/{eid}.webp\">"),
+        svg => format!("<span class=\"i emo\">{}</span>", svg.trim()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +146,9 @@ mod tests {
         assert_eq!(md("<b>\n> q"), "<div class=\"\">&lt;b&gt;</div><div class=\"q\">q</div>");
         assert_eq!(md("```rs\nlet *a*;\n```"), "<pre>let *a*;</pre>");
         assert_eq!(md("## H"), "<div class=\"h2\">H</div>");
+        // mentions and emojis keep their underscores away from the italic pass
+        assert_eq!(inline(&esc("<@1001> <#2001> <@&9> <:right_sort:0> _a_")).replace(crate::icons::svg("right_sort").trim(), "SVG"),
+            "<span class=\"mention\">@member</span> <span class=\"mention\">#general</span> <span class=\"mention\">@unknown-role</span> <span class=\"i emo\">SVG</span> <i>a</i>");
+        assert_eq!(inline(&esc("<:pepe:42> <x> a & b")), "<img class=\"emo\" alt=\":pepe:\" src=\"https://cdn.discordapp.com/emojis/42.webp\"> &lt;x&gt; a &amp; b");
     }
 }

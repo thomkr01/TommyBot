@@ -1,0 +1,251 @@
+{
+  "automod_kick": {
+    "embeds": [
+      {
+        "color": 15145755,
+        "description": "<:heat:0> **Factor:** *Posting an invite link*\n<:channel_text:0> **Channel:** <#2001> *`2001`*\n<:message:0> **Message:** ||Join my server everyone discord.gg/example||\n<:member:0> **Member:** <@1001> *`1001`*\n<:clock:0> <t:0:F>",
+        "title": "*member has been kicked!*",
+        "type": "rich"
+      }
+    ]
+  },
+  "automod_timeout": {
+    "embeds": [
+      {
+        "color": 15171099,
+        "description": "<:reason:0> **Reason:** *Spamming the same message*\n<:member:0> **Member:** <@1001> *`1001`*\n<:channel_text:0> **Channel:** <#2001> *`2001`*\n<:duration:0> **Duration:** `1m`\n<:warn_points:0> **Strike:** `1`\n<:clock:0> <t:0:F>",
+        "title": "*member has been timed out!*",
+        "type": "rich"
+      }
+    ]
+  },
+  "automod_warn": {
+    "embeds": [
+      {
+        "color": 15171099,
+        "description": "<:heat:0> **Factor:** *Use of blacklisted words*\n<:channel_text:0> **Channel:** <#2001> *`2001`*\n<:message:0> **Message:** ||you all suck||\n<:member:0> **Member:** <@1001> *`1001`*\n<:clock:0> <t:0:F>",
+        "title": "*member has been warned!*",
+        "type": "rich"
+      }
+    ]
+  },
+  "ban_compact": {
+    "content": "Case #4151: ban <@1001>"
+  },
+  "ban_result": {
+    "embeds": [
+      {
+        "color": 892408,
+        "description": "<:reason:0> **Reason:** toxic\n<:moderator_field:0> **Moderator:** <@1002>\n**Banned:**\n<:success:0> <@1001> [`1001`]",
+        "title": "Ban Result:",
+        "type": "rich"
+      }
+    ]
+  },
+  "mod_log": {
+    "embeds": [
+      {
+        "color": 15145755,
+        "description": "<:clock:0> <t:0:F>",
+        "fields": [
+          {
+            "inline": true,
+            "name": "<:case_number:0> Case:",
+            "value": "`4151`"
+          },
+          {
+            "inline": true,
+            "name": "<:tag:0> Type:",
+            "value": "`Ban`"
+          },
+          {
+            "inline": true,
+            "name": "<:moderator_field:0> Moderator:",
+            "value": "<@1002> *`1002`*"
+          },
+          {
+            "inline": false,
+            "name": "<:target:0> Target:",
+            "value": "<:right_sort:0> <@1001> *`1001`*"
+          },
+          {
+            "inline": false,
+            "name": "<:reason:0> Reason:",
+            "value": "DM ads"
+          }
+        ],
+        "type": "rich"
+      }
+    ]
+  },
+  "names": {
+    "channels": {
+      "2001": "general"
+    },
+    "users": {
+      "1001": "member",
+      "1002": "you",
+      "1003": "rogue-admin"
+    }
+  },
+  "nuke_no_quarantine": {
+    "embeds": [
+      {
+        "color": 13632026,
+        "description": "<:case_number:0> **CASE:** `4152` (nuke `n7Kd2x`)\n<:moderator_field:0> **Responsible:** <@1003> *`1003`*\n<:error:0> **Not quarantined** (auto quarantine is off)\n<:reason:0> **Reason:** ChannelDelete limit reached (5/min, 20/hour)\n**Revert Report:**\n<:restore:0> **Reverted:** `5/5`\n<:backup:0> **Recreated:** `5`\n<:kick:0> **Kicked, re-invite:** None\n<:clock:0> <t:0:F>",
+        "title": "Anti Nuke Report:",
+        "type": "rich"
+      }
+    ]
+  },
+  "nuke_quarantined": {
+    "embeds": [
+      {
+        "color": 13632026,
+        "description": "<:case_number:0> **CASE:** `4152` (nuke `n7Kd2x`)\n<:moderator_field:0> **Responsible:** <@1003> *`1003`*\n<:success:0> **Quarantined** (bots are kicked)\n<:reason:0> **Reason:** ChannelDelete limit reached (5/min, 20/hour)\n**Revert Report:**\n<:restore:0> **Reverted:** `5/5`\n<:backup:0> **Recreated:** `5`\n<:kick:0> **Kicked, re-invite:** None\n<:clock:0> <t:0:F>",
+        "title": "Anti Nuke Report:",
+        "type": "rich"
+      }
+    ]
+  },
+  "raid": {
+    "embeds": [
+      {
+        "color": 13632026,
+        "description": "<:success:0> TommyBot has identified a weird join pattern.\n<:right_sort:0> Flagged accounts joining for the next `10m` will be **kicked**.\n<:right_sort:0> A full report will be posted once the duration ends.\n<:right_sort:0> [Every caught account](https://tommybot.example/raid/Ab3dE9fGh1_0123456789)\n<:clock:0> <t:0:F>",
+        "fields": [
+          {
+            "inline": false,
+            "name": "Initial Flags:",
+            "value": "`12345678 | free nitro`\n`12345678 | free nitro 2`\n`12345678 | free nitro 3`"
+          },
+          {
+            "inline": false,
+            "name": "Code:",
+            "value": "`Ab3dE9fGh1_0123456789`"
+          }
+        ],
+        "title": "🕵 Join Raid Trigger!",
+        "type": "rich"
+      }
+    ]
+  },
+  "verify_button": {
+    "embeds": [
+      {
+        "color": 1828645,
+        "description": "<:success:0> You passed the verification successfully. You can now access `Your Server`!",
+        "title": "You have been verified!",
+        "type": "rich"
+      }
+    ],
+    "flags": 64
+  },
+  "verify_captcha": {
+    "components": [
+      {
+        "components": [
+          {
+            "custom_id": "verify:enter:1",
+            "label": "Answer",
+            "style": 1,
+            "type": 2
+          }
+        ],
+        "type": 1
+      }
+    ],
+    "embeds": [
+      {
+        "color": 1828645,
+        "description": "```\nPlease type the captcha below to be able to access this server!\n```\n\n**Additional Notes:**\n› Type out the traced colored characters from left to right.\n› Ignore the decoy characters spread-around.\n› You don't have to respect characters cases (upper/lower case)!",
+        "footer": {
+          "text": "Verification Period: 2 minutes"
+        },
+        "image": {
+          "url": "attachment://captcha.png"
+        },
+        "title": "🧩 Hello! Are you human? Let's find out!",
+        "type": "rich"
+      }
+    ],
+    "flags": 64
+  },
+  "verify_dm": {
+    "content": "Check your DMs for the challenge.",
+    "flags": 64
+  },
+  "verify_panel": {
+    "components": [
+      {
+        "components": [
+          {
+            "custom_id": "verify:start",
+            "label": "Verify",
+            "style": 3,
+            "type": 2
+          },
+          {
+            "custom_id": "verify:help",
+            "label": "Help",
+            "style": 2,
+            "type": 2
+          }
+        ],
+        "type": 1
+      }
+    ],
+    "embeds": [
+      {
+        "color": 1828645,
+        "description": "To access `Your Server`, you need to pass the verification first.\n<:right_sort:0> Press on the **Verify** button below.",
+        "title": "🧩 Verification Required!",
+        "type": "rich"
+      }
+    ]
+  },
+  "verify_simple": {
+    "components": [
+      {
+        "components": [
+          {
+            "custom_id": "verify:enter:1",
+            "label": "Answer",
+            "style": 1,
+            "type": 2
+          }
+        ],
+        "type": 1
+      }
+    ],
+    "embeds": [
+      {
+        "color": 1828645,
+        "description": "```\nWhat is 4 + 3?\n```",
+        "footer": {
+          "text": "Verification Period: 2 minutes"
+        },
+        "title": "🧩 Hello! Are you human? Let's find out!",
+        "type": "rich"
+      }
+    ],
+    "flags": 64
+  },
+  "verify_web": {
+    "components": [
+      {
+        "components": [
+          {
+            "label": "Verify on the website",
+            "style": 5,
+            "type": 2,
+            "url": "https://tommybot.example/verify/1"
+          }
+        ],
+        "type": 1
+      }
+    ],
+    "content": "Open the page to verify.",
+    "flags": 64
+  }
+}

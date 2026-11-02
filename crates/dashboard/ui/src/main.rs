@@ -5,6 +5,7 @@ mod appeals;
 mod channels;
 mod records;
 mod common;
+mod discord;
 mod embeds;
 mod form;
 mod icons;
