@@ -196,15 +196,17 @@ pub async fn apply_dm(
             (None, 0)
         }
         ModKind::Ban => {
+            // Queued first: a restart right after the ban must not make it permanent. If the ban
+            // fails, the unban later finds no ban and is dropped.
+            if let Some(d) = duration_s {
+                let job = json!({"user":t});
+                jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d).await?;
+            }
             app.http
                 .create_ban(gid, target)
                 .delete_message_seconds(cfg.misc.purge_secs())
                 .reason(&audit)
                 .await?;
-            if let Some(d) = duration_s {
-                let job = json!({"user":t});
-                jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d).await?;
-            }
             (Some(json!({"op":"unban","user":t})), 0)
         }
         ModKind::Kick => {

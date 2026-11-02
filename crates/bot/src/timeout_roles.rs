@@ -31,15 +31,17 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         if held.is_empty() {
             return Ok(());
         }
+        // Queued first, so a restart halfway never loses the roles for good.
+        let roles: Vec<u64> = held.iter().map(|r| r.get()).collect();
+        let job = json!({"user": m.user.id.get(), "roles": roles});
+        jobs::enqueue(&app.pool, g, KIND, job, until).await?;
         for r in &held {
             app.http
                 .remove_guild_member_role(m.guild_id, m.user.id, **r)
                 .reason("Timed out: main roles removed")
                 .await?;
         }
-        let roles: Vec<u64> = held.iter().map(|r| r.get()).collect();
-        let job = json!({"user": m.user.id.get(), "roles": roles});
-        return jobs::enqueue(&app.pool, g, KIND, job, until).await;
+        return Ok(());
     }
     if main.iter().all(|r| m.roles.contains(r)) {
         return Ok(());
@@ -65,7 +67,9 @@ pub async fn restore(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(p["user"].as_u64().context("job payload has no user")?);
     let member = app.http.guild_member(gid, user).await?.model().await?;
     if let Some(t) = active(member.communication_disabled_until) {
-        return jobs::enqueue(&app.pool, gid.get() as i64, KIND, p.clone(), t).await;
+        return jobs::enqueue(&app.pool, gid.get() as i64, KIND, p.clone(), t)
+            .await
+            .map(drop);
     }
     for r in p["roles"].as_array().into_iter().flatten() {
         let Some(r) = r.as_u64() else { continue };

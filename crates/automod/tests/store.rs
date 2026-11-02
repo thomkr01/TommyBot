@@ -73,6 +73,45 @@ async fn lock_snapshot_round_trip_then_gone() {
     assert!(store::take_lock(&p, g as u64, &snap).await.unwrap());
     assert!(!store::take_lock(&p, g as u64, &snap).await.unwrap());
     assert!(store::locks(&p, g as u64).await.unwrap().is_empty());
+    store::drop_lock(&p, g as u64, &snap).await.unwrap();
+    cleanup(&p, g).await;
+}
+
+#[tokio::test]
+async fn interrupted_locks_and_unlocks_come_back() {
+    let Some(p) = pool().await else { return };
+    let g = gid(4);
+    cleanup(&p, g).await;
+    let snap = |c| Snapshot {
+        kind: Some(LockKind::Channel(c)),
+        ..Default::default()
+    };
+    let mine = |all: Vec<(u64, Snapshot, bool)>| -> Vec<(Snapshot, bool)> {
+        let mut v: Vec<_> = all
+            .into_iter()
+            .filter(|r| r.0 == g as u64)
+            .map(|r| (r.1, r.2))
+            .collect();
+        v.sort_by_key(|r| r.1);
+        v
+    };
+    let (half, done, lifting) = (snap(1), snap(2), snap(3));
+    for s in [&half, &done, &lifting] {
+        store::save_lock(&p, g as u64, s).await.unwrap();
+    }
+    store::lock_done(&p, g as u64, &done).await.unwrap();
+    store::lock_done(&p, g as u64, &lifting).await.unwrap();
+    assert!(store::take_lock(&p, g as u64, &lifting).await.unwrap());
+    // A cut-off lock is still active; a cut-off unlock is handed back as active and claimable.
+    assert_eq!(
+        mine(store::interrupted(&p).await.unwrap()),
+        vec![(half.clone(), false), (lifting.clone(), true)]
+    );
+    assert_eq!(store::locks(&p, g as u64).await.unwrap().len(), 3);
+    assert!(store::take_lock(&p, g as u64, &lifting).await.unwrap());
+    store::lock_done(&p, g as u64, &half).await.unwrap();
+    store::drop_lock(&p, g as u64, &lifting).await.unwrap();
+    assert!(mine(store::interrupted(&p).await.unwrap()).is_empty());
     cleanup(&p, g).await;
 }
 

@@ -133,6 +133,13 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 None => send_log(app, gid.get(), LogKind::JoinRaid, log).await?,
             }
         }
+        "nuke_revert" => {
+            let p = &job.payload;
+            let actor = Id::new(p["actor"].as_u64().context("job payload has no actor")?);
+            let why = p["why"].as_str().unwrap_or_default();
+            let since = p["since"].as_i64().context("job payload has no since")?;
+            crate::antinuke::revert_and_report(app, gid, actor, why, since).await?
+        }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }

@@ -86,6 +86,14 @@ async fn main() -> Result<()> {
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
     }
+    tokio::spawn({
+        let app = app.clone();
+        async move {
+            if let Err(e) = lockdown::resume(&app).await {
+                tracing::warn!(?e, "resuming interrupted locks failed");
+            }
+        }
+    });
     metrics::STARTED.store(app::now_secs() as u64, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(scheduler::run(app.clone()));
     tokio::spawn({
