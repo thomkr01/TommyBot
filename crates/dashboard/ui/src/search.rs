@@ -21,6 +21,7 @@ fn route(section: &str, page: Option<&str>) -> String {
         ("logging", Some(p)) => format!("logging/{}", p.replacen('_', "/", 1)),
         ("whitelist", Some(p)) => format!("whitelist/{p}"),
         ("lockdown", _) => "lockdown_settings".into(),
+        ("channel_profiles", _) => "channel_setup".into(),
         (s, _) => s.into(),
     }
 }
@@ -156,5 +157,6 @@ mod tests {
         assert_eq!(route("automod", Some("spam_text")), "filters/spam_text");
         assert_eq!(route("automod", None), "automod");
         assert_eq!(route("panic", None), "antinuke_panic");
+        assert_eq!(route("channel_profiles", None), "channel_setup");
     }
 }

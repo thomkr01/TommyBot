@@ -6,22 +6,19 @@ fn s(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
-fn confirm(text: &str) -> bool {
-    web_sys::window().is_some_and(|w| w.confirm_with_message(text).unwrap_or(false))
-}
-
 /// Filter chips writing into `sig`; every change reloads through `load`.
 fn chips(sig: RwSignal<String>, opts: &'static [(&'static str, &'static str)], load: impl Fn() + Copy + 'static) -> impl IntoView {
     view! { <div class="chips">{opts.iter().map(|(k, l)| view! { <button class="ghost" class:on=move || sig.get() == *k on:click=move |_| { sig.set((*k).into()); load() }>{*l}</button> }).collect_view()}</div> }
 }
 
-/// Loads `/api/guilds/{g}/{path}?{query}` into `rows`, errors into `msg`.
-fn fetch(path: String, rows: WriteSignal<Vec<Value>>, msg: RwSignal<String>) {
+/// Loads `/api/guilds/{g}/{path}?{query}` into `rows`, errors into `msg`; `loaded` turns on after the first answer.
+fn fetch(path: String, rows: WriteSignal<Vec<Value>>, msg: RwSignal<String>, loaded: RwSignal<bool>) {
     spawn_local(async move {
         match api("GET", &path, None).await {
             Ok(v) => { msg.set(String::new()); rows.set(v.as_array().cloned().unwrap_or_default()) }
             Err(e) => msg.set(e),
         }
+        loaded.set(true);
     });
 }
 
@@ -32,9 +29,10 @@ fn enc(v: &str) -> String {
 #[component]
 pub fn CaseList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
+    let loaded = RwSignal::new(false);
     let (q, kind, state, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
     let g = StoredValue::new(guild);
-    let load = move || fetch(format!("/api/guilds/{}/cases?q={}&kind={}&state={}", g.get_value(), enc(&q.get_untracked()), kind.get_untracked(), state.get_untracked()), set_rows, msg);
+    let load = move || fetch(format!("/api/guilds/{}/cases?q={}&kind={}&state={}", g.get_value(), enc(&q.get_untracked()), kind.get_untracked(), state.get_untracked()), set_rows, msg, loaded);
     load();
     let post = move |no: i64, path: &str, body: Value| {
         let url = format!("/api/guilds/{}/cases/{no}{path}", g.get_value());
@@ -48,15 +46,15 @@ pub fn CaseList(guild: String) -> impl IntoView {
     view! {
         <div class="card row">
             {chips(state, &[("", "All"), ("open", "Open"), ("closed", "Closed")], load)}
-            <select on:change=move |e| { kind.set(event_target_value(&e)); load() }>
+            <select aria-label="case type" on:change=move |e| { kind.set(event_target_value(&e)); load() }>
                 <option value="">"Any type"</option>
                 {["ban", "kick", "timeout", "warn", "quarantine", "sanitize", "purge", "slowmode", "verify"].map(|k| view! { <option value=k>{k}</option> }).to_vec()}
             </select>
-            <input placeholder="User or mod ID" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
+            <input placeholder="User or mod ID" aria-label="user or mod ID" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
             <button class="ghost" on:click=move |_| load()>"Search"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rows.get().is_empty()><div class="banner">"No cases found.."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No cases found.."</div></Show>
         <For each=move || rows.get() key=|r| (r["case_no"].as_i64(), r["active"].as_bool(), r["reason"].as_str().map(String::from), r["proof"].as_str().map(String::from)) let:r>
             {
                 let no = r["case_no"].as_i64().unwrap_or(0);
@@ -67,7 +65,7 @@ pub fn CaseList(guild: String) -> impl IntoView {
                     <div class="row"><b>{format!("#{no} {}", s(&r["kind"]))}</b><span class="muted">{if active { "open" } else { "closed" }}</span>
                         <span>"user "<code>{s(&r["user_id"])}</code></span><span>"mod "<code>{s(&r["mod_id"])}</code></span>
                         <span class="muted">{format!("{} points, {}", r["points"], s(&r["at"]))}</span></div>
-                    <div class="row"><input placeholder="Reason" prop:value=reason on:input=move |e| reason.set(event_target_value(&e)) /><input placeholder="Proof" prop:value=proof on:input=move |e| proof.set(event_target_value(&e)) /></div>
+                    <div class="row"><input placeholder="Reason" aria-label="reason" prop:value=reason on:input=move |e| reason.set(event_target_value(&e)) /><input placeholder="Proof" aria-label="proof" prop:value=proof on:input=move |e| proof.set(event_target_value(&e)) /></div>
                     <div class="row">
                         <button on:click=move |_| save(active)>"Save"</button>
                         <button class="ghost" on:click=move |_| save(!active)>{if active { "Close" } else { "Reopen" }}</button>
@@ -82,9 +80,10 @@ pub fn CaseList(guild: String) -> impl IntoView {
 #[component]
 pub fn NoteList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
+    let loaded = RwSignal::new(false);
     let (q, text, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
     let g = StoredValue::new(guild);
-    let load = move || fetch(format!("/api/guilds/{}/notes?q={}", g.get_value(), enc(&q.get_untracked())), set_rows, msg);
+    let load = move || fetch(format!("/api/guilds/{}/notes?q={}", g.get_value(), enc(&q.get_untracked())), set_rows, msg, loaded);
     load();
     let post = move |path: String, body: Value| spawn_local(async move {
         match api("POST", &format!("/api/guilds/{}/notes{path}", g.get_value()), Some(body)).await {
@@ -94,14 +93,14 @@ pub fn NoteList(guild: String) -> impl IntoView {
     });
     view! {
         <div class="card row">
-            <input placeholder="User ID" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
+            <input placeholder="User ID" aria-label="user ID" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
             <button class="ghost" on:click=move |_| load()>"Search"</button>
-            <input placeholder="New note" maxlength="500" prop:value=text on:input=move |e| text.set(event_target_value(&e)) />
+            <input placeholder="New note" aria-label="new note" maxlength="500" prop:value=text on:input=move |e| text.set(event_target_value(&e)) />
             <button on:click=move |_| { post(String::new(), json!({"user_id": q.get_untracked(), "text": text.get_untracked()})); text.set(String::new()) }>"Add note"</button>
             <button class="ghost" on:click=move |_| if confirm("Remove every note of this user?") { post("/sweep".into(), json!({"user_id": q.get_untracked()})) }>"Sweep user"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rows.get().is_empty()><div class="banner">"No notes found.."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No notes found.."</div></Show>
         <For each=move || rows.get() key=|r| (s(&r["id"]), s(&r["text"])) let:r>
             {
                 let id = s(&r["id"]);
@@ -109,9 +108,9 @@ pub fn NoteList(guild: String) -> impl IntoView {
                 let body = RwSignal::new(s(&r["text"]));
                 view! { <div class="card">
                     <div class="row"><b>{id.clone()}</b><code>{s(&r["user_id"])}</code><span class="muted">{format!("by {}, {}", s(&r["author_id"]), s(&r["at"]))}</span></div>
-                    <div class="row"><input maxlength="500" prop:value=body on:input=move |e| body.set(event_target_value(&e)) />
+                    <div class="row"><input maxlength="500" aria-label="note text" prop:value=body on:input=move |e| body.set(event_target_value(&e)) />
                         <button on:click=move |_| post(format!("/{id}"), json!({"text": body.get_untracked()}))>"Save"</button>
-                        <button class="ghost" on:click=move |_| post(format!("/{del}/delete"), json!({}))>"Delete"</button></div>
+                        <button class="ghost" on:click=move |_| if confirm("Delete this note?") { post(format!("/{del}/delete"), json!({})) }>"Delete"</button></div>
                 </div> }
             }
         </For>
@@ -121,9 +120,10 @@ pub fn NoteList(guild: String) -> impl IntoView {
 #[component]
 pub fn ReportList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
+    let loaded = RwSignal::new(false);
     let (state, msg) = (RwSignal::new("open".to_string()), RwSignal::new(String::new()));
     let g = StoredValue::new(guild);
-    let load = move || fetch(format!("/api/guilds/{}/reports?state={}", g.get_value(), state.get_untracked()), set_rows, msg);
+    let load = move || fetch(format!("/api/guilds/{}/reports?state={}", g.get_value(), state.get_untracked()), set_rows, msg, loaded);
     load();
     let set_open = move |id: i64, open: bool| spawn_local(async move {
         match api("POST", &format!("/api/guilds/{}/reports/{id}/status", g.get_value()), Some(json!({"open": open}))).await {
@@ -137,7 +137,7 @@ pub fn ReportList(guild: String) -> impl IntoView {
             <span class="muted">"Warn, timeout, kick and ban are done with the buttons on the report in Discord."</span>
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rows.get().is_empty()><div class="banner">"No reports.."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No reports.."</div></Show>
         <For each=move || rows.get() key=|r| (r["id"].as_i64(), r["status"].as_str().map(String::from)) let:r>
             {
                 let id = r["id"].as_i64().unwrap_or(0);
@@ -165,10 +165,11 @@ pub fn ReportList(guild: String) -> impl IntoView {
 pub fn RaidLog(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let msg = RwSignal::new(String::new());
-    fetch(format!("/api/guilds/{guild}/raid_log"), set_rows, msg);
+    let loaded = RwSignal::new(false);
+    fetch(format!("/api/guilds/{guild}/raid_log"), set_rows, msg, loaded);
     view! {
         <span class="err">{move || msg.get()}</span>
-        <Show when=move || rows.get().is_empty()><div class="banner">"No join raids caught yet."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No join raids caught yet."</div></Show>
         {move || rows.get().into_iter().map(|r| {
             let accounts = r["accounts"].as_array().cloned().unwrap_or_default();
             view! { <div class="card">

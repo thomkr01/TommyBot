@@ -57,7 +57,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
         <div class="stack narrow">
         <div class="card row">
             <label>"Lock length"</label>
-            <select on:change=move |e| secs.set(event_target_value(&e).parse().unwrap_or(0))>
+            <select aria-label="lock length" on:change=move |e| secs.set(event_target_value(&e).parse().unwrap_or(0))>
                 <option value="0">"Until I unlock"</option><option value="900">"15 minutes"</option><option value="3600">"1 hour"</option>
                 <option value="21600">"6 hours"</option><option value="86400">"24 hours"</option>
             </select>
@@ -92,7 +92,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
             <div class="card row">
                 <button class="ghost" on:click=move |_| note.update(|x| *x = !*x)>"Send an update"</button>
                 <Show when=move || note.get()>
-                    <input placeholder="What members should know" prop:value=update on:input=move |e| update.set(event_target_value(&e)) />
+                    <input placeholder="What members should know" aria-label="update for members" prop:value=update on:input=move |e| update.set(event_target_value(&e)) />
                     <button on:click=move |_| { act("update", json!({"text": update.get_untracked()})); update.set(String::new()); note.set(false) }>"Send"</button>
                 </Show>
             </div>
@@ -100,7 +100,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
         <Show when=move || single.get()>
             <div class="card row">
                 <label>"Lock a single channel"</label>
-                <select on:change=move |e| channel.set(event_target_value(&e))>
+                <select aria-label="channel to lock" on:change=move |e| channel.set(event_target_value(&e))>
                     <option value="">"Choose a channel"</option>
                     {move || chans.get().into_iter().map(|c| {
                         let flags = [("locked", "locked"), ("private", "private")].iter().filter(|(k, _)| c[*k] == true).map(|(_, t)| *t).collect::<Vec<_>>().join(", ");
@@ -238,13 +238,14 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
 pub fn DiscordRules(guild: String) -> impl IntoView {
     let rules = RwSignal::new(Vec::<Value>::new());
     let (msg, dc, editing) = (RwSignal::new(String::new()), RwSignal::new(json!({})), RwSignal::new(None::<Value>));
-    let picking = RwSignal::new(false);
+    let (picking, loaded) = (RwSignal::new(false), RwSignal::new(false));
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/discord-rules", g.get_value()), None).await {
             Ok(v) => { rules.set(v.as_array().cloned().unwrap_or_default()); msg.set(String::new()); }
             Err(e) => msg.set(e),
         }
+        loaded.set(true);
     });
     load();
     spawn_local(async move {
@@ -266,7 +267,7 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
                 on:click=move |_| for r in rules.get_untracked().iter().filter(|r| r["enabled"] != true) { call("POST", format!("/{}/enabled", s(&r["id"])), Some(json!({"enabled": true}))) }>"Activate"</button>
             <span class="sp"></span>
             <button class="ghost" title="Copy the local word blacklist into a Discord rule, then clear the local lists"
-                on:click=move |_| if web_sys::window().and_then(|w| w.confirm_with_message("Copy your word blacklist into a new Discord AutoMod rule and clear the local lists? This cannot be undone.").ok()).unwrap_or(false) {
+                on:click=move |_| if confirm("Copy your word blacklist into a new Discord AutoMod rule and clear the local lists? This cannot be undone.") {
                     spawn_local(async move {
                         match api("POST", &format!("/api/guilds/{}/discord-rules-migrate-words", g.get_value()), None).await {
                             Ok(_) => { load(); msg.set("Words migrated.".into()); }
@@ -277,7 +278,7 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
             <button class="go" on:click=move |_| picking.set(true)>"+ Create"</button>
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rules.get().is_empty()>
+        <Show when=move || loaded.get() && rules.get().is_empty()>
             <div class="card empty"><p class="warn">"No Discord AutoMod rules found."</p></div>
         </Show>
         <Show when=move || picking.get()>
@@ -310,7 +311,7 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
                     <span class="chip" class:ok=on>{if on { "Active" } else { "Off" }}</span>
                     <button class=if on { "ghost" } else { "go" } on:click=move |_| call("POST", format!("/{id}/enabled"), Some(json!({"enabled": !on})))>{if on { "Deactivate" } else { "Activate" }}</button>
                     <button class="ghost" on:click=move |_| editing.set(Some(r2.clone()))>"Edit"</button>
-                    <button class="danger" on:click=move |_| call("DELETE", format!("/{id3}"), None)>"Delete"</button>
+                    <button class="danger" on:click=move |_| if confirm("Delete this Discord AutoMod rule?") { call("DELETE", format!("/{id3}"), None) }>"Delete"</button>
                 </div> }
             }
         </For>

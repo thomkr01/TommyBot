@@ -11,13 +11,15 @@ fn s(v: &Value) -> String {
 pub fn AppealList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let (kind, q, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let loaded = RwSignal::new(false);
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
         let path = format!("/api/guilds/{}/appeals?kind={}&q={}", g.get_value(), kind.get_untracked(), js_sys::encode_uri_component(&q.get_untracked()));
         match api("GET", &path, None).await {
-            Ok(v) => set_rows.set(v.as_array().cloned().unwrap_or_default()),
+            Ok(v) => { msg.set(String::new()); set_rows.set(v.as_array().cloned().unwrap_or_default()) }
             Err(e) => msg.set(e),
         }
+        loaded.set(true);
     });
     load();
     let reply = RwSignal::new(String::new());
@@ -34,12 +36,12 @@ pub fn AppealList(guild: String) -> impl IntoView {
             <div class="chips">
                 {["ban", "timeout"].map(|k| view! { <button class="ghost" class:on=move || kind.get() == k on:click=move |_| { kind.set(if kind.get_untracked() == k { String::new() } else { k.into() }); load() }>{k}</button> }).collect_view()}
             </div>
-            <input placeholder="User ID/tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
+            <input placeholder="User ID/tag" aria-label="user ID or tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| load() />
             <button class="ghost" on:click=move |_| load()>"Search"</button>
-            <input placeholder="Reply to the member (optional)" prop:value=reply on:input=move |e| reply.set(event_target_value(&e)) />
+            <input placeholder="Reply to the member (optional)" aria-label="reply to the member" prop:value=reply on:input=move |e| reply.set(event_target_value(&e)) />
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rows.get().is_empty()><div class="banner">"No pending appeals.."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No pending appeals.."</div></Show>
         <For each=move || rows.get() key=|r| (r["id"].as_i64(), r["status"].as_str().map(String::from)) let:r>
             {
                 let id = r["id"].as_i64().unwrap_or(0);
@@ -66,11 +68,14 @@ pub fn AppealList(guild: String) -> impl IntoView {
 pub fn Blacklist(guild: String, base: &'static str, #[prop(optional)] purge: bool) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let (user, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let loaded = RwSignal::new(false);
     let g = StoredValue::new(guild);
     let load = move || spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{}/{base}/blacklist", g.get_value()), None).await {
-            set_rows.set(v.as_array().cloned().unwrap_or_default());
+        match api("GET", &format!("/api/guilds/{}/{base}/blacklist", g.get_value()), None).await {
+            Ok(v) => set_rows.set(v.as_array().cloned().unwrap_or_default()),
+            Err(e) => msg.set(e),
         }
+        loaded.set(true);
     });
     load();
     let post = move |path: String, body: Option<Value>| spawn_local(async move {
@@ -81,12 +86,12 @@ pub fn Blacklist(guild: String, base: &'static str, #[prop(optional)] purge: boo
     });
     view! {
         <div class="card row">
-            <input placeholder="User ID" prop:value=user on:input=move |e| user.set(event_target_value(&e)) />
+            <input placeholder="User ID" aria-label="user ID" prop:value=user on:input=move |e| user.set(event_target_value(&e)) />
             <button on:click=move |_| post(String::new(), Some(json!({"user_id": user.get_untracked()})))>"Blacklist user"</button>
-            <Show when=move || purge><button class="ghost" on:click=move |_| if web_sys::window().is_some_and(|w| w.confirm_with_message("Remove every user from the appeals blacklist?").unwrap_or(false)) { post("/purge".into(), None) }>"Purge all"</button></Show>
+            <Show when=move || purge><button class="ghost" on:click=move |_| if confirm("Remove every user from the appeals blacklist?") { post("/purge".into(), None) }>"Purge all"</button></Show>
             <span class="err">{move || msg.get()}</span>
         </div>
-        <Show when=move || rows.get().is_empty()><div class="banner">"No blacklisted users.."</div></Show>
+        <Show when=move || loaded.get() && rows.get().is_empty()><div class="banner">"No blacklisted users.."</div></Show>
         <For each=move || rows.get() key=|r| s(&r["user_id"]) let:r>
             {
                 let id = s(&r["user_id"]);
@@ -129,7 +134,7 @@ pub fn AppealForm(guild: String) -> impl IntoView {
         }
     });
     view! {
-        <h1>"Appeal"</h1>
+        <div class="head"><h1>"Appeal"</h1></div>
         <p class="err">{move || msg.get()}</p>
         <For each=move || mine.get() key=|r| (r["id"].as_i64(), r["status"].as_str().map(String::from)) let:r>
             {
@@ -153,15 +158,15 @@ pub fn AppealForm(guild: String) -> impl IntoView {
                             let opts: Vec<String> = f["options"].as_array().map(|o| o.iter().map(s).collect()).unwrap_or_default();
                             let max = f["max"].as_u64().unwrap_or(1000).to_string();
                             let input = if opts.is_empty() {
-                                if f["long"] == true { view! { <textarea maxlength=max on:input=on></textarea> }.into_any() } else { view! { <input maxlength=max on:input=on /> }.into_any() }
+                                if f["long"] == true { view! { <textarea class="short" aria-label=s(&f["label"]) maxlength=max on:input=on></textarea> }.into_any() } else { view! { <input aria-label=s(&f["label"]) maxlength=max on:input=on /> }.into_any() }
                             } else if f["multi"] == true {
-                                view! { <div class="pick">{opts.into_iter().map(|o| { let o2 = o.clone(); view! { <label><input type="checkbox" on:change=move |e| answers.update(|a| {
+                                view! { <div class="pick" role="group" aria-label=s(&f["label"])>{opts.into_iter().map(|o| { let o2 = o.clone(); view! { <label><input type="checkbox" on:change=move |e| answers.update(|a| {
                                     let mut picked: Vec<String> = a[n].lines().filter(|l| *l != o2).map(String::from).collect();
                                     if event_target_checked(&e) { picked.push(o2.clone()) }
                                     a[n] = picked.join("\n");
                                 }) /> {o}</label> } }).collect_view()}</div> }.into_any()
                             } else {
-                                view! { <select on:change=on><option value="">"Choose"</option>{opts.into_iter().map(|o| { let v = o.clone(); view! { <option value=v>{o}</option> } }).collect_view()}</select> }.into_any()
+                                view! { <select aria-label=s(&f["label"]) on:change=on><option value="">"Choose"</option>{opts.into_iter().map(|o| { let v = o.clone(); view! { <option value=v>{o}</option> } }).collect_view()}</select> }.into_any()
                             };
                             view! { <div class="row"><label>{s(&f["label"])}</label>{input}</div> }
                         }).collect_view()}
