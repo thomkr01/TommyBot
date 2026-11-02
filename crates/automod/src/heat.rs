@@ -334,12 +334,30 @@ impl HeatState {
     }
 }
 
+/// One message in a [`Crowd`].
+#[derive(Debug)]
+pub struct Post {
+    pub user: u64,
+    pub name: String,
+    pub channel: u64,
+    pub msg: u64,
+}
+
+#[derive(Debug, Default)]
+struct Group {
+    posts: Vec<(Post, i64)>,
+    /// Shared heat of everyone who sent this text.
+    heat: HeatState,
+    tripped_ms: i64,
+}
+
 /// The same text from several members within seconds: a spam raid where every account stays under
-/// its own heat. The first members to post it are not flagged, only those who join in.
+/// its own heat. Their heat adds up in one shared pool, and when it trips every one of them is
+/// punished.
 #[derive(Debug, Default)]
 pub struct Crowd {
-    /// (guild, text hash) -> (member, ms) of recent posts.
-    seen: HashMap<(u64, u64), Vec<(u64, i64)>>,
+    /// (guild, text hash) -> the members who sent that text lately.
+    seen: HashMap<(u64, u64), Group>,
 }
 
 impl Crowd {
@@ -348,29 +366,51 @@ impl Crowd {
     /// Short texts ("gg", "hi") are said by many at once; links count at any length.
     const MIN_CHARS: usize = 30;
 
-    pub fn on_text(&mut self, guild: u64, user: u64, text: &str, now: i64) -> bool {
+    /// Adds a post's heat (`b`) to its text's shared pool. When two or more members' combined heat
+    /// reaches the max, three members sent it, or it tripped within the window, returns the
+    /// group's posts not returned before (this one included).
+    pub fn on_text(
+        &mut self,
+        guild: u64,
+        post: Post,
+        text: &str,
+        b: &Breakdown,
+        now: i64,
+        cfg: &HeatCfg,
+    ) -> Option<Vec<Post>> {
         use std::hash::{Hash, Hasher};
         let norm: String = crate::filters::cure(text)
             .chars()
             .filter(|c| c.is_alphanumeric())
             .collect();
         if norm.chars().count() < Self::MIN_CHARS && crate::filters::urls(text).is_empty() {
-            return false;
+            return None;
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         norm.hash(&mut h);
-        let fresh = |v: &mut Vec<(u64, i64)>| v.retain(|&(_, at)| now - at < Self::WINDOW_MS);
+        let fresh = |g: &mut Group| g.posts.retain(|&(_, at)| now - at < Self::WINDOW_MS);
         if self.seen.len() > 50_000 {
-            self.seen.retain(|_, v| {
-                fresh(v);
-                !v.is_empty()
+            self.seen.retain(|_, g| {
+                fresh(g);
+                !g.posts.is_empty() || now - g.tripped_ms < Self::WINDOW_MS
             });
         }
-        let posts = self.seen.entry((guild, h.finish())).or_default();
-        fresh(posts);
-        posts.retain(|&(u, _)| u != user);
-        posts.push((user, now));
-        posts.len() >= Self::USERS
+        let g = self.seen.entry((guild, h.finish())).or_default();
+        fresh(g);
+        g.posts.push((post, now));
+        let pool = g.heat.apply(b, now, cfg);
+        let mut users: Vec<u64> = g.posts.iter().map(|p| p.0.user).collect();
+        users.sort_unstable();
+        users.dedup();
+        let tripped = (users.len() >= 2 && pool)
+            || users.len() >= Self::USERS
+            || (g.tripped_ms > 0 && now - g.tripped_ms < Self::WINDOW_MS);
+        if !tripped {
+            return None;
+        }
+        g.tripped_ms = now;
+        g.heat = HeatState::default();
+        Some(g.posts.drain(..).map(|p| p.0).collect())
     }
 }
 
@@ -605,20 +645,61 @@ mod tests {
     }
 
     #[test]
-    fn crowd_flags_the_third_member_with_the_same_text() {
+    fn crowd_pools_heat_and_returns_every_member() {
+        let cfg = HeatCfg::default();
         let mut c = Crowd::default();
+        let post = |user, msg| Post {
+            user,
+            name: String::new(),
+            channel: 1,
+            msg,
+        };
+        let some = |v: f64| Breakdown {
+            parts: vec![("base", v)],
+        };
         let spam = "join my server for free nitro giveaway now!!";
-        assert!(!c.on_text(1, 10, spam, 0));
-        assert!(!c.on_text(1, 10, spam, 1)); // the same member again is not a crowd
-        assert!(!c.on_text(1, 11, "JOIN my server for FREE nitro giveaway now", 2));
-        assert!(c.on_text(1, 12, spam, 3));
-        assert!(!c.on_text(2, 13, spam, 4), "other guilds are separate");
-        assert!(!c.on_text(1, 14, spam, 40_000), "window passed");
-        for u in 20..30 {
-            assert!(!c.on_text(1, u, "gg", 50_000), "short chat is not a crowd");
+        let on = |c: &mut Crowd, g, u, text, v, now| {
+            c.on_text(g, post(u, now as u64), text, &some(v), now, &cfg)
+                .map(|p| p.iter().map(|p| p.user).collect::<Vec<_>>())
+        };
+        // One member alone never trips the pool, however hot.
+        assert_eq!(on(&mut c, 1, 10, spam, 60.0, 0), None);
+        assert_eq!(on(&mut c, 1, 10, spam, 60.0, 1), None);
+        // A second member's heat adds to the pool: both members (all their posts) come back.
+        assert_eq!(
+            on(
+                &mut c,
+                1,
+                11,
+                "JOIN my server for FREE nitro giveaway now",
+                1.0,
+                2
+            ),
+            Some(vec![10, 10, 11])
+        );
+        // Joining in right after is flagged too, alone.
+        assert_eq!(on(&mut c, 1, 12, spam, 0.0, 3), Some(vec![12]));
+        assert_eq!(
+            on(&mut c, 2, 13, spam, 0.0, 4),
+            None,
+            "other guilds are separate"
+        );
+        // Three members trip it without heat.
+        assert_eq!(on(&mut c, 1, 20, spam, 0.0, 100_000), None);
+        assert_eq!(on(&mut c, 1, 21, spam, 0.0, 100_001), None);
+        assert_eq!(
+            on(&mut c, 1, 22, spam, 0.0, 100_002),
+            Some(vec![20, 21, 22])
+        );
+        for u in 30..40 {
+            assert_eq!(
+                on(&mut c, 1, u, "gg", 90.0, 200_000),
+                None,
+                "short chat is not a crowd"
+            );
         }
-        assert!(!c.on_text(1, 30, "https://x.example", 60_000));
-        assert!(!c.on_text(1, 31, "https://x.example", 60_001));
-        assert!(c.on_text(1, 32, "https://x.example", 60_002));
+        assert_eq!(on(&mut c, 1, 40, "https://x.example", 0.0, 300_000), None);
+        assert_eq!(on(&mut c, 1, 41, "https://x.example", 0.0, 300_001), None);
+        assert!(on(&mut c, 1, 42, "https://x.example", 0.0, 300_002).is_some());
     }
 }

@@ -2,7 +2,7 @@
 use anyhow::Result;
 use tommybot_automod::{
     filters,
-    heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
+    heat::{heat, Breakdown, HeatCfg, MsgFacts, Post, Whitelist},
     join::account_created_ms,
     store,
     strike::strike,
@@ -19,7 +19,7 @@ use twilight_model::{
     channel::Message,
     gateway::payload::incoming::MessageCreate,
     id::{
-        marker::{GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, UserMarker},
         Id,
     },
 };
@@ -213,15 +213,7 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
-    let crowd = !edit
-        && heat_cfg.similarity > 0.0
-        && !facts.whitelist.spam
-        && app
-            .crowd
-            .lock()
-            .unwrap()
-            .on_text(gid.get(), m.author.id.get(), content, now);
-    let (triggered, fresh, breakdown) = {
+    let (triggered, fresh, breakdown, crowd) = {
         let mut map = app.heat.lock().unwrap();
         // Past 100k users, users idle for 10 minutes go first; everyone only if that frees nothing.
         if map.len() > 100_000 {
@@ -238,7 +230,23 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         if over_hour_cap {
             b.parts.push(("mentions", heat_cfg.max));
         }
-        if crowd {
+        // The same text from several members: their heat is pooled (webhooks have their own).
+        let crowd =
+            (!edit && heat_cfg.similarity > 0.0 && !facts.whitelist.spam && m.webhook_id.is_none())
+                .then(|| {
+                    let post = Post {
+                        user: m.author.id.get(),
+                        name: m.author.name.clone(),
+                        channel: m.channel_id.get(),
+                        msg: m.id.get(),
+                    };
+                    app.crowd
+                        .lock()
+                        .unwrap()
+                        .on_text(gid.get(), post, content, &b, now, &heat_cfg)
+                })
+                .flatten();
+        if crowd.is_some() {
             b.parts.push(("similarity", heat_cfg.max));
         }
         if edit {
@@ -249,8 +257,11 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         }
         // An edit adding nothing must not trip on heat left over from earlier messages.
         let triggered = state.apply(&b, now, &heat_cfg) && !(edit && b.parts.is_empty());
-        (triggered, triggered && state.claim(now), b)
+        (triggered, triggered && state.claim(now), b, crowd)
     };
+    if let Some(posts) = &crowd {
+        punish_crowd(app, &cfg, gid, m, posts, now).await;
+    }
     if !triggered && !mention_lock {
         return Ok(());
     }
@@ -311,34 +322,112 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
             return filter_action(app, &cfg, gid, m, action, (factor, fc.duration_secs)).await;
         }
     }
-    let mut st = store::load_strikes(&app.pool, gid.get(), m.author.id.get()).await?;
+    crate::http_err::best_effort(
+        app.http.delete_message(m.channel_id, m.id).await,
+        "automod delete",
+    );
+    strike_member(
+        app,
+        &cfg,
+        gid,
+        (m.author.id, &m.author.name),
+        m.channel_id,
+        tripped
+            .map(|t| t.1)
+            .or(crowd.is_some().then_some("Coordinated spam")),
+    )
+    .await
+}
+
+/// Everyone else who sent the crowd's text gets the same punishment as the member who tripped it.
+async fn punish_crowd(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    m: &Message,
+    posts: &[Post],
+    now: i64,
+) {
+    let msgs: Vec<_> = posts
+        .iter()
+        .filter(|p| p.msg != m.id.get())
+        .map(|p| (p.channel, p.msg))
+        .collect();
+    reply::purge_ids(app, &msgs).await;
+    let mut done = vec![m.author.id.get()];
+    for p in posts {
+        if done.contains(&p.user) {
+            continue;
+        }
+        done.push(p.user);
+        let user = Id::new(p.user);
+        // Not twice for one burst if their own heat tripped too.
+        let fresh = app
+            .heat
+            .lock()
+            .unwrap()
+            .entry((gid.get(), p.user))
+            .or_default()
+            .0
+            .claim(now);
+        let res = async {
+            if !fresh || app.whitelisted(gid, user, "automod").await? {
+                return Ok(());
+            }
+            crate::panic::note(app, gid, user, true).await?;
+            strike_member(
+                app,
+                cfg,
+                gid,
+                (user, &p.name),
+                Id::new(p.channel),
+                Some("Coordinated spam"),
+            )
+            .await
+        };
+        if let Err(e) = res.await {
+            tracing::warn!(?e, user = p.user, "punishing a crowd member failed");
+        }
+    }
+}
+
+/// Strike and time out a spammer as the strike settings say, then log it.
+async fn strike_member(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    (user, name): (Id<UserMarker>, &str),
+    ch: Id<ChannelMarker>,
+    reason: Option<&str>,
+) -> Result<()> {
+    let am = &cfg.automod;
+    let lock = &am.auto_lockdown;
+    let now = now_ms();
+    let key = (gid.get(), user.get());
+    let mut st = store::load_strikes(&app.pool, gid.get(), user.get()).await?;
     let act = strike(&mut st, &am.strike, now);
-    store::save_strikes(&app.pool, gid.get(), m.author.id.get(), &st).await?;
+    store::save_strikes(&app.pool, gid.get(), user.get(), &st).await?;
     let tracked = app.heat.lock().unwrap().get_mut(&key).map(|(s, h)| {
         if act.reset_heat {
             s.value = 0.0;
         }
         h.take_msgs()
     });
-    crate::http_err::best_effort(
-        app.http.delete_message(m.channel_id, m.id).await,
-        "automod delete",
-    );
     if cfg.misc.purge_last_100 || act.purge {
-        if let Err(e) = reply::purge_user(app, m.channel_id, m.author.id).await {
+        if let Err(e) = reply::purge_user(app, ch, user).await {
             tracing::warn!(?e, "automod purge failed");
         }
         let others: Vec<_> = tracked
             .unwrap_or_default()
             .into_iter()
-            .filter(|&(c, _)| c != m.channel_id.get())
+            .filter(|&(c, _)| c != ch.get())
             .collect();
         reply::purge_ids(app, &others).await;
     }
     let reason = if act.purge {
         "Message spam (strike cap)"
     } else {
-        tripped.map_or("Message spam", |t| t.1)
+        reason.unwrap_or("Message spam")
     };
     if am.strike.enabled {
         let why = if cfg.misc.show_reason_on_auto {
@@ -349,39 +438,31 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
             .filter(|_| act.timeout_ms > 300_000)
             .map_or(String::new(), |n| format!("\n{n}"));
-        if let Err(e) = timeout(
-            &app.http,
-            gid,
-            m.author.id,
-            act.timeout_ms / 1000,
-            "Automod",
-        )
-        .await
-        {
-            action_failed(app, gid, m.author.id.get(), "Timeout", &e).await;
+        if let Err(e) = timeout(&app.http, gid, user, act.timeout_ms / 1000, "Automod").await {
+            action_failed(app, gid, user.get(), "Timeout", &e).await;
             return Err(e);
         }
         // Only after it worked: a failed timeout must not tell them they were timed out.
         reply::dm(
             app,
-            m.author.id,
+            user,
             &format!("You were timed out by automod{why}{note}"),
         )
         .await;
         auto_case(
             app,
             gid,
-            m.author.id,
+            user,
             "timeout",
             reason,
             Some(act.timeout_ms / 1000),
         )
         .await?;
     }
-    let log = Log::new(&format!("*{} has been timed out!*", m.author.name), ORANGE)
+    let log = Log::new(&format!("*{} has been timed out!*", name), ORANGE)
         .line("Reason", &format!("*{reason}*"))
-        .user("Member", m.author.id.get())
-        .line("Channel", &channel(m.channel_id.get()))
+        .user("Member", user.get())
+        .line("Channel", &channel(ch.get()))
         .line(
             "Duration",
             &format!("`{}`", duration(act.timeout_ms / 1000)),
@@ -398,7 +479,7 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
             LogKind::Panic,
             Log::new("Server Locked", ALERT)
                 .text(&format!("{YES} **The server has been locked down.**"))
-                .user("Member", m.author.id.get())
+                .user("Member", user.get())
                 .line("Reason", &format!("Reached strike `{}`", act.strike)),
         )
         .await?;
