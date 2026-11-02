@@ -12,6 +12,7 @@ mod hierarchy;
 mod http_err;
 mod info;
 mod invites;
+mod joingate;
 mod lockdown;
 mod metrics;
 mod modcmds;

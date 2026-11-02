@@ -366,9 +366,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(e) = crate::timeout_roles::on_member_update(app, m).await {
                 tracing::warn!(?e, "removing main roles on timeout failed");
             }
-            automod::on_member_update(app, m).await?
+            crate::joingate::on_member_update(app, m).await?
         }
-        Event::MemberAdd(m) => automod::on_join(app, m).await?,
+        Event::MemberAdd(m) => crate::joingate::on_join(app, m).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?
