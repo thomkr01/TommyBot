@@ -105,7 +105,9 @@ def log_messages(kind, since, event=None):
 
 
 def logged(kind, since, title=None):
-    return any(title in (None, e.get("title")) for m in log_messages(kind, since) for e in m["embeds"])
+    """A log with this title arrived, and it carries the date and time (`<t:...:F>`)."""
+    return any(title in (None, e.get("title")) and ":F>" in e.get("description", "")
+               for m in log_messages(kind, since) for e in m["embeds"])
 
 
 def spam():
