@@ -271,6 +271,8 @@ fn changes(
             // Changes twilight cannot decode, and the id and type the target line already shows.
             "other" | "id" => log,
             "type" if overwrite => log,
+            // The target line names a new or removed webhook already.
+            "name" if kind == LogKind::Webhook && (created || deleted) => log,
             "$add" => log.line("Roles Added", &roles(new)),
             "$remove" => log.line("Roles Removed", &roles(new)),
             key @ ("permissions" | "allow" | "deny") => {
@@ -560,6 +562,7 @@ mod tests {
             "action_type": 50, "id": "1", "guild_id": "9", "user_id": "10", "target_id": "60",
             "changes": [
                 { "key": "channel_id", "new_value": "30" },
+                { "key": "name", "new_value": "hook" },
                 { "key": "type", "new_value": 1 },
                 { "key": "avatar_hash", "new_value": null },
                 { "key": "nsfw", "new_value": false }
