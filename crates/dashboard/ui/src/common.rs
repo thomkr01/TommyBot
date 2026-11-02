@@ -1,7 +1,10 @@
 use gloo_net::http::Request;
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
-use std::cell::RefCell;
+use std::{cell::RefCell, time::Duration};
+
+/// How long a closing bar, toast or dialog fades out; matches `--dur` in style.css.
+pub const OUT: Duration = Duration::from_millis(200);
 
 thread_local! { pub static CSRF: RefCell<String> = const { RefCell::new(String::new()) }; }
 
@@ -60,7 +63,7 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
         }
     });
     view! {
-        <Show when=move || need.get()>
+        <AnimatedShow when=need hide_class="out" hide_delay=OUT>
             <div class="card">
                 <b>"Confirm it's you"</b>
                 <p class="muted">"This change needs your authenticator code. After verifying, save again."</p>
@@ -76,7 +79,7 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
                 </div>
                 <p class="err">{move || err.get()}</p>
             </div>
-        </Show>
+        </AnimatedShow>
     }
 }
 
@@ -97,6 +100,13 @@ pub fn run_act(fut: impl std::future::Future<Output = Result<Value, String>> + '
             Err(e) => msg.set(e),
         }
     });
+}
+
+/// Click-to-close message; keeps its last text while it fades out.
+#[component]
+pub fn Toast(msg: RwSignal<String>) -> impl IntoView {
+    let text = Memo::new(move |prev: Option<&String>| { let m = msg.get(); if m.is_empty() { prev.cloned().unwrap_or_default() } else { m } });
+    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" role="status" on:click=move |_| msg.set(String::new())>{move || text.get()}</p></AnimatedShow> }
 }
 
 /// Runs a save, recording the new version.

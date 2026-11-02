@@ -104,6 +104,9 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         </div></div> }
     };
     let delete = move |i: usize| cfg.update(|c| { c["custom"].as_array_mut().map(|a| a.remove(i)); });
+    // The last dialog stays rendered while it fades out.
+    let del = Memo::new(move |prev: Option<&Option<usize>>| deleting.get().or(prev.copied().flatten()));
+    let dlg = Memo::new(move |prev: Option<&Option<i32>>| open.get().or(prev.copied().flatten()));
     view! {
         <div class="row"><button class="go" title="Create New Permit" aria-label="create new permit" on:click=move |_| { let before = cfg.get_untracked(); cfg.update(|c| { if !c["custom"].is_array() { c["custom"] = json!([]); } c["custom"].as_array_mut().unwrap().push(json!({"name": "New permit", "rank": 0, "perms": [], "roles": [], "whitelist": [], "limits": {}})); }); start(cfg.get_untracked()["custom"].as_array().map_or(0, |a| a.len() as i32 - 1)); snap.set(before) }>"+"</button></div>
         <table class="permits"><thead><tr><th>"Name"</th><th>"Actions"</th></tr></thead><tbody>
@@ -115,13 +118,14 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     <button class="ghost" title="Edit Permit" on:click=move |_| start(i as i32)>"Edit"</button></td></tr>
             }).collect_view()}
         </tbody></table>
-        {move || deleting.get().map(|n| view! { <div class="modal" role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| if e.key() == "Escape" { deleting.set(None) }><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
+        <AnimatedShow when=Signal::derive(move || deleting.get().is_some()) hide_class="out" hide_delay=OUT>{move || del.get().map(|n| view! { <div class="modal" role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| if e.key() == "Escape" { deleting.set(None) }><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get_untracked()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
             <div class="row"><button class="ghost" on:click=move |_| deleting.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); deleting.set(None) }>"Delete"</button></div></div></div> })}
-        {move || open.get().map(|i| dialog(i))}
-        <Show when=move || cfg.get() != orig.get()>
+</AnimatedShow>
+        <AnimatedShow when=Signal::derive(move || open.get().is_some()) hide_class="out" hide_delay=OUT>{move || dlg.get().map(|i| dialog(i))}</AnimatedShow>
+        <AnimatedShow when=Signal::derive(move || cfg.get() != orig.get()) hide_class="out" hide_delay=OUT>
             <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| cfg.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
-        </Show>
-        <Show when=move || !msg.get().is_empty()><p class="toast" role="status" on:click=move |_| msg.set(String::new())>{move || msg.get()}</p></Show>
+        </AnimatedShow>
+        <Toast msg />
         <StepUp need enrolled />
     }
 }
