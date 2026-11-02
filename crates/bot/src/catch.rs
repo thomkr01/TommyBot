@@ -48,7 +48,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
             return Ok(true);
         }
     };
-    app.http.delete_message(m.channel_id, m.id).await.ok();
+    crate::http_err::best_effort(
+        app.http.delete_message(m.channel_id, m.id).await,
+        "delete caught message",
+    );
     let flags = Flags {
         dm: c.dm,
         soft,

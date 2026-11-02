@@ -331,12 +331,16 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::ChannelCreate(c) => {
             app.note_parent(&c.0);
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
-            crate::setup::enforce_quarantine(app, c).await.ok();
+            if let Err(e) = crate::setup::enforce_quarantine(app, c).await {
+                tracing::warn!(?e, channel = %c.id, "quarantine overwrite failed");
+            }
         }
         Event::ChannelUpdate(c) => {
             app.log_public.lock().unwrap().remove(&c.id);
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
-            crate::setup::enforce_quarantine(app, c).await.ok();
+            if let Err(e) = crate::setup::enforce_quarantine(app, c).await {
+                tracing::warn!(?e, channel = %c.id, "quarantine overwrite failed");
+            }
             crate::catch::keep_top(app, c).await?;
         }
         Event::ChannelDelete(c) => {

@@ -400,18 +400,28 @@ pub(crate) async fn quarantine(
     let cfg = app.cfg(gid.get()).await?;
     let member = app.http.guild_member(gid, user).await?.model().await?;
     let saved: Vec<i64> = member.roles.iter().map(|r| r.get() as i64).collect();
-    // Keep the first saved list when quarantined twice.
-    sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+    // Keep the first saved list when quarantined twice. Saved before the roles go, so a crash
+    // between the two never loses them.
+    let fresh = sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
         .bind(gid.get() as i64)
         .bind(user.get() as i64)
         .bind(&saved)
         .execute(&app.pool)
-        .await?;
+        .await?
+        .rows_affected()
+        == 1;
     let roles: Vec<_> = cfg.antinuke.quarantine_role.into_iter().collect();
-    app.http
-        .update_guild_member(gid, user)
-        .roles(&roles)
-        .await?;
+    if let Err(e) = app.http.update_guild_member(gid, user).roles(&roles).await {
+        // Role too low or permission missing: they are not quarantined, so no row may say so.
+        if fresh {
+            sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2")
+                .bind(gid.get() as i64)
+                .bind(user.get() as i64)
+                .execute(&app.pool)
+                .await?;
+        }
+        return Err(e.into());
+    }
     record_quarantine(app, gid, user).await
 }
 

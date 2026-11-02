@@ -72,15 +72,17 @@ pub(crate) async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Resu
         |o| immune.get(&o).copied().unwrap_or(false),
         |id| cfg.whitelist.spam.webhooks.iter().any(|w| w.get() == id),
     );
+    let mut deleted = 0;
     for id in &doomed {
-        app.http.delete_webhook(Id::new(*id)).await.ok();
+        let r = app.http.delete_webhook(Id::new(*id)).await;
+        deleted += usize::from(crate::http_err::best_effort(r, "delete spam webhook").is_some());
     }
-    // Every message of a flood lands here; only the one that found hooks to delete is logged.
-    if doomed.is_empty() {
+    // Every message of a flood lands here; only the one that deleted hooks is logged.
+    if deleted == 0 {
         return Ok(());
     }
     let log = Log::new("Webhooks Deleted", RED)
-        .line("Count", &format!("`{}`", doomed.len()))
+        .line("Count", &format!("`{deleted}`"))
         .line("Reason", "Webhook spam");
     send_log(app, gid.get(), LogKind::AutoMod, log).await
 }

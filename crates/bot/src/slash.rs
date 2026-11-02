@@ -448,7 +448,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<()> {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(?e, command = %data.name, "slash command failed");
-            "Something went wrong, see logs".into()
+            format!("Something went wrong: {}", crate::http_err::why(&e))
         }
     };
     client

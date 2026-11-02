@@ -48,7 +48,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         return Ok(());
     }
     if crate::panic::is_raider(app, gid, m.author.id) {
-        app.http.delete_message(m.channel_id, m.id).await.ok();
+        crate::http_err::best_effort(
+            app.http.delete_message(m.channel_id, m.id).await,
+            "automod delete",
+        );
         return timeout(
             &app.http,
             gid,
@@ -250,7 +253,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             .unwrap()
             .get_mut(&key)
             .map(|(_, h)| h.take_msgs());
-        app.http.delete_message(m.channel_id, m.id).await.ok();
+        crate::http_err::best_effort(
+            app.http.delete_message(m.channel_id, m.id).await,
+            "automod delete",
+        );
         reply::purge_ids(app, &tracked.unwrap_or_default()).await;
         return crate::webhooks::delete_new_webhooks(app, gid).await;
     }
@@ -273,9 +279,14 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         }
         h.take_msgs()
     });
-    app.http.delete_message(m.channel_id, m.id).await.ok();
+    crate::http_err::best_effort(
+        app.http.delete_message(m.channel_id, m.id).await,
+        "automod delete",
+    );
     if cfg.misc.purge_last_100 || act.purge {
-        reply::purge_user(app, m.channel_id, m.author.id).await.ok();
+        if let Err(e) = reply::purge_user(app, m.channel_id, m.author.id).await {
+            tracing::warn!(?e, "automod purge failed");
+        }
         let others: Vec<_> = tracked
             .unwrap_or_default()
             .into_iter()
@@ -463,7 +474,10 @@ async fn filter_action(
     (factor, duration_secs): (&str, Option<i64>),
 ) -> Result<()> {
     let uid = m.author.id;
-    app.http.delete_message(m.channel_id, m.id).await.ok();
+    crate::http_err::best_effort(
+        app.http.delete_message(m.channel_id, m.id).await,
+        "automod delete",
+    );
     if action != FilterAction::Delete && cfg.automod.strike.reset_heat_on_timeout {
         if let Some((s, _)) = app.heat.lock().unwrap().get_mut(&(gid.get(), uid.get())) {
             s.value = 0.0;
@@ -826,6 +840,24 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     .await
 }
 
+/// A punishment Discord refused (role too low, permission missing) is shown to staff, not
+/// only written to the container log.
+pub(crate) async fn action_failed(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: u64,
+    action: &str,
+    e: &anyhow::Error,
+) {
+    let log = Log::new("Automod Action Failed", RED)
+        .user("Member", user)
+        .line("Action", &format!("`{action}`"))
+        .line("Error", &crate::http_err::why(e));
+    if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+        tracing::warn!(?e, "could not log the failed automod action");
+    }
+}
+
 pub(crate) async fn punish(
     app: &App,
     cfg: &GuildCfg,
@@ -883,23 +915,33 @@ pub(crate) async fn punish(
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        Action::Timeout(0) => {
-            timeout(
-                &app.http,
-                gid,
-                uid,
-                cfg.misc.timeout_secs() as i64,
-                "Automod",
-            )
-            .await?
-        }
-        Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000, "Automod").await?,
-        Action::Timeout(_) => return Ok(()),
-        Action::Kick => {
-            app.http.remove_guild_member(gid, uid).await?;
-        }
-        Action::Ban => {
-            app.http.create_ban(gid, uid).await?;
+        Action::Timeout(..=-1) => return Ok(()),
+        Action::Timeout(_) | Action::Kick | Action::Ban => {
+            let done = match action {
+                Action::Timeout(ms) => {
+                    let secs = match ms {
+                        0 => cfg.misc.timeout_secs() as i64,
+                        ms => ms / 1000,
+                    };
+                    timeout(&app.http, gid, uid, secs, "Automod").await
+                }
+                Action::Kick => app
+                    .http
+                    .remove_guild_member(gid, uid)
+                    .await
+                    .map(drop)
+                    .map_err(Into::into),
+                _ => app
+                    .http
+                    .create_ban(gid, uid)
+                    .await
+                    .map(drop)
+                    .map_err(Into::into),
+            };
+            if let Err(e) = done {
+                action_failed(app, gid, user, &format!("{action:?}"), &e).await;
+                return Err(e);
+            }
         }
     }
     send_log(

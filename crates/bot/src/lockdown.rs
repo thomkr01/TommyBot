@@ -196,16 +196,17 @@ async fn announce(app: &App, gid: Id<GuildMarker>, log: Log) {
 
 /// Lifts the active locks that overlap `which`, or all of them; returns how many were lifted.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
-    let mut lifted = 0;
+    let (mut lifted, mut failed) = (0, 0);
     for snap in store::locks(&app.pool, gid.get()).await? {
         let hit = match (which, &snap.kind) {
             (Some(w), Some(k)) => w.overlaps(k),
             (Some(_), None) => false,
             (None, _) => true,
         };
-        if !hit || !store::take_lock(&app.pool, gid.get(), &snap).await? {
+        if !hit {
             continue;
         }
+        // Read before the snapshot is taken, so a failed read leaves the lock to retry.
         let current: Vec<(u64, u64)> = app
             .http
             .roles(gid)
@@ -215,14 +216,26 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             .iter()
             .map(|r| (r.id.get(), r.permissions.bits()))
             .collect();
+        if !store::take_lock(&app.pool, gid.get(), &snap).await? {
+            continue;
+        }
+        // The snapshot is gone now, so one failed step must not leave the rest locked. A deleted
+        // channel or role has nothing to restore.
+        let mut step = |r: Result<()>| match r {
+            Err(e) if !crate::http_err::gone_any(&e) => {
+                tracing::warn!(?e, "unlock step failed");
+                failed += 1;
+            }
+            _ => {}
+        };
         for op in unlock_ops(&snap, &current) {
-            exec(app, gid, &op, &snap).await?;
+            step(exec(app, gid, &op, &snap).await.map(drop));
         }
         if snap.invites_paused {
-            app.api.pause_invites(gid.get(), None).await?;
+            step(app.api.pause_invites(gid.get(), None).await);
         }
         for &(channel, role) in &snap.channel_denies {
-            match snap.prior.iter().find(|p| p.0 == channel && p.1 == role) {
+            let r = match snap.prior.iter().find(|p| p.0 == channel && p.1 == role) {
                 Some(&(_, _, allow, deny)) => {
                     let o = PermissionOverwrite {
                         id: Id::new(role),
@@ -232,20 +245,31 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
                     };
                     app.http
                         .update_channel_permission(Id::new(channel), &o)
-                        .await?;
+                        .await
                 }
                 None => {
                     app.http
                         .delete_channel_permission(Id::new(channel))
                         .role(Id::new(role))
-                        .await?;
+                        .await
                 }
-            }
+            };
+            step(r.map(drop).map_err(Into::into));
         }
         if let Some(c) = snap.locked_channel {
-            app.http.delete_channel(Id::new(c)).await.ok();
+            crate::http_err::best_effort(
+                app.http.delete_channel(Id::new(c)).await,
+                "delete lock channel",
+            );
         }
         lifted += 1;
+    }
+    if failed > 0 {
+        let log = Log::new("Unlock Incomplete", ALERT)
+            .text(&format!("`{failed}` permission changes could not be undone. Check the bot's role and permissions, then fix them by hand."));
+        if let Err(e) = send_log(app, gid.get(), LogKind::Server, log).await {
+            tracing::warn!(?e, "could not log the incomplete unlock");
+        }
     }
     if lifted > 0 {
         if active(app, gid).await?.is_empty() {
@@ -301,11 +325,12 @@ pub async fn update(
     let e = log.build();
     let locked = locks.iter().find_map(|s| s.locked_channel).map(Id::new);
     for ch in std::iter::once(channel).chain(locked.filter(|c| *c != channel)) {
-        app.http
+        let r = app
+            .http
             .create_message(ch)
             .embeds(std::slice::from_ref(&e))
-            .await
-            .ok();
+            .await;
+        crate::http_err::best_effort(r, "post lock update");
     }
     Ok("Lock update posted".into())
 }

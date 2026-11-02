@@ -693,7 +693,10 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(?e, action, "report action failed");
-            refused(format!("Something went wrong: {}", crate::confirm::why(&e)))
+            refused(format!(
+                "Something went wrong: {}",
+                crate::http_err::why(&e)
+            ))
         });
     if let Some((line, closes)) = line {
         if closes {

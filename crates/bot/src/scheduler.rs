@@ -9,7 +9,7 @@ use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
 use tommybot_logging::emoji::ARROW;
 use tommybot_logging::{
-    embed::{DONE, YES},
+    embed::{DONE, RED, YES},
     Log, LogKind,
 };
 use twilight_model::id::{marker::UserMarker, Id};
@@ -18,7 +18,7 @@ use crate::{
     app::{now_secs, App},
     backup, commands,
     events::{send_log, send_log_link},
-    lockdown, metrics, panic, verify,
+    http_err, lockdown, metrics, panic, verify,
 };
 
 fn user(payload: &Value) -> Result<Id<UserMarker>> {
@@ -131,6 +131,8 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
     Ok(())
 }
 
+const ONE_TARGET: [&str; 3] = ["unban", "timeout_renew", "delete_message"];
+
 /// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
 async fn round(app: &App, heavy: bool) {
     match jobs::claim_due(&app.pool, 50, heavy).await {
@@ -141,11 +143,21 @@ async fn round(app: &App, heavy: bool) {
                         metrics::JOBS_DONE.fetch_add(1, Relaxed);
                         true
                     }
+                    // One-target jobs whose member left, ban was lifted by hand or message is gone:
+                    // nothing left to do, and retrying would only fail again.
+                    Err(e) if ONE_TARGET.contains(&job.kind.as_str()) && http_err::gone_any(&e) => {
+                        tracing::info!(id = job.id, kind = %job.kind, "job target is gone");
+                        true
+                    }
                     Err(e) => {
                         tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
                         metrics::JOBS_FAILED.fetch_add(1, Relaxed);
                         // Otherwise the lease expires and it runs again.
-                        job.attempts >= jobs::MAX_ATTEMPTS
+                        let last = job.attempts >= jobs::MAX_ATTEMPTS;
+                        if last {
+                            give_up_log(app, &job, &e).await;
+                        }
+                        last
                     }
                 };
                 if done {
@@ -156,6 +168,21 @@ async fn round(app: &App, heavy: bool) {
             }
         }
         Err(e) => tracing::warn!(?e, "claiming jobs failed"),
+    }
+}
+
+/// A dropped job (a temp ban that never ends, a lock that stays) must be visible on Discord, not
+/// only in the container log.
+async fn give_up_log(app: &App, job: &Job, e: &anyhow::Error) {
+    let log = Log::new("Scheduled Action Failed", RED)
+        .line("Action", &format!("`{}`", job.kind))
+        .line("Error", &crate::http_err::why(e))
+        .text(&format!(
+            "Gave up after {} tries, do it by hand.",
+            job.attempts
+        ));
+    if let Err(e) = send_log(app, job.guild_id as u64, LogKind::Server, log).await {
+        tracing::warn!(?e, id = job.id, "could not log the failed job");
     }
 }
 

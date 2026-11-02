@@ -66,10 +66,7 @@ pub(crate) async fn user_info(
 ) -> Result<Embed> {
     let cfg = app.cfg(gid.get()).await?;
     let info = app.guild_info(gid).await?;
-    let member = match app.http.guild_member(gid, uid).await {
-        Ok(m) => Some(m.model().await?),
-        Err(_) => None,
-    };
+    let member = crate::http_err::member(&app.http, gid, uid).await?;
     let user = match &member {
         Some(m) => m.user.clone(),
         None => app.http.user(uid).await?.model().await?,

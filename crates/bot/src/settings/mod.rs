@@ -724,13 +724,19 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
     };
     if kind == "x" {
         if let Some(m) = &i.message {
-            app.http.delete_message(m.channel_id, m.id).await.ok();
+            crate::http_err::best_effort(
+                app.http.delete_message(m.channel_id, m.id).await,
+                "close panel",
+            );
         }
         let r = InteractionResponse {
             kind: InteractionResponseType::DeferredUpdateMessage,
             data: None,
         };
-        client.create_response(i.id, &i.token, &r).await.ok();
+        crate::http_err::best_effort(
+            client.create_response(i.id, &i.token, &r).await,
+            "ack panel close",
+        );
         return Ok(true);
     }
     let page: usize = it.next().and_then(|p| p.parse().ok()).unwrap_or(0);
