@@ -197,10 +197,10 @@ fn App() -> impl IntoView {
         }
     });
     view! {
-        <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a></main> }>
+        <Show when=move || me.get().is_some() fallback=|| view! { <main><img class="hero" src="/logo.svg" alt="" width="128" height="128" /><h1>"TommyBot"</h1><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a></main> }>
             <header>
                 <button class="ghost menu-btn" aria-label="menu" aria-expanded=move || nav_open.get().to_string() on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
-                <a class="logo" href="#/">"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
+                <a class="logo" href="#/"><img src="/logo.svg" alt="" width="32" height="32" />"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
