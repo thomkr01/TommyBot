@@ -840,6 +840,24 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     .await
 }
 
+/// A punishment Discord refused (role too low, permission missing) is shown to staff, not
+/// only written to the container log.
+pub(crate) async fn action_failed(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: u64,
+    action: &str,
+    e: &anyhow::Error,
+) {
+    let log = Log::new("Automod Action Failed", RED)
+        .user("Member", user)
+        .line("Action", &format!("`{action}`"))
+        .line("Error", &crate::http_err::why(e));
+    if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+        tracing::warn!(?e, "could not log the failed automod action");
+    }
+}
+
 pub(crate) async fn punish(
     app: &App,
     cfg: &GuildCfg,
@@ -897,23 +915,33 @@ pub(crate) async fn punish(
             .await?;
             warn_actions(app, cfg, gid, uid).await?;
         }
-        Action::Timeout(0) => {
-            timeout(
-                &app.http,
-                gid,
-                uid,
-                cfg.misc.timeout_secs() as i64,
-                "Automod",
-            )
-            .await?
-        }
-        Action::Timeout(ms) if ms > 0 => timeout(&app.http, gid, uid, ms / 1000, "Automod").await?,
-        Action::Timeout(_) => return Ok(()),
-        Action::Kick => {
-            app.http.remove_guild_member(gid, uid).await?;
-        }
-        Action::Ban => {
-            app.http.create_ban(gid, uid).await?;
+        Action::Timeout(..=-1) => return Ok(()),
+        Action::Timeout(_) | Action::Kick | Action::Ban => {
+            let done = match action {
+                Action::Timeout(ms) => {
+                    let secs = match ms {
+                        0 => cfg.misc.timeout_secs() as i64,
+                        ms => ms / 1000,
+                    };
+                    timeout(&app.http, gid, uid, secs, "Automod").await
+                }
+                Action::Kick => app
+                    .http
+                    .remove_guild_member(gid, uid)
+                    .await
+                    .map(drop)
+                    .map_err(Into::into),
+                _ => app
+                    .http
+                    .create_ban(gid, uid)
+                    .await
+                    .map(drop)
+                    .map_err(Into::into),
+            };
+            if let Err(e) = done {
+                action_failed(app, gid, user, &format!("{action:?}"), &e).await;
+                return Err(e);
+            }
         }
     }
     send_log(
