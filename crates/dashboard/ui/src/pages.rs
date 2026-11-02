@@ -57,8 +57,8 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         <div class="card">
             <div class="split">
                 <div><h2>{move || format!("{} Setup Process", guilds.get().iter().find(|x| x["id"] == g_id.as_str()).and_then(|x| x["name"].as_str().map(String::from)).unwrap_or_default())}</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
-                <Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) color=Some("var(--primary)") />
-                <svg class="wizart" viewBox="0 0 120 120" aria-hidden="true"><path d="M60 8 104 26v32c0 28-19 46-44 54C35 104 16 86 16 58V26z" fill="var(--primary)" opacity=".25" stroke="var(--primary)" stroke-width="4"/><path d="m40 60 14 14 28-30" fill="none" stroke="var(--primary)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div class="brand"><Ring pct=Signal::derive(move || (step.get() + 1) * 100 / STEPS.len()) /></div>
+                <svg class="wizart" viewBox="0 0 120 120" aria-hidden="true"><defs><linearGradient id="tb-brand" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFA36C"/><stop offset=".35" stop-color="#FF6F91"/><stop offset=".7" stop-color="#9B7BFF"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient></defs><path d="M60 8 104 26v32c0 28-19 46-44 54C35 104 16 86 16 58V26z" fill="url(#tb-brand)" fill-opacity=".25" stroke="url(#tb-brand)" stroke-width="4"/><path class="tick" d="m40 60 14 14 28-30" fill="none" stroke="url(#tb-brand)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </div>
             <h2>"Steps"</h2>
             <div class="steps">
@@ -66,13 +66,13 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             </div>
             <div class="chips"><span class="chip blue">"You can choose a certain step if you want."</span><span class="chip orange">"The full setup could take around 3 minutes of your time."</span></div>
         </div>
-        {move || match step.get() {
+        {move || view! { <div class="enter">{match step.get() {
             0 => {
                 let (all, run) = (auto.clone(), auto.clone());
                 view! { <div class="card">
                     <h2>"Initial Setup"</h2>
                     <p>"TommyBot needs to do some magic in your server: it creates #tommybot-logs and #mod-logs, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
-                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].map(|t| view! { <li class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
+                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].into_iter().enumerate().map(|(i, t)| view! { <li style=format!("--i:{i}") class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
                     <p>"Like Wick, it makes #tommybot-logs and #mod-logs; every other log goes to #tommybot-logs until you give it a channel under Logging > Customize. Custom also makes a channel for the types you tick."</p>
                     <button on:click=move |_| all(None)>"Auto Setup"</button>
                     <button on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
@@ -84,9 +84,9 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 </div> }.into_any()
             }
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
-            9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a href=format!("#/{}/overview", g)><button class="go">"Go to Overview"</button></a></div> }.into_any(),
+            9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a class="btn go" href=format!("#/{}/overview", g)>"Go to Overview"</a></div> }.into_any(),
             i => { let (name, cards) = CARDS[i - 1]; view! { <Section guild=g.clone() name=name.to_string() cards next=Callback::new(move |_| step.update(|i| *i += 1)) enrolled /> }.into_any() }
-        }}
+        }}</div> }}
         <p><Show when=move || matches!(step.get(), 0 | 8)><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
         <StepUp need enrolled />
     }
@@ -114,6 +114,8 @@ const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
 fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl IntoView {
     let (cfg, version, on) = (RwSignal::new(json!({})), RwSignal::new(0i64), RwSignal::new(default));
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    // Locked while the config loads and while a save runs, so the knob never shows a state the server does not have.
+    let busy = RwSignal::new(true);
     let g = guild.clone();
     spawn_local(async move {
         if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
@@ -121,15 +123,23 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
             on.set(v["config"][section]["enabled"].as_bool().unwrap_or(default));
             if v["config"][section].is_object() { cfg.set(v["config"][section].clone()); }
         }
+        busy.set(false);
     });
     let change = move |e| {
         let x = event_target_checked(&e);
+        let before = cfg.get_untracked();
         cfg.update(|c| c["enabled"] = json!(x));
         let (g, v, value) = (guild.clone(), version.get_untracked(), cfg.get_untracked());
         on.set(x);
-        run_act(async move { api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await }, msg, need, move |r| version.set(r["version"].as_i64().unwrap_or(0)));
+        busy.set(true);
+        run_act(async move {
+            let r = api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await;
+            if r.is_err() { cfg.set(before); on.set(!x); }
+            busy.set(false);
+            r
+        }, msg, need, move |r| { msg.set(String::new()); version.set(r["version"].as_i64().unwrap_or(0)) });
     };
-    view! { <input type="checkbox" class="sw" aria-label="enable system" prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
+    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
 }
 
 #[component]
@@ -179,7 +189,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         </For></div>
         <h2 style="text-align:center">"Quick Systems Overview"</h2>
         <div class="cards five">
-            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
+            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
         </div>
         <p class="err">{move || msg.get()}</p>
         <StepUp need enrolled />
@@ -225,8 +235,8 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     };
     view! {
         <div class="row">
-            <input placeholder="Actor user ID" prop:value=actor on:input=move |e| actor.set(event_target_value(&e)) />
-            <input placeholder="Hours" prop:value=hours on:input=move |e| hours.set(event_target_value(&e)) />
+            <input placeholder="Actor user ID" aria-label="actor user ID" prop:value=actor on:input=move |e| actor.set(event_target_value(&e)) />
+            <input placeholder="Hours" aria-label="hours back" prop:value=hours on:input=move |e| hours.set(event_target_value(&e)) />
             <button on:click=load>"Load"</button>
         </div>
         <p class="err">{move || msg.get()}</p>
@@ -234,7 +244,7 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             {
                 let id = r["id"].as_i64().unwrap_or(0);
                 view! { <div class="card row">
-                    <input type="checkbox" disabled=r["reverted"].as_bool().unwrap_or(false) on:change=move |e| picked.update(|p| { p.retain(|x| *x != id); if event_target_checked(&e) { p.push(id) } }) />
+                    <input type="checkbox" aria-label=format!("select action {id}") disabled=r["reverted"].as_bool().unwrap_or(false) on:change=move |e| picked.update(|p| { p.retain(|x| *x != id); if event_target_checked(&e) { p.push(id) } }) />
                     <b>{s(&r["action"])}</b>
                     <span class="muted">{format!("target {} at {}{}", s(&r["target_id"]), s(&r["at"]), if r["reverted"].as_bool().unwrap_or(false) { " (reverted)" } else { "" })}</span>
                 </div> }
@@ -262,6 +272,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     });
     let g = guild.clone();
     let regen = move |_| {
+        if has_key.get_untracked() && !confirm("Make a new rescue key? The old key and its authenticator code stop working.") { return; }
         let g = g.clone();
         run_act(async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await }, msg, need, move |v| {
             key.set(s(&v["key"])); has_key.set(true);
@@ -271,7 +282,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     view! {
         <div class="card">
             <p class="muted">{move || if has_key.get() { "A rescue key exists. Regenerating invalidates the old one." } else { "No rescue key yet." }}</p>
-            <button style="background:var(--warn);color:#000" on:click=regen>"REGENERATE"</button>
+            <button class="warn" on:click=regen>"REGENERATE"</button>
             <Show when=move || !key.get().is_empty()>
                 <p><b>"Rescue Key (shown once, store it somewhere safe):"</b></p>
                 <div class="row"><pre class:blur=move || !shown.get()>{move || key.get()}</pre>
@@ -300,12 +311,12 @@ pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
         run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.set("Claimed. Refresh your servers.".into()));
     };
     view! {
-        <a class="danger" href="#/" on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</a>
+        <button class="link err" aria-expanded=move || open.get().to_string() on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</button>
         <Show when=move || open.get()>
             <div class="card">
                 <h2>"RESCUE PROCESS"</h2>
                 <p class="muted">"You have lost access to your physical owner account. Enter the server ID and either the rescue key or the 6-digit code from your authenticator."</p>
-                <div class="row"><input placeholder="Server ID" prop:value=guild on:input=move |e| guild.set(event_target_value(&e)) /><input placeholder="Rescue key or 6-digit code" prop:value=secret on:input=move |e| secret.set(event_target_value(&e)) /><button on:click=claim>"CONFIRM"</button></div>
+                <div class="row"><input placeholder="Server ID" aria-label="server ID" prop:value=guild on:input=move |e| guild.set(event_target_value(&e)) /><input placeholder="Rescue key or 6-digit code" aria-label="rescue key or 6-digit code" prop:value=secret on:input=move |e| secret.set(event_target_value(&e)) /><button on:click=claim>"CONFIRM"</button></div>
                 <p>{move || msg.get()}</p>
             </div>
         </Show>

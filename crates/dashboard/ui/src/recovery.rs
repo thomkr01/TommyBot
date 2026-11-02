@@ -23,10 +23,15 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let preview = RwSignal::new(None::<(i64, Vec<String>)>);
     let detail = RwSignal::new(None::<String>);
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let loaded = RwSignal::new(false);
     let load = {
         let g = guild.clone();
         move || { let g = g.clone(); spawn_local(async move {
-            if let Ok(v) = api("GET", &format!("/api/guilds/{g}/backups"), None).await { rows.set(v.as_array().cloned().unwrap_or_default()) }
+            match api("GET", &format!("/api/guilds/{g}/backups"), None).await {
+                Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
+                Err(e) => msg.set(e),
+            }
+            loaded.set(true);
         }) }
     };
     load();
@@ -46,7 +51,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         detail.set(Some(format!("General Settings\nName: {}\nVerification level: {}\nContent filter: {}\n\nRoles\n{}\n\nChannels\n{ch}\n\nWebhooks\n{hooks}", v["name"].as_str().unwrap_or(""), st["verification"], st["content_filter"], names("roles", &|r| r["name"].as_str().unwrap_or("").to_string()))));
     }) });
     let apply = Callback::new(move |id: i64| { let g = gl.clone(); preview.set(None); queued(async move { api("POST", &format!("/api/guilds/{g}/backups/{id}/load"), None).await }, msg, need, || ()) });
-    let remove = Callback::new(move |id: i64| { let (g, l) = (gd.clone(), load.clone()); run_act(async move { api("POST", &format!("/api/guilds/{g}/backups/{id}/delete"), None).await }, msg, need, move |_| l()) });
+    let remove = Callback::new(move |id: i64| { if !confirm("Delete this backup for good?") { return } let (g, l) = (gd.clone(), load.clone()); run_act(async move { api("POST", &format!("/api/guilds/{g}/backups/{id}/delete"), None).await }, msg, need, move |_| l()) });
     view! {
         <Section guild=guild.clone() name="backups".to_string() enrolled />
         <div class="card">
@@ -67,7 +72,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     }
                 }
             </For>
-            <Show when=move || rows.get().is_empty()><p class="muted">"No backups yet."</p></Show>
+            <Show when=move || loaded.get() && rows.get().is_empty()><p class="muted">"No backups yet."</p></Show>
         </div>
         {move || detail.get().map(|t| view! { <div class="card"><pre>{t}</pre><button class="ghost" on:click=move |_| detail.set(None)>"Close"</button></div> })}
         {move || preview.get().map(|(id, lines)| view! {

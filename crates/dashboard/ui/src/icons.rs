@@ -11,7 +11,7 @@ macro_rules! icons {
         }
     };
 }
-icons!("success", "error", "warning", "right_sort", "bell", "menu", "globe", "moon", "arrow_up", "arrow_down", "edit", "link", "page_prev", "page_next", "checkbox_off");
+icons!("success", "error", "warning", "right_sort", "bell", "menu", "moon", "arrow_up", "arrow_down", "edit", "link", "page_prev", "page_next", "checkbox_off");
 
 pub fn icon(name: &'static str) -> AnyView {
     view! { <span class="i" aria-hidden="true" inner_html=svg(name)></span> }.into_any()
