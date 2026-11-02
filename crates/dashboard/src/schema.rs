@@ -180,6 +180,14 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("ChannelDelete", "Channel deletions"),
     ("WebhookCreate", "Webhook creations"),
     ("WebhookDelete", "Webhook deletions"),
+    ("Timeout", "Member timeouts"),
+    ("ChannelUpdate", "Channel updates"),
+    ("RoleUpdate", "Role renames"),
+    ("EmojiDelete", "Emoji deletions"),
+    ("StickerDelete", "Sticker deletions"),
+    ("AutoModRuleDelete", "AutoMod rule deletions"),
+    ("AutoModRuleUpdate", "AutoMod rule updates"),
+    ("Unban", "Unbans"),
 ];
 const GATE_ACTIONS: &[&str] = &["Log", "Warn", "Timeout", "Kick", "Ban"];
 
@@ -268,9 +276,8 @@ pub fn schema() -> Vec<Value> {
         ),
     ];
     for (a, title) in NUKE_CARDS {
-        let (m, h, heat) = NukeAction::ALL
-            .into_iter()
-            .find(|x| format!("{x:?}") == *a)
+        let action = NukeAction::ALL.into_iter().find(|x| format!("{x:?}") == *a);
+        let (m, h, heat) = action
             .and_then(NukeAction::default_limit)
             .unwrap_or_default();
         let card = *title;
@@ -280,7 +287,8 @@ pub fn schema() -> Vec<Value> {
                 title,
             )
         };
-        let mut first = dv(at("enabled", "bool", "Monitor this action"), true);
+        let opt_in = action.is_some_and(NukeAction::opt_in);
+        let mut first = dv(at("enabled", "bool", "Monitor this action"), !opt_in);
         if *a == "Ban" {
             first = hp(first, "We absolutely recommend not giving your staff members native Discord Ban/Kick permissions, force them to use the bot's kick and ban commands that are supervised by the antinuke.");
         }

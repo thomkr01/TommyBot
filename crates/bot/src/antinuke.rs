@@ -40,8 +40,9 @@ use crate::{
     events::send_log,
 };
 
-fn watched(t: A) -> Option<Action> {
-    Some(match t {
+fn watched(e: &AuditLogEntry) -> Option<Action> {
+    let changed = |f: fn(&AuditLogChange) -> bool| e.changes.iter().any(f);
+    Some(match e.action_type {
         A::ChannelCreate => Action::ChannelCreate,
         A::ChannelDelete => Action::ChannelDelete,
         A::RoleCreate => Action::RoleCreate,
@@ -52,6 +53,25 @@ fn watched(t: A) -> Option<Action> {
         A::WebhookDelete => Action::WebhookDelete,
         A::MemberPrune => Action::Prune,
         A::BotAdd => Action::BotAdd,
+        A::MemberUpdate
+            if changed(|c| {
+                matches!(
+                    c,
+                    AuditLogChange::CommunicationDisabledUntil { new: Some(_), .. }
+                )
+            }) =>
+        {
+            Action::Timeout
+        }
+        A::ChannelUpdate => Action::ChannelUpdate,
+        A::RoleUpdate if changed(|c| matches!(c, AuditLogChange::Name { .. })) => {
+            Action::RoleUpdate
+        }
+        A::EmojiDelete => Action::EmojiDelete,
+        A::StickerDelete => Action::StickerDelete,
+        A::AutoModerationRuleDelete => Action::AutoModRuleDelete,
+        A::AutoModerationRuleUpdate => Action::AutoModRuleUpdate,
+        A::MemberBanRemove => Action::Unban,
         _ => return None,
     })
 }
@@ -103,7 +123,8 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         if e.action_type == A::MemberRoleUpdate {
             hold(app, e, actor).await?;
         }
-        return guard_perms(app, &cfg, e, actor).await;
+        // A role rename still counts below.
+        guard_perms(app, &cfg, e, actor).await?;
     }
     match e.action_type {
         A::MemberUpdate | A::MemberKick | A::MemberBanAdd if cfg.antinuke.quarantine_hold => {
@@ -112,7 +133,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         A::RoleCreate => guard_perms(app, &cfg, e, actor).await?,
         _ => {}
     }
-    let Some(action) = watched(e.action_type) else {
+    let Some(action) = watched(e) else {
         return Ok(());
     };
     let Some((_, heat)) = cfg.antinuke.limit(action) else {
@@ -765,6 +786,24 @@ mod tests {
         let positions = HashMap::from([(id(1), 2), (id(2), 3), (id(3), 9)]);
         let got = dangerous_below_bot(&[id(1), id(2), id(3), id(4)], &perms, &positions, 5);
         assert_eq!(got, vec![id(1)]);
+    }
+
+    #[test]
+    fn timeouts_and_role_renames_are_watched_other_updates_not() {
+        let entry = |t: u16, changes: serde_json::Value| -> AuditLogEntry {
+            serde_json::from_value(json!({
+                "action_type": t, "changes": changes, "id": "1", "user_id": "2", "target_id": "3"
+            }))
+            .unwrap()
+        };
+        let timeout = json!([{"key": "communication_disabled_until", "new_value": "2030-01-01T00:00:00+00:00"}]);
+        let lifted = json!([{"key": "communication_disabled_until", "old_value": "2030-01-01T00:00:00+00:00"}]);
+        let rename = json!([{"key": "name", "old_value": "a", "new_value": "b"}]);
+        assert_eq!(watched(&entry(24, timeout)), Some(Action::Timeout));
+        assert_eq!(watched(&entry(24, lifted)), None);
+        assert_eq!(watched(&entry(31, rename)), Some(Action::RoleUpdate));
+        assert_eq!(watched(&entry(31, json!([]))), None);
+        assert_eq!(watched(&entry(23, json!([]))), Some(Action::Unban));
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres.

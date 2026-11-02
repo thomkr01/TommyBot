@@ -26,10 +26,19 @@ pub enum Action {
     WebhookDelete,
     Prune,
     BotAdd,
+    Timeout,
+    ChannelUpdate,
+    /// Renames only.
+    RoleUpdate,
+    EmojiDelete,
+    StickerDelete,
+    AutoModRuleDelete,
+    AutoModRuleUpdate,
+    Unban,
 }
 
 impl Action {
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 18] = [
         Action::ChannelCreate,
         Action::ChannelDelete,
         Action::RoleCreate,
@@ -40,6 +49,14 @@ impl Action {
         Action::WebhookDelete,
         Action::Prune,
         Action::BotAdd,
+        Action::Timeout,
+        Action::ChannelUpdate,
+        Action::RoleUpdate,
+        Action::EmojiDelete,
+        Action::StickerDelete,
+        Action::AutoModRuleDelete,
+        Action::AutoModRuleUpdate,
+        Action::Unban,
     ];
 
     /// Wick's defaults (per minute, per hour, heat %); None: watched only when configured.
@@ -54,7 +71,27 @@ impl Action {
             Action::WebhookDelete => (3, 8, 10),
             Action::Prune => (1, 1, 0),
             Action::BotAdd => return None,
+            Action::Timeout | Action::Unban => (5, 15, 15),
+            Action::ChannelUpdate | Action::RoleUpdate => (5, 20, 10),
+            Action::EmojiDelete | Action::StickerDelete => (5, 15, 10),
+            Action::AutoModRuleDelete => (2, 5, 25),
+            Action::AutoModRuleUpdate => (3, 10, 15),
         })
+    }
+
+    /// Watched only once the server configures it, so busy mods are not quarantined by surprise.
+    pub fn opt_in(self) -> bool {
+        matches!(
+            self,
+            Action::Timeout
+                | Action::ChannelUpdate
+                | Action::RoleUpdate
+                | Action::EmojiDelete
+                | Action::StickerDelete
+                | Action::AutoModRuleDelete
+                | Action::AutoModRuleUpdate
+                | Action::Unban
+        )
     }
 
     /// Wick's "Kicks & Bans" card: kicks share the ban limit and counter.
