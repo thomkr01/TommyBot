@@ -10,9 +10,9 @@ pub(crate) fn when(secs: i64) -> String {
 }
 
 /// Runs a queued bot action, then reloads after a few seconds, once the bot has picked the job up.
-fn queued(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, msg: RwSignal<String>, need: RwSignal<bool>, reload: impl Fn() + 'static) {
+fn queued(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, msg: Msg, need: RwSignal<bool>, reload: impl Fn() + 'static) {
     run_act(fut, msg, need, move |_| {
-        msg.set("Queued: the bot runs it within a few seconds.".into());
+        msg.ok("Queued: the bot runs it within a few seconds.");
         set_timeout(reload, Duration::from_secs(6));
     });
 }
@@ -22,14 +22,14 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let preview = RwSignal::new(None::<(i64, Vec<String>)>);
     let detail = RwSignal::new(None::<String>);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let loaded = RwSignal::new(false);
     let load = {
         let g = guild.clone();
         move || { let g = g.clone(); spawn_local(async move {
             match api("GET", &format!("/api/guilds/{g}/backups"), None).await {
                 Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
-                Err(e) => msg.set(e),
+                Err(e) => msg.err(e),
             }
             loaded.set(true);
         }) }
@@ -38,7 +38,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (gc, lc) = (guild.clone(), load.clone());
     let create = move |_| { let g = gc.clone(); queued(async move { api("POST", &format!("/api/guilds/{g}/backups"), None).await }, msg, need, lc.clone()) };
     let (gp, gl, gd) = (guild.clone(), guild.clone(), guild.clone());
-    let show = Callback::new(move |id: i64| { let g = gp.clone(); msg.set(String::new()); run_act(async move { api("GET", &format!("/api/guilds/{g}/backups/{id}/preview"), None).await }, msg, need, move |v| {
+    let show = Callback::new(move |id: i64| { let g = gp.clone(); msg.clear(); run_act(async move { api("GET", &format!("/api/guilds/{g}/backups/{id}/preview"), None).await }, msg, need, move |v| {
         let lines = v["lines"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
         preview.set(Some((id, lines)));
     }) });
@@ -66,7 +66,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                             <span class="muted">{format!("{} · {} · {} roles · {} channels", if r["by"].is_null() { "TommyBot".to_string() } else { format!("user {}", r["by"]) }, when(r["at"].as_i64().unwrap_or(0)), r["roles"], r["channels"])}</span>
                             <span class="sp"></span>
                             <button class="ghost" on:click=move |_| view_it.run(id)>"View"</button>
-                            <button class="ghost" on:click=move |_| show.run(id)>"Load"</button>
+                            <button class="ghost" on:click=move |_| show.run(id)>"Preview & load"</button>
                             <button class="ghost" on:click=move |_| remove.run(id)>"Delete"</button>
                         </div>
                     }
@@ -86,7 +86,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 </div>
             </div>
         })}
-        <p class="info">{move || msg.get()}</p>
+        <Toast msg />
         <StepUp need enrolled />
     }
 }
@@ -95,7 +95,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 #[component]
 pub fn Panic(guild: String, part: &'static str, enrolled: ReadSignal<bool>) -> impl IntoView {
     let status = RwSignal::new(json!({}));
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let load = {
         let g = guild.clone();
         move || { let g = g.clone(); spawn_local(async move {
@@ -117,7 +117,7 @@ pub fn Panic(guild: String, part: &'static str, enrolled: ReadSignal<bool>) -> i
                 _ => "Panic mode is off.".to_string(),
             }}</p>
             <div class="row"><button on:click=toggle>{move || if active() { "End panic mode now" } else { "Start panic mode now" }}</button></div>
-            <p class="info">{move || msg.get()}</p>
+            <Toast msg />
         </div>
         <Section guild=guild.clone() name="panic".to_string() part=part enrolled />
         <StepUp need enrolled />

@@ -68,7 +68,7 @@ details { margin:12px 0; }
 .sys { display:flex; flex-direction:column; border-left:48px solid var(--primary); } .sys h3 { margin:0 0 6px; font-size:24px; }
 .sys .foot { display:flex; justify-content:space-between; align-items:center; margin-top:auto; padding-top:12px; }
 .bar { animation:bar-in var(--dur-slow) var(--ease); position:fixed; left:50%; bottom:24px; transform:translateX(-50%); z-index:40; display:flex; gap:12px; align-items:center; background:var(--b2); padding:10px 20px; border-radius:12px; box-shadow:0 4px 24px #000a; }
-.toast { animation:enter var(--dur) var(--ease); position:fixed; right:16px; top:72px; z-index:41; max-width:min(90vw,360px); margin:0; background:var(--b2); padding:10px 16px; border-radius:12px; box-shadow:0 4px 24px #000a; cursor:pointer; }
+.toast.bad { border-left:4px solid var(--bad); } .toast { border-left:4px solid var(--ok); animation:enter var(--dur) var(--ease); position:fixed; right:16px; top:72px; z-index:41; max-width:min(90vw,360px); margin:0; background:var(--b2); padding:10px 16px; border-radius:12px; box-shadow:0 4px 24px #000a; cursor:pointer; }
 .stat .copy { padding:0 6px; font-size:11px; }
 .wizbar { display:flex; margin-bottom:0; } .wizbar button { flex:1; border-radius:6px 0 0 0; background:var(--ok); border-color:var(--ok); color:#000; padding:12px; } .wizbar a { background:var(--info); color:#000; padding:12px 24px; font-weight:600; text-decoration:none; border-radius:0 6px 0 0; text-transform:uppercase; }
 .steps { display:flex; flex-wrap:wrap; gap:8px 16px; margin:16px 0; } .steps button { background:none; border:0; color:var(--fg); padding:4px 0; text-transform:none; } .steps button { transition:color var(--dur) var(--ease); } .steps button.on { color:var(--fg); font-weight:600; }
@@ -83,14 +83,12 @@ details { margin:12px 0; }
 .stack { display:flex; flex-direction:column; gap:16px; max-width:900px; margin:0 auto; } .stack .card { margin:0; }
 .lockrow h3, .card.empty h3 { margin:0; } .lockrow .sp { flex:1; } .chip.ok { background:var(--ok); color:#000; }
 .card.empty { text-align:center; } button.dashed { border-style:dashed; width:100%; padding:16px; }
-.banner { background:var(--warn); color:#000; border-radius:8px; padding:10px 16px; margin:0 0 16px; font-weight:600; }
 button.ghost.on { background:var(--primary); color:var(--on-primary); border-color:var(--primary); }
 .wizart { width:120px; height:120px; flex:none; }
 header details.ico summary { background:none; font-size:18px; }
 .modal { animation:fade var(--dur) var(--ease); position:fixed; inset:0; z-index:50; background:#000a; display:grid; place-items:center; overflow:auto; } .modal .card { width:min(92vw,640px); max-height:90vh; overflow:auto; margin:0; }
 .card .back { cursor:pointer; color:var(--info); display:block; margin-bottom:8px; } button.menu { display:block; width:100%; margin:6px 0; text-align:left; }
 table.permits { width:100%; max-width:900px; margin:0 auto; border-collapse:collapse; } table.permits th { text-align:left; text-transform:uppercase; } table.permits th, table.permits td { padding:10px 12px; border-bottom:1px solid var(--line); } table.permits td:last-child { text-align:right; }
-.chip.new { background:var(--ok); color:#000; margin-left:6px; font-size:10px; }
 .cards.five { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
 details.notes { margin:8px 0 0; } details.notes summary { cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; } details.notes .bell { float:none; } details.notes p { margin:6px 0 0; color:var(--warn); }
 .bell { width:28px; height:28px; border-radius:50%; background:var(--bad); display:grid; place-items:center; font-size:14px; }
@@ -141,3 +139,5 @@ header details div p { margin:0; padding:8px 12px; }
 @media (max-width:600px) { header { gap:8px; padding:0 12px; } header .logo, header .sp { display:none; } header .search { flex:1; min-width:0; } header .search input { width:100%; max-width:none; } .embed .fields { grid-template-columns:1fr; } }
 button.link.err { color:var(--bad); }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-delay:0s !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; transition-delay:0s !important; } }
+.wizbody > .card { background:none; box-shadow:none; padding:0; margin:0; }
+.scrim { display:none; } @media (max-width:900px) { .scrim { display:block; position:fixed; inset:80px 0 0; z-index:19; background:#000a; animation:fade var(--dur) var(--ease); } }

@@ -144,9 +144,16 @@ async fn raid_page(State(st): State<AppState>, Path(code): Path<String>) -> Html
     ))
 }
 
+/// Lists come in pages of 50 (the dashboard's `Pager`).
+pub fn offset(page: i64) -> i64 {
+    page.clamp(0, 10_000) * 50
+}
+
 #[derive(Deserialize)]
 struct CaseFilter {
     q: Option<String>,
+    #[serde(default)]
+    page: i64,
     kind: Option<String>,
     /// "open", "closed" or anything else for both
     state: Option<String>,
@@ -165,12 +172,13 @@ async fn cases(
                and ($2 = '' or user_id::text = $2 or mod_id::text = $2)
                and ($3 = '' or kind = $3)
                and ($4 = '' or active = ($4 = 'open'))
-             order by case_no desc limit 200",
+             order by case_no desc limit 50 offset $5",
         )
         .bind(guild)
         .bind(f.q.unwrap_or_default().trim())
         .bind(f.kind.unwrap_or_default())
         .bind(f.state.unwrap_or_default())
+        .bind(offset(f.page))
         .fetch_all(&st.db)
         .await?;
     Ok(Json(json!(rows
@@ -235,6 +243,8 @@ async fn case_delete(
 #[derive(Deserialize)]
 struct NoteFilter {
     q: Option<String>,
+    #[serde(default)]
+    page: i64,
 }
 
 async fn notes(
@@ -246,10 +256,11 @@ async fn notes(
     api::staff(&st, &s, guild, &["notes_view", "notes_manage"]).await?;
     let rows: Vec<(String, String, String, String, At)> = sqlx::query_as(
         "select short_id, user_id::text, author_id::text, text, created_at from notes
-         where guild_id = $1 and ($2 = '' or user_id::text = $2) order by id desc limit 200",
+         where guild_id = $1 and ($2 = '' or user_id::text = $2) order by id desc limit 50 offset $3",
     )
     .bind(guild)
     .bind(f.q.unwrap_or_default().trim())
+    .bind(offset(f.page))
     .fetch_all(&st.db)
     .await?;
     Ok(Json(json!(rows
@@ -337,6 +348,8 @@ async fn note_sweep(
 struct ReportFilter {
     /// "open", "dismissed", "actioned" or anything else for all
     state: Option<String>,
+    #[serde(default)]
+    page: i64,
 }
 
 async fn reports(
@@ -351,10 +364,11 @@ async fn reports(
         "select id, reporter_id::text, target_id::text, channel_id::text, message_id::text, content, status,
                 action, handled_by::text, created_at
          from reports where guild_id = $1 and ($2 = '' or status = $2)
-         order by (status = 'open') desc, id desc limit 200",
+         order by (status = 'open') desc, id desc limit 50 offset $3",
     )
     .bind(guild)
     .bind(f.state.unwrap_or_default())
+    .bind(offset(f.page))
     .fetch_all(&st.db)
     .await?;
     Ok(Json(json!(rows

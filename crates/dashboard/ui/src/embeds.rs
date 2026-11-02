@@ -70,11 +70,11 @@ pub fn Embeds(guild: String) -> impl IntoView {
     let g = StoredValue::new(guild);
     let rows = RwSignal::new(Vec::<Value>::new());
     let channels = RwSignal::new(Vec::<(String, String)>::new());
-    let (cur, msg) = (RwSignal::new(blank()), RwSignal::new(String::new()));
+    let (cur, msg) = (RwSignal::new(blank()), Msg::default());
     let load = move || spawn_local(async move {
         match api("GET", &format!("/api/guilds/{}/embeds", g.get_value()), None).await {
             Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     load();
@@ -105,7 +105,7 @@ pub fn Embeds(guild: String) -> impl IntoView {
                 None => Ok("Draft saved.".into()),
             }
         }.await;
-        msg.set(r.unwrap_or_else(|e| e));
+        match r { Ok(t) => msg.ok(t), Err(e) => msg.err(e) }
         load();
     });
     let remove = move |_| {
@@ -114,8 +114,8 @@ pub fn Embeds(guild: String) -> impl IntoView {
         if !web_sys::window().is_some_and(|w| w.confirm_with_message("Delete this embed and the bot's message?").unwrap_or(false)) { return }
         spawn_local(async move {
             match api("POST", &format!("/api/guilds/{}/embeds/{id}/delete", g.get_value()), Some(json!({}))).await {
-                Ok(_) => { cur.set(blank()); msg.set("Deleted.".into()); load() }
-                Err(e) => msg.set(e),
+                Ok(_) => { cur.set(blank()); msg.ok("Deleted."); load() }
+                Err(e) => msg.err(e),
             }
         });
     };
@@ -123,7 +123,7 @@ pub fn Embeds(guild: String) -> impl IntoView {
     let color = move || format!("#{:06x}", cur.with(|c| c["embed"]["color"].as_u64().unwrap_or(0x0d9df8)));
     view! {
         <div class="card row">
-            <select aria-label="saved embeds" on:change=move |e| { let v = event_target_value(&e); msg.set(String::new());
+            <select aria-label="saved embeds" on:change=move |e| { let v = event_target_value(&e); msg.clear();
                 cur.set(rows.with_untracked(|r| r.iter().find(|x| x["id"].as_i64() == v.parse().ok()).cloned()).unwrap_or_else(blank)) }>
                 <option value="" selected=move || cur.with(|c| c["id"].is_null())>"New embed"</option>
                 {move || rows.get().into_iter().map(|r| { let id = r["id"].as_i64(); view! {
@@ -199,7 +199,7 @@ pub fn Embeds(guild: String) -> impl IntoView {
                     <button class="ghost" on:click=remove>"Delete"</button>
                 </div>
                 {move || posted().map(|u| view! { <a href=u target="_blank" rel="noopener">"Jump to message"</a> })}
-                <p class="muted">{move || msg.get()}</p>
+                <Toast msg />
             </div>
         </div>
     }

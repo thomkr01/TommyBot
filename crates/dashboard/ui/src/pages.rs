@@ -27,7 +27,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     const STEPS: [&str; 10] = ["Auto Setup", "Misc", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue", "Wrap"];
     const CARDS: [(&str, &[Card]); 7] = [("misc", MISC), ("automod", AUTOMOD), ("antinuke", ANTINUKE), ("whitelist", WHITELIST), ("joingate", JOINGATE), ("joinraid", JOINRAID), ("verification", VERIFICATION)];
     let step = RwSignal::new(0usize);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = guild.clone();
     let custom = RwSignal::new(false);
     let picks = RwSignal::new(Vec::<String>::new());
@@ -44,7 +44,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
             let member = if c["staff"] == true { format!("{member}, Admins and Moderators roles with their permits") } else { member };
             let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
-            msg.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
+            msg.ok(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
         }) });
     };
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
@@ -52,6 +52,12 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let g = guild.clone();
     let me = expect_context::<ReadSignal<Option<Value>>>();
     let support = move || me.get().and_then(|m| m["support_url"].as_str().map(String::from)).unwrap_or_else(|| "https://github.com/thomkr01/TommyBot".into());
+    // Same side arrows as the settings cards of steps 1-7.
+        let arrows = move |body: AnyView| view! { <div class="card wiz">
+            <button class="nav back" aria-label="previous" disabled=move || step.get() == 0 on:click=move |_| step.update(|i| *i = i.saturating_sub(1))>{crate::icons::icon("page_prev")}</button>
+            <div class="wizbody">{body}</div>
+            <button class="nav" aria-label="next" on:click=move |_| step.update(|i| *i += 1)>{crate::icons::icon("page_next")}</button>
+        </div> }.into_any();
     view! {
         <div class="wizbar"><button on:click=move |_| step.set(0)>"Start wizard"</button><a href=support target="_blank" rel="noopener">"Support"</a></div>
         <div class="card">
@@ -69,25 +75,24 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         {move || view! { <div class="enter">{match step.get() {
             0 => {
                 let (all, run) = (auto.clone(), auto.clone());
-                view! { <div class="card">
+                arrows(view! { <div>
                     <h2>"Initial Setup"</h2>
                     <p>"TommyBot needs to do some magic in your server: it creates #tommybot-logs and #mod-logs, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
                     <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].into_iter().enumerate().map(|(i, t)| view! { <li style=format!("--i:{i}") class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
                     <p>"Like Wick, it makes #tommybot-logs and #mod-logs; every other log goes to #tommybot-logs until you give it a channel under Logging > Customize. Custom also makes a channel for the types you tick."</p>
                     <button on:click=move |_| all(None)>"Auto Setup"</button>
-                    <button on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
+                    <button class="ghost" class:on=custom on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
                     <Show when=move || custom.get()>
                         {OPTIONAL_LOGS.iter().map(|(name, label)| view! { <label><input type="checkbox" prop:checked=move || picks.get().iter().any(|p| p == name) on:change=move |e| picks.update(|l| if event_target_checked(&e) { l.push(name.to_string()) } else { l.retain(|p| p != name) }) /> {*label}</label> }).collect_view()}
                         <button on:click={let run = run.clone(); move |_| run(Some(picks.get()))}>"Run with selected"</button>
                     </Show>
-                    <p class="info">{move || msg.get()}</p>
-                </div> }.into_any()
+                    <Toast msg />
+                </div> }.into_any())
             }
-            8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
+            8 => arrows(view! { <Rescue guild=g.clone() enrolled /> }.into_any()),
             9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a class="btn go" href=format!("#/{}/overview", g)>"Go to Overview"</a></div> }.into_any(),
             i => { let (name, cards) = CARDS[i - 1]; view! { <Section guild=g.clone() name=name.to_string() cards next=Callback::new(move |_| step.update(|i| *i += 1)) enrolled /> }.into_any() }
         }}</div> }}
-        <p><Show when=move || matches!(step.get(), 0 | 8)><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
         <StepUp need enrolled />
     }
 }
@@ -113,7 +118,7 @@ const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
 #[component]
 fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl IntoView {
     let (cfg, version, on) = (RwSignal::new(json!({})), RwSignal::new(0i64), RwSignal::new(default));
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Locked while the config loads and while a save runs, so the knob never shows a state the server does not have.
     let busy = RwSignal::new(true);
     let g = guild.clone();
@@ -137,15 +142,15 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
             if r.is_err() { cfg.set(before); on.set(!x); }
             busy.set(false);
             r
-        }, msg, need, move |r| { msg.set(String::new()); version.set(r["version"].as_i64().unwrap_or(0)) });
+        }, msg, need, move |r| { msg.clear(); version.set(r["version"].as_i64().unwrap_or(0)) });
     };
-    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
+    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() prop:checked=move || on.get() on:change=change /><Toast msg /> }
 }
 
 #[component]
 pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
     let members = RwSignal::new(Value::Null);
     let g = guild.clone();
@@ -154,7 +159,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let load = move || { let g = g.clone(); spawn_local(async move {
         match api("GET", &format!("/api/guilds/{g}/score"), None).await {
             Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     }) };
     load();
@@ -167,9 +172,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 {move || guilds.get().into_iter().find(|x| x["id"] == id.as_str()).map(|x| view! {
                     <Stat label="Server Name" value=s(&x["name"]) />
                     <Stat label="Server ID" value=s(&x["id"]) />
-                    // The bot runs a single gateway shard.
-                    <Stat label="Shard ID" value="0".into() />
-                    <span class="stat"><span>"Type"</span><b class="chip">"STANDARD"</b></span> })}
+                    })}
                 {move || (!members.get().is_null()).then(|| view! { <Stat label="Members" value=s(&members.get()) /> })}
             </div>
         </div></div>
@@ -191,7 +194,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         <div class="cards five">
             {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
         </div>
-        <p class="err">{move || msg.get()}</p>
+        <Toast msg />
         <StepUp need enrolled />
     }
 }
@@ -215,22 +218,22 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let picked = RwSignal::new(Vec::<i64>::new());
     let report = RwSignal::new(String::new());
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = guild.clone();
     let load = move |_| { let g = g.clone(); spawn_local(async move {
         let q = format!("/api/guilds/{g}/actions?actor={}&hours={}", actor.get_untracked().trim(), hours.get_untracked().trim());
         match api("GET", &q, None).await {
-            Ok(v) => { msg.set(String::new()); picked.set(vec![]); rows.set(v.as_array().cloned().unwrap_or_default()) }
-            Err(e) => msg.set(e),
+            Ok(v) => { msg.clear(); picked.set(vec![]); rows.set(v.as_array().cloned().unwrap_or_default()) }
+            Err(e) => msg.err(e),
         }
     }) };
     let revert = move |_| {
         let (g, ids) = (guild.clone(), picked.get_untracked());
-        if ids.is_empty() { return msg.set("Select at least one action".into()) }
+        if ids.is_empty() { return msg.err("Select at least one action") }
         run_act(async move { api("POST", &format!("/api/guilds/{g}/revert"), Some(json!({"ids": ids}))).await }, msg, need, move |v| {
             let fails: Vec<String> = v["failed"].as_array().map(|a| a.iter().map(|f| format!("{}: {}", s(&f["id"]), s(&f["error"]))).collect()).unwrap_or_default();
             report.set(format!("Done: {}\nFailed: {}\nSkipped: {}\nRe-invite these users manually: {}", v["done"], fails.join("; "), v["skipped"], v["reinvite"]));
-            msg.set(String::new());
+            msg.clear();
         });
     };
     view! {
@@ -239,7 +242,7 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <input placeholder="Hours" aria-label="hours back" prop:value=hours on:input=move |e| hours.set(event_target_value(&e)) />
             <button on:click=load>"Load"</button>
         </div>
-        <p class="err">{move || msg.get()}</p>
+        <Toast msg />
         <For each=move || rows.get() key=|r| s(&r["id"]) let:r>
             {
                 let id = r["id"].as_i64().unwrap_or(0);
@@ -262,12 +265,12 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let key = RwSignal::new(String::new());
     let qr = RwSignal::new(String::new());
     let shown = RwSignal::new(false);
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = guild.clone();
     spawn_local(async move {
         match api("GET", &format!("/api/guilds/{g}/rescue"), None).await {
             Ok(v) => has_key.set(v["has_key"].as_bool().unwrap_or(false)),
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
     });
     let g = guild.clone();
@@ -293,7 +296,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 <ul class="checks warn"><li>"View this rescue key alone!"</li><li>"Never share a screenshot of this QR code."</li><li>"Anyone with this rescue key can get dangerous TommyBot permissions."</li><li>"This rescue key is used ONLY when you lose physical owner account access."</li><li>"It grants TommyBot owner permissions, not Discord ownership."</li></ul>
             </Show>
         </div>
-        <p>{move || msg.get()}</p>
+        <Toast msg />
         <StepUp need enrolled />
     }
 }
@@ -303,12 +306,12 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 #[component]
 pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
     let (open, guild, secret) = (RwSignal::new(false), RwSignal::new(String::new()), RwSignal::new(String::new()));
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     let claim = move |_| {
         let (g, k) = (guild.get_untracked(), secret.get_untracked());
         let k = k.trim().to_string();
         let body = if k.len() == 6 && k.chars().all(|c| c.is_ascii_digit()) { json!({"guild_id": g, "code": k}) } else { json!({"guild_id": g, "key": k}) };
-        run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.set("Claimed. Refresh your servers.".into()));
+        run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.ok("Claimed. Refresh your servers."));
     };
     view! {
         <button class="link err" aria-expanded=move || open.get().to_string() on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</button>
@@ -317,7 +320,7 @@ pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
                 <h2>"RESCUE PROCESS"</h2>
                 <p class="muted">"You have lost access to your physical owner account. Enter the server ID and either the rescue key or the 6-digit code from your authenticator."</p>
                 <div class="row"><input placeholder="Server ID" aria-label="server ID" prop:value=guild on:input=move |e| guild.set(event_target_value(&e)) /><input placeholder="Rescue key or 6-digit code" aria-label="rescue key or 6-digit code" prop:value=secret on:input=move |e| secret.set(event_target_value(&e)) /><button on:click=claim>"CONFIRM"</button></div>
-                <p>{move || msg.get()}</p>
+                <Toast msg />
             </div>
         </Show>
         <StepUp need enrolled />
@@ -330,7 +333,9 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
     let tab = if tab == "discord" { "discord" } else { "wick" };
     let sub = if sub == "customize" { "customize" } else { "essential" };
     let part = format!("{tab}_{sub}");
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
+    // Bumped after a setup so the form below reloads the config the setup changed.
+    let fresh = RwSignal::new(0u32);
     let g = guild.clone();
     // Optional, beyond Wick: private "Logs" and "Staff" categories with a channel per log type that has none yet.
     let setup = move |_| {
@@ -339,21 +344,23 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
             let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
             let all: Vec<&str> = OPTIONAL_LOGS.iter().map(|(n, _)| *n).collect();
             api("POST", &format!("/api/guilds/{g}/logging/setup"), Some(json!({"expected_version": c["version"], "logs": all}))).await
-        }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
+        }, msg, need, move |_| { msg.ok("Done"); fresh.update(|n| *n += 1) });
     };
     view! {
-        <div class="row"><button on:click=setup>"Create a channel per log type"</button><span>{move || msg.get()}</span></div>
+        <div class="row"><button on:click=setup>"Create a channel per log type"</button><Toast msg /></div>
         <StepUp need enrolled />
         <div class="tabs">
-            <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"tommybot"<span class="chip new">"new"</span></a>
-            <a class:on=tab == "discord" href=format!("#/{guild}/logging/discord/{sub}")>"discord"<span class="chip new">"new"</span></a>
+            <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"tommybot"</a>
+            <a class:on=tab == "discord" href=format!("#/{guild}/logging/discord/{sub}")>"discord"</a>
         </div>
         <div class="tabs">
             <a class:on=sub == "essential" href=format!("#/{guild}/logging/{tab}/essential")>"essential"</a>
             <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
         </div>
-        {(tab == "wick").then(|| view! { <RouteNote guild=guild.clone() customize=sub == "customize" /> })}
-        <Section guild=guild.clone() name="logging".to_string() part enrolled />
+        {move || { fresh.track(); let (g, part) = (guild.clone(), part.clone()); view! {
+            {(tab == "wick").then(|| view! { <RouteNote guild=g.clone() customize=sub == "customize" /> })}
+            <Section guild=g name="logging".to_string() part enrolled />
+        } }}
     }
 }
 
@@ -379,7 +386,9 @@ fn RouteNote(guild: String, customize: bool) -> impl IntoView {
 /// Catch channel: one click makes the honeypot channel and turns it on, then the settings form.
 #[component]
 pub fn Catch(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
+    // Bumped after a setup so the form below reloads the config the setup changed.
+    let fresh = RwSignal::new(0u32);
     let g = guild.clone();
     let setup = move |_| {
         let sure = "This creates #do-not-write at the top of the server and turns the catch channel on: anyone without a permit who writes there gets the action below. Continue?";
@@ -388,30 +397,32 @@ pub fn Catch(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         run_act(async move {
             let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
             api("POST", &format!("/api/guilds/{g}/catch/setup"), Some(json!({"expected_version": c["version"]}))).await
-        }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
+        }, msg, need, move |_| { msg.ok("Done"); fresh.update(|n| *n += 1) });
     };
     view! {
-        <div class="row"><button on:click=setup>"Set up channel"</button><span>{move || msg.get()}</span></div>
+        <div class="row"><button on:click=setup>"Set up channel"</button><Toast msg /></div>
         <StepUp need enrolled />
-        <Section guild=guild.clone() name="catch".to_string() enrolled />
+        {move || { fresh.track(); view! { <Section guild=guild.clone() name="catch".to_string() enrolled /> } }}
     }
 }
 
 /// Tickets settings with a one-click setup that creates the channels and posts the panel.
 #[component]
 pub fn Tickets(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
+    // Bumped after a setup so the form below reloads the config the setup changed.
+    let fresh = RwSignal::new(0u32);
     let g = guild.clone();
     let setup = move |_| {
         let g = g.clone();
         run_act(async move {
             let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
             api("POST", &format!("/api/guilds/{g}/tickets/setup"), Some(json!({"expected_version": c["version"]}))).await
-        }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
+        }, msg, need, move |_| { msg.ok("Done"); fresh.update(|n| *n += 1) });
     };
     view! {
-        <div class="row"><button on:click=setup>"Set up tickets and post the panel"</button><span>{move || msg.get()}</span></div>
+        <div class="row"><button on:click=setup>"Set up tickets and post the panel"</button><Toast msg /></div>
         <StepUp need enrolled />
-        <Section guild name="tickets".to_string() part=String::new() enrolled />
+        {move || { fresh.track(); view! { <Section guild=guild.clone() name="tickets".to_string() enrolled /> } }}
     }
 }

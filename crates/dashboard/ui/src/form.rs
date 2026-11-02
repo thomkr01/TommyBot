@@ -364,10 +364,10 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
 }
 
 /// Raw JSON of one section of the config in `val`.
-fn raw_editor(val: RwSignal<Value>, name: String, msg: RwSignal<String>) -> impl IntoView {
+fn raw_editor(val: RwSignal<Value>, name: String, msg: Msg) -> impl IntoView {
     let n = StoredValue::new(name);
     view! { <textarea prop:value=move || serde_json::to_string_pretty(&val.get()[n.get_value()]).unwrap_or_default()
-        on:change=move |e| { match serde_json::from_str::<Value>(&event_target_value(&e)) { Ok(v) => val.update(|c| c[n.get_value()] = v), Err(_) => msg.set("Not valid JSON".into()) } }></textarea> }
+        on:change=move |e| { match serde_json::from_str::<Value>(&event_target_value(&e)) { Ok(v) => val.update(|c| c[n.get_value()] = v), Err(_) => msg.err("Not valid JSON") } }></textarea> }
 }
 
 /// Schema-driven form for the sections the backend describes; raw JSON stays available underneath.
@@ -389,7 +389,7 @@ pub fn Section(
     let dc = RwSignal::new(json!({}));
     let fields = RwSignal::new(Vec::<Value>::new());
     let orig = RwSignal::new(json!({}));
-    let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Until the schema answers, show a loading line instead of flashing the raw JSON editor.
     let loaded = RwSignal::new(false);
     let (g, n) = (guild.clone(), name.clone());
@@ -402,7 +402,7 @@ pub fn Section(
                 val.set(c);
                 orig.set(val.get_untracked());
             }
-            Err(e) => msg.set(e),
+            Err(e) => msg.err(e),
         }
         // Missing schema/discord data degrades to the raw editor.
         if let Ok(s) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
@@ -431,7 +431,7 @@ pub fn Section(
         let g = guild.clone();
         let act = move |path: &'static str| {
             let (g, v, reload) = (g.clone(), version.get_untracked(), reload.clone());
-            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.set("Done".into()); reload(r["version"].as_i64().unwrap_or(0)) });
+            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.ok("Done"); reload(r["version"].as_i64().unwrap_or(0)) });
         };
         view! { <div class="card wiz">
             <button class="nav back" aria-label="previous" disabled=move || at.get() == 0 on:click=move |_| at.update(|i| *i = i.saturating_sub(1))>{crate::icons::icon("page_prev")}</button>
