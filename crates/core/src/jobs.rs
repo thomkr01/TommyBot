@@ -12,30 +12,30 @@ pub struct Job {
     pub attempts: i32,
 }
 
+/// Returns the job id, for [`finish`].
 pub async fn enqueue(
     pool: &PgPool,
     guild: i64,
     kind: &str,
     payload: Value,
     run_at_secs: i64,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<i64> {
+    Ok(sqlx::query_scalar(
         "INSERT INTO scheduled_jobs (guild_id, kind, payload, run_at)
-         VALUES ($1, $2, $3, to_timestamp($4::float8))",
+         VALUES ($1, $2, $3, to_timestamp($4::float8)) RETURNING id",
     )
     .bind(guild)
     .bind(kind)
     .bind(payload)
     .bind(run_at_secs as f64)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Jobs that fail this many times are dropped by the scheduler.
 pub const MAX_ATTEMPTS: i32 = 5;
 /// Kinds that can run for minutes; a separate worker takes them so they never delay unbans or unlocks.
-pub const HEAVY: [&str; 2] = ["backup_load", "panic_start"];
+pub const HEAVY: [&str; 3] = ["backup_load", "panic_start", "nuke_revert"];
 const LEASE_SECS: i32 = 60;
 const HEAVY_LEASE_SECS: i32 = 900;
 
@@ -52,7 +52,9 @@ pub async fn replace(
         .bind(kind)
         .execute(pool)
         .await?;
-    enqueue(pool, guild, kind, payload, run_at_secs).await
+    enqueue(pool, guild, kind, payload, run_at_secs)
+        .await
+        .map(drop)
 }
 
 /// Leases due jobs (the [`HEAVY`] kinds or all others) and returns them; call [`finish`] when done.

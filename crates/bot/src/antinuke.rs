@@ -13,7 +13,7 @@ use tommybot_antinuke::{
 use tommybot_automod::heat::{Breakdown, HeatCfg};
 use tommybot_core::{
     cases::{self, NewCase},
-    permits,
+    jobs, permits,
     sections::BackupsCfg,
 };
 use tommybot_logging::{
@@ -550,9 +550,13 @@ pub(crate) async fn revert_actor(
     }
     let mut failed = 0;
     for op in &plan.ops {
-        if let Err(e) = run_inverse(app, gid, op).await {
-            tracing::warn!(?e, ?op, "revert step failed");
-            failed += 1;
+        // Already undone (a revert cut off by a restart runs again) or the target is gone.
+        match run_inverse(app, gid, op).await {
+            Err(e) if !crate::http_err::gone_any(&e) => {
+                tracing::warn!(?e, ?op, "revert step failed");
+                failed += 1;
+            }
+            _ => {}
         }
     }
     // Deleted channels and roles have no logged inverse; they come back from the latest backup.
@@ -601,11 +605,35 @@ async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Resu
     quarantine(app, gid, actor).await
 }
 
+/// A restart mid-revert would leave the nuke half undone: the `nuke_revert` guard job runs it again
+/// after a restart, and is dropped once this run is over.
 async fn quarantine_and_revert(
     app: &App,
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     why: &str,
+) -> Result<()> {
+    let since = now_secs() - 3600;
+    let payload = json!({"actor": actor.get(), "why": why, "since": since});
+    let guard = jobs::enqueue(
+        &app.pool,
+        gid.get() as i64,
+        "nuke_revert",
+        payload,
+        now_secs() + 120,
+    )
+    .await?;
+    let r = revert_and_report(app, gid, actor, why, since).await;
+    jobs::finish(&app.pool, guard).await?;
+    r
+}
+
+pub(crate) async fn revert_and_report(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+    since: i64,
 ) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let auto = cfg.antinuke.auto_quarantine;
@@ -615,7 +643,7 @@ async fn quarantine_and_revert(
             .await
             .inspect_err(|e| tracing::warn!(?e, "quarantine failed"))
             .is_ok();
-    let sum = revert_actor(app, gid, actor, now_secs() - 3600, Some(&cfg.backups)).await?;
+    let sum = revert_actor(app, gid, actor, since, Some(&cfg.backups)).await?;
     let case = open_case(app, gid, actor, why).await?;
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
     let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();

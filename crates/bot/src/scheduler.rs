@@ -15,7 +15,7 @@ use tommybot_logging::{
 use twilight_model::id::{marker::UserMarker, Id};
 
 use crate::{
-    app::{now_secs, App},
+    app::App,
     backup, commands,
     events::{send_log, send_log_link},
     http_err, lockdown, metrics, panic, verify,
@@ -42,19 +42,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 .or_else(|| p["channel"].as_str()?.parse().ok());
             let kind = kind_from(p["kind"].as_str().unwrap_or_default(), channel)
                 .context("job payload has no valid lock kind")?;
-            if let (true, Some(d)) = (
-                lockdown::lock(app, gid, kind.clone()).await?,
-                p["duration_s"].as_i64(),
-            ) {
-                jobs::replace(
-                    &app.pool,
-                    job.guild_id,
-                    "unlock",
-                    serde_json::json!({ "lock": kind }),
-                    now_secs() + d,
-                )
-                .await?;
-            }
+            lockdown::lock_for(app, gid, kind, p["duration_s"].as_i64()).await?;
         }
         // Timed unlocks name their lock; older jobs and the dashboard's lift everything.
         "unlock" => {
@@ -132,6 +120,13 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 }
                 None => send_log(app, gid.get(), LogKind::JoinRaid, log).await?,
             }
+        }
+        "nuke_revert" => {
+            let p = &job.payload;
+            let actor = Id::new(p["actor"].as_u64().context("job payload has no actor")?);
+            let why = p["why"].as_str().unwrap_or_default();
+            let since = p["since"].as_i64().context("job payload has no since")?;
+            crate::antinuke::revert_and_report(app, gid, actor, why, since).await?
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),

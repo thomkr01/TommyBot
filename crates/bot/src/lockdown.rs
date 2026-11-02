@@ -2,7 +2,7 @@
 use anyhow::Result;
 use tommybot_automod::{
     discord_api::MAX_INVITE_PAUSE_MS,
-    lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, RoleInfo, Snapshot, SILENCE},
+    lockdown::{plan, unlock_ops, JoinLock, LockKind, Op, Plan, RoleInfo, Snapshot, SILENCE},
     store,
 };
 use tommybot_logging::emoji::LOCKDOWN;
@@ -87,6 +87,17 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
 /// Locks the guild unless an active lock already covers the same part (its snapshot would save
 /// locked perms).
 pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<bool> {
+    lock_for(app, gid, kind, None).await
+}
+
+/// [`lock`] that lifts itself after `secs`. The timer is queued before any lock step runs, so a
+/// lock that a restart cut off and [`resume`] finished still ends on time.
+pub async fn lock_for(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: LockKind,
+    secs: Option<i64>,
+) -> Result<bool> {
     if lock_thread(app, &kind, true).await? {
         return Ok(true);
     }
@@ -98,6 +109,27 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
     {
         return Ok(false);
     }
+    let plan = plan_now(app, gid, &kind).await?;
+    // Saved first so a failure halfway can still be unlocked exactly, or finished after a restart.
+    store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+    if let Some(d) = secs {
+        let job = serde_json::json!({ "lock": kind });
+        tommybot_core::jobs::enqueue(&app.pool, gid.get() as i64, "unlock", job, now_secs() + d)
+            .await?;
+    }
+    apply(app, gid, plan).await?;
+    announce(
+        app,
+        gid,
+        Log::new("Server Locked", ALERT)
+            .text(&format!("{YES} **The server has been locked down.**")),
+    )
+    .await;
+    Ok(true)
+}
+
+/// The lock plan for the guild as it is now.
+async fn plan_now(app: &App, gid: Id<GuildMarker>, kind: &LockKind) -> Result<Plan> {
     let cfg = app.cfg(gid.get()).await?;
     let roles = app.http.roles(gid).await?.models().await?;
     let mine = app
@@ -124,14 +156,14 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
         .collect();
     let main_roles: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
     let mut plan = plan(
-        &kind,
+        kind,
         gid.get(),
         &main_roles,
         &info,
         bot_position,
         cfg.lockdown_prefs.voice,
     );
-    if let LockKind::Channel(c) = kind {
+    if let LockKind::Channel(c) = *kind {
         let ch = app.http.channel(Id::new(c)).await?.model().await?;
         plan.snapshot.prior = ch
             .permission_overwrites
@@ -145,22 +177,52 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
         plan.ops.retain(|o| *o != Op::PauseInvites);
         plan.snapshot.invites_paused = false;
     }
-    // Saved first so a failure halfway can still be unlocked exactly.
-    store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+    Ok(plan)
+}
+
+/// Runs the ops of a saved lock, then marks it done. Every op is safe to run twice.
+async fn apply(app: &App, gid: Id<GuildMarker>, mut plan: Plan) -> Result<()> {
     for op in &plan.ops {
+        if *op == Op::CreateLockedChannel && plan.snapshot.locked_channel.is_some() {
+            continue;
+        }
         if let Some(created) = exec(app, gid, op, &plan.snapshot).await? {
             plan.snapshot.locked_channel = Some(created);
             store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
         }
     }
-    announce(
-        app,
-        gid,
-        Log::new("Server Locked", ALERT)
-            .text(&format!("{YES} **The server has been locked down.**")),
-    )
-    .await;
-    Ok(true)
+    Ok(store::lock_done(&app.pool, gid.get(), &plan.snapshot).await?)
+}
+
+/// Finishes the locks and unlocks a restart cut off. A lock keeps its saved snapshot (the live
+/// perms may already be half locked) and runs its ops again.
+pub async fn resume(app: &App) -> Result<()> {
+    for (guild, snap, unlocking) in store::interrupted(&app.pool).await? {
+        let gid = Id::new(guild);
+        let r = async {
+            match (unlocking, &snap.kind) {
+                (true, kind) => unlock(app, gid, kind.as_ref()).await.map(drop),
+                (false, Some(k)) => {
+                    let ops = plan_now(app, gid, k).await?.ops;
+                    apply(
+                        app,
+                        gid,
+                        Plan {
+                            ops,
+                            snapshot: snap.clone(),
+                        },
+                    )
+                    .await
+                }
+                (false, None) => Ok(store::lock_done(&app.pool, guild, &snap).await?),
+            }
+        }
+        .await;
+        if let Err(e) = r {
+            tracing::warn!(?e, guild, unlocking, "resuming an interrupted lock failed");
+        }
+    }
+    Ok(())
 }
 
 /// Threads cannot have permission overwrites, so a channel lock there locks the thread itself.
@@ -244,7 +306,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
         if !store::take_lock(&app.pool, gid.get(), &snap).await? {
             continue;
         }
-        // The snapshot is gone now, so one failed step must not leave the rest locked. A deleted
+        // The lock is claimed now, so one failed step must not leave the rest locked. A deleted
         // channel or role has nothing to restore.
         let mut step = |r: Result<()>| match r {
             Err(e) if !crate::http_err::gone_any(&e) => {
@@ -287,6 +349,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
                 "delete lock channel",
             );
         }
+        store::drop_lock(&app.pool, gid.get(), &snap).await?;
         lifted += 1;
     }
     if failed > 0 {
@@ -432,19 +495,7 @@ pub async fn command(
     if let Some((_, p)) = needs.iter().find(|(on, p)| *on && !actor.has(p)) {
         return Ok(format!("Cannot lock {name}: you lack the {p} permit"));
     }
-    let done = lock(app, gid, kind.clone()).await?;
-    if done {
-        if let Some(d) = duration_s {
-            tommybot_core::jobs::enqueue(
-                &app.pool,
-                gid.get() as i64,
-                "unlock",
-                serde_json::json!({ "lock": kind }),
-                now_secs() + d,
-            )
-            .await?;
-        }
-    }
+    let done = lock_for(app, gid, kind.clone(), duration_s).await?;
     Ok(if done {
         format!("Locked: {name}")
     } else {
@@ -483,5 +534,6 @@ mod tests {
         );
         store::take_lock(&pool, gid, &p.snapshot).await.unwrap();
         assert_eq!(load_join_lock(&pool, gid).await.unwrap(), None);
+        store::drop_lock(&pool, gid, &p.snapshot).await.unwrap();
     }
 }
