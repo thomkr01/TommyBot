@@ -135,7 +135,7 @@ async fn members_route(
 #[derive(Deserialize)]
 struct Setup {
     expected_version: i32,
-    /// Log channels to create besides the essential two; absent means all of them.
+    /// Log channels to create besides the essential two; absent means only those two, like Wick.
     logs: Option<Vec<String>>,
 }
 
@@ -531,8 +531,8 @@ const LOG_CHANNELS: [(&[&str], &str); 11] = [
     (&["logging", "routes", "server"], "server-logs"),
 ];
 
-/// One click: a channel per log type that has none yet, plus "discord-logs" for every Discord
-/// event without a channel, in private "Logs" and "Staff" categories. Set channels are kept.
+/// One click: the essential log channels plus the named ones (a channel per log type, "discord-logs"
+/// for every Discord event without one), in private "Logs" and "Staff" categories. Set channels are kept.
 async fn log_setup(
     State(st): State<AppState>,
     s: Sess,
@@ -544,7 +544,7 @@ async fn log_setup(
     if cur != b.expected_version {
         return Err(ApiError::Conflict(cur)); // before any Discord side effect
     }
-    let created = log_channels(&st, guild, &mut config, None).await?;
+    let created = log_channels(&st, guild, &mut config, b.logs.as_deref()).await?;
     if created.is_empty() {
         return Err(ApiError::BadRequest(
             "every log type already has a channel".into(),
@@ -626,8 +626,8 @@ async fn category(
 
 /// Creates the missing log channels under "Logs" (reports and appeals under "Staff"), and
 /// sets them in `config`.
-/// `only` limits it to the essentials plus the named channels ("discord-logs" for the Discord
-/// events). Returns the names of the channels it created; nothing when all have one.
+/// `only` adds the named channels to the essentials ("discord-logs" for the Discord events);
+/// `None` makes just the essentials, as Wick's Auto Setup does. Returns the names of the channels it created; nothing when all have one.
 async fn log_channels(
     st: &AppState,
     guild: i64,
@@ -635,7 +635,7 @@ async fn log_channels(
     only: Option<&[String]>,
 ) -> Result<Vec<&'static str>, ApiError> {
     let wanted =
-        |name: &str| ESSENTIAL.contains(&name) || only.is_none_or(|l| l.iter().any(|n| n == name));
+        |name: &str| ESSENTIAL.contains(&name) || only.is_some_and(|l| l.iter().any(|n| n == name));
     let missing: Vec<_> = LOG_CHANNELS
         .into_iter()
         .filter(|(p, name)| at(config, p).is_null() && wanted(name))

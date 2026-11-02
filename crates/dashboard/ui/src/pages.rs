@@ -30,7 +30,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
     let custom = RwSignal::new(false);
-    let picks = RwSignal::new(OPTIONAL_LOGS.iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>());
+    let picks = RwSignal::new(Vec::<String>::new());
     let auto = move |logs: Option<Vec<String>>| {
         let (g, g2) = (g.clone(), g.clone());
         run_act(async move {
@@ -71,10 +71,10 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 let (all, run) = (auto.clone(), auto.clone());
                 view! { <div class="card">
                     <h2>"Initial Setup"</h2>
-                    <p>"TommyBot needs to do some magic in your server: it creates its log channels, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
-                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring log channels"].map(|t| view! { <li class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
-                    <p>"The essential logs (TommyBot logs and Mod logs) are always created."</p>
-                    <button on:click=move |_| all(None)>"All log channels"</button>
+                    <p>"TommyBot needs to do some magic in your server: it creates #tommybot-logs and #mod-logs, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
+                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].map(|t| view! { <li class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
+                    <p>"Like Wick, it makes #tommybot-logs and #mod-logs; every other log goes to #tommybot-logs until you give it a channel under Logging > Customize. Custom also makes a channel for the types you tick."</p>
+                    <button on:click=move |_| all(None)>"Auto Setup"</button>
                     <button on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
                     <Show when=move || custom.get()>
                         {OPTIONAL_LOGS.iter().map(|(name, label)| view! { <label><input type="checkbox" prop:checked=move || picks.get().iter().any(|p| p == name) on:change=move |e| picks.update(|l| if event_target_checked(&e) { l.push(name.to_string()) } else { l.retain(|p| p != name) }) /> {*label}</label> }).collect_view()}
@@ -321,16 +321,17 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
     let part = format!("{tab}_{sub}");
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
     let g = guild.clone();
-    // One click: private "Logs" and "Staff" categories with a channel per log type that has none yet.
+    // Optional, beyond Wick: private "Logs" and "Staff" categories with a channel per log type that has none yet.
     let setup = move |_| {
         let g = g.clone();
         run_act(async move {
             let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
-            api("POST", &format!("/api/guilds/{g}/logging/setup"), Some(json!({"expected_version": c["version"]}))).await
+            let all: Vec<&str> = OPTIONAL_LOGS.iter().map(|(n, _)| *n).collect();
+            api("POST", &format!("/api/guilds/{g}/logging/setup"), Some(json!({"expected_version": c["version"], "logs": all}))).await
         }, msg, need, |_| { web_sys::window().unwrap().location().reload().ok(); });
     };
     view! {
-        <div class="row"><button on:click=setup>"Create log channels"</button><span>{move || msg.get()}</span></div>
+        <div class="row"><button on:click=setup>"Create a channel per log type"</button><span>{move || msg.get()}</span></div>
         <StepUp need enrolled />
         <div class="tabs">
             <a class:on=tab == "wick" href=format!("#/{guild}/logging/wick/{sub}")>"tommybot"<span class="chip new">"new"</span></a>

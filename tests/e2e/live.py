@@ -3,7 +3,6 @@ Usage: live.py spam|lock|mention_lock|nuke|purge|emojis|all. Needs DISCORD_TOKEN
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
-import re
 import os
 import subprocess
 import sys
@@ -64,13 +63,8 @@ def logging_cfg():
                           f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
 
 
-# The dashboard's "Create log channels" setup (LOG_CHANNELS in crates/dashboard/src/sections.rs).
-LOG_ROUTES = {"tommybot-logs": ("logging", "fallback"), "mod-logs": ("logging", "routes", "mod_command"),
-              "reports": ("logging", "routes", "report"), "appeals": ("appeals", "channel"),
-              "automod-logs": ("logging", "routes", "auto_mod"), "antinuke-logs": ("logging", "routes", "anti_nuke"),
-              "verification-logs": ("logging", "routes", "verification"),
-              "joingate-logs": ("logging", "routes", "join_gate"), "joinraid-logs": ("logging", "routes", "join_raid"),
-              "panic-logs": ("logging", "routes", "panic"), "server-logs": ("logging", "routes", "server")}
+# Wick's default, as the wizard's Auto Setup makes it: everything in tommybot-logs, staff actions in mod-logs.
+LOG_ROUTES = {"tommybot-logs": "fallback", "mod-logs": "mod_command"}
 
 
 def bot_log_channels():
@@ -81,27 +75,12 @@ def bot_log_channels():
 
 
 def use_bot_log_channels():
-    """Routes logs like the bot's own setup does, into the channels it made; never creates any.
-    Routes that are already set are kept, as the setup keeps them."""
+    """Routes logs as a real server set up by the wizard does, into the channels the bot made; never creates any."""
     have = bot_log_channels()
     missing = sorted(set(LOG_ROUTES) - set(have))
     if missing:
-        raise SystemExit(f"missing bot log channels {missing}: run Create log channels in the dashboard")
-    config = {k: json.loads(sql(f"select coalesce(config->'{k}', '{{}}') from guild_config "
-                                f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
-              for k in ("logging", "appeals")}
-    for name, (section, *path) in LOG_ROUTES.items():
-        node = config[section]
-        for key in path[:-1]:
-            node = node.setdefault(key, {})
-        node.setdefault(path[-1], have[name])
-    # Every Discord event without a channel goes to discord-logs, like the setup.
-    enum = open("crates/logging/src/config.rs").read().split("pub enum LogEvent")[1].split("}")[0]
-    events = [re.sub(r"(?<!^)(?=[A-Z])", "_", v).lower() for v in re.findall(r"^\s+(\w+),", enum, re.M)]
-    for e in events:
-        config["logging"].setdefault("events", {}).setdefault(e, have["discord-logs"])
-    set_config("logging", config["logging"])
-    set_config("appeals", config["appeals"])
+        raise SystemExit(f"missing bot log channels {missing}: run the wizard's Auto Setup in the dashboard")
+    set_config("logging", {"fallback": have["tommybot-logs"], "routes": {"mod_command": have["mod-logs"]}})
 
 
 def text_channel(name):
