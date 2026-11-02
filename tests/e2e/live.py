@@ -1,8 +1,9 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|logchan|purge|emojis|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
+Usage: live.py spam|lock|mention_lock|nuke|purge|emojis|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
+import re
 import os
 import subprocess
 import sys
@@ -43,6 +44,12 @@ def sql(q):
 
 def set_config(section, value):
     """Merges one section into the newest guild config, then tells the bot to reload."""
+    # Logs only ever go to the bot's own private log channels, never #general or a test channel.
+    routed = {value.get("fallback"), *value.get("routes", {}).values(), *value.get("events", {}).values(),
+              *(c.get("channel") for c in value.get("custom", []))} - {None} if section == "logging" else set()
+    stray = routed - set(bot_log_channels().values())
+    if stray:
+        raise SystemExit(f"refusing to route logs outside the bot's log channels: {sorted(stray)}")
     sql(f"""insert into guild_config (guild_id, version, config)
             select {GUILD}, coalesce(max(version), 0) + 1,
                    coalesce((select config from guild_config where guild_id = {GUILD}
@@ -55,6 +62,46 @@ def set_config(section, value):
 def logging_cfg():
     return json.loads(sql(f"select coalesce(config->'logging', '{{}}') from guild_config "
                           f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
+
+
+# The dashboard's "Create log channels" setup (LOG_CHANNELS in crates/dashboard/src/sections.rs).
+LOG_ROUTES = {"tommybot-logs": ("logging", "fallback"), "mod-logs": ("logging", "routes", "mod_command"),
+              "reports": ("logging", "routes", "report"), "appeals": ("appeals", "channel"),
+              "automod-logs": ("logging", "routes", "auto_mod"), "antinuke-logs": ("logging", "routes", "anti_nuke"),
+              "verification-logs": ("logging", "routes", "verification"),
+              "joingate-logs": ("logging", "routes", "join_gate"), "joinraid-logs": ("logging", "routes", "join_raid"),
+              "panic-logs": ("logging", "routes", "panic"), "server-logs": ("logging", "routes", "server")}
+
+
+def bot_log_channels():
+    """Name -> id of the channels the bot's setup made in its private Logs and Staff categories."""
+    chans = call("GET", f"/guilds/{GUILD}/channels")
+    cats = {c["id"] for c in chans if c["type"] == 4 and c["name"] in ("Logs", "Staff")}
+    return {c["name"]: c["id"] for c in chans if c["type"] == 0 and c.get("parent_id") in cats}
+
+
+def use_bot_log_channels():
+    """Routes logs like the bot's own setup does, into the channels it made; never creates any.
+    Routes that are already set are kept, as the setup keeps them."""
+    have = bot_log_channels()
+    missing = sorted(set(LOG_ROUTES) - set(have))
+    if missing:
+        raise SystemExit(f"missing bot log channels {missing}: run Create log channels in the dashboard")
+    config = {k: json.loads(sql(f"select coalesce(config->'{k}', '{{}}') from guild_config "
+                                f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
+              for k in ("logging", "appeals")}
+    for name, (section, *path) in LOG_ROUTES.items():
+        node = config[section]
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node.setdefault(path[-1], have[name])
+    # Every Discord event without a channel goes to discord-logs, like the setup.
+    enum = open("crates/logging/src/config.rs").read().split("pub enum LogEvent")[1].split("}")[0]
+    events = [re.sub(r"(?<!^)(?=[A-Z])", "_", v).lower() for v in re.findall(r"^\s+(\w+),", enum, re.M)]
+    for e in events:
+        config["logging"].setdefault("events", {}).setdefault(e, have["discord-logs"])
+    set_config("logging", config["logging"])
+    set_config("appeals", config["appeals"])
 
 
 def text_channel(name):
@@ -71,10 +118,10 @@ def snowflake_now():
     return str((int(time.time() * 1000) - 1420070400000) << 22)
 
 
-def log_messages(kind, since):
-    """Messages after `since` in the log channel for `kind`: its route, else the main one."""
+def log_messages(kind, since, event=None):
+    """Messages after `since` in the log channel the bot uses: the event's, else the kind's, else the main one."""
     log = logging_cfg()
-    chan = log.get("routes", {}).get(kind) or log.get("fallback")
+    chan = log.get("events", {}).get(event) or log.get("routes", {}).get(kind) or log.get("fallback")
     return call("GET", f"/channels/{chan}/messages?after={since}&limit=50", soft=True) or []
 
 
@@ -212,13 +259,11 @@ def emojis():
     icons = {f[:-4] for f in os.listdir("assets/icons") if f.endswith(".svg")}
     missing = sorted(icons - set(have))
     chan = text_channel("general")
-    # Logs go to the log channel, never #general, and the rest of the logging setup stays.
-    log_chan = text_channel("tommybot-logs")
-    set_config("logging", {**logging_cfg(), "fallback": log_chan})
+    since = snowflake_now()
     locked = lock()
-    me = call("GET", "/users/@me")["id"]
-    logs = [m for m in call("GET", f"/channels/{log_chan}/messages?limit=10")
-            if m["author"]["id"] == me and m["embeds"]]
+    # The lock shows up as a Discord overwrite log in discord-logs; any bot log channel counts.
+    logs = [m for c in bot_log_channels().values()
+            for m in call("GET", f"/channels/{c}/messages?after={since}&limit=20", soft=True) or []]
     text = json.dumps([m["embeds"] for m in logs])
     in_log = "<:channel_text:" in text and "<:clock:" in text
     row = [{"type": 2, "style": 2, "custom_id": f"e2e-{n}", "emoji": {"id": have.get(n), "name": n}} for n in
@@ -233,21 +278,6 @@ def emojis():
                  f"emojis: uploaded {len(icons) - len(missing)}/{len(icons)}, in lock log={in_log}, buttons={buttons}")
 
 
-def logchan():
-    """Deleting a routed log channel must drop it from the config and say so in the main log channel."""
-    since = snowflake_now()
-    chan = call("POST", f"/guilds/{GUILD}/channels", body={"name": "e2e-logs"})["id"]
-    log = logging_cfg()
-    log.setdefault("routes", {})["sticker"] = chan
-    set_config("logging", log)
-    call("DELETE", f"/channels/{chan}")
-    time.sleep(4)
-    gone = chan not in logging_cfg().get("routes", {}).values()
-    print("cleaned: e2e-logs channel deleted by the test; the bot removed its route")
-    return check(gone and logged("server", since, "Log Channel Deleted"),
-                 f"logchan: route removed={gone}, notice logged")
-
-
 def purge():
     """A bulk delete must log, then post its messages as a bulk-<code>.txt that replies to that log."""
     since = snowflake_now()
@@ -257,7 +287,7 @@ def purge():
     time.sleep(1)
     call("POST", f"/channels/{chan}/messages/bulk-delete", body={"messages": ids})
     time.sleep(3)
-    msgs = log_messages("message", since)
+    msgs = log_messages("message", since, "message_delete_bulk")
     hit = next((m for m in msgs if m["attachments"]), None)
     files = hit["attachments"] if hit else []
     # The file replies to the embed it belongs to, and that embed names the same file.
@@ -272,14 +302,11 @@ def purge():
 
 
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
-             "logchan": logchan, "purge": purge, "emojis": emojis}
+             "purge": purge, "emojis": emojis}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
     names = list(SCENARIOS) if picked == ["all"] else picked
-    # Log checks need a main log channel; a fresh database has none.
-    log = logging_cfg()
-    if not log.get("fallback"):
-        set_config("logging", {**log, "fallback": text_channel("tommybot-logs")})
+    use_bot_log_channels()
     results = [SCENARIOS[n]() for n in names]
     sys.exit(0 if all(results) else 1)
