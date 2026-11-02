@@ -78,7 +78,7 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
-    // Other bots' slash command replies come through their application's webhook: not spam.
+    // Server-installed apps' replies are not spam (user-installed ones were rewritten above).
     let app_reply = m.interaction_metadata.is_some();
     if !am.enabled || app_reply || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
@@ -178,10 +178,8 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
         blacklisted_words: if f.words.filter.enabled && !f.words.use_discord_automod {
-            {
-                let forms = filters::word_forms(content);
-                filters::word_hits(&forms, &blacklist_words(f)) + f.words.regex.hits(&forms)
-            }
+            let forms = filters::word_forms(content);
+            filters::word_hits(&forms, &blacklist_words(f)) + f.words.regex.hits(&forms)
         } else {
             0
         },

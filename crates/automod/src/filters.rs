@@ -95,8 +95,6 @@ pub fn word_forms(s: &str) -> String {
     let joined = join_spaced(&cured);
     [
         s.to_string(),
-        squeeze(&cured, 1),
-        squeeze(&cured, 2),
         squeeze(&joined, 1),
         squeeze(&joined, 2),
         joined,

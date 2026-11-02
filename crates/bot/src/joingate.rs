@@ -1,6 +1,7 @@
 //! Join gate, join raid detection and the punishments they share with native AutoMod.
 use anyhow::Result;
 use tommybot_automod::{
+    filters,
     join::{gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
     lockdown::JoinLock,
 };
@@ -220,15 +221,11 @@ async fn join_raid(
     Ok(())
 }
 
-pub(crate) fn cure(name: &str) -> String {
-    tommybot_automod::filters::cure(name)
-}
-
 /// The cured names, one per line, as `GateCfg::name_matches` reads them.
 fn names(raw: &[Option<&String>]) -> String {
     raw.iter()
         .flatten()
-        .map(|n| cure(n))
+        .map(|n| filters::cure(n))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -379,14 +376,4 @@ pub(crate) async fn punish(
             .line("Reason", why),
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cure_folds_fancy_names() {
-        assert_eq!(cure("ⓗⓔⓛⓛⓞ"), "hello");
-    }
 }

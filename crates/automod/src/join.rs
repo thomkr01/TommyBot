@@ -452,7 +452,7 @@ impl RaidDetector {
         self.joins.push(JoinRec {
             id: j.id,
             at: now,
-            name: j.name.to_lowercase(),
+            name: j.name.lines().next().unwrap_or_default().to_lowercase(),
             has_avatar: j.has_avatar,
             suspicious,
             invite: j.invite.map(Into::into),
