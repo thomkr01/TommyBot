@@ -131,6 +131,8 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
     Ok(())
 }
 
+const ONE_TARGET: [&str; 3] = ["unban", "timeout_renew", "delete_message"];
+
 /// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
 async fn round(app: &App, heavy: bool) {
     match jobs::claim_due(&app.pool, 50, heavy).await {
@@ -141,9 +143,9 @@ async fn round(app: &App, heavy: bool) {
                         metrics::JOBS_DONE.fetch_add(1, Relaxed);
                         true
                     }
-                    // The member left, the ban was lifted by hand, the message or channel is gone:
+                    // One-target jobs whose member left, ban was lifted by hand or message is gone:
                     // nothing left to do, and retrying would only fail again.
-                    Err(e) if http_err::gone_any(&e) => {
+                    Err(e) if ONE_TARGET.contains(&job.kind.as_str()) && http_err::gone_any(&e) => {
                         tracing::info!(id = job.id, kind = %job.kind, "job target is gone");
                         true
                     }
@@ -174,7 +176,7 @@ async fn round(app: &App, heavy: bool) {
 async fn give_up_log(app: &App, job: &Job, e: &anyhow::Error) {
     let log = Log::new("Scheduled Action Failed", RED)
         .line("Action", &format!("`{}`", job.kind))
-        .line("Error", &crate::confirm::why(e))
+        .line("Error", &crate::http_err::why(e))
         .text(&format!(
             "Gave up after {} tries, do it by hand.",
             job.attempts

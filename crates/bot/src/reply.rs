@@ -155,19 +155,14 @@ pub fn dm_text(kind: &str, reason: Option<&str>, actor: Option<u64>) -> String {
 
 /// Best effort: closed DMs are normal, other failures are logged.
 pub async fn dm(app: &App, user: Id<UserMarker>, text: &str) {
-    let ch = match app.http.create_private_channel(user).await {
-        Ok(ch) => ch.model().await.ok(),
-        Err(e) => {
-            best_effort(Err::<(), _>(e), "open DM");
-            None
-        }
+    let Some(ch) = best_effort(app.http.create_private_channel(user).await, "open DM") else {
+        return;
     };
-    if let Some(ch) = ch {
-        best_effort(
-            app.http.create_message(ch.id).content(text).await,
-            "send DM",
-        );
-    }
+    let Ok(ch) = ch.model().await else { return };
+    best_effort(
+        app.http.create_message(ch.id).content(text).await,
+        "send DM",
+    );
 }
 
 /// Queued as a job so it survives restarts and never blocks the handler.

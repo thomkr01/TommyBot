@@ -74,10 +74,8 @@ pub(crate) async fn delete_new_webhooks(app: &App, gid: Id<GuildMarker>) -> Resu
     );
     let mut deleted = 0;
     for id in &doomed {
-        deleted += usize::from(crate::http_err::best_effort(
-            app.http.delete_webhook(Id::new(*id)).await,
-            "delete spam webhook",
-        ));
+        let r = app.http.delete_webhook(Id::new(*id)).await;
+        deleted += usize::from(crate::http_err::best_effort(r, "delete spam webhook").is_some());
     }
     // Every message of a flood lands here; only the one that deleted hooks is logged.
     if deleted == 0 {

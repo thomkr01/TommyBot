@@ -491,7 +491,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(?e, "mod command failed");
-                format!("Command failed: {}", crate::confirm::why(&e))
+                format!("Command failed: {}", crate::http_err::why(&e))
             }),
         );
     }

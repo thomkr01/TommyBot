@@ -243,7 +243,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 Ok(Err(m)) => m,
                 Err(e) => {
                     tracing::warn!(?e, "appeal decision failed");
-                    format!("Something went wrong: {}", crate::confirm::why(&e))
+                    format!("Something went wrong: {}", crate::http_err::why(&e))
                 }
                 Ok(Ok(_)) => unreachable!(),
             });
