@@ -73,7 +73,13 @@ async fn lock_snapshot_round_trip_then_gone() {
     assert!(store::take_lock(&p, g as u64, &snap).await.unwrap());
     assert!(!store::take_lock(&p, g as u64, &snap).await.unwrap());
     assert!(store::locks(&p, g as u64).await.unwrap().is_empty());
+    // Locked again while the unlock ran: finishing that unlock keeps the new lock.
+    store::save_lock(&p, g as u64, &snap).await.unwrap();
     store::drop_lock(&p, g as u64, &snap).await.unwrap();
+    assert_eq!(store::locks(&p, g as u64).await.unwrap().len(), 1);
+    assert!(store::take_lock(&p, g as u64, &snap).await.unwrap());
+    store::drop_lock(&p, g as u64, &snap).await.unwrap();
+    assert!(store::locks(&p, g as u64).await.unwrap().is_empty());
     cleanup(&p, g).await;
 }
 

@@ -42,7 +42,7 @@ pub async fn save_strikes(db: &PgPool, guild: u64, user: u64, s: &StrikeState) -
 pub async fn save_lock(db: &PgPool, guild: u64, snap: &Snapshot) -> Result<()> {
     sqlx::query(
         "INSERT INTO lock_snapshots (guild_id, kind, snapshot, state) VALUES ($1,$2,$3,'locking')
-         ON CONFLICT (guild_id, kind) DO UPDATE SET snapshot=$3, created_at=now()",
+         ON CONFLICT (guild_id, kind) DO UPDATE SET snapshot=$3, created_at=now(), state='locking'",
     )
     .bind(guild as i64)
     .bind(lock_key(snap))
@@ -89,9 +89,9 @@ async fn set_state(db: &PgPool, guild: u64, snap: &Snapshot, state: &str) -> Res
     Ok(done.rows_affected() > 0)
 }
 
-/// Deletes a lock whose unlock has run.
+/// Deletes a lock whose unlock has run, unless it was locked again meanwhile.
 pub async fn drop_lock(db: &PgPool, guild: u64, snap: &Snapshot) -> Result<()> {
-    sqlx::query("DELETE FROM lock_snapshots WHERE guild_id=$1 AND kind=$2")
+    sqlx::query("DELETE FROM lock_snapshots WHERE guild_id=$1 AND kind=$2 AND state='unlocking'")
         .bind(guild as i64)
         .bind(lock_key(snap))
         .execute(db)
