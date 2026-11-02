@@ -15,7 +15,7 @@ use tommybot_logging::{
 use twilight_model::id::{marker::UserMarker, Id};
 
 use crate::{
-    app::{now_secs, App},
+    app::App,
     backup, commands,
     events::{send_log, send_log_link},
     http_err, lockdown, metrics, panic, verify,
@@ -42,19 +42,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 .or_else(|| p["channel"].as_str()?.parse().ok());
             let kind = kind_from(p["kind"].as_str().unwrap_or_default(), channel)
                 .context("job payload has no valid lock kind")?;
-            if let (true, Some(d)) = (
-                lockdown::lock(app, gid, kind.clone()).await?,
-                p["duration_s"].as_i64(),
-            ) {
-                jobs::replace(
-                    &app.pool,
-                    job.guild_id,
-                    "unlock",
-                    serde_json::json!({ "lock": kind }),
-                    now_secs() + d,
-                )
-                .await?;
-            }
+            lockdown::lock_for(app, gid, kind, p["duration_s"].as_i64()).await?;
         }
         // Timed unlocks name their lock; older jobs and the dashboard's lift everything.
         "unlock" => {

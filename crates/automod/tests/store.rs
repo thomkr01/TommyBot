@@ -81,11 +81,13 @@ async fn lock_snapshot_round_trip_then_gone() {
     store::drop_lock(&p, g as u64, &snap).await.unwrap();
     assert!(store::locks(&p, g as u64).await.unwrap().is_empty());
     cleanup(&p, g).await;
+    interrupted_locks_and_unlocks_come_back(&p).await;
 }
 
-#[tokio::test]
-async fn interrupted_locks_and_unlocks_come_back() {
-    let Some(p) = pool().await else { return };
+/// Called from the round-trip test: `interrupted` touches every guild, so it must not run
+/// alongside another lock test.
+async fn interrupted_locks_and_unlocks_come_back(p: &PgPool) {
+    let p = p.clone();
     let g = gid(4);
     cleanup(&p, g).await;
     let snap = |c| Snapshot {

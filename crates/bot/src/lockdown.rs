@@ -87,6 +87,17 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
 /// Locks the guild unless an active lock already covers the same part (its snapshot would save
 /// locked perms).
 pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<bool> {
+    lock_for(app, gid, kind, None).await
+}
+
+/// [`lock`] that lifts itself after `secs`. The timer is queued before any lock step runs, so a
+/// lock that a restart cut off and [`resume`] finished still ends on time.
+pub async fn lock_for(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: LockKind,
+    secs: Option<i64>,
+) -> Result<bool> {
     if lock_thread(app, &kind, true).await? {
         return Ok(true);
     }
@@ -101,6 +112,11 @@ pub async fn lock(app: &App, gid: Id<GuildMarker>, kind: LockKind) -> Result<boo
     let plan = plan_now(app, gid, &kind).await?;
     // Saved first so a failure halfway can still be unlocked exactly, or finished after a restart.
     store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+    if let Some(d) = secs {
+        let job = serde_json::json!({ "lock": kind });
+        tommybot_core::jobs::enqueue(&app.pool, gid.get() as i64, "unlock", job, now_secs() + d)
+            .await?;
+    }
     apply(app, gid, plan).await?;
     announce(
         app,
@@ -479,19 +495,7 @@ pub async fn command(
     if let Some((_, p)) = needs.iter().find(|(on, p)| *on && !actor.has(p)) {
         return Ok(format!("Cannot lock {name}: you lack the {p} permit"));
     }
-    let done = lock(app, gid, kind.clone()).await?;
-    if done {
-        if let Some(d) = duration_s {
-            tommybot_core::jobs::enqueue(
-                &app.pool,
-                gid.get() as i64,
-                "unlock",
-                serde_json::json!({ "lock": kind }),
-                now_secs() + d,
-            )
-            .await?;
-        }
-    }
+    let done = lock_for(app, gid, kind.clone(), duration_s).await?;
     Ok(if done {
         format!("Locked: {name}")
     } else {
