@@ -363,12 +363,13 @@ pub struct Crowd {
 impl Crowd {
     const USERS: usize = 3;
     const WINDOW_MS: i64 = 30_000;
-    /// Short texts ("gg", "hi") are said by many at once; links count at any length.
+    /// Short texts ("gg", "hi") are said by many at once, so only the pool catches those; three
+    /// members are enough for longer texts and links.
     const MIN_CHARS: usize = 30;
 
     /// Adds a post's heat (`b`) to its text's shared pool. When two or more members' combined heat
-    /// reaches the max, three members sent it, or it tripped within the window, returns the
-    /// group's posts not returned before (this one included).
+    /// reaches the max, three members sent a long text or link, or it tripped within the window,
+    /// returns the group's posts not returned before (this one included).
     pub fn on_text(
         &mut self,
         guild: u64,
@@ -383,7 +384,9 @@ impl Crowd {
             .chars()
             .filter(|c| c.is_alphanumeric())
             .collect();
-        if norm.chars().count() < Self::MIN_CHARS && crate::filters::urls(text).is_empty() {
+        let long =
+            norm.chars().count() >= Self::MIN_CHARS || !crate::filters::urls(text).is_empty();
+        if norm.is_empty() && !long {
             return None;
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -403,7 +406,7 @@ impl Crowd {
         users.sort_unstable();
         users.dedup();
         let tripped = (users.len() >= 2 && pool)
-            || users.len() >= Self::USERS
+            || (long && users.len() >= Self::USERS)
             || (g.tripped_ms > 0 && now - g.tripped_ms < Self::WINDOW_MS);
         if !tripped {
             return None;
@@ -691,13 +694,16 @@ mod tests {
             on(&mut c, 1, 22, spam, 0.0, 100_002),
             Some(vec![20, 21, 22])
         );
-        for u in 30..40 {
-            assert_eq!(
-                on(&mut c, 1, u, "gg", 90.0, 200_000),
-                None,
-                "short chat is not a crowd"
-            );
+        // Short text only through the pool: three members saying "gg" is chat, their heat is not.
+        for u in 30..33 {
+            assert_eq!(on(&mut c, 1, u, "gg", 15.0, 200_000 + u as i64), None);
         }
+        assert_eq!(
+            on(&mut c, 1, 33, "gg", 60.0, 200_040),
+            Some(vec![30, 31, 32, 33])
+        );
+        assert_eq!(on(&mut c, 1, 34, "", 90.0, 250_000), None, "no text");
+        assert_eq!(on(&mut c, 1, 35, "", 90.0, 250_001), None);
         assert_eq!(on(&mut c, 1, 40, "https://x.example", 0.0, 300_000), None);
         assert_eq!(on(&mut c, 1, 41, "https://x.example", 0.0, 300_001), None);
         assert!(on(&mut c, 1, 42, "https://x.example", 0.0, 300_002).is_some());
