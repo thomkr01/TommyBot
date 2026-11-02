@@ -43,6 +43,7 @@ pub fn from_csv(s: &str) -> Value {
 #[component]
 pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (code, set_code) = signal(String::new());
+    let (dm_code, set_dm_code) = signal(String::new());
     let (err, set_err) = signal(String::new());
     let (qr, set_qr) = signal(String::new());
     let (secret, set_secret) = signal(String::new());
@@ -57,7 +58,7 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
         }
     });
     let verify = move |_| spawn_local(async move {
-        match api("POST", "/api/totp/verify", Some(json!({"code": code.get_untracked()}))).await {
+        match api("POST", "/api/totp/verify", Some(json!({"code": code.get_untracked(), "dm_code": dm_code.get_untracked()}))).await {
             Ok(_) => { need.set(false); set_err.set(String::new()); set_qr.set(String::new()); }
             Err(e) => set_err.set(e),
         }
@@ -72,6 +73,8 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
                     <p class="info">"Scan this QR code with your authenticator app, then enter a code below."</p>
                     <div class="qr" inner_html=move || qr.get()></div>
                     <p class="muted">"Can't scan? Enter this key manually: " <code>{move || secret.get()}</code></p>
+                    <p class="info">"TommyBot also sent you a code in Discord DMs. Enter it here to confirm the setup."</p>
+                    <input placeholder="Discord DM code" aria-label="code from Discord DM" autocomplete="off" prop:value=dm_code on:input=move |e| set_dm_code.set(event_target_value(&e)) />
                 </Show>
                 <div class="row">
                     <input placeholder="123456" aria-label="authenticator code" autocomplete="one-time-code" prop:value=code on:input=move |e| set_code.set(event_target_value(&e)) />

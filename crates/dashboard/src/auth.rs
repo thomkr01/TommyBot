@@ -266,16 +266,48 @@ pub async fn totp_enroll(
         return Err(ApiError::Forbidden("totp already enrolled"));
     }
     let secret = Secret::generate_secret().to_encoded().to_string();
-    sqlx::query("insert into dash_totp (user_id, secret) values ($1,$2) on conflict (user_id) do update set secret = $2")
-        .bind(s.user_id).bind(&secret).execute(&st.db).await?;
+    let dm_code = format!("{:06}", rand::rngs::OsRng.next_u32() % 1_000_000);
+    dm_enroll_code(&st, s.user_id, &dm_code).await?;
+    sqlx::query("insert into dash_totp (user_id, secret, dm_code) values ($1,$2,$3) on conflict (user_id) do update set secret = $2, dm_code = $3")
+        .bind(s.user_id).bind(&secret).bind(&dm_code).execute(&st.db).await?;
     Ok(Json(
         json!({"secret": secret, "uri": totp(&secret, &s.username)?.get_url()}),
     ))
 }
 
+/// DMs the enrollment code to the logged-in Discord account; a stolen session cookie can't read it.
+async fn dm_enroll_code(st: &AppState, user: i64, code: &str) -> Result<(), ApiError> {
+    const NO_DM: &str = "couldn't DM you; allow DMs from server members and try again";
+    let ch = st
+        .discord
+        .call(
+            Method::POST,
+            "/users/@me/channels",
+            Some(json!({"recipient_id": user.to_string()})),
+        )
+        .await
+        .map_err(|_| ApiError::BadRequest(NO_DM.into()))?;
+    let ch = ch["id"]
+        .as_str()
+        .ok_or(ApiError::BadRequest(NO_DM.into()))?;
+    let text = format!("Your TommyBot authenticator setup code is **{code}**. If you didn't start this, ignore it and log out of the dashboard everywhere.");
+    st.discord
+        .call(
+            Method::POST,
+            &format!("/channels/{ch}/messages"),
+            Some(json!({"content": text, "allowed_mentions": {"parse": []}})),
+        )
+        .await
+        .map_err(|_| ApiError::BadRequest(NO_DM.into()))?;
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct Code {
     code: String,
+    /// The code from the bot's DM; only needed to confirm a new enrollment.
+    #[serde(default)]
+    dm_code: String,
 }
 
 /// Confirms enrollment on first use, and grants step-up for STEP_UP_MINUTES.
@@ -284,11 +316,13 @@ pub async fn totp_verify(
     s: Sess,
     Json(c): Json<Code>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let secret = sqlx::query_scalar::<_, String>("select secret from dash_totp where user_id = $1")
-        .bind(s.user_id)
-        .fetch_optional(&st.db)
-        .await?
-        .ok_or(ApiError::Forbidden("totp not enrolled"))?;
+    let (secret, confirmed, dm_code) = sqlx::query_as::<_, (String, bool, Option<String>)>(
+        "select secret, confirmed, dm_code from dash_totp where user_id = $1",
+    )
+    .bind(s.user_id)
+    .fetch_optional(&st.db)
+    .await?
+    .ok_or(ApiError::Forbidden("totp not enrolled"))?;
     let totp = totp(&secret, &s.username)?;
     let now_step = std::time::UNIX_EPOCH
         .elapsed()
@@ -297,6 +331,8 @@ pub async fn totp_verify(
         / 30;
     // Same window as `check_current` (skew 1), but we need the step to refuse a replay.
     let step = (now_step - 1..=now_step + 1).find(|t| totp.generate(t * 30) == c.code);
+    // A wrong DM code counts as a miss, so it shares the TOTP lockout.
+    let step = step.filter(|_| confirmed || dm_code.as_deref() == Some(c.dm_code.as_str()));
     {
         let mut m = st.totp.lock().unwrap();
         let a = m.entry(s.user_id).or_default();
@@ -307,7 +343,7 @@ pub async fn totp_verify(
             return Err(ApiError::Forbidden("invalid code"));
         }
     }
-    sqlx::query("update dash_totp set confirmed = true where user_id = $1")
+    sqlx::query("update dash_totp set confirmed = true, dm_code = null where user_id = $1")
         .bind(s.user_id)
         .execute(&st.db)
         .await?;

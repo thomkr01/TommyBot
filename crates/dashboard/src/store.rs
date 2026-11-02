@@ -193,4 +193,25 @@ mod tests {
         .is_err());
         tx.rollback().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn history_keeps_newest_200_versions() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_300_000_000 + (std::process::id() as i64);
+        let mut tx = db.begin().await.unwrap();
+        for v in 0..205 {
+            commit(&mut tx, g, v, &json!({}), 7).await.unwrap();
+        }
+        let (n, low): (i64, i32) =
+            sqlx::query_as("select count(*), min(version) from guild_config where guild_id = $1")
+                .bind(g)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!((n, low), (200, 6));
+        tx.rollback().await.unwrap();
+    }
 }
