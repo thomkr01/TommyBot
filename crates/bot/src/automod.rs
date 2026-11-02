@@ -19,7 +19,7 @@ use twilight_model::{
     channel::Message,
     gateway::payload::incoming::MessageCreate,
     id::{
-        marker::{ChannelMarker, GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
         Id,
     },
 };
@@ -305,11 +305,11 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
             .unwrap()
             .get_mut(&key)
             .map(|(_, h)| h.take_msgs());
-        crate::http_err::best_effort(
-            app.http.delete_message(m.channel_id, m.id).await,
-            "automod delete",
-        );
-        reply::purge_ids(app, &tracked.unwrap_or_default()).await;
+        reply::purge_ids(
+            app,
+            &with_msg(tracked, Some((m.channel_id.get(), m.id.get()))),
+        )
+        .await;
         return crate::webhooks::delete_new_webhooks(app, gid).await;
     }
     crate::panic::note(app, gid, m.author.id, true).await?;
@@ -322,16 +322,13 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
             return filter_action(app, &cfg, gid, m, action, (factor, fc.duration_secs)).await;
         }
     }
-    crate::http_err::best_effort(
-        app.http.delete_message(m.channel_id, m.id).await,
-        "automod delete",
-    );
     strike_member(
         app,
         &cfg,
         gid,
         (m.author.id, &m.author.name),
         m.channel_id,
+        Some(m.id),
         tripped
             .map(|t| t.1)
             .or(crowd.is_some().then_some("Coordinated spam")),
@@ -381,6 +378,7 @@ async fn punish_crowd(
                 gid,
                 (user, &p.name),
                 Id::new(p.channel),
+                None,
                 Some("Coordinated spam"),
             )
             .await
@@ -398,6 +396,7 @@ async fn strike_member(
     gid: Id<GuildMarker>,
     (user, name): (Id<UserMarker>, &str),
     ch: Id<ChannelMarker>,
+    msg: Option<Id<MessageMarker>>,
     reason: Option<&str>,
 ) -> Result<()> {
     let am = &cfg.automod;
@@ -413,17 +412,15 @@ async fn strike_member(
         }
         h.take_msgs()
     });
+    // Wick deletes every message that built the heat, so they go in one bulk delete per channel.
+    let mut msgs = with_msg(tracked, msg.map(|id| (ch.get(), id.get())));
     if cfg.misc.purge_last_100 || act.purge {
         if let Err(e) = reply::purge_user(app, ch, user).await {
             tracing::warn!(?e, "automod purge failed");
         }
-        let others: Vec<_> = tracked
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|&(c, _)| c != ch.get())
-            .collect();
-        reply::purge_ids(app, &others).await;
+        msgs.retain(|&(c, _)| c != ch.get());
     }
+    reply::purge_ids(app, &msgs).await;
     let reason = if act.purge {
         "Message spam (strike cap)"
     } else {
@@ -485,6 +482,15 @@ async fn strike_member(
         .await?;
     }
     Ok(())
+}
+
+/// The tracked heat messages plus the triggering one (an edit is not tracked), as (channel, message).
+fn with_msg(tracked: Option<Vec<(u64, u64)>>, here: Option<(u64, u64)>) -> Vec<(u64, u64)> {
+    let mut msgs = tracked.unwrap_or_default();
+    if let Some(here) = here.filter(|h| !msgs.contains(h)) {
+        msgs.push(here);
+    }
+    msgs
 }
 
 /// The text the filters read: the message, what it forwards, and a poll's question and answers.
