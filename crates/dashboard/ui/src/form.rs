@@ -104,9 +104,9 @@ fn UserPick(get: Signal<Value>, set: Callback<Value>) -> impl IntoView {
     view! { <div class="pick">
         {move || strs(&get.get()).into_iter().map(|id| {
             let label = names.with(|n| n.get(&id).cloned()).unwrap_or_else(|| id.clone());
-            view! { <span class="chip">{label}" "<a aria-label="remove" on:click=move |_| { let mut cur = strs(&get.get_untracked()); cur.retain(|x| *x != id); set.run(json!(cur)) }>"×"</a></span> }
+            view! { <span class="chip">{label}" "<button class="link" aria-label="remove" on:click=move |_| { let mut cur = strs(&get.get_untracked()); cur.retain(|x| *x != id); set.run(json!(cur)) }>"×"</button></span> }
         }).collect_view()}
-        <input placeholder="Search a member or paste an ID" on:change=move |e| search(event_target_value(&e)) />
+        <input placeholder="Search a member or paste an ID" aria-label="search a member or paste an ID" on:change=move |e| search(event_target_value(&e)) />
         {move || found.get().into_iter().map(|(id, name)| view! { <button class="ghost" on:click=move |_| add(id.clone())>{name}</button> }).collect_view()}
     </div> }
 }
@@ -151,7 +151,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!(x) } else { json!(x as i64) })
             };
             let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
-            view! { <div class="step"><button class="ghost" on:click=move |_| step(-1.0)>"-"</button>
+            view! { <div class="step"><button class="ghost" aria-label="less" on:click=move |_| step(-1.0)>"-"</button>
                 <input prop:value=shown on:change=move |e| {
                     let s = event_target_value(&e);
                     let s = s.trim();
@@ -159,7 +159,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x / k)) } }
                     else if let Ok(x) = s.parse::<i64>() { set(json!(x)) }
                 } />
-                <button class="ghost" on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div> }.into_any()
+                <button class="ghost" aria-label="more" on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div> }.into_any()
         }
         "list" | "lines" => {
             let box_ = if kind == "lines" {
@@ -359,7 +359,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "strike system" } else { a }, action_desc(a))
     }}</span> });
     let label = f["title"].as_str().map_or_else(|| tail.replace('_', " "), String::from);
-    view! { <div class="row" class:tog=kind == "bool"><label>{label}</label>{input}{help}{helper}{nuke}{action}</div> }
+    // The group's name labels the control inside, whatever kind it is.
+    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}</div> }
 }
 
 /// Raw JSON of one section of the config in `val`.
@@ -389,6 +390,8 @@ pub fn Section(
     let fields = RwSignal::new(Vec::<Value>::new());
     let orig = RwSignal::new(json!({}));
     let (msg, need) = (RwSignal::new(String::new()), RwSignal::new(false));
+    // Until the schema answers, show a loading line instead of flashing the raw JSON editor.
+    let loaded = RwSignal::new(false);
     let (g, n) = (guild.clone(), name.clone());
     spawn_local(async move {
         match api("GET", &format!("/api/guilds/{g}/config"), None).await {
@@ -414,6 +417,7 @@ pub fn Section(
                 if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(d); }
             }
         }
+        loaded.set(true);
     });
     let n = StoredValue::new(name);
     let reload = {
@@ -465,7 +469,7 @@ pub fn Section(
     };
     view! {
         {card_view}
-        <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| raw_editor(val, n.get_value(), msg))>
+        <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| if loaded.get() { raw_editor(val, n.get_value(), msg).into_any() } else { view! { <p class="muted">"Loading..."</p> }.into_any() })>
             <div class="cards">
                 {move || {
                     // One card per path prefix ("limits.ban" -> "limits ban"); unprefixed fields go under "General".
@@ -493,7 +497,7 @@ pub fn Section(
         <Show when=move || val.get() != orig.get()>
             <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| val.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
         </Show>
-        <Show when=move || !msg.get().is_empty()><p class="toast" on:click=move |_| msg.set(String::new())>{move || msg.get()}</p></Show>
+        <Show when=move || !msg.get().is_empty()><p class="toast" role="status" on:click=move |_| msg.set(String::new())>{move || msg.get()}</p></Show>
         <StepUp need enrolled />
     }
 }

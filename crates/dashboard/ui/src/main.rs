@@ -27,7 +27,7 @@ use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
 use channels::ChannelSetup;
 
-/// Sidebar like Wick's, only with the pages TommyBot has. Untyped sections stay reachable under "Raw JSON".
+/// Sidebar like Wick's, only with the pages TommyBot has.
 const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("channel_setup", "Channel Setup"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
@@ -35,7 +35,6 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
     ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
     ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports"), ("tickets", "Tickets"), ("catch", "Catch Channel")]),
     ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("embeds", "Embed Builder"), ("rescue", "Rescue Key")]),
-    ("Raw JSON", &[("condition_automod", "Condition Automod"), ("moderation", "Moderation"), ("warn_points", "Warn Points"), ("punish", "Punish"), ("utility", "Utility")]),
 ];
 /// Groups Wick has; the rest are TommyBot extras that stay folded until visited.
 const WICK_GROUPS: [&str; 3] = ["Auto Mod", "Anti Nuke", "Server Joins"];
@@ -91,16 +90,18 @@ fn Bell(route: ReadSignal<Vec<String>>) -> impl IntoView {
     let appeals = RwSignal::new(Vec::<Value>::new());
     let fetch = move || spawn_local(async move { if let Ok(v) = api("GET", "/api/appeal/notifications", None).await { appeals.set(v.as_array().cloned().unwrap_or_default()) } });
     fetch();
+    let guild = move || route.get_untracked().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit()));
     let load = move |_| {
         // Opening the bell shows the verdicts once; the next fetch no longer lists them.
         if !appeals.get_untracked().is_empty() { spawn_local(async move { let _ = api("POST", "/api/appeal/notifications", None).await; }); }
-        let Some(g) = route.get_untracked().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())) else { return };
+        let Some(g) = guild() else { return };
         spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await { rows.set(v.as_array().cloned().unwrap_or_default()) } });
     };
     view! { <details class="ico" on:toggle=load><summary aria-label="notifications">{icons::icon("bell")}{move || (!appeals.get().is_empty()).then(|| format!(" {}", appeals.get().len()))}</summary><div>
         {move || appeals.get().into_iter().map(|a| view! { <a href=format!("#/appeal/{}", a["guild"].as_str().unwrap_or(""))>{format!("Your {} appeal #{} was {}", a["kind"].as_str().unwrap_or(""), a["id"], if a["status"] == "accepted" { "approved" } else { "denied" })}</a> }).collect_view()}
-        {move || if rows.get().is_empty() { view! { <a href="#/">"No recent changes"</a> }.into_any() } else {
-            rows.get().into_iter().take(5).map(|r| view! { <a href="#/">{format!("v{} · {}", r["version"], r["at"].as_str().unwrap_or("").get(..16).unwrap_or(""))}</a> }).collect_view().into_any() }}
+        {move || if rows.get().is_empty() { view! { <p class="muted">"No recent changes"</p> }.into_any() } else {
+            let history = format!("#/{}/history", guild().unwrap_or_default());
+            rows.get().into_iter().take(5).map(|r| view! { <a href=history.clone()>{format!("v{} · {}", r["version"], r["at"].as_str().unwrap_or("").get(..16).unwrap_or(""))}</a> }).collect_view().into_any() }}
     </div></details> }
 }
 
@@ -195,15 +196,14 @@ fn App() -> impl IntoView {
         }
     });
     view! {
-        <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))><button>"Log in with Discord"</button></a></main> }>
+        <Show when=move || me.get().is_some() fallback=|| view! { <main><h1>"TommyBot"</h1><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a></main> }>
             <header>
                 <button class="ghost menu-btn" aria-label="menu" on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/">"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
-                <details class="ico"><summary aria-label="language">{icons::icon("globe")}</summary><div><button>"English"</button></div></details>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
-                    <summary>{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
+                    <summary aria-label="account menu">{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
                     <div><a href="#/">"Servers"</a><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
                 </details>
             </header>
@@ -234,7 +234,7 @@ fn App() -> impl IntoView {
                 <main>
                     {move || match route.get().as_slice() {
                         [] => view! {
-                            <div class="head"><h1>"Servers"</h1><input placeholder="Filter: [Type name or ID]" prop:value=filter on:input=move |e| set_filter.set(event_target_value(&e)) /><LostControl enrolled /><button class="ghost" on:click=move |_| { set_guilds_note.set("Loading servers...".into()); spawn_local(load_guilds()) }>"Refresh servers"</button></div>
+                            <div class="head"><h1>"Servers"</h1><input placeholder="Filter: [Type name or ID]" aria-label="filter servers" prop:value=filter on:input=move |e| set_filter.set(event_target_value(&e)) /><LostControl enrolled /><button class="ghost" on:click=move |_| { set_guilds_note.set("Loading servers...".into()); spawn_local(load_guilds()) }>"Refresh servers"</button></div>
                             <p class="muted">{move || guilds_note.get()}</p>
                             <div class="cards">{guilds.get().iter().filter(|g| { let f = filter.get().to_lowercase(); g["name"].as_str().unwrap_or("").to_lowercase().contains(&f) || g["id"].as_str().unwrap_or("").contains(&f) }).map(|g| view! { <div class="card"><a class="gcard" href=format!("#/{}/overview", g["id"].as_str().unwrap_or(""))>{match g["icon"].as_str() {
                                 Some(i) => view! { <img src=format!("https://cdn.discordapp.com/icons/{}/{i}.png?size=64", g["id"].as_str().unwrap_or("")) /> }.into_any(),
@@ -276,7 +276,7 @@ fn App() -> impl IntoView {
                                 ("filters", Some(sub)) => {
                                     let tabs = sub.starts_with("spam_").then(|| view! { <Tabs guild=g.clone() items=SPAM_TABS active=format!("filters/{sub}") /> });
                                     let name = FILTER_PAGES.iter().find(|(s, ..)| sub.starts_with(s) || (*s == "spam_text" && sub.starts_with("spam_"))).map_or("", |(_, t, _)| *t);
-                                    view! { <p><a href=format!("#/{g}/filters")><button class="ghost">"Go Back"</button></a></p><h2 style="text-align:center">{name}</h2>{tabs}<h3 style="text-align:center">{match sub.as_str() { "spam_text" => "Text Message Filters", "spam_mentions" => "Mention Filters", "spam_attach" => "Attachment Filters", _ => "" }}</h3>{sec("automod", sub)} }.into_any()
+                                    view! { <p><a class="ghost" href=format!("#/{g}/filters")>"Go Back"</a></p><h2 style="text-align:center">{name}</h2>{tabs}<h3 style="text-align:center">{match sub.as_str() { "spam_text" => "Text Message Filters", "spam_mentions" => "Mention Filters", "spam_attach" => "Attachment Filters", _ => "" }}</h3>{sec("automod", sub)} }.into_any()
                                 }
                                 ("whitelist", sub) => {
                                     let active = sub.map_or_else(|| "whitelist".to_string(), |s| format!("whitelist/{s}"));

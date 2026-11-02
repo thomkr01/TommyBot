@@ -84,7 +84,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 </div> }.into_any()
             }
             8 => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
-            9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a href=format!("#/{}/overview", g)><button class="go">"Go to Overview"</button></a></div> }.into_any(),
+            9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a class="btn go" href=format!("#/{}/overview", g)>"Go to Overview"</a></div> }.into_any(),
             i => { let (name, cards) = CARDS[i - 1]; view! { <Section guild=g.clone() name=name.to_string() cards next=Callback::new(move |_| step.update(|i| *i += 1)) enrolled /> }.into_any() }
         }}
         <p><Show when=move || matches!(step.get(), 0 | 8)><button on:click=move |_| step.update(|i| *i += 1)>"Next"</button></Show></p>
@@ -129,7 +129,7 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
         on.set(x);
         run_act(async move { api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await }, msg, need, move |r| version.set(r["version"].as_i64().unwrap_or(0)));
     };
-    view! { <input type="checkbox" class="sw" aria-label="enable system" prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
+    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") prop:checked=move || on.get() on:change=change /><span class="err">{move || msg.get()}</span> }
 }
 
 #[component]
@@ -179,7 +179,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         </For></div>
         <h2 style="text-align:center">"Quick Systems Overview"</h2>
         <div class="cards five">
-            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a href=format!("#/{g2}/{k}")><button>"Settings"</button></a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
+            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
         </div>
         <p class="err">{move || msg.get()}</p>
         <StepUp need enrolled />
@@ -225,8 +225,8 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     };
     view! {
         <div class="row">
-            <input placeholder="Actor user ID" prop:value=actor on:input=move |e| actor.set(event_target_value(&e)) />
-            <input placeholder="Hours" prop:value=hours on:input=move |e| hours.set(event_target_value(&e)) />
+            <input placeholder="Actor user ID" aria-label="actor user ID" prop:value=actor on:input=move |e| actor.set(event_target_value(&e)) />
+            <input placeholder="Hours" aria-label="hours back" prop:value=hours on:input=move |e| hours.set(event_target_value(&e)) />
             <button on:click=load>"Load"</button>
         </div>
         <p class="err">{move || msg.get()}</p>
@@ -234,7 +234,7 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             {
                 let id = r["id"].as_i64().unwrap_or(0);
                 view! { <div class="card row">
-                    <input type="checkbox" disabled=r["reverted"].as_bool().unwrap_or(false) on:change=move |e| picked.update(|p| { p.retain(|x| *x != id); if event_target_checked(&e) { p.push(id) } }) />
+                    <input type="checkbox" aria-label=format!("select action {id}") disabled=r["reverted"].as_bool().unwrap_or(false) on:change=move |e| picked.update(|p| { p.retain(|x| *x != id); if event_target_checked(&e) { p.push(id) } }) />
                     <b>{s(&r["action"])}</b>
                     <span class="muted">{format!("target {} at {}{}", s(&r["target_id"]), s(&r["at"]), if r["reverted"].as_bool().unwrap_or(false) { " (reverted)" } else { "" })}</span>
                 </div> }
@@ -262,6 +262,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     });
     let g = guild.clone();
     let regen = move |_| {
+        if has_key.get_untracked() && !confirm("Make a new rescue key? The old key and its authenticator code stop working.") { return; }
         let g = g.clone();
         run_act(async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await }, msg, need, move |v| {
             key.set(s(&v["key"])); has_key.set(true);
@@ -271,7 +272,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     view! {
         <div class="card">
             <p class="muted">{move || if has_key.get() { "A rescue key exists. Regenerating invalidates the old one." } else { "No rescue key yet." }}</p>
-            <button style="background:var(--warn);color:#000" on:click=regen>"REGENERATE"</button>
+            <button class="warn" on:click=regen>"REGENERATE"</button>
             <Show when=move || !key.get().is_empty()>
                 <p><b>"Rescue Key (shown once, store it somewhere safe):"</b></p>
                 <div class="row"><pre class:blur=move || !shown.get()>{move || key.get()}</pre>
@@ -300,12 +301,12 @@ pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
         run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.set("Claimed. Refresh your servers.".into()));
     };
     view! {
-        <a class="danger" href="#/" on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</a>
+        <button class="link err" aria-expanded=move || open.get().to_string() on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</button>
         <Show when=move || open.get()>
             <div class="card">
                 <h2>"RESCUE PROCESS"</h2>
                 <p class="muted">"You have lost access to your physical owner account. Enter the server ID and either the rescue key or the 6-digit code from your authenticator."</p>
-                <div class="row"><input placeholder="Server ID" prop:value=guild on:input=move |e| guild.set(event_target_value(&e)) /><input placeholder="Rescue key or 6-digit code" prop:value=secret on:input=move |e| secret.set(event_target_value(&e)) /><button on:click=claim>"CONFIRM"</button></div>
+                <div class="row"><input placeholder="Server ID" aria-label="server ID" prop:value=guild on:input=move |e| guild.set(event_target_value(&e)) /><input placeholder="Rescue key or 6-digit code" aria-label="rescue key or 6-digit code" prop:value=secret on:input=move |e| secret.set(event_target_value(&e)) /><button on:click=claim>"CONFIRM"</button></div>
                 <p>{move || msg.get()}</p>
             </div>
         </Show>

@@ -24,6 +24,10 @@ pub async fn api(method: &str, path: &str, body: Option<Value>) -> Result<Value,
     if ok { Ok(v) } else { Err(v["error"].as_str().unwrap_or("request failed").to_string()) }
 }
 
+pub fn confirm(text: &str) -> bool {
+    web_sys::window().is_some_and(|w| w.confirm_with_message(text).unwrap_or(false))
+}
+
 pub fn csv(v: &Value) -> String {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
 }
@@ -67,7 +71,7 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
                     <p class="muted">"Can't scan? Enter this key manually: " <code>{move || secret.get()}</code></p>
                 </Show>
                 <div class="row">
-                    <input placeholder="123456" prop:value=code on:input=move |e| set_code.set(event_target_value(&e)) />
+                    <input placeholder="123456" aria-label="authenticator code" autocomplete="one-time-code" prop:value=code on:input=move |e| set_code.set(event_target_value(&e)) />
                     <button on:click=verify>"Verify"</button>
                 </div>
                 <p class="err">{move || err.get()}</p>
