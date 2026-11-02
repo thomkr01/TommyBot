@@ -805,6 +805,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn with_msg_adds_the_trigger_once() {
+        assert_eq!(with_msg(Some(vec![(1, 2)]), Some((1, 2))), [(1, 2)]);
+        assert_eq!(with_msg(Some(vec![(1, 2)]), Some((1, 3))), [(1, 2), (1, 3)]);
+        assert_eq!(with_msg(None, None), []);
+    }
+
+    #[test]
     fn disabled_filters_lose_their_weight() {
         let mut am = AutomodCfg::default();
         am.filters.zalgo.enabled = false;
