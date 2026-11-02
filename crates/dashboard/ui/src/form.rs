@@ -467,7 +467,7 @@ pub fn Section(
             Ok(last)
         }, version, msg, need);
     };
-    // Read per card below rather than in the grouping closure, so flipping a switch restyles the cards instead of rebuilding them (which cut its animation).
+    // Read per card, not in the grouping closure: rebuilding the cards on every switch flip cut the knob's animation.
     let off = Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));
     view! {
         {card_view}

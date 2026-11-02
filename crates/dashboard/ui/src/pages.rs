@@ -134,7 +134,6 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
         busy.set(true);
         run_act(async move {
             let r = api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await;
-            // A failed save slides the knob back to what is stored.
             if r.is_err() { cfg.set(before); on.set(!x); }
             busy.set(false);
             r
