@@ -14,6 +14,7 @@ use twilight_model::{
         },
         Channel,
     },
+    guild::Permissions,
     http::attachment::Attachment,
     id::{
         marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker},
@@ -41,6 +42,52 @@ fn guild_of(ev: &Event) -> Option<u64> {
     g.map(|g| g.get())
 }
 
+/// Channel and role updates drop the cached answer sooner.
+const PUBLIC_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether @everyone can view a channel: its base permissions, then the channel's @everyone overwrite.
+fn everyone_sees(base: Permissions, overwrite: Option<(Permissions, Permissions)>) -> bool {
+    if base.contains(Permissions::ADMINISTRATOR) {
+        return true;
+    }
+    let (allow, deny) = overwrite.unwrap_or((Permissions::empty(), Permissions::empty()));
+    ((base - deny) | allow).contains(Permissions::VIEW_CHANNEL)
+}
+
+/// Logs carry deleted messages and staff actions, so they never go where @everyone can read them.
+async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
+    let cached = app.log_public.lock().unwrap().get(&channel).copied();
+    if let Some((p, _)) = cached.filter(|(_, at)| at.elapsed() < PUBLIC_TTL) {
+        return Ok(p);
+    }
+    let c = app.http.channel(channel).await?.model().await?;
+    let p = match c.guild_id {
+        Some(gid) => {
+            let perms = app
+                .guild_info(gid)
+                .await?
+                .role_perms
+                .get(&gid.cast())
+                .copied();
+            let overwrite = c
+                .permission_overwrites
+                .into_iter()
+                .flatten()
+                .find(|o| o.id == gid.cast());
+            everyone_sees(
+                Permissions::from_bits_truncate(perms.unwrap_or(0)),
+                overwrite.map(|o| (o.allow, o.deny)),
+            )
+        }
+        None => false,
+    };
+    app.log_public
+        .lock()
+        .unwrap()
+        .insert(channel, (p, Instant::now()));
+    Ok(p)
+}
+
 /// Logged text is user-controlled, so it is sent with mentions disabled.
 async fn send(
     app: &App,
@@ -50,6 +97,11 @@ async fn send(
     link: Option<&(&str, String)>,
     mentions: &AllowedMentions,
 ) -> Result<Id<MessageMarker>> {
+    if public(app, channel).await? {
+        anyhow::bail!(
+            "not logging to {channel}: @everyone can read it, pick a private log channel"
+        );
+    }
     let rows: Vec<Component> = link
         .map(|(label, url)| {
             Component::ActionRow(ActionRow {
@@ -271,7 +323,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             automod::on_message(app, m).await?;
         }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
-        Event::RoleUpdate(r) => app.invalidate_guild(r.guild_id),
+        Event::RoleUpdate(r) => {
+            app.invalidate_guild(r.guild_id);
+            app.log_public.lock().unwrap().clear();
+        }
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
         Event::ChannelCreate(c) => {
             app.note_parent(&c.0);
@@ -279,6 +334,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             crate::setup::enforce_quarantine(app, c).await.ok();
         }
         Event::ChannelUpdate(c) => {
+            app.log_public.lock().unwrap().remove(&c.id);
             c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
             crate::setup::enforce_quarantine(app, c).await.ok();
             crate::catch::keep_top(app, c).await?;
@@ -320,4 +376,22 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn everyone_sees_follows_base_and_overwrite() {
+        let (view, none) = (Permissions::VIEW_CHANNEL, Permissions::empty());
+        assert!(everyone_sees(view, None));
+        assert!(!everyone_sees(view, Some((none, view))));
+        assert!(!everyone_sees(none, None));
+        assert!(everyone_sees(none, Some((view, none))));
+        assert!(everyone_sees(
+            Permissions::ADMINISTRATOR,
+            Some((none, view))
+        ));
+    }
 }

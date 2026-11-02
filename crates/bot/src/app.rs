@@ -120,6 +120,9 @@ pub struct App {
     pub me: Id<UserMarker>,
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
     pub logger: Mutex<Logger>,
+    /// Whether @everyone can read a log channel, and when that was checked.
+    pub log_public:
+        Mutex<HashMap<Id<twilight_model::id::marker::ChannelMarker>, (bool, std::time::Instant)>>,
     pub antinuke: Mutex<AntiNuke>,
     pub rate_limiter: Mutex<RateLimiter>,
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
@@ -173,6 +176,7 @@ impl App {
             me,
             cfgs: Default::default(),
             logger: Mutex::new(Logger::new(me)),
+            log_public: Default::default(),
             antinuke: Mutex::new(AntiNuke::new(HashMap::new())),
             rate_limiter: Default::default(),
             heat: Default::default(),
