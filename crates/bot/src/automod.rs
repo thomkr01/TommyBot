@@ -237,6 +237,14 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
+    let crowd = !edit
+        && heat_cfg.similarity > 0.0
+        && !facts.whitelist.spam
+        && app
+            .crowd
+            .lock()
+            .unwrap()
+            .on_text(gid.get(), m.author.id.get(), content, now);
     let (triggered, fresh, breakdown) = {
         let mut map = app.heat.lock().unwrap();
         // Past 100k users, users idle for 10 minutes go first; everyone only if that frees nothing.
@@ -253,6 +261,9 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         let mut b = heat(&facts, hist, &heat_cfg);
         if over_hour_cap {
             b.parts.push(("mentions", heat_cfg.max));
+        }
+        if crowd {
+            b.parts.push(("similarity", heat_cfg.max));
         }
         if edit {
             b.parts.retain(|(n, _)| INSTANT.contains(n));

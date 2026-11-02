@@ -99,6 +99,7 @@ async fn turnstile_ok(st: &AppState, secret: &str, token: &str) -> Result<bool, 
 async fn submit(
     State(st): State<AppState>,
     Path(guild): Path<i64>,
+    headers: axum::http::HeaderMap,
     s: Sess,
     Json(b): Json<Body>,
 ) -> Result<Json<Value>, ApiError> {
@@ -119,15 +120,53 @@ async fn submit(
     if !in_guild {
         return Err(ApiError::BadRequest("Join the server first.".into()));
     }
+    // Cloudflare's tunnel sets this; without it (local runs) the alt check is skipped.
+    let ip = headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok());
+    let same_ip = match ip {
+        Some(ip) => same_ip(&st, guild, s.user_id, ip).await?,
+        None => vec![],
+    };
     tommybot_core::jobs::enqueue(
         &st.db,
         guild,
         "verify_grant",
-        json!({ "user": s.user_id }),
+        json!({ "user": s.user_id, "same_ip": same_ip }),
         0,
     )
     .await?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// Salted per server, so the hash says nothing outside it and no raw IP is stored.
+fn ip_hash(guild: i64, ip: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let salt = std::env::var("DISCORD_CLIENT_SECRET").unwrap_or_default();
+    Sha256::digest(format!("{salt}:{guild}:{ip}")).to_vec()
+}
+
+/// Other members who verified from the same IP in the last 24 hours; records this visit.
+async fn same_ip(st: &AppState, guild: i64, user: i64, ip: &str) -> Result<Vec<String>, ApiError> {
+    let hash = ip_hash(guild, ip);
+    sqlx::query("delete from verify_ips where at < now() - interval '30 days'")
+        .execute(&st.db)
+        .await?;
+    let others: Vec<i64> = sqlx::query_scalar(
+        "select user_id from verify_ips where guild_id = $1 and ip_hash = $2 and user_id <> $3 and at > now() - interval '1 day'",
+    )
+    .bind(guild)
+    .bind(&hash)
+    .bind(user)
+    .fetch_all(&st.db)
+    .await?;
+    sqlx::query("insert into verify_ips (guild_id, ip_hash, user_id) values ($1, $2, $3) on conflict (guild_id, ip_hash, user_id) do update set at = now()")
+        .bind(guild)
+        .bind(&hash)
+        .bind(user)
+        .execute(&st.db)
+        .await?;
+    Ok(others.iter().map(i64::to_string).collect())
 }
 
 #[cfg(test)]
@@ -144,5 +183,12 @@ mod tests {
         assert!(gate(&cfg("Captcha", json!(["1"])), true).is_err());
         assert!(gate(&cfg("Web", json!([])), true).is_err());
         assert!(gate(&json!({}), true).is_err());
+    }
+
+    #[test]
+    fn ip_hash_is_per_server() {
+        assert_eq!(ip_hash(1, "1.2.3.4"), ip_hash(1, "1.2.3.4"));
+        assert_ne!(ip_hash(1, "1.2.3.4"), ip_hash(2, "1.2.3.4"));
+        assert_ne!(ip_hash(1, "1.2.3.4"), ip_hash(1, "1.2.3.5"));
     }
 }

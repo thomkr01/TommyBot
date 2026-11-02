@@ -126,6 +126,7 @@ pub struct App {
     pub antinuke: Mutex<AntiNuke>,
     pub rate_limiter: Mutex<RateLimiter>,
     pub heat: Mutex<HashMap<(u64, u64), (HeatState, UserHistory)>>,
+    pub crowd: Mutex<tommybot_automod::heat::Crowd>,
     /// Phishing and NSFW domain lists, refreshed in the background.
     pub sites: tommybot_automod::sites::Sites,
     pub raids: Mutex<HashMap<u64, RaidDetector>>,
@@ -203,6 +204,7 @@ impl App {
             channels: Default::default(),
             punished_names: Default::default(),
             cmd_cooldown: Default::default(),
+            crowd: Default::default(),
             nuke_heat: Default::default(),
             nukes: Default::default(),
             panic: Mutex::new(PanicTracker::new(Duration::from_secs(600), 0)),

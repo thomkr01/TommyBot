@@ -68,6 +68,8 @@ fn overwrites(
     v
 }
 
+const TICKETS_PER_HOUR: i64 = 5;
+
 async fn open(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<String> {
     let cfg = app.cfg(gid.get()).await?;
     let t = &cfg.tickets;
@@ -89,6 +91,17 @@ async fn open(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<S
             .map(|c| format!(" <#{c}>"))
             .collect::<String>();
         return Ok(format!("You already have an open ticket:{at}"));
+    }
+    // Open, close, open again would make channels without end.
+    let recent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tickets WHERE guild_id = $1 AND user_id = $2 AND opened_at > now() - interval '1 hour'",
+    )
+    .bind(g)
+    .bind(user.get() as i64)
+    .fetch_one(&app.pool)
+    .await?;
+    if recent >= TICKETS_PER_HOUR {
+        return Ok("You opened too many tickets this hour, try again later.".into());
     }
     // shortcut: two opens at the same instant can collide on the number (the loser presses again) or pass max_open together; fine for button clicks.
     let number: i32 = sqlx::query_scalar(

@@ -31,6 +31,8 @@ use crate::{
     modcmds::{self, Anchor, ModCmd},
 };
 
+/// One member cannot flood the report channel.
+const REPORTS_PER_HOUR: i64 = 10;
 const SNIPPET: usize = 300;
 const ACTION_LOG: &str = "Action Log";
 
@@ -153,6 +155,18 @@ async fn report(
     if banned {
         return Ok(Some(
             "You can no longer report messages in this server".into(),
+        ));
+    }
+    let recent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM reports WHERE guild_id=$1 AND reporter_id=$2 AND created_at > now() - interval '1 hour'",
+    )
+    .bind(g)
+    .bind(reporter.get() as i64)
+    .fetch_one(&app.pool)
+    .await?;
+    if recent >= REPORTS_PER_HOUR {
+        return Ok(Some(
+            "You reported a lot of messages this hour, try again later".into(),
         ));
     }
     if app.whitelisted(gid, msg.author.id, "reports").await? {
