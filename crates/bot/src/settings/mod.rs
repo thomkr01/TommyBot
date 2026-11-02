@@ -661,6 +661,14 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         send(app, msg, "You may not change this setting", None, vec![]).await?;
         return Ok(true);
     }
+    if tommybot_core::sections::SENSITIVE.contains(&section) {
+        let text = format!(
+            "This setting needs 2FA, so change it on the {}",
+            dashboard_link(gid.get())
+        );
+        send(app, msg, &text, None, vec![]).await?;
+        return Ok(true);
+    }
     let ids = match (row.kind, &op) {
         (
             Kind::Role | Kind::Roles | Kind::Channel | Kind::Channels,

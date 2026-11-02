@@ -18,7 +18,6 @@ use tommybot_logging::{
 use twilight_model::{
     channel::Message,
     gateway::payload::incoming::MessageCreate,
-    guild::Permissions,
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -99,38 +98,15 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
     }
     let wl = &cfg.whitelist;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
-    let any_categories = [&wl.spam, &wl.invites, &wl.mentions, &wl.everyone]
-        .iter()
-        .any(|l| !l.categories.is_empty());
-    let category = if any_categories {
-        app.guild_info(gid)
-            .await?
-            .parents
-            .get(&m.channel_id)
-            .copied()
-    } else {
-        None
-    };
-    let listed =
-        |l: &WhitelistList| l.covers(m.author.id, roles, m.channel_id, category, m.webhook_id);
-    let partner = wl.partner_channels.contains(&m.channel_id);
+    // In a thread or forum post the whitelists of its parent channel apply.
+    let (parent, category) = app
+        .channel_scope(gid, m.channel_id)
+        .await
+        .unwrap_or((m.channel_id, None));
+    let listed = |l: &WhitelistList| l.covers(m.author.id, roles, parent, category, m.webhook_id);
+    let partner = wl.partner_channels.contains(&parent);
     // Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
-    let dangerous = !cfg.misc.staff_only_permitted && {
-        const BITS: Permissions = Permissions::ADMINISTRATOR
-            .union(Permissions::KICK_MEMBERS)
-            .union(Permissions::BAN_MEMBERS)
-            .union(Permissions::MANAGE_CHANNELS)
-            .union(Permissions::MANAGE_GUILD)
-            .union(Permissions::MANAGE_MESSAGES)
-            .union(Permissions::MANAGE_ROLES)
-            .union(Permissions::MANAGE_WEBHOOKS);
-        // A failed lookup must not switch automod off for this message.
-        app.guild_info(gid).await.is_ok_and(|info| {
-            roles
-                .iter()
-                .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
-        })
-    };
+    let dangerous = app.staff_by_perms(&cfg, gid, roles).await;
     let now = now_ms();
     let text = filter_text(m);
     let content = text.as_str();
@@ -483,7 +459,7 @@ pub fn blacklist_words(f: &FiltersCfg) -> Vec<String> {
 }
 
 /// Heat weights with every disabled filter zeroed; anti spam off leaves only the link and word filters.
-fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
+pub(crate) fn enabled_weights(am: &AutomodCfg) -> HeatCfg {
     let (f, mut h) = (&am.filters, am.heat.clone());
     let spam = am.anti_spam;
     let (pings, attach) = (spam && f.mentions.enabled, spam && f.attachments.enabled);
@@ -544,7 +520,7 @@ fn tripped_filter<'a>(
 }
 
 /// The case an automod punishment leaves on the cases page, filed by the bot.
-async fn auto_case(
+pub(crate) async fn auto_case(
     app: &App,
     gid: Id<GuildMarker>,
     uid: Id<UserMarker>,

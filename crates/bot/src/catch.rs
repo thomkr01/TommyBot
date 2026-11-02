@@ -23,7 +23,19 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     };
     let cfg = app.cfg(gid.get()).await?;
     let c = &cfg.catch;
-    if !c.enabled || c.channel != Some(m.channel_id) || m.author.bot || m.webhook_id.is_some() {
+    let Some(catch) = c.channel.filter(|_| c.enabled) else {
+        return Ok(false);
+    };
+    if m.author.bot || m.webhook_id.is_some() {
+        return Ok(false);
+    }
+    // Threads of the catch channel catch too.
+    if catch != m.channel_id
+        && !app
+            .channel_scope(gid, m.channel_id)
+            .await
+            .is_ok_and(|(parent, _)| parent == catch)
+    {
         return Ok(false);
     }
     let uid = m.author.id;

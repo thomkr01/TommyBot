@@ -84,7 +84,9 @@ impl Default for LimitCfg {
 impl AntinukeCfg {
     /// The watched limit and heat % of `a`, None when it is not watched.
     pub fn limit(&self, a: NukeAction) -> Option<(Limit, u32)> {
-        if a == NukeAction::Prune && !self.prune {
+        if (a == NukeAction::Prune && !self.prune)
+            || (a.opt_in() && !self.limits.contains_key(&a.card()))
+        {
             return None;
         }
         let c = self.limits.get(&a.card()).copied().unwrap_or_default();
@@ -385,6 +387,9 @@ impl WhitelistList {
 }
 
 pub const MAX_APPEAL_FIELDS: usize = 6;
+
+/// Sections the dashboard saves only after a TOTP step-up, so prefix panels may not edit them.
+pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppealField {
@@ -741,7 +746,8 @@ mod tests {
     #[test]
     fn antinuke_limits_fall_back_to_wick_defaults() {
         let c: AntinukeCfg = serde_json::from_value(json!({"limits": {
-            "Ban": {"per_minute": 2}, "RoleCreate": {"enabled": false}, "BotAdd": {"per_minute": 1, "per_hour": 2}
+            "Ban": {"per_minute": 2}, "RoleCreate": {"enabled": false}, "BotAdd": {"per_minute": 1, "per_hour": 2},
+            "Timeout": {"enabled": true}
         }}))
         .unwrap();
         let ban = c.limit(NukeAction::Ban).unwrap();
@@ -751,6 +757,9 @@ mod tests {
             c.limit(NukeAction::Prune).is_none(),
             "prunes need the toggle"
         );
-        assert_eq!(c.watched().len(), 8);
+        // Opt-in actions are watched only once configured, then with their defaults.
+        assert_eq!(c.limit(NukeAction::Timeout).unwrap().0.per_minute, 5);
+        assert!(c.limit(NukeAction::Unban).is_none());
+        assert_eq!(c.watched().len(), 9);
     }
 }

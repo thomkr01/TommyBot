@@ -25,7 +25,7 @@ use tommybot_core::{
 use tommybot_logging::{LogConfig, Logger};
 use twilight_http::Client;
 use twilight_model::id::{
-    marker::{GuildMarker, UserMarker},
+    marker::{ChannelMarker, GuildMarker, UserMarker},
     Id,
 };
 
@@ -156,6 +156,10 @@ pub struct App {
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
     /// Category of each channel created or deleted since its audit entry, for anti-nuke's ticket categories.
     pub channel_parents: Mutex<HashMap<u64, u64>>,
+    /// Recent reactions per (guild, member), for reaction spam.
+    pub reactions: Mutex<HashMap<(u64, u64), tommybot_automod::window::Window>>,
+    /// Thread -> parent channel; see [`App::channel_scope`].
+    pub thread_parents: Mutex<HashMap<Id<ChannelMarker>, Id<ChannelMarker>>>,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -213,6 +217,8 @@ impl App {
             heat_raiders: Default::default(),
             guilds: Default::default(),
             channel_parents: Default::default(),
+            thread_parents: Default::default(),
+            reactions: Default::default(),
         }
     }
 

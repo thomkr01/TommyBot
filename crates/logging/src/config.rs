@@ -32,6 +32,8 @@ pub enum LogKind {
     Panic,
     ModCommand,
     Appeal,
+    /// Voice joins, leaves and moves; only sent once a channel is picked for them.
+    Voice,
 }
 
 /// A Discord event type that can get its own log channel. Names are the dashboard's option keys.
@@ -211,8 +213,8 @@ impl LogConfig {
                     .or_else(|| self.events.get(&e).copied())
             })
             .or_else(|| self.routes.get(&kind).copied());
-        // Wick: mod logs never go to the general log channel.
-        if kind == LogKind::ModCommand {
+        // Wick: mod logs never go to the general log channel; voice logs are too noisy for it.
+        if matches!(kind, LogKind::ModCommand | LogKind::Voice) {
             routed
         } else {
             routed.or(self.fallback)
@@ -277,6 +279,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.target(LogKind::ModCommand, None), None);
+        assert_eq!(cfg.target(LogKind::Voice, None), None);
     }
 
     #[test]

@@ -6,6 +6,23 @@ use serde::{Deserialize, Serialize};
 pub const VIEW_CHANNEL: u64 = 1 << 10;
 pub const SEND_MESSAGES: u64 = 1 << 11;
 const CONNECT: u64 = 1 << 20;
+/// What a channel lock takes from main roles: writing in channels and threads, new threads,
+/// reactions, polls and external apps.
+pub const SILENCE: u64 = SEND_MESSAGES
+    | SEND_IN_THREADS
+    | PUBLIC_THREADS
+    | PRIVATE_THREADS
+    | REACTIONS
+    | POLLS
+    | EXTERNAL_APPS;
+const SEND_IN_THREADS: u64 = 1 << 38;
+const PUBLIC_THREADS: u64 = 1 << 35;
+const PRIVATE_THREADS: u64 = 1 << 36;
+const REACTIONS: u64 = 1 << 6;
+const POLLS: u64 = 1 << 49;
+const EXTERNAL_APPS: u64 = 1 << 50;
+/// Taken too when the voice option is on: connect, speak, soundboard, stream.
+pub const VOICE: u64 = CONNECT | (1 << 21) | (1 << 42) | (1 << 9);
 /// Perms stripped by role lock: admin, kick, ban, manage channels/guild/messages/roles/webhooks/
 /// expressions/nicknames/events/threads, mention everyone, moderate members, view audit log.
 pub const DANGEROUS: u64 = (1 << 3)
@@ -77,11 +94,7 @@ impl LockKind {
     /// Role permission bits this lock may strip, and so may give back.
     fn mask(&self) -> u64 {
         let (channels, roles, _) = self.covers();
-        (if channels {
-            SEND_MESSAGES | VIEW_CHANNEL
-        } else {
-            0
-        }) | (if roles { DANGEROUS } else { 0 })
+        (if channels { SILENCE | VIEW_CHANNEL } else { 0 }) | (if roles { DANGEROUS } else { 0 })
     }
 }
 
@@ -94,6 +107,8 @@ pub struct LockdownPrefs {
     pub updates: bool,
     /// A kick lock also pauses Discord invites.
     pub pause_invites: bool,
+    /// A channel lock also takes voice from main roles.
+    pub voice: bool,
 }
 
 impl Default for LockdownPrefs {
@@ -104,6 +119,7 @@ impl Default for LockdownPrefs {
             joins: false,
             updates: false,
             pause_invites: true,
+            voice: false,
         }
     }
 }
@@ -161,6 +177,9 @@ pub struct Snapshot {
     /// The blind lock's `#server-locked` channel, deleted on unlock.
     #[serde(default)]
     pub locked_channel: Option<u64>,
+    /// The channel lock took voice perms too.
+    #[serde(default)]
+    pub voice: bool,
 }
 
 pub struct Plan {
@@ -169,12 +188,14 @@ pub struct Plan {
 }
 
 /// `main_roles` empty means @everyone (whose role id equals the guild id) is the main role.
+/// `voice` makes a channel lock take voice perms too.
 pub fn plan(
     kind: &LockKind,
     guild_id: u64,
     main_roles: &[u64],
     roles: &[RoleInfo],
     bot_position: i32,
+    voice: bool,
 ) -> Plan {
     let mut p = Plan {
         ops: vec![],
@@ -198,11 +219,8 @@ pub fn plan(
     let (channels, role_lock, join) = kind.covers();
     if channels {
         let blind = matches!(kind, LockKind::Blind);
-        let mask = if blind {
-            SEND_MESSAGES | VIEW_CHANNEL
-        } else {
-            SEND_MESSAGES
-        };
+        p.snapshot.voice = voice;
+        let mask = SILENCE | if blind { VIEW_CHANNEL } else { 0 } | if voice { VOICE } else { 0 };
         roles
             .iter()
             .filter(|r| main.contains(&r.id))
@@ -321,27 +339,18 @@ pub fn tshoot(
                 ),
                 fix: None,
             });
-        } else if r.perms & SEND_MESSAGES != 0 {
+        } else if r.perms & SILENCE != 0 {
             let fixable = r.position < bot_position;
             out.push(Problem {
                 id: format!("bypass_{}", r.id),
                 text: format!(
-                    "<@&{}> has some permissions that need to be removed. [Send Messages{}{}]",
+                    "<@&{}> has some permissions that need to be removed. [{}]",
                     r.id,
-                    if r.perms & VIEW_CHANNEL != 0 {
-                        ", View Channel"
-                    } else {
-                        ""
-                    },
-                    if r.perms & CONNECT != 0 {
-                        ", Connect"
-                    } else {
-                        ""
-                    },
+                    perm_names(r.perms & (SILENCE | VIEW_CHANNEL | CONNECT)),
                 ),
                 fix: fixable.then_some(Fix::SetRolePerms {
                     role: r.id,
-                    perms: r.perms & !SEND_MESSAGES,
+                    perms: r.perms & !SILENCE,
                 }),
             });
         }
@@ -349,18 +358,20 @@ pub fn tshoot(
     // An explicit allow on a main role beats the stripped role perm, so the lock would not hold there.
     for o in overwrites
         .iter()
-        .filter(|o| main.contains(&o.role) && o.allow & SEND_MESSAGES != 0)
+        .filter(|o| main.contains(&o.role) && o.allow & SILENCE != 0)
     {
         out.push(Problem {
             id: format!("overwrite_{}_{}", o.channel, o.role),
             text: format!(
-                "Channel <#{}> explicitly allows Send Messages for <@&{}>, so a lock does not apply there.",
-                o.channel, o.role
+                "Channel <#{}> explicitly allows {} for <@&{}>, so a lock does not apply there.",
+                o.channel,
+                perm_names(o.allow & SILENCE),
+                o.role
             ),
             fix: Some(Fix::SetOverwrite(Overwrite {
                 channel: o.channel,
                 role: o.role,
-                allow: o.allow & !SEND_MESSAGES,
+                allow: o.allow & !SILENCE,
                 deny: o.deny,
             })),
         });
@@ -368,11 +379,31 @@ pub fn tshoot(
     out
 }
 
+fn perm_names(bits: u64) -> String {
+    const NAMES: [(u64, &str); 9] = [
+        (SEND_MESSAGES, "Send Messages"),
+        (SEND_IN_THREADS, "Send Messages in Threads"),
+        (PUBLIC_THREADS, "Create Public Threads"),
+        (PRIVATE_THREADS, "Create Private Threads"),
+        (REACTIONS, "Add Reactions"),
+        (POLLS, "Create Polls"),
+        (EXTERNAL_APPS, "Use External Apps"),
+        (VIEW_CHANNEL, "View Channel"),
+        (CONNECT, "Connect"),
+    ];
+    NAMES
+        .iter()
+        .filter(|(b, _)| bits & b != 0)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Ops that put every saved perm back exactly; join lock / invites are lifted by the caller via the flags.
 /// Gives back only the bits this lock took, so permissions changed meanwhile, or held by another
 /// active lock, are kept. `current` is (role, perms) now.
 pub fn unlock_ops(s: &Snapshot, current: &[(u64, u64)]) -> Vec<Op> {
-    let mask = s.kind.as_ref().map_or(0, LockKind::mask);
+    let mask = s.kind.as_ref().map_or(0, LockKind::mask) | if s.voice { VOICE } else { 0 };
     s.role_perms
         .iter()
         .filter_map(|&(role, before)| {
@@ -454,7 +485,7 @@ mod tests {
 
     #[test]
     fn server_lock_is_one_patch_per_main_role_and_restores_exactly() {
-        let p = plan(&LockKind::Server, G, &[10], &roles(), 5);
+        let p = plan(&LockKind::Server, G, &[10], &roles(), 5, false);
         assert_eq!(
             p.ops,
             vec![Op::SetRolePerms {
@@ -474,6 +505,36 @@ mod tests {
     }
 
     #[test]
+    fn channel_lock_silences_threads_reactions_and_optionally_voice() {
+        let all = SILENCE | VOICE | VIEW_CHANNEL | 1;
+        let r = [role(10, all, 1)];
+        let p = plan(&LockKind::Server, G, &[10], &r, 5, false);
+        assert_eq!(
+            p.ops,
+            vec![Op::SetRolePerms {
+                role: 10,
+                perms: VOICE | VIEW_CHANNEL | 1
+            }]
+        );
+        let p = plan(&LockKind::Server, G, &[10], &r, 5, true);
+        assert_eq!(
+            p.ops,
+            vec![Op::SetRolePerms {
+                role: 10,
+                perms: VIEW_CHANNEL | 1
+            }]
+        );
+        // Unlock gives back every taken bit, voice included.
+        assert_eq!(
+            unlock_ops(&p.snapshot, &[(10, VIEW_CHANNEL | 1)]),
+            vec![Op::SetRolePerms {
+                role: 10,
+                perms: all
+            }]
+        );
+    }
+
+    #[test]
     fn overlapping_locks() {
         assert!(LockKind::Server.overlaps(&LockKind::All));
         assert!(!LockKind::Server.overlaps(&LockKind::Role));
@@ -484,7 +545,7 @@ mod tests {
 
     #[test]
     fn no_main_roles_falls_back_to_everyone_and_blind_hides_channels() {
-        let p = plan(&LockKind::Blind, G, &[], &roles(), 5);
+        let p = plan(&LockKind::Blind, G, &[], &roles(), 5, false);
         assert_eq!(
             p.ops,
             vec![
@@ -496,7 +557,7 @@ mod tests {
 
     #[test]
     fn role_lock_skips_roles_at_or_above_bot() {
-        let p = plan(&LockKind::Role, G, &[], &roles(), 5);
+        let p = plan(&LockKind::Role, G, &[], &roles(), 5, false);
         assert_eq!(
             p.ops,
             vec![Op::SetRolePerms {
@@ -509,7 +570,7 @@ mod tests {
 
     #[test]
     fn all_combines_without_double_snapshotting() {
-        let p = plan(&LockKind::All, G, &[11], &roles(), 5);
+        let p = plan(&LockKind::All, G, &[11], &roles(), 5, false);
         // role 11 is both a main role and dangerous: snapshotted once, with the original perms
         assert_eq!(
             p.snapshot
@@ -524,12 +585,12 @@ mod tests {
 
     #[test]
     fn kick_join_lock_pauses_invites_and_channel_lock_denies_main() {
-        let p = plan(&LockKind::Join(JoinLock::Kick), G, &[], &[], 5);
+        let p = plan(&LockKind::Join(JoinLock::Kick), G, &[], &[], 5, false);
         assert_eq!(
             p.ops,
             vec![Op::EnableJoinLock(JoinLock::Kick), Op::PauseInvites]
         );
-        let p = plan(&LockKind::Channel(77), G, &[10, 11], &[], 5);
+        let p = plan(&LockKind::Channel(77), G, &[10, 11], &[], 5, false);
         assert_eq!(p.ops.len(), 2);
     }
 
@@ -584,8 +645,9 @@ mod tests {
             joins: false,
             updates: false,
             pause_invites: true,
+            voice: false,
         };
-        let p = plan(&prefs.kind(), G, &[10], &roles(), 5);
+        let p = plan(&prefs.kind(), G, &[10], &roles(), 5, false);
         assert!(p.ops.contains(&Op::SetRolePerms {
             role: 10,
             perms: VIEW_CHANNEL

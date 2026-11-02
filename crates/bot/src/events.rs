@@ -37,6 +37,7 @@ fn guild_of(ev: &Event) -> Option<u64> {
         Event::MemberRemove(m) => Some(m.guild_id),
         Event::GuildAuditLogEntryCreate(e) => e.0.guild_id,
         Event::AutoModerationActionExecution(e) => Some(e.guild_id),
+        Event::VoiceStateUpdate(v) => v.0.guild_id,
         _ => None,
     };
     g.map(|g| g.get())
@@ -45,16 +46,18 @@ fn guild_of(ev: &Event) -> Option<u64> {
 /// Channel and role updates drop the cached answer sooner.
 const PUBLIC_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Whether @everyone can view a channel: its base permissions, then the channel's @everyone overwrite.
-fn everyone_sees(base: Permissions, overwrite: Option<(Permissions, Permissions)>) -> bool {
-    if base.contains(Permissions::ADMINISTRATOR) {
-        return true;
-    }
-    let (allow, deny) = overwrite.unwrap_or((Permissions::empty(), Permissions::empty()));
-    ((base - deny) | allow).contains(Permissions::VIEW_CHANNEL)
+/// Whether a member can view a channel: base permissions, then the channel's (allow, deny)
+/// overwrites in order (@everyone first, then the role's).
+fn sees(base: Permissions, overwrites: &[(Permissions, Permissions)]) -> bool {
+    base.contains(Permissions::ADMINISTRATOR)
+        || overwrites
+            .iter()
+            .fold(base, |p, (allow, deny)| (p - *deny) | *allow)
+            .contains(Permissions::VIEW_CHANNEL)
 }
 
-/// Logs carry deleted messages and staff actions, so they never go where @everyone can read them.
+/// Logs carry deleted messages and staff actions, so they never go where @everyone, or a main
+/// role every member gets, can read them.
 async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
     let cached = app.log_public.lock().unwrap().get(&channel).copied();
     if let Some((p, _)) = cached.filter(|(_, at)| at.elapsed() < PUBLIC_TTL) {
@@ -63,21 +66,26 @@ async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
     let c = app.http.channel(channel).await?.model().await?;
     let p = match c.guild_id {
         Some(gid) => {
-            let perms = app
-                .guild_info(gid)
-                .await?
-                .role_perms
-                .get(&gid.cast())
-                .copied();
-            let overwrite = c
-                .permission_overwrites
-                .into_iter()
-                .flatten()
-                .find(|o| o.id == gid.cast());
-            everyone_sees(
-                Permissions::from_bits_truncate(perms.unwrap_or(0)),
-                overwrite.map(|o| (o.allow, o.deny)),
-            )
+            let info = app.guild_info(gid).await?;
+            let main = app.cfg(gid.get()).await?.lockdown.main_roles.clone();
+            let perms = |r: u64| {
+                Permissions::from_bits_truncate(
+                    info.role_perms.get(&Id::new(r)).copied().unwrap_or(0),
+                )
+            };
+            let ows = c.permission_overwrites.unwrap_or_default();
+            let ow = |r: u64| {
+                ows.iter()
+                    .find(|o| o.id.get() == r)
+                    .map_or((Permissions::empty(), Permissions::empty()), |o| {
+                        (o.allow, o.deny)
+                    })
+            };
+            let g = gid.get();
+            sees(perms(g), &[ow(g)])
+                || main
+                    .iter()
+                    .any(|r| sees(perms(g) | perms(r.get()), &[ow(g), ow(r.get())]))
         }
         None => false,
     };
@@ -387,6 +395,18 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         }
         Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
+        Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
+        Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,
+        Event::ThreadUpdate(t) => {
+            if let Some(p) = t.parent_id {
+                app.note_thread(t.id, p);
+            }
+        }
+        Event::ThreadListSync(s) => s
+            .threads
+            .iter()
+            .filter_map(|t| Some((t.id, t.parent_id?)))
+            .for_each(|(t, p)| app.note_thread(t, p)),
         _ => {}
     }
     Ok(())
@@ -397,15 +417,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn everyone_sees_follows_base_and_overwrite() {
+    fn sees_follows_base_and_overwrites() {
         let (view, none) = (Permissions::VIEW_CHANNEL, Permissions::empty());
-        assert!(everyone_sees(view, None));
-        assert!(!everyone_sees(view, Some((none, view))));
-        assert!(!everyone_sees(none, None));
-        assert!(everyone_sees(none, Some((view, none))));
-        assert!(everyone_sees(
-            Permissions::ADMINISTRATOR,
-            Some((none, view))
-        ));
+        assert!(sees(view, &[]));
+        assert!(!sees(view, &[(none, view)]));
+        assert!(!sees(none, &[]));
+        assert!(sees(none, &[(view, none)]));
+        assert!(sees(Permissions::ADMINISTRATOR, &[(none, view)]));
+        // Hidden from @everyone but opened for a main role.
+        assert!(sees(view, &[(none, view), (view, none)]));
     }
 }
