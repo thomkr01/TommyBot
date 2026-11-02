@@ -29,6 +29,7 @@ const LOG_KINDS: &[&str] = &[
     "panic",
     "mod_command",
     "appeal",
+    "voice",
 ];
 
 fn f(path: &str, kind: &str) -> Value {
@@ -220,6 +221,7 @@ pub fn schema() -> Vec<Value> {
             "join_raid" => "Join raid triggers and results will be sent to this channel.",
             "panic" => "Panic mode triggers and results will be sent to this channel.",
             "appeal" => "New ban and timeout appeals will be sent to this channel.",
+            "voice" => "Voice joins, leaves and moves. Only logged once you pick a channel here.",
             _ => "Logs of this type will go to this channel instead of the Wick Logs channel.",
         };
         pg(

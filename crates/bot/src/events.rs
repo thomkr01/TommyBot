@@ -37,6 +37,7 @@ fn guild_of(ev: &Event) -> Option<u64> {
         Event::MemberRemove(m) => Some(m.guild_id),
         Event::GuildAuditLogEntryCreate(e) => e.0.guild_id,
         Event::AutoModerationActionExecution(e) => Some(e.guild_id),
+        Event::VoiceStateUpdate(v) => v.0.guild_id,
         _ => None,
     };
     g.map(|g| g.get())

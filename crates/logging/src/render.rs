@@ -105,6 +105,24 @@ pub fn member_add(user: &User) -> Embed {
         .build()
 }
 
+/// A voice join, leave or move; None when the member stayed in the same channel (mute, stream...).
+pub fn voice(
+    user: Id<UserMarker>,
+    old: Option<Id<ChannelMarker>>,
+    new: Option<Id<ChannelMarker>>,
+) -> Option<Embed> {
+    let ch = |c: Id<ChannelMarker>| embed::channel(c.get());
+    let log = match (old, new) {
+        (None, Some(n)) => Log::new("Voice Join", GREEN).line("Channel", &ch(n)),
+        (Some(o), None) => Log::new("Voice Leave", RED).line("Channel", &ch(o)),
+        (Some(o), Some(n)) if o != n => Log::new("Voice Move", ORANGE)
+            .line("From", &ch(o))
+            .line("To", &ch(n)),
+        _ => return None,
+    };
+    Some(log.user("Target", user.get()).time().build())
+}
+
 pub fn member_remove(user: &User) -> Embed {
     Log::new("Member Leave", RED)
         .thumbnail(user)

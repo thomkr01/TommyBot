@@ -13,7 +13,7 @@ pub use config::{CustomLog, LogConfig, LogEvent, LogKind};
 pub use embed::Log;
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 use twilight_model::{
@@ -21,7 +21,7 @@ use twilight_model::{
     gateway::event::Event,
     guild::audit_log::{AuditLogEntry, AuditLogEventType},
     id::{
-        marker::{ChannelMarker, MessageMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
         Id,
     },
 };
@@ -89,6 +89,8 @@ pub struct Logger {
     removals: VecDeque<(Instant, Id<UserMarker>)>,
     held: VecDeque<HeldDelete>,
     leaves: VecDeque<HeldLeave>,
+    /// The voice channel each member is in, to tell joins, leaves and moves apart.
+    voice: HashMap<(Id<GuildMarker>, Id<UserMarker>), Id<ChannelMarker>>,
 }
 
 impl Logger {
@@ -100,6 +102,7 @@ impl Logger {
             removals: VecDeque::new(),
             held: VecDeque::new(),
             leaves: VecDeque::new(),
+            voice: HashMap::new(),
         }
     }
 
@@ -294,6 +297,22 @@ impl Logger {
                 link: None,
             }),
             Event::GuildAuditLogEntryCreate(e) => self.audit(&e.0, now),
+            Event::VoiceStateUpdate(v) => {
+                let (guild, user, new) = (v.0.guild_id?, v.0.user_id, v.0.channel_id);
+                // shortcut: members already in voice when the bot starts log their first move as a join.
+                let old = match new {
+                    Some(c) => self.voice.insert((guild, user), c),
+                    None => self.voice.remove(&(guild, user)),
+                };
+                Some(Entry {
+                    kind: LogKind::Voice,
+                    event: None,
+                    channel: new.or(old),
+                    user: Some(user),
+                    embed: render::voice(user, old, new)?,
+                    link: None,
+                })
+            }
             _ => None,
         }
     }
@@ -434,6 +453,42 @@ mod tests {
         let cfg = LogConfig::default();
         assert!(Logger::new(Id::new(1))
             .handle(&cfg, &event, Instant::now())
+            .is_empty());
+    }
+
+    #[test]
+    fn voice_join_move_leave_are_logged_mute_is_not() {
+        let cfg = LogConfig {
+            fallback: Some(Id::new(1)),
+            routes: std::collections::HashMap::from([(LogKind::Voice, Id::new(2))]),
+            ..Default::default()
+        };
+        let ev = |channel: Option<&str>| {
+            Event::VoiceStateUpdate(Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "guild_id": "5", "user_id": "7", "channel_id": channel, "session_id": "s",
+                    "deaf": false, "mute": false, "self_deaf": false, "self_mute": true,
+                    "self_video": false, "suppress": false, "request_to_speak_timestamp": null
+                }))
+                .unwrap(),
+            ))
+        };
+        let mut l = Logger::new(Id::new(1));
+        let mut titles = vec![];
+        for c in [Some("10"), Some("10"), Some("11"), None, None] {
+            for m in l.handle(&cfg, &ev(c), Instant::now()) {
+                assert_eq!(m.channel_id, Id::new(2));
+                titles.push(m.embed.title.unwrap());
+            }
+        }
+        assert_eq!(titles, ["Voice Join", "Voice Move", "Voice Leave"]);
+        // Without its own route, voice never reaches the fallback channel.
+        let fallback_only = LogConfig {
+            fallback: Some(Id::new(1)),
+            ..Default::default()
+        };
+        assert!(Logger::new(Id::new(1))
+            .handle(&fallback_only, &ev(Some("10")), Instant::now())
             .is_empty());
     }
 
