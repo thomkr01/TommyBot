@@ -322,6 +322,12 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             automod::on_message(app, m).await?;
         }
+        // Discord also sends updates for link previews; only real edits are checked again.
+        Event::MessageUpdate(m)
+            if m.edited_timestamp.is_some() && (!m.author.bot || m.webhook_id.is_some()) =>
+        {
+            automod::on_edit(app, &m.0).await?;
+        }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
             app.invalidate_guild(r.guild_id);

@@ -128,12 +128,21 @@ pub struct UserHistory {
 impl UserHistory {
     const KEEP: usize = 5;
     const KEEP_MSGS: usize = 50;
+    /// Similarity is quadratic in length: long walls of text are compared by their start only.
+    const CMP_CHARS: usize = 500;
 
     pub fn track(&mut self, channel: u64, msg: u64) {
         if self.msgs.len() == Self::KEEP_MSGS {
             self.msgs.pop_front();
         }
         self.msgs.push_back((channel, msg));
+    }
+
+    /// Whether a tracked message in `channel` is newer than `since_ms` (unix ms).
+    pub fn posted_in(&self, channel: u64, since_ms: i64) -> bool {
+        self.msgs
+            .iter()
+            .any(|&(c, m)| c == channel && ((m >> 22) + 1_420_070_400_000) as i64 > since_ms)
     }
 
     pub fn take_msgs(&mut self) -> Vec<(u64, u64)> {
@@ -144,16 +153,24 @@ impl UserHistory {
         if self.recent.len() == Self::KEEP {
             self.recent.pop_front();
         }
-        self.recent.push_back(content.to_lowercase());
+        self.recent.push_back(cmp_form(content));
     }
 
     fn best_similarity(&self, content: &str) -> f64 {
-        let c = content.to_lowercase();
+        let c = cmp_form(content);
         self.recent
             .iter()
             .map(|r| similarity(r, &c))
             .fold(0.0, f64::max)
     }
+}
+
+fn cmp_form(content: &str) -> String {
+    content
+        .chars()
+        .take(UserHistory::CMP_CHARS)
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Per-filter contributions of one message, in heat points.
@@ -206,8 +223,8 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
         "links_blacklist",
         hit(m.blacklisted_link, cfg.blacklisted_link),
     );
-    b.add("message", cfg.base);
     if !w.spam {
+        b.add("message", cfg.base);
         let sim = hist.best_similarity(m.content);
         if sim >= cfg.similarity_floor && !m.content.is_empty() {
             b.add("similarity", cfg.similarity * sim);
@@ -249,7 +266,7 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
         "blacklisted_words",
         cfg.per_blacklisted_word * m.blacklisted_words as f64,
     );
-    if m.suspicious_account {
+    if m.suspicious_account && !w.spam {
         b.add("suspicious_account", cfg.suspicious_account);
     }
     if m.from_webhook {
@@ -285,7 +302,12 @@ impl ChannelActivity {
 pub struct HeatState {
     pub value: f64,
     pub at_ms: i64,
+    /// When the last punishment started; 0 if none.
+    pub punished_ms: i64,
 }
+
+/// Messages already on their way when a punishment lands keep arriving for a moment.
+pub const PUNISH_GRACE_MS: i64 = 10_000;
 
 impl HeatState {
     pub fn decayed(&self, now: i64, cfg: &HeatCfg) -> f64 {
@@ -298,6 +320,16 @@ impl HeatState {
         self.value = self.decayed(now, cfg) + b.total();
         self.at_ms = now;
         self.value >= cfg.max
+    }
+
+    /// Claims the punishment for a trigger; false while the last one is under `PUNISH_GRACE_MS` old,
+    /// so a burst costs one strike, not one per message in flight.
+    pub fn claim(&mut self, now: i64) -> bool {
+        if self.punished_ms > 0 && now - self.punished_ms < PUNISH_GRACE_MS {
+            return false;
+        }
+        self.punished_ms = now;
+        true
     }
 }
 
@@ -342,7 +374,7 @@ mod tests {
         let cfg = HeatCfg::default();
         let s = HeatState {
             value: 100.0,
-            at_ms: 0,
+            ..Default::default()
         };
         assert!((s.decayed(2000, &cfg) - 90.25).abs() < 1e-9);
         assert_eq!(s.decayed(-5, &cfg), 100.0);
@@ -359,6 +391,101 @@ mod tests {
         assert!(!hits[0] && hits[6]);
         let mut slow = HeatState::default();
         assert!((0..20).all(|i| !slow.apply(&heat(&msg("hi"), &hist, &cfg), i * 10_000, &cfg)));
+    }
+
+    #[test]
+    fn spam_whitelist_skips_message_heat() {
+        let cfg = HeatCfg::default();
+        let mut m = msg("hi");
+        m.suspicious_account = true;
+        m.whitelist.spam = true;
+        let mut s = HeatState::default();
+        let hist = UserHistory::default();
+        assert!((0..50).all(|i| !s.apply(&heat(&m, &hist, &cfg), i * 50, &cfg)));
+    }
+
+    #[test]
+    fn one_punishment_per_burst() {
+        let mut s = HeatState::default();
+        assert!(s.claim(1_000));
+        assert!(!s.claim(1_500), "a message in flight is not a new offence");
+        assert!(s.claim(1_000 + PUNISH_GRACE_MS));
+    }
+
+    #[test]
+    fn posted_in_reads_snowflake_time() {
+        let mut h = UserHistory::default();
+        let at = |ms: i64| ((ms - 1_420_070_400_000) as u64) << 22;
+        h.track(7, at(1_700_000_000_000));
+        assert!(h.posted_in(7, 1_699_999_999_000));
+        assert!(!h.posted_in(7, 1_700_000_001_000));
+        assert!(!h.posted_in(8, 0));
+    }
+
+    #[test]
+    fn long_walls_compare_by_their_start() {
+        let cfg = HeatCfg::default();
+        let wall = "spam ".repeat(800);
+        let mut h = UserHistory::default();
+        (0..5).for_each(|_| h.remember(&wall));
+        let t = std::time::Instant::now();
+        assert!(heat(&msg(&wall), &h, &cfg)
+            .parts
+            .iter()
+            .any(|p| p.0 == "similarity"));
+        assert!(t.elapsed().as_millis() < 500);
+    }
+
+    /// What the bot does per message: quiet-channel bonus once per user, then heat, then history.
+    fn send(
+        users: &mut std::collections::HashMap<u64, (HeatState, UserHistory)>,
+        chan: &mut ChannelActivity,
+        (user, text, now): (u64, &str, i64),
+        cfg: &HeatCfg,
+    ) -> bool {
+        let (s, h) = users.entry(user).or_default();
+        let mut m = msg(text);
+        m.channel_inactive = chan.on_message(now, 10, 1) && !h.posted_in(1, now - 3_600_000);
+        let b = heat(&m, h, cfg);
+        h.remember(text);
+        h.track(1, ((now - 1_420_070_400_000) as u64) << 22);
+        s.apply(&b, now, cfg)
+    }
+
+    #[test]
+    fn spammers_trip_while_chatters_in_the_same_channel_do_not() {
+        let cfg = HeatCfg::default();
+        let (mut users, mut chan) = (Default::default(), ChannelActivity::default());
+        let t0 = 1_700_000_000_000;
+        let mut tripped = std::collections::HashSet::new();
+        for i in 0..30 {
+            let now = t0 + i * 200;
+            for spammer in [1, 2] {
+                if send(&mut users, &mut chan, (spammer, "BUY NOW", now), &cfg) {
+                    tripped.insert(spammer);
+                }
+            }
+            // Chatters post every 2 s, the same short line as each other.
+            if i % 10 == 0 {
+                for chatter in [3, 4, 5] {
+                    if send(&mut users, &mut chan, (chatter, "gg", now), &cfg) {
+                        tripped.insert(chatter);
+                    }
+                }
+            }
+        }
+        assert_eq!(tripped, [1, 2].into());
+    }
+
+    #[test]
+    fn gg_twice_after_a_quiet_hour_is_not_spam() {
+        let cfg = HeatCfg::default();
+        let (mut users, mut chan) = (Default::default(), ChannelActivity::default());
+        let t0 = 1_700_000_000_000;
+        send(&mut users, &mut chan, (9, "hi", t0), &cfg);
+        let t = t0 + 2 * 3_600_000;
+        assert!(!send(&mut users, &mut chan, (1, "gg", t), &cfg));
+        assert!(!send(&mut users, &mut chan, (1, "gg", t + 1000), &cfg));
     }
 
     #[test]

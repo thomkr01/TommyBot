@@ -18,6 +18,7 @@ use tommybot_logging::{
     Log, LogKind,
 };
 use twilight_model::{
+    channel::Message,
     gateway::payload::incoming::{MemberAdd, MemberUpdate, MessageCreate},
     guild::Permissions,
     id::{
@@ -41,10 +42,32 @@ fn now_ms() -> i64 {
 }
 
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
+    check(app, m, false).await
+}
+
+/// An edit can sneak in a link or word after the message passed, so only those filters run again.
+pub async fn on_edit(app: &App, m: &Message) -> Result<()> {
+    check(app, m, true).await
+}
+
+/// Heat parts that punish on their own; the only ones an edit can add.
+const INSTANT: [&str; 5] = [
+    "invites",
+    "malicious",
+    "nsfw",
+    "links_blacklist",
+    "blacklisted_words",
+];
+
+async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
-    if !am.enabled || (m.webhook_id.is_some() && !am.monitor_webhooks) {
+    // Other bots' slash command replies come through their application's webhook: not spam.
+    let app_reply = m.interaction_metadata.is_some()
+        || m.webhook_id
+            .is_some_and(|w| m.application_id.is_some_and(|a| a.get() == w.get()));
+    if !am.enabled || (m.webhook_id.is_some() && (!am.monitor_webhooks || app_reply)) {
         return Ok(());
     }
     if crate::panic::is_raider(app, gid, m.author.id) {
@@ -127,13 +150,14 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         embeds: m.embeds.len(),
         links: hosts.len(),
         stickers: m.sticker_items.len(),
-        channel_inactive: app
-            .channels
-            .lock()
-            .unwrap()
-            .entry(m.channel_id.get())
-            .or_default()
-            .on_message(now, f.inactive_messages, f.inactive_hours),
+        channel_inactive: !edit
+            && app
+                .channels
+                .lock()
+                .unwrap()
+                .entry(m.channel_id.get())
+                .or_default()
+                .on_message(now, f.inactive_messages, f.inactive_hours),
         invite_link: f.invites.enabled
             && [
                 "discord.gg/",
@@ -173,7 +197,12 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if facts.blacklisted_link && app.whitelisted(gid, m.author.id, "links").await? {
         facts.blacklisted_link = false;
     }
-    let pings = facts.user_mentions + facts.everyone_mentions + facts.role_mentions;
+    // Mentions added by an edit ping nobody.
+    let pings = if edit {
+        0
+    } else {
+        facts.user_mentions + facts.everyone_mentions + facts.role_mentions
+    };
     let lock = &am.auto_lockdown;
     let mention_lock = lock.enabled
         && lock.mentions
@@ -202,7 +231,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
-    let (triggered, breakdown) = {
+    let (triggered, fresh, breakdown) = {
         let mut map = app.heat.lock().unwrap();
         // Past 100k users, users idle for 10 minutes go first; everyone only if that frees nothing.
         if map.len() > 100_000 {
@@ -212,13 +241,22 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             }
         }
         let (state, hist) = map.entry(key).or_default();
+        // A quiet channel weighs on someone's first message there, not on each of their replies.
+        let quiet_ms = i64::from(f.inactive_hours.max(1)) * 3_600_000;
+        facts.channel_inactive &= !hist.posted_in(m.channel_id.get(), now - quiet_ms);
         let mut b = heat(&facts, hist, &heat_cfg);
         if over_hour_cap {
             b.parts.push(("mentions", heat_cfg.max));
         }
-        hist.remember(content);
-        hist.track(m.channel_id.get(), m.id.get());
-        (state.apply(&b, now, &heat_cfg), b)
+        if edit {
+            b.parts.retain(|(n, _)| INSTANT.contains(n));
+        } else {
+            hist.remember(content);
+            hist.track(m.channel_id.get(), m.id.get());
+        }
+        // An edit adding nothing must not trip on heat left over from earlier messages.
+        let triggered = state.apply(&b, now, &heat_cfg) && !(edit && b.parts.is_empty());
+        (triggered, triggered && state.claim(now), b)
     };
     if !triggered && !mention_lock {
         return Ok(());
@@ -245,6 +283,13 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         if crate::webhooks::webhook_exempt(app, gid, hook, listed(&wl.spam)).await {
             return Ok(());
         }
+    }
+    if !fresh {
+        // Sent before the punishment landed: remove it, the burst was already punished once.
+        app.http.delete_message(m.channel_id, m.id).await.ok();
+        return Ok(());
+    }
+    if m.webhook_id.is_some() {
         // A webhook is not a member: no strikes, remove its spam (the messages that built the heat
         // too, or the first ones stay) and the freshly made hooks.
         let tracked = app
@@ -308,12 +353,6 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
             .filter(|_| act.timeout_ms > 300_000)
             .map_or(String::new(), |n| format!("\n{n}"));
-        reply::dm(
-            app,
-            m.author.id,
-            &format!("You were timed out by automod{why}{note}"),
-        )
-        .await;
         timeout(
             &app.http,
             gid,
@@ -322,6 +361,13 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             "Automod",
         )
         .await?;
+        // Only after it worked: a failed timeout must not tell them they were timed out.
+        reply::dm(
+            app,
+            m.author.id,
+            &format!("You were timed out by automod{why}{note}"),
+        )
+        .await;
         auto_case(
             app,
             gid,
@@ -469,7 +515,7 @@ async fn filter_action(
     app: &App,
     cfg: &GuildCfg,
     gid: Id<GuildMarker>,
-    m: &MessageCreate,
+    m: &Message,
     action: FilterAction,
     (factor, duration_secs): (&str, Option<i64>),
 ) -> Result<()> {

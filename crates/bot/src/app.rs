@@ -280,11 +280,19 @@ impl App {
     pub async fn listen_config(self: Arc<Self>) -> Result<()> {
         let mut l = PgListener::connect_with(&self.pool).await?;
         l.listen("config_changed").await?;
+        // A restarted listener missed what was saved while it was down.
+        self.cfgs.write().unwrap().clear();
         loop {
-            let n = l.recv().await?;
-            if let Ok(g) = n.payload().parse::<u64>() {
-                self.cfgs.write().unwrap().remove(&g);
-                tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
+            match l.try_recv().await? {
+                Some(n) => {
+                    if let Ok(g) = n.payload().parse::<u64>() {
+                        self.cfgs.write().unwrap().remove(&g);
+                        tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
+                    }
+                }
+                // The connection dropped and reconnects on the next call: changes saved meanwhile
+                // were never announced, so every cached config is read again.
+                None => self.cfgs.write().unwrap().clear(),
             }
         }
     }
