@@ -16,12 +16,93 @@ pub fn case_counts(s: &str) -> (usize, usize) {
     })
 }
 
-/// Every http(s) URL in the text, with the wrapping punctuation trimmed.
+/// Every http(s) URL in the text, wherever it starts: masked links `[x](https://..)`, spoilers and
+/// bold text all hide a URL inside a word.
 pub fn urls(s: &str) -> Vec<&str> {
-    s.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| "<>()[]\"'".contains(c)))
-        .filter(|w| w.starts_with("https://") || w.starts_with("http://"))
-        .collect()
+    let lower = s.to_ascii_lowercase();
+    let mut out = vec![];
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("http").map(|i| at + i) {
+        let rest = &lower[i..];
+        if !(rest.starts_with("https://") || rest.starts_with("http://")) {
+            at = i + 4;
+            continue;
+        }
+        let len = s[i..]
+            .find(|c: char| c.is_whitespace() || "<>()[]|*~`\"'".contains(c))
+            .unwrap_or(s.len() - i);
+        out.push(&s[i..i + len]);
+        at = i + len;
+    }
+    out
+}
+
+/// Zero-width and other format characters (Unicode Cf) that split a word without showing.
+fn invisible(c: char) -> bool {
+    matches!(c as u32, 0xAD | 0x34F | 0x61C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0
+        | 0xE0000..=0xE007F)
+}
+
+pub fn strip_invisible(s: &str) -> String {
+    s.chars().filter(|c| !invisible(*c)).collect()
+}
+
+/// Lookalikes folded (`ⓕ`, `ｆ`, Cyrillic `а`, math letters) and invisible characters dropped.
+pub fn cure(s: &str) -> String {
+    let s = strip_invisible(s);
+    decancer::cure!(&s).map_or(s.to_lowercase(), |c| c.to_string())
+}
+
+/// Spaced-out letters joined: `f u c k` and `f.u.c.k` become `fuck`; other words stay.
+fn join_spaced(s: &str) -> String {
+    let mut out: Vec<String> = vec![];
+    let mut run = String::new();
+    for t in s
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        if t.chars().count() == 1 {
+            run.push_str(t);
+            continue;
+        }
+        out.push(std::mem::take(&mut run));
+        out.push(t.to_string());
+    }
+    out.push(run);
+    out.retain(|w| !w.is_empty());
+    out.join(" ")
+}
+
+/// Runs of 3+ equal letters cut to `keep`: `fuuuck` -> `fuck` (1) or `fuuck` (2).
+fn squeeze(s: &str, keep: usize) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        let mut n = 1;
+        while chars.next_if_eq(&c).is_some() {
+            n += 1;
+        }
+        out.extend(std::iter::repeat_n(c, if n >= 3 { keep } else { n }));
+    }
+    out
+}
+
+/// What the word filter reads: the text as written plus the cured, joined and squeezed forms, one
+/// per line. Words are counted once however many forms they hit.
+pub fn word_forms(s: &str) -> String {
+    let cured = cure(s);
+    let joined = join_spaced(&cured);
+    [
+        s.to_string(),
+        squeeze(&cured, 1),
+        squeeze(&cured, 2),
+        squeeze(&joined, 1),
+        squeeze(&joined, 2),
+        joined,
+        cured,
+    ]
+    .join("\n")
 }
 
 /// Hosts of every http(s) URL in the text, lowercased, without port or `www.`.
@@ -154,6 +235,47 @@ mod tests {
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn urls_inside_markdown() {
+        for t in [
+            "[free nitro](https://scam.example/x)",
+            "||https://scam.example/x||",
+            "**https://scam.example/x**",
+            "see:https://scam.example/x",
+            "<https://scam.example/x>",
+        ] {
+            assert_eq!(hosts(t), v(&["scam.example"]), "{t}");
+        }
+        assert!(urls("http and https words, httpx").is_empty());
+        assert_eq!(
+            urls("a https://a.com b http://b.com"),
+            ["https://a.com", "http://b.com"]
+        );
+    }
+
+    #[test]
+    fn word_forms_beat_tricks() {
+        let words = v(&["fuck", "*nigg*"]);
+        for t in [
+            "fuck",
+            "f\u{200b}uck",
+            "ｆｕｃｋ",
+            "ⓕⓤⓒⓚ",
+            "f u c k",
+            "f.u.c.k off",
+            "fuuuuck",
+            "fu\u{441}k",
+            "n\u{200b}igga",
+        ] {
+            assert!(word_hits(&word_forms(t), &words) > 0, "{t}");
+        }
+        // Each word counts once, however many forms hit it.
+        assert_eq!(word_hits(&word_forms("fuck fuck"), &words), 1);
+        for t in ["class act", "a b c", "I am fine", "funk", "hello there"] {
+            assert_eq!(word_hits(&word_forms(t), &words), 0, "{t}");
+        }
     }
 
     #[test]

@@ -39,12 +39,30 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
-    check(app, m, false).await
+    match as_app_user(m) {
+        Some(m) => check(app, &m, true).await,
+        None => check(app, m, false).await,
+    }
+}
+
+/// A reply from an app the member installed on their own account says what the member wants it to,
+/// so it gets the instant filters (as on an edit) under the member's name. Server-installed bots stay
+/// exempt.
+fn as_app_user(m: &Message) -> Option<Message> {
+    let meta = m.interaction_metadata.as_deref()?;
+    let owners = &meta.authorizing_integration_owners;
+    (owners.user.is_some() && owners.guild.is_none()).then(|| Message {
+        author: meta.user.clone(),
+        member: None,
+        webhook_id: None,
+        interaction_metadata: None,
+        ..m.clone()
+    })
 }
 
 /// An edit can sneak in a link or word after the message passed, so only those filters run again.
 pub async fn on_edit(app: &App, m: &Message) -> Result<()> {
-    check(app, m, true).await
+    check(app, as_app_user(m).as_ref().unwrap_or(m), true).await
 }
 
 /// Heat parts that punish on their own; the only ones an edit can add.
@@ -62,7 +80,7 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
     let am = &cfg.automod;
     // Other bots' slash command replies come through their application's webhook: not spam.
     let app_reply = m.interaction_metadata.is_some();
-    if !am.enabled || (m.webhook_id.is_some() && (!am.monitor_webhooks || app_reply)) {
+    if !am.enabled || app_reply || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
     }
     if crate::panic::is_raider(app, gid, m.author.id) {
@@ -114,11 +132,12 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         })
     };
     let now = now_ms();
-    let content = m.content.as_str();
+    let text = filter_text(m);
+    let content = text.as_str();
     let f = &am.filters;
     let hosts = filters::hosts(content);
     let mut checked = hosts.clone();
-    if f.nsfw_crawl_shorteners {
+    if f.nsfw_crawl_shorteners || f.invites.enabled {
         for u in filters::shortener_urls(content).into_iter().take(3) {
             checked.extend(app.sites.unshorten(u).await);
         }
@@ -153,22 +172,16 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
                 .entry(m.channel_id.get())
                 .or_default()
                 .on_message(now, f.inactive_messages, f.inactive_hours),
-        invite_link: f.invites.enabled
-            && [
-                "discord.gg/",
-                "discord.com/invite/",
-                "discordapp.com/invite/",
-                "discord.me/",
-                "dsc.gg/",
-            ]
-            .iter()
-            .any(|p| content.to_lowercase().contains(p)),
+        invite_link: f.invites.enabled && is_invite(content, &checked),
         malicious_link: bad_site || f.scam_links.enabled && filters::is_nitro_steam_scam(content),
         nsfw_link: f.nsfw_links.enabled && app.sites.nsfw(&checked),
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
         blacklisted_words: if f.words.filter.enabled && !f.words.use_discord_automod {
-            filters::word_hits(content, &blacklist_words(f)) + f.words.regex.hits(content)
+            {
+                let forms = filters::word_forms(content);
+                filters::word_hits(&forms, &blacklist_words(f)) + f.words.regex.hits(&forms)
+            }
         } else {
             0
         },
@@ -406,6 +419,42 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         .await?;
     }
     Ok(())
+}
+
+/// The text the filters read: the message, what it forwards, and a poll's question and answers.
+fn filter_text(m: &Message) -> String {
+    let poll = m.poll.iter().flat_map(|p| {
+        std::iter::once(&p.question)
+            .chain(p.answers.iter().map(|a| &a.poll_media))
+            .filter_map(|q| q.text.as_deref())
+    });
+    std::iter::once(m.content.as_str())
+        .chain(
+            m.message_snapshots
+                .iter()
+                .map(|s| s.message.content.as_str()),
+        )
+        .chain(poll)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const INVITE_PATHS: [&str; 7] = [
+    "discord.gg/",
+    "discord.com/invite/",
+    "discordapp.com/invite/",
+    "discord.me/",
+    "dsc.gg/",
+    "discord.io/",
+    "invite.gg/",
+];
+
+/// An invite in the text (hidden characters ignored), or a shortener that lands on discord.gg.
+fn is_invite(text: &str, landed: &[String]) -> bool {
+    let lower = filters::strip_invisible(text).to_lowercase();
+    INVITE_PATHS.iter().any(|p| lower.contains(p))
+        || landed.iter().any(|h| h == "discord.gg" || h == "dsc.gg")
 }
 
 /// Strict words as written, wildcard words wrapped in `*`, plus the toggled premade lists.

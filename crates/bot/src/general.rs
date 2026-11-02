@@ -665,6 +665,9 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
     if !allowed(&level, perm) || (level == Level::None && cfg.misc.ignore_no_permit) {
         return Ok(true);
     }
+    if level == Level::None && !app.cooled_down(gid.get(), msg.author.id.get()) {
+        return Ok(true);
+    }
     let (text, embed, rows) = answer(app, gid, msg.author.id, &level, name, &words).await?;
     send(app, msg, &text, embed, rows).await?;
     Ok(true)

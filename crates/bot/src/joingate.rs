@@ -55,7 +55,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             tracing::warn!(?e, "invite log failed");
         }
     }
-    let name = cure(&user.name);
+    let name = names(&[Some(&user.name), user.global_name.as_ref()]);
     // Without an audit entry the bot counts as authorised.
     let adder = if user.bot {
         crate::welcome::bot_adder(app, gid, user.id).await
@@ -221,7 +221,16 @@ async fn join_raid(
 }
 
 pub(crate) fn cure(name: &str) -> String {
-    decancer::cure!(name).map_or_else(|_| name.to_string(), |c| c.to_string())
+    tommybot_automod::filters::cure(name)
+}
+
+/// The cured names, one per line, as `GateCfg::name_matches` reads them.
+fn names(raw: &[Option<&String>]) -> String {
+    raw.iter()
+        .flatten()
+        .map(|n| cure(n))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Re-runs the username filter when a member renames, if the gate asks for it.
@@ -238,18 +247,23 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     let timed_out = m
         .communication_disabled_until
         .is_some_and(|t| t.as_secs() > now_secs());
-    let names = [Some(m.user.name.as_str()), m.nick.as_deref()];
     let key = (m.guild_id.get(), m.user.id.get());
-    let bad = names
-        .into_iter()
-        .flatten()
-        .any(|n| g.name_matches(&cure(n)));
+    let bad = g.name_matches(&names(&[
+        Some(&m.user.name),
+        m.user.global_name.as_ref(),
+        m.nick.as_ref(),
+    ]));
     let skip = {
         let mut seen = app.punished_names.lock().unwrap();
         if !bad {
             seen.remove(&key);
         }
-        let names = format!("{}\0{}", m.user.name, m.nick.as_deref().unwrap_or_default());
+        let names = format!(
+            "{}\0{}\0{}",
+            m.user.name,
+            m.user.global_name.as_deref().unwrap_or_default(),
+            m.nick.as_deref().unwrap_or_default()
+        );
         // A timeout fires another update and a role change keeps the name: act once per bad name pair.
         timed_out || !bad || seen.insert(key, names.clone()) == Some(names)
     };
