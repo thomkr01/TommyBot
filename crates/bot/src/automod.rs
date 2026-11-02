@@ -1,50 +1,68 @@
-//! Message heat -> strikes -> timeouts, join gate and raid detection, mention-triggered lockdown.
+//! Message heat -> strikes -> timeouts, mention-triggered lockdown.
 use anyhow::Result;
 use tommybot_automod::{
     filters,
     heat::{heat, Breakdown, HeatCfg, MsgFacts, Whitelist},
-    join::{account_created_ms, gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
-    lockdown::JoinLock,
+    join::account_created_ms,
     store,
     strike::strike,
 };
 use tommybot_core::{
     cases::{self, NewCase},
-    jobs,
     sections::{AutomodCfg, FilterAction, FilterCfg, FiltersCfg, WhitelistList},
 };
 use tommybot_logging::{
-    embed::{channel, clip, duration, ALERT, ARROW, DONE, ORANGE, RED, YES},
+    embed::{channel, clip, duration, ALERT, ORANGE, RED, YES},
     Log, LogKind,
 };
 use twilight_model::{
-    gateway::payload::incoming::{MemberAdd, MemberUpdate, MessageCreate},
+    channel::Message,
+    gateway::payload::incoming::MessageCreate,
     guild::Permissions,
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
     },
-    user::UserFlags,
 };
 
 use crate::{
-    app::{now_secs, App, GuildCfg},
+    app::{App, GuildCfg},
     commands::{self, timeout},
-    events::{send_log, send_log_pinging},
-    lockdown, reply, verify,
+    events::send_log,
+    lockdown, reply,
 };
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
 }
 
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
+    check(app, m, false).await
+}
+
+/// An edit can sneak in a link or word after the message passed, so only those filters run again.
+pub async fn on_edit(app: &App, m: &Message) -> Result<()> {
+    check(app, m, true).await
+}
+
+/// Heat parts that punish on their own; the only ones an edit can add.
+const INSTANT: [&str; 5] = [
+    "invites",
+    "malicious",
+    "nsfw",
+    "links_blacklist",
+    "blacklisted_words",
+];
+
+async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
-    if !am.enabled || (m.webhook_id.is_some() && !am.monitor_webhooks) {
+    // Other bots' slash command replies come through their application's webhook: not spam.
+    let app_reply = m.interaction_metadata.is_some();
+    if !am.enabled || (m.webhook_id.is_some() && (!am.monitor_webhooks || app_reply)) {
         return Ok(());
     }
     if crate::panic::is_raider(app, gid, m.author.id) {
@@ -127,13 +145,14 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         embeds: m.embeds.len(),
         links: hosts.len(),
         stickers: m.sticker_items.len(),
-        channel_inactive: app
-            .channels
-            .lock()
-            .unwrap()
-            .entry(m.channel_id.get())
-            .or_default()
-            .on_message(now, f.inactive_messages, f.inactive_hours),
+        channel_inactive: !edit
+            && app
+                .channels
+                .lock()
+                .unwrap()
+                .entry(m.channel_id.get())
+                .or_default()
+                .on_message(now, f.inactive_messages, f.inactive_hours),
         invite_link: f.invites.enabled
             && [
                 "discord.gg/",
@@ -173,7 +192,12 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     if facts.blacklisted_link && app.whitelisted(gid, m.author.id, "links").await? {
         facts.blacklisted_link = false;
     }
-    let pings = facts.user_mentions + facts.everyone_mentions + facts.role_mentions;
+    // Mentions added by an edit ping nobody.
+    let pings = if edit {
+        0
+    } else {
+        facts.user_mentions + facts.everyone_mentions + facts.role_mentions
+    };
     let lock = &am.auto_lockdown;
     let mention_lock = lock.enabled
         && lock.mentions
@@ -202,7 +226,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
-    let (triggered, breakdown) = {
+    let (triggered, fresh, breakdown) = {
         let mut map = app.heat.lock().unwrap();
         // Past 100k users, users idle for 10 minutes go first; everyone only if that frees nothing.
         if map.len() > 100_000 {
@@ -212,13 +236,22 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
             }
         }
         let (state, hist) = map.entry(key).or_default();
+        // A quiet channel weighs on someone's first message there, not on each of their replies.
+        let quiet_ms = i64::from(f.inactive_hours.max(1)) * 3_600_000;
+        facts.channel_inactive &= !hist.posted_in(m.channel_id.get(), now - quiet_ms);
         let mut b = heat(&facts, hist, &heat_cfg);
         if over_hour_cap {
             b.parts.push(("mentions", heat_cfg.max));
         }
-        hist.remember(content);
-        hist.track(m.channel_id.get(), m.id.get());
-        (state.apply(&b, now, &heat_cfg), b)
+        if edit {
+            b.parts.retain(|(n, _)| INSTANT.contains(n));
+        } else {
+            hist.remember(content);
+            hist.track(m.channel_id.get(), m.id.get());
+        }
+        // An edit adding nothing must not trip on heat left over from earlier messages.
+        let triggered = state.apply(&b, now, &heat_cfg) && !(edit && b.parts.is_empty());
+        (triggered, triggered && state.claim(now), b)
     };
     if !triggered && !mention_lock {
         return Ok(());
@@ -245,6 +278,16 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         if crate::webhooks::webhook_exempt(app, gid, hook, listed(&wl.spam)).await {
             return Ok(());
         }
+    }
+    if !fresh {
+        // Sent before the punishment landed: remove it, the burst was already punished once.
+        crate::http_err::best_effort(
+            app.http.delete_message(m.channel_id, m.id).await,
+            "automod delete",
+        );
+        return Ok(());
+    }
+    if m.webhook_id.is_some() {
         // A webhook is not a member: no strikes, remove its spam (the messages that built the heat
         // too, or the first ones stay) and the freshly made hooks.
         let tracked = app
@@ -308,20 +351,25 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
         let note = crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
             .filter(|_| act.timeout_ms > 300_000)
             .map_or(String::new(), |n| format!("\n{n}"));
-        reply::dm(
-            app,
-            m.author.id,
-            &format!("You were timed out by automod{why}{note}"),
-        )
-        .await;
-        timeout(
+        if let Err(e) = timeout(
             &app.http,
             gid,
             m.author.id,
             act.timeout_ms / 1000,
             "Automod",
         )
-        .await?;
+        .await
+        {
+            action_failed(app, gid, m.author.id.get(), "Timeout", &e).await;
+            return Err(e);
+        }
+        // Only after it worked: a failed timeout must not tell them they were timed out.
+        reply::dm(
+            app,
+            m.author.id,
+            &format!("You were timed out by automod{why}{note}"),
+        )
+        .await;
         auto_case(
             app,
             gid,
@@ -469,7 +517,7 @@ async fn filter_action(
     app: &App,
     cfg: &GuildCfg,
     gid: Id<GuildMarker>,
-    m: &MessageCreate,
+    m: &Message,
     action: FilterAction,
     (factor, duration_secs): (&str, Option<i64>),
 ) -> Result<()> {
@@ -509,17 +557,32 @@ async fn filter_action(
                 store::save_strikes(&app.pool, gid.get(), uid.get(), &st).await?;
             }
         }
-        FilterAction::Timeout => {
-            timeout(&app.http, gid, uid, secs, "Automod").await?;
-            auto_case(app, gid, uid, "timeout", factor, Some(secs)).await?;
-        }
-        FilterAction::Kick => {
-            app.http.remove_guild_member(gid, uid).await?;
-            auto_case(app, gid, uid, "kick", factor, None).await?;
-        }
-        FilterAction::Ban => {
-            app.http.create_ban(gid, uid).await?;
-            auto_case(app, gid, uid, "ban", factor, None).await?;
+        FilterAction::Timeout | FilterAction::Kick | FilterAction::Ban => {
+            let (kind, timed) = match action {
+                FilterAction::Timeout => ("timeout", Some(secs)),
+                FilterAction::Kick => ("kick", None),
+                _ => ("ban", None),
+            };
+            let done = match action {
+                FilterAction::Timeout => timeout(&app.http, gid, uid, secs, "Automod").await,
+                FilterAction::Kick => app
+                    .http
+                    .remove_guild_member(gid, uid)
+                    .await
+                    .map(drop)
+                    .map_err(Into::into),
+                _ => app
+                    .http
+                    .create_ban(gid, uid)
+                    .await
+                    .map(drop)
+                    .map_err(Into::into),
+            };
+            if let Err(e) = done {
+                action_failed(app, gid, uid.get(), kind, &e).await;
+                return Err(e);
+            }
+            auto_case(app, gid, uid, kind, factor, timed).await?;
         }
     }
     send_log(
@@ -571,199 +634,6 @@ pub async fn sync_discord_rule(app: std::sync::Arc<App>, guild: u64) {
     }
 }
 
-pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
-    let (gid, user) = (m.guild_id, &m.member.user);
-    let cfg = app.cfg(gid.get()).await?;
-    let now = now_ms();
-    if let Some(lock) = lockdown::join_lock(app, gid).await? {
-        let action = match lock {
-            JoinLock::Kick => Action::Kick,
-            JoinLock::Ban => Action::Ban,
-        };
-        return punish(app, &cfg, gid, user.id.get(), action, "join lock").await;
-    }
-    // One invites call per join: only when something shows the result.
-    let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
-        || cfg.logging.target(LogKind::Member, None).is_some()
-    {
-        crate::invites::used_invite(app, gid).await
-    } else {
-        None
-    };
-    if let Some((code, inviter)) = &invite {
-        let log = Log::new("Invite Used", DONE)
-            .user("Member", user.id.get())
-            .line("Invite", &format!("`{code}`"))
-            .line("Inviter", inviter);
-        if let Err(e) = send_log(app, gid.get(), LogKind::Member, log).await {
-            tracing::warn!(?e, "invite log failed");
-        }
-    }
-    let name = cure(&user.name);
-    // Without an audit entry the bot counts as authorised.
-    let adder = if user.bot {
-        crate::welcome::bot_adder(app, gid, user.id).await
-    } else {
-        None
-    };
-    let authorized = match adder {
-        Some(a) => app.is_immune(gid, a).await.unwrap_or(true),
-        None => true,
-    };
-    let j = Joiner {
-        invite: invite.as_ref().map(|i| i.0.as_str()),
-        id: user.id.get(),
-        name: &name,
-        has_avatar: user.avatar.is_some(),
-        is_bot: user.bot,
-        bot_verified: user
-            .public_flags
-            .is_some_and(|f| f.contains(UserFlags::VERIFIED_BOT)),
-        added_by_authorized: authorized,
-    };
-    let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
-    verify::on_join(app, gid, user.id, suspicious, user.bot).await;
-    let hits = gate(&j, &cfg.joingate, now);
-    if let Some(action) = harshest(&hits) {
-        let why = if hits.iter().any(|h| h.0 == Filter::AccountAge) {
-            let min = duration(cfg.joingate.min_age_ms() / 1000);
-            format!("join gate: accounts must be at least {min} old")
-        } else {
-            "join gate".into()
-        };
-        punish(app, &cfg, gid, j.id, action, &why).await?;
-        // The bot filter also punishes whoever added it.
-        if let (Some(adder), true) = (adder, hits.iter().any(|h| h.0 == Filter::UnauthorizedBot)) {
-            punish(
-                app,
-                &cfg,
-                gid,
-                adder.get(),
-                action,
-                "adding a bot without permission",
-            )
-            .await?;
-        }
-    }
-    if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
-        join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
-    }
-    Ok(())
-}
-
-async fn join_raid(
-    app: &App,
-    cfg: &GuildCfg,
-    gid: Id<GuildMarker>,
-    raid: &RaidCfg,
-    j: &Joiner<'_>,
-    suspicious: bool,
-    now: i64,
-) -> Result<()> {
-    let (out, started, names, invites, code) = {
-        let mut raids = app.raids.lock().unwrap();
-        let d = raids.entry(gid.get()).or_default();
-        let out = d.on_join(j, suspicious, raid, now);
-        if out.triggered || d.code.is_empty() {
-            d.code = crate::invites::raid_code(gid.get());
-        }
-        let names: Vec<String> = out
-            .flagged
-            .iter()
-            .map(|id| d.name_of(*id).unwrap_or_default().to_string())
-            .collect();
-        let invites: Vec<String> = out
-            .flagged
-            .iter()
-            .map(|id| d.invite_of(*id).unwrap_or_default().to_string())
-            .collect();
-        (out, d.started, names, invites, d.code.clone())
-    };
-    if !out.flagged.is_empty() {
-        let ids: Vec<i64> = out.flagged.iter().map(|&id| id as i64).collect();
-        let logged = sqlx::query(
-            "insert into raid_log (guild_id, raid_ms, user_id, name, invite_code, code)
-             select $1, $2, u, n, nullif(i, ''), $6
-             from unnest($3::bigint[], $4::text[], $5::text[]) as t(u, n, i) on conflict do nothing",
-        )
-        .bind(gid.get() as i64)
-        .bind(started)
-        .bind(&ids)
-        .bind(&names)
-        .bind(&invites)
-        .bind(&code)
-        .execute(&app.pool)
-        .await;
-        if let Err(e) = logged {
-            tracing::warn!(?e, "saving the raid log failed");
-        }
-    }
-    if out.triggered {
-        jobs::replace(
-            &app.pool,
-            gid.get() as i64,
-            "raid_end",
-            serde_json::json!({ "until_ms": now + raid.active_ms, "started_ms": started, "code": code }),
-            (now / 1000) + raid.active_ms / 1000,
-        )
-        .await?;
-        let warned: Vec<_> = raid
-            .warned_roles
-            .iter()
-            .filter_map(|r| r.parse().ok().map(Id::new))
-            .collect();
-        let mut log = Log::new("🕵 Join Raid Trigger!", ALERT)
-            .text(&format!(
-                "{YES} TommyBot has identified a weird join pattern."
-            ))
-            .text(&format!(
-                "{ARROW} Flagged accounts joining for the next `{}` will be **{}**.",
-                duration(raid.active_ms / 1000),
-                match raid.action {
-                    Action::Log => "logged",
-                    Action::Warn => "warned",
-                    Action::Timeout(_) => "timed out",
-                    Action::Kick => "kicked",
-                    Action::Ban => "banned",
-                }
-            ))
-            .text(&format!(
-                "{ARROW} A full report will be posted once the duration ends."
-            ))
-            .field(
-                "Initial Flags:",
-                // 40 IDs stay under Discord's 1024-character field limit; the page lists all
-                &(out
-                    .flagged
-                    .iter()
-                    .zip(&names)
-                    .take(40)
-                    .map(|(u, n)| format!("`{} | {n}`", crate::invites::short_id(*u))))
-                .chain(
-                    (out.flagged.len() > 40).then(|| format!("+{} more", out.flagged.len() - 40)),
-                )
-                .collect::<Vec<_>>()
-                .join("\n"),
-            );
-        log = log.field("Code:", &format!("`{code}`"));
-        if let Some(url) = crate::invites::raid_url(&code) {
-            log = log.text(&format!("{ARROW} [Every caught account]({url})"));
-        }
-        send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
-    }
-    let auto_lock = cfg.automod.auto_lockdown.enabled;
-    if let Some(kind) = (out.triggered && auto_lock)
-        .then(|| raid.lock.clone())
-        .flatten()
-    {
-        lockdown::lock(app, gid, kind).await?;
-    }
-    for id in out.flagged {
-        punish(app, cfg, gid, id, raid.action, "join raid").await?;
-    }
-    Ok(())
-}
-
 pub(crate) async fn warn_actions(
     app: &App,
     cfg: &GuildCfg,
@@ -793,55 +663,6 @@ pub(crate) fn count_emojis(s: &str) -> usize {
 }
 
 /// Names with fancy Unicode, lookalikes and leetspeak folded to plain letters, for the username filter.
-pub(crate) fn cure(name: &str) -> String {
-    decancer::cure!(name).map_or_else(|_| name.to_string(), |c| c.to_string())
-}
-
-/// Re-runs the username filter when a member renames, if the gate asks for it.
-pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
-    let cfg = app.cfg(m.guild_id.get()).await?;
-    let g = &cfg.joingate;
-    let Some(action) = g
-        .username_filter
-        .get(Filter::UsernameFilter.default_action())
-        .filter(|_| g.enabled && g.username_post_join)
-    else {
-        return Ok(());
-    };
-    let timed_out = m
-        .communication_disabled_until
-        .is_some_and(|t| t.as_secs() > now_secs());
-    let names = [Some(m.user.name.as_str()), m.nick.as_deref()];
-    let key = (m.guild_id.get(), m.user.id.get());
-    let bad = names
-        .into_iter()
-        .flatten()
-        .any(|n| g.name_matches(&cure(n)));
-    let skip = {
-        let mut seen = app.punished_names.lock().unwrap();
-        if !bad {
-            seen.remove(&key);
-        }
-        let names = format!("{}\0{}", m.user.name, m.nick.as_deref().unwrap_or_default());
-        // A timeout fires another update and a role change keeps the name: act once per bad name pair.
-        timed_out || !bad || seen.insert(key, names.clone()) == Some(names)
-    };
-    if skip {
-        return Ok(());
-    }
-    punish(
-        app,
-        &cfg,
-        m.guild_id,
-        m.user.id.get(),
-        action,
-        "username filter",
-    )
-    .await
-}
-
-/// A punishment Discord refused (role too low, permission missing) is shown to staff, not
-/// only written to the container log.
 pub(crate) async fn action_failed(
     app: &App,
     gid: Id<GuildMarker>,
@@ -856,104 +677,6 @@ pub(crate) async fn action_failed(
     if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
         tracing::warn!(?e, "could not log the failed automod action");
     }
-}
-
-pub(crate) async fn punish(
-    app: &App,
-    cfg: &GuildCfg,
-    gid: Id<GuildMarker>,
-    user: u64,
-    action: Action,
-    why: &str,
-) -> Result<()> {
-    let uid = Id::new(user);
-    let punishing = !matches!(action, Action::Log | Action::Timeout(..=-1));
-    if punishing && cfg.joingate.dm_punished {
-        let mut text = if cfg.misc.show_reason_on_auto {
-            format!("Automod action: {action:?} ({why})")
-        } else {
-            format!("Automod action: {action:?}")
-        };
-        if cfg.joingate.expose_min_age && why.starts_with("join gate") {
-            let min = duration(cfg.joingate.min_age_ms() / 1000);
-            text.push_str(&format!("\nMinimum account age: `{min}`"));
-        }
-        let note =
-            crate::appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid).filter(|_| {
-                match action {
-                    Action::Ban => true,
-                    // Wick: short automatic timeouts (5 minutes or less) get no appeal link.
-                    Action::Timeout(0) => cfg.misc.timeout_secs() > 300,
-                    Action::Timeout(ms) => ms > 300_000,
-                    _ => false,
-                }
-            });
-        reply::dm(
-            app,
-            uid,
-            &note.map_or(text.clone(), |n| format!("{text}\n{n}")),
-        )
-        .await;
-    }
-    match action {
-        Action::Log => {}
-        Action::Warn => {
-            cases::create(
-                &app.pool,
-                NewCase {
-                    guild_id: gid.get() as i64,
-                    kind: "warn",
-                    user_id: user as i64,
-                    mod_id: app.me.get() as i64,
-                    reason: Some(why),
-                    points: cfg.misc.warn_base_points,
-                    duration_s: None,
-                    proof: None,
-                    inverse: None,
-                },
-            )
-            .await?;
-            warn_actions(app, cfg, gid, uid).await?;
-        }
-        Action::Timeout(..=-1) => return Ok(()),
-        Action::Timeout(_) | Action::Kick | Action::Ban => {
-            let done = match action {
-                Action::Timeout(ms) => {
-                    let secs = match ms {
-                        0 => cfg.misc.timeout_secs() as i64,
-                        ms => ms / 1000,
-                    };
-                    timeout(&app.http, gid, uid, secs, "Automod").await
-                }
-                Action::Kick => app
-                    .http
-                    .remove_guild_member(gid, uid)
-                    .await
-                    .map(drop)
-                    .map_err(Into::into),
-                _ => app
-                    .http
-                    .create_ban(gid, uid)
-                    .await
-                    .map(drop)
-                    .map_err(Into::into),
-            };
-            if let Err(e) = done {
-                action_failed(app, gid, user, &format!("{action:?}"), &e).await;
-                return Err(e);
-            }
-        }
-    }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::JoinGate,
-        Log::new("Join Gate", ORANGE)
-            .user("Member", user)
-            .line("Action", &format!("`{action:?}`"))
-            .line("Reason", why),
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -978,11 +701,6 @@ mod tests {
     fn emojis_count_unicode_and_custom() {
         assert_eq!(count_emojis("hi 😀🔥 <:a:1> <a:b:2> ok"), 4);
         assert_eq!(count_emojis("plain text"), 0);
-    }
-
-    #[test]
-    fn cure_folds_fancy_names() {
-        assert_eq!(cure("ⓗⓔⓛⓛⓞ"), "hello");
     }
 
     #[test]

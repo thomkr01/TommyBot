@@ -15,9 +15,10 @@ use twilight_model::{
 
 use crate::{
     app::{now_secs, App, GuildCfg},
-    automod::{punish, warn_actions},
+    automod::warn_actions,
     commands::timeout,
     events::send_log,
+    joingate::punish,
     lockdown, reports,
 };
 

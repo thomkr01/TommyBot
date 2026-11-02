@@ -322,6 +322,12 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             automod::on_message(app, m).await?;
         }
+        // Discord also sends updates for link previews; only real edits are checked again.
+        Event::MessageUpdate(m)
+            if m.edited_timestamp.is_some() && (!m.author.bot || m.webhook_id.is_some()) =>
+        {
+            automod::on_edit(app, &m.0).await?;
+        }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
             app.invalidate_guild(r.guild_id);
@@ -360,9 +366,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(e) = crate::timeout_roles::on_member_update(app, m).await {
                 tracing::warn!(?e, "removing main roles on timeout failed");
             }
-            automod::on_member_update(app, m).await?
+            crate::joingate::on_member_update(app, m).await?
         }
-        Event::MemberAdd(m) => automod::on_join(app, m).await?,
+        Event::MemberAdd(m) => crate::joingate::on_join(app, m).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?

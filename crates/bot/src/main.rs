@@ -12,6 +12,7 @@ mod hierarchy;
 mod http_err;
 mod info;
 mod invites;
+mod joingate;
 mod lockdown;
 mod metrics;
 mod modcmds;
@@ -71,9 +72,12 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let app = app.clone();
         async move {
-            // Without the listener, saved config only applies after a restart.
-            if let Err(e) = app.listen_config().await {
-                tracing::error!(?e, "config listener stopped");
+            // Without the listener, saved config only applies after a restart, so it never gives up.
+            loop {
+                if let Err(e) = app.clone().listen_config().await {
+                    tracing::error!(?e, "config listener stopped, retrying");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         }
     });
