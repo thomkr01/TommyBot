@@ -149,7 +149,7 @@ pub fn for_label(label: &str) -> Emoji {
         ("avatar", "avatar_field"),
         ("badge", "nitro_badge"),
         ("bot", "bot"),
-        ("count", "stats"),
+        ("count", "counting"),
         ("strike", "warn_points"),
         ("rule", "rules"),
         ("factor", "heat"),
