@@ -1,6 +1,5 @@
 :root, [data-theme=dark] { --b1:#1c1c1c; --b2:#212121; --b3:#0d0d0d; --fg:#f5f5f5; --muted:#a1a1a1; --line:#3a3a3a; --primary:#0d9df8; --focus:#065bcb; --info:#5cc9ff; --ok:#00db5f; --bad:#ff2445; --warn:#ff9900; --page:linear-gradient(160deg,#0f3b6e 0%,#0a2447 35%,#050b16 100%); }
 [data-theme=light] { --b1:#ffffff; --b2:#f8f9fa; --b3:#d3d7dd; --fg:#1f2937; --muted:#5b6472; --line:#c5cad2; --page:linear-gradient(160deg,#cfe6ff 0%,#eef4fb 50%,#ffffff 100%); }
-/* Motion: every transition and animation uses these, so the whole dashboard moves alike. */
 :root { --dur-fast:120ms; --dur:200ms; --dur-slow:320ms; --ease:cubic-bezier(.2,0,0,1); --brand:linear-gradient(135deg,#FFA36C,#FF6F91,#9B7BFF,#4FC3F7); }
 @property --p { syntax:'<number>'; inherits:false; initial-value:0; }
 @keyframes enter { from { opacity:0; transform:translateY(6px); } }
@@ -97,7 +96,6 @@ details.notes { margin:8px 0 0; } details.notes summary { cursor:pointer; list-s
 .wiz .nav { width:32px; flex:none; font-size:22px; padding:0; background:var(--ok); border-color:var(--ok); }
 .wiz .nav.back { background:var(--bad); border-color:var(--bad); }
 .wiz .nav:disabled { opacity:.3; }
-/* Wizard in the logo colours: ring filled with the brand sweep, each step and card slides in. */
 .enter { animation:enter var(--dur-slow) var(--ease); }
 .brand .ring { background:conic-gradient(transparent calc(var(--p) * 1%), var(--b3) 0), conic-gradient(#FFA36C,#FF6F91,#9B7BFF,#4FC3F7,#FFA36C); }
 .brand .ring b { background:var(--b2); color:var(--fg); }
