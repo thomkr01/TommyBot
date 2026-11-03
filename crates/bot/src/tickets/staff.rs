@@ -33,14 +33,7 @@ pub(super) async fn relay(
         text.to_string()
     };
     let staff = &m.author;
-    let mut to_member = s.footer(stamp(emb(
-        &format!("{TICKET_REPLY} Message Received"),
-        &text,
-        ORANGE,
-    )));
-    if !anon {
-        to_member = author(to_member, &staff.name, avatar(staff));
-    }
+    let (to_member, copy) = from_staff(&s, staff, &member.user, &text, anon);
     let files = download(&m.attachments).await;
     let dm = app
         .http
@@ -63,17 +56,7 @@ pub(super) async fn relay(
             return say(app, ch, error(text)).await;
         }
     };
-    let shown = if anon {
-        format!("{} (Anonymous)", staff.name)
-    } else {
-        staff.name.clone()
-    };
-    let copy = author(
-        stamp(emb(&format!("{TICKET_REPLY} Message Sent"), &text, ORANGE)),
-        &shown,
-        avatar(staff),
-    );
-    let copy = attachment_fields(user_footer(copy, &member.user), &posted.attachments);
+    let copy = attachment_fields(copy, &posted.attachments);
     app.http
         .create_message(ch)
         .embeds(&[copy.build()])
@@ -252,26 +235,15 @@ pub(super) async fn close(
         .await?
         .id;
     if !t.closing.is_empty() {
-        let e = s.footer(stamp(emb(
-            &format!("{TICKET_CLOSE} Closing Message"),
-            &tags(&t.closing, &member.user),
-            ORANGE,
-        )));
+        let e = notice(&s, true, &t.closing, &member.user);
         best_effort(
-            app.http.create_message(dm).embeds(&[e.build()]).await,
+            app.http.create_message(dm).embeds(&[e]).await,
             "ticket closing message",
         );
     }
-    let mut e = s.footer(stamp(emb(
-        &format!("{TICKET_CLOSE} Ticket Closed"),
-        reason,
-        RED,
-    )));
-    if !anon {
-        e = author(e, &staff.name, avatar(staff));
-    }
+    let e = closed(&s, reason, (!anon).then_some(staff));
     best_effort(
-        app.http.create_message(dm).embeds(&[e.build()]).await,
+        app.http.create_message(dm).embeds(&[e]).await,
         "ticket closed dm",
     );
     Ok(())

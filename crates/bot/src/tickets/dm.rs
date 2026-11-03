@@ -96,37 +96,10 @@ async fn confirmation(app: &App, m: &Message) -> Result<()> {
 }
 
 async fn ask(app: &App, m: &Message, s: &Server) -> Result<()> {
-    let e = emb(
-        &format!("{TICKET} Confirmation"),
-        &format!(
-            "You're sending this message to **{}** (ID: {}). Press **Send** to confirm.\nWant to send to another server? Press **Other server**.\nTo cancel this request, press **Cancel**.",
-            s.name, s.id
-        ),
-        BLUE,
-    );
-    let e = footer(
-        e,
-        &format!(
-            "Tip: You can disable confirmation messages with the {DM_PREFIX}confirmation command."
-        ),
-        None,
-    );
-    let row = action_row(vec![
-        button(
-            "Send",
-            format!("tk:ok:{}:{}", s.id, m.id),
-            ButtonStyle::Success,
-        ),
-        button(
-            "Other server",
-            format!("tk:other:{}", m.id),
-            ButtonStyle::Secondary,
-        ),
-        button("Cancel", "tk:no".into(), ButtonStyle::Danger),
-    ]);
+    let (e, row) = confirm(s, m.id);
     app.http
         .create_message(m.channel_id)
-        .embeds(&[e.build()])
+        .embeds(&[e])
         .components(&[row])
         .await?;
     Ok(())
@@ -268,11 +241,7 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
     };
     let text = body(&m.content, app.me);
     let files = download(&m.attachments).await;
-    let sent = s.footer(stamp(emb(
-        &format!("{TICKET_REPLY} Message Sent"),
-        &text,
-        GREEN,
-    )));
+    let (sent, got) = from_member(&s, &m.author, &text);
     let dm_msg = app
         .http
         .create_message(dm)
@@ -281,14 +250,6 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         .await?
         .model()
         .await?;
-    let got = user_footer(
-        stamp(emb(
-            &format!("{TICKET_REPLY} Message Received"),
-            &text,
-            GREEN,
-        )),
-        &m.author,
-    );
     let got = attachment_fields(got, &dm_msg.attachments);
     if let Err(e) = app
         .http
@@ -375,27 +336,13 @@ async fn create(
         }
     }
     let pfx = &app.cfg(gid.get()).await?.misc.prefix;
-    let how = if t.command_only {
-        format!("Type `{pfx}reply <message>` in this channel to reply. All other messages are ignored, and can be used for staff discussion. Use the command `{pfx}close [reason]` to close this ticket. (Command only mode enabled)")
-    } else {
-        format!("Type a message in this channel to reply. Messages starting with the server prefix `{pfx}` are ignored, and can be used for staff discussion. Use the command `{pfx}close [reason]` to close this ticket.")
-    };
-    let role_list: String = roles.iter().map(|r| format!("<@&{r}> ")).collect();
-    let role_list = match role_list.trim_end() {
-        "" => "*None*".to_string(),
-        l if l.len() <= 1024 => l.to_string(),
-        _ => format!("*{} roles*", roles.len()),
-    };
-    let intro = stamp(emb(&format!("{TICKET_NEW} New Ticket"), &how, BLUE))
-        .field(EmbedFieldBuilder::new("User", format!("<@{}> ({})", user.id, user.id)).inline())
-        .field(EmbedFieldBuilder::new("Roles", role_list).inline());
-    let intro = user_footer(intro, user);
+    let intro = intro(pfx, t.command_only, user, roles);
     let (pings, mentions) = pings(gid, t);
     if let Err(e) = app
         .http
         .create_message(ch)
         .content(&pings)
-        .embeds(&[intro.build()])
+        .embeds(&[intro])
         .allowed_mentions(Some(&mentions))
         .await
     {
@@ -405,12 +352,7 @@ async fn create(
         return Ok(None);
     }
     if !t.greeting.is_empty() {
-        let e = s.footer(stamp(emb(
-            &format!("{TICKET} Greeting Message"),
-            &tags(&t.greeting, user),
-            ORANGE,
-        )));
-        say(app, dm, e.build()).await?;
+        say(app, dm, notice(s, false, &t.greeting, user)).await?;
     }
     Ok(Some(ch))
 }

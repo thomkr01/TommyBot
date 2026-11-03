@@ -175,10 +175,10 @@ async fn say(app: &App, ch: Id<ChannelMarker>, e: Embed) -> Result<()> {
 }
 
 /// A server the bot is in, for embed footers and the server menu.
-struct Server {
-    id: Id<GuildMarker>,
-    name: String,
-    icon: Option<String>,
+pub(crate) struct Server {
+    pub(crate) id: Id<GuildMarker>,
+    pub(crate) name: String,
+    pub(crate) icon: Option<String>,
 }
 
 impl Server {
@@ -375,7 +375,10 @@ fn action_row(components: Vec<Component>) -> Component {
 
 mod commands;
 mod dm;
+mod msgs;
 mod staff;
+
+pub(crate) use msgs::*;
 
 pub use commands::{blocked_page, on_message, snippets_page};
 pub use dm::{handle, on_dm};

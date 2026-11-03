@@ -1,6 +1,6 @@
 use crate::common::*;
 use crate::form::{name_of, strs, Section};
-use crate::wizard::{Card, ANTINUKE, AUTOMOD, JOINGATE, JOINRAID, MISC, VERIFICATION, WHITELIST};
+use crate::wizard::{Card, ANTINUKE, AUTOMOD, JOINGATE, JOINRAID, MISC, TICKETS, VERIFICATION, WHITELIST};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
@@ -24,8 +24,8 @@ const OPTIONAL_LOGS: [(&str, &str); 10] = [
 
 #[component]
 pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    const STEPS: [&str; 10] = ["Auto Setup", "Misc", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Rescue", "Wrap"];
-    const CARDS: [(&str, &[Card]); 7] = [("misc", MISC), ("automod", AUTOMOD), ("antinuke", ANTINUKE), ("whitelist", WHITELIST), ("joingate", JOINGATE), ("joinraid", JOINRAID), ("verification", VERIFICATION)];
+    const STEPS: [&str; 11] = ["Auto Setup", "Misc", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Tickets", "Rescue", "Wrap"];
+    const CARDS: [(&str, &[Card]); 8] = [("misc", MISC), ("automod", AUTOMOD), ("antinuke", ANTINUKE), ("whitelist", WHITELIST), ("joingate", JOINGATE), ("joinraid", JOINRAID), ("verification", VERIFICATION), ("tickets", TICKETS)];
     let step = RwSignal::new(0usize);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = guild.clone();
@@ -52,7 +52,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let g = guild.clone();
     let me = expect_context::<ReadSignal<Option<Value>>>();
     let support = move || me.get().and_then(|m| m["support_url"].as_str().map(String::from)).unwrap_or_else(|| "https://github.com/thomkr01/TommyBot".into());
-    // Same side arrows as the settings cards of steps 1-7.
+    // Same side arrows as the settings cards of steps 1-8.
         let arrows = move |body: AnyView| view! { <div class="card wiz">
             <button class="nav back" aria-label="previous" disabled=move || step.get() == 0 on:click=move |_| step.update(|i| *i = i.saturating_sub(1))>{crate::icons::icon("page_prev")}</button>
             <div class="wizbody">{body}</div>
@@ -89,8 +89,8 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     <Toast msg />
                 </div> }.into_any())
             }
-            8 => arrows(view! { <Rescue guild=g.clone() enrolled /> }.into_any()),
-            9 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a class="btn go" href=format!("#/{}/overview", g)>"Go to Overview"</a></div> }.into_any(),
+            9 => arrows(view! { <Rescue guild=g.clone() enrolled /> }.into_any()),
+            10 => view! { <div class="card"><h2>"All done!"</h2><p>"TommyBot is set up. Every setting can be changed later on its own page, and the Overview shows your security score."</p><a class="btn go" href=format!("#/{}/overview", g)>"Go to Overview"</a></div> }.into_any(),
             i => { let (name, cards) = CARDS[i - 1]; view! { <Section guild=g.clone() name=name.to_string() cards next=Callback::new(move |_| step.update(|i| *i += 1)) enrolled /> }.into_any() }
         }}</div> }}
         <StepUp need enrolled />

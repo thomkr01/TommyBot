@@ -15,7 +15,7 @@ use twilight_model::{
     id::Id,
 };
 
-use crate::{antinuke, automod, commands, joingate, reply, verify};
+use crate::{antinuke, automod, commands, joingate, reply, tickets, verify};
 use tommybot_core::sections::FilterAction;
 
 const MEMBER: u64 = 1001;
@@ -31,6 +31,65 @@ fn log(l: Log) -> Value {
 
 fn interaction(r: InteractionResponse) -> Value {
     serde_json::to_value(r.data).unwrap()
+}
+
+fn embed(e: twilight_model::channel::message::Embed) -> Value {
+    json!({"embeds": [e]})
+}
+
+/// A ticket in both places: the member's DMs and the staff channel. `{prefix}` and `{text}` are
+/// filled in by the dashboard from the settings.
+fn tickets() -> Vec<(&'static str, Value)> {
+    let user = |id: u64, name: &str| -> twilight_model::user::User {
+        serde_json::from_value(
+            json!({"id": id.to_string(), "username": name, "discriminator": "0", "avatar": null}),
+        )
+        .unwrap()
+    };
+    let (member, staff) = (user(MEMBER, "member"), user(YOU, "you"));
+    let s = tickets::Server {
+        id: Id::new(1),
+        name: SERVER.into(),
+        icon: None,
+    };
+    let (confirm, row) = tickets::confirm(&s, Id::new(1));
+    let ask = "Hi, someone in the server keeps sending me scam links.";
+    let (sent, got) = tickets::from_member(&s, &member, ask);
+    let answer = "Thanks, we are looking into it.";
+    let (dm, copy) = tickets::from_staff(&s, &staff, &member, answer, false);
+    let (dm_anon, copy_anon) = tickets::from_staff(&s, &staff, &member, answer, true);
+    let intro = |cmd| embed(tickets::intro("{prefix}", cmd, &member, &[]));
+    let reason = "Solved, thanks for the report.";
+    vec![
+        (
+            "ticket_confirm",
+            json!({"embeds": [confirm], "components": [row]}),
+        ),
+        ("ticket_sent", embed(sent.build())),
+        ("ticket_received", embed(got.build())),
+        ("ticket_reply", embed(dm.build())),
+        ("ticket_reply_anon", embed(dm_anon.build())),
+        ("ticket_reply_copy", embed(copy.build())),
+        ("ticket_reply_copy_anon", embed(copy_anon.build())),
+        ("ticket_intro", intro(false)),
+        ("ticket_intro_cmd", intro(true)),
+        (
+            "ticket_greeting",
+            embed(tickets::notice(&s, false, "{text}", &member)),
+        ),
+        (
+            "ticket_closing",
+            embed(tickets::notice(&s, true, "{text}", &member)),
+        ),
+        (
+            "ticket_closed",
+            embed(tickets::closed(&s, reason, Some(&staff))),
+        ),
+        (
+            "ticket_closed_anon",
+            embed(tickets::closed(&s, reason, None)),
+        ),
+    ]
 }
 
 fn messages() -> Value {
@@ -87,7 +146,7 @@ fn messages() -> Value {
             Some(t),
         ))
     };
-    json!({
+    let mut all = json!({
         "names": {"users": {MEMBER.to_string(): "member", YOU.to_string(): "you", ROGUE.to_string(): "rogue-admin"}, "channels": {GENERAL.to_string(): "general"}},
         "ban_result": json!({"embeds": reply::result_embeds("ban", &[full], Some("toxic"), YOU)}),
         "ban_compact": {"content": reply::summary("ban", true, &[compact], Some("toxic"), YOU)},
@@ -104,7 +163,11 @@ fn messages() -> Value {
         "verify_captcha": challenge(verify::PROMPT, true),
         "verify_simple": challenge(&verify::new_sum().0, false),
         "verify_dm": reply_text("Check your DMs for the challenge."),
-    })
+    });
+    for (k, v) in tickets() {
+        all[k] = v;
+    }
+    all
 }
 
 /// Saves the samples for the dashboard; run at startup, once the custom emojis are loaded.

@@ -19,7 +19,7 @@ const fn card(title: &'static str, desc: &'static str, fields: &'static [(&'stat
     Card { title, desc, notes: &[], fields, preview, action: None }
 }
 
-use crate::discord::{bot, chat, sample, show};
+use crate::discord::{bot, chat, sample, show, show_msg};
 
 /// The message box with something typed in it.
 fn typed(text: String) -> AnyView {
@@ -189,3 +189,67 @@ pub const VERIFICATION: &[Card] = &[Card {
         view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after} }.into_any()
     })
 }];
+
+/// A sample with `{key}` placeholders filled in; null while the samples load.
+fn filled(key: &str, with: &[(&str, &str)]) -> Value {
+    fill(&sample(key), with)
+}
+
+fn fill(m: &Value, with: &[(&str, &str)]) -> Value {
+    let mut s = m.to_string();
+    for (k, v) in with {
+        let v = serde_json::to_string(v).unwrap_or_default();
+        s = s.replace(&format!("{{{k}}}"), &v[1..v.len() - 1]);
+    }
+    serde_json::from_str(&s).unwrap_or(Value::Null)
+}
+
+/// The member's DMs and the staff channel side by side, as the ticket settings make them.
+fn ticket_preview(c: &Value, dc: &Value) -> AnyView {
+    let t = &c["tickets"];
+    let anon = if on(c, "tickets.anonymous", false) { "_anon" } else { "" };
+    let tagged = |k: &str| t[k].as_str().unwrap_or("").replace("{username}", "member").replace("{userid}", "1001").replace("{usermention}", "@member");
+    let (greeting, closing) = (tagged("greeting"), tagged("closing"));
+    let mut pings: Vec<String> = strs(&t["ping_roles"]).iter().map(|r| name_of(dc, "roles", r)).map(|n| if n.starts_with('@') { n } else { format!("@{n}") }).collect();
+    if on(c, "tickets.ping_here", false) { pings.push("@here".into()); }
+    let mut intro = filled(if on(c, "tickets.command_only", false) { "ticket_intro_cmd" } else { "ticket_intro" }, &[("prefix", c["misc"]["prefix"].as_str().unwrap_or("w!"))]);
+    if !intro.is_null() && !pings.is_empty() { intro["content"] = Value::String(pings.join(" ")); }
+    view! {
+        <p class="muted">"In the member's DMs:"</p>
+        {chat("member", text("Hi, someone in the server keeps sending me scam links."))}
+        {show("ticket_confirm")}{show("ticket_sent")}
+        {(!greeting.is_empty()).then(|| show_msg(filled("ticket_greeting", &[("text", &greeting)])))}
+        {show(&format!("ticket_reply{anon}"))}
+        {(!closing.is_empty()).then(|| show_msg(filled("ticket_closing", &[("text", &closing)])))}
+        {show(&format!("ticket_closed{anon}"))}
+        <p class="muted">"In the ticket channel, for staff:"</p>
+        {show_msg(intro)}
+        {show("ticket_received")}{show(&format!("ticket_reply_copy{anon}"))}
+    }.into_any()
+}
+
+pub const TICKETS: &[Card] = &[Card {
+    notes: &["Members open a ticket by sending TommyBot a DM. Save your changes first, then set up the category and log channel."],
+    action: Some(("Set up category and log", "tickets/setup")),
+    ..card("Tickets status", "Do you want members to reach your staff by sending TommyBot a DM?", &[
+        ("tickets.enabled", "Enable Tickets"),
+        ("tickets.category", ""),
+        ("tickets.log_channel", ""),
+        ("tickets.ping_roles", ""),
+        ("tickets.ping_here", ""),
+        ("tickets.greeting", ""),
+        ("tickets.closing", ""),
+        ("tickets.anonymous", ""),
+        ("tickets.command_only", ""),
+    ], ticket_preview)
+}];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn placeholders_take_text_that_needs_escaping() {
+        let m = serde_json::json!({"embeds": [{"description": "Hi {text} via `{prefix}reply`"}]});
+        let out = super::fill(&m, &[("text", "say \"hi\"\nnow"), ("prefix", "!")]);
+        assert_eq!(out["embeds"][0]["description"], "Hi say \"hi\"\nnow via `!reply`");
+    }
+}
