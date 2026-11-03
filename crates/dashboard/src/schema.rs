@@ -109,7 +109,7 @@ const FILTERS: &[(&str, &str, &str)] = &[
     ("inactive_channel", "spam_text", "Inactive channel"),
     ("invites", "invites", "Invite links"),
     ("bad_sites", "malicious", "Bad websites"),
-    ("scam_links", "malicious", "Nitro and Steam scam links"),
+    ("scam_links", "malicious", "Scam links and login QR codes"),
     ("nsfw_links", "nsfw", "NSFW links"),
     ("words.filter", "words", "Word blacklist"),
     ("links", "links", "Link blacklist"),
