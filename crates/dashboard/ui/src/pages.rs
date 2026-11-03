@@ -406,7 +406,7 @@ pub fn Catch(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     }
 }
 
-/// Tickets settings with a one-click setup that creates the channels and posts the panel.
+/// Tickets settings with a one-click setup that creates the category and the ticket log.
 #[component]
 pub fn Tickets(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (msg, need) = (Msg::default(), RwSignal::new(false));
@@ -421,7 +421,7 @@ pub fn Tickets(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         }, msg, need, move |_| { msg.ok("Done"); fresh.update(|n| *n += 1) });
     };
     view! {
-        <div class="row"><button on:click=setup>"Set up tickets and post the panel"</button><Toast msg /></div>
+        <div class="row"><button on:click=setup>"Set up the ticket category and log"</button><Toast msg /></div>
         <StepUp need enrolled />
         {move || { fresh.track(); view! { <Section guild=guild.clone() name="tickets".to_string() enrolled /> } }}
     }

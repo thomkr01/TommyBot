@@ -454,6 +454,21 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         let heat = serde_json::from_value(v["heat"].clone()).unwrap_or_default();
         heat_ok(&heat).map_err(|e| ApiError::BadRequest(e.into()))?;
     }
+    if section == "tickets" {
+        let mut seen = std::collections::HashSet::new();
+        for sn in v["snippets"].as_array().into_iter().flatten() {
+            let (n, c) = (
+                sn["name"].as_str().unwrap_or(""),
+                sn["content"].as_str().unwrap_or(""),
+            );
+            let n_ok = (1..=100).contains(&n.chars().count()) && !n.contains(char::is_whitespace);
+            if !n_ok || !(1..=1000).contains(&c.chars().count()) || !seen.insert(n) {
+                return Err(ApiError::BadRequest(format!(
+                    "snippet \"{n}\" needs a unique name of 1-100 characters without spaces and 1-1000 characters of content"
+                )));
+            }
+        }
+    }
     if section == "misc" && v["warn_actions"].as_array().is_some_and(|a| a.len() > 5) {
         return Err(ApiError::BadRequest("at most 5 warn actions".into()));
     }

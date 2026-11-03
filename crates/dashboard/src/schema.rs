@@ -904,20 +904,40 @@ pub fn schema() -> Vec<Value> {
             "Decoy color",
         ),
     ];
-    let tickets = vec![
-        ti(fg("General", "enabled", "bool"), "Use the ticket system"),
-        ti(fg("General", "category", "category"), "Ticket category"),
-        ti(fg("General", "panel_channel", "channel"), "Panel channel"),
-        ti(
-            fg("General", "log_channel", "channel"),
-            "Transcript log channel",
-        ),
+    let tickets =
+        vec![
         hp(
-            ti(
-                dv(fg("General", "max_open", "int"), 1),
-                "Open tickets per member",
-            ),
-            "Staff with the Manage Tickets permit see and close every ticket.",
+            ti(fg("General", "enabled", "bool"), "Members can DM TommyBot to open a ticket"),
+            "Staff with the Manage Tickets permit or an access role see and answer every ticket.",
+        ),
+        ti(fg("General", "category", "category"), "Ticket category"),
+        ti(fg("General", "log_channel", "channel"), "Ticket log channel"),
+        ti(
+            dv(fg("General", "full_log", "bool"), true),
+            "Full conversation in the ticket log",
+        ),
+        ti(fg("General", "access_roles", "roles"), "Access roles"),
+        ti(fg("General", "ping_roles", "roles"), "Roles pinged on a new ticket"),
+        ti(fg("General", "ping_here", "bool"), "Ping @here on a new ticket"),
+        hp(
+            ti(fg("Messages", "greeting", "text"), "Greeting message"),
+            "Sent to the member when a ticket opens. Tags: {username} {userid} {usermention}",
+        ),
+        ti(fg("Messages", "closing", "text"), "Closing message"),
+        ti(fg("Replies", "anonymous", "bool"), "Anonymous replies by default"),
+        ti(
+            fg("Replies", "command_only", "bool"),
+            "Only the reply command reaches the member",
+        ),
+        ti(fg("New tickets", "paused", "bool"), "Turn off new tickets"),
+        ti(
+            fg("New tickets", "pause_reason", "text"),
+            "Reason shown to members",
+        ),
+        ti(fg("Blacklist", "blocked", "users"), "Members who cannot open tickets"),
+        hp(
+            ti(fg("Snippets", "snippets", "snippets"), "Saved replies"),
+            "Sent with the snippet command in a ticket. Tags: {username} {userid} {usermention}",
         ),
     ];
     let appeals = vec![
@@ -1114,6 +1134,7 @@ mod tests {
                     "form" => json!([{"label": "x"}]),
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
                     "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
+                    "snippets" => json!([{"name": "x", "content": "y"}]),
                     "profiles" => {
                         json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
                     }

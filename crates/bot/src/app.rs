@@ -78,6 +78,7 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
         "misc" => t::<MiscCfg>(v),
         "whitelist" => t::<WhitelistCfg>(v),
         "verification" => t::<VerificationCfg>(v),
+        "tickets" => t::<TicketsCfg>(v),
         _ => Ok(()),
     }
 }

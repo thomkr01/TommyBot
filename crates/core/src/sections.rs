@@ -418,15 +418,40 @@ fn yes() -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct TicketsCfg {
+    /// Members can DM the bot to open a ticket with this server.
     pub enabled: bool,
     /// Where ticket channels are created.
     pub category: Option<Id<ChannelMarker>>,
-    /// Holds the "Open a ticket" button.
-    pub panel_channel: Option<Id<ChannelMarker>>,
-    /// Gets a log and the transcript of every closed ticket.
+    /// Gets "New Ticket" and "Ticket Closed" logs.
     pub log_channel: Option<Id<ChannelMarker>>,
-    /// Open tickets one member may have at once.
-    pub max_open: u32,
+    /// The close log carries the whole conversation as a file.
+    pub full_log: bool,
+    /// Staff besides permits with Manage Tickets.
+    pub access_roles: Vec<Id<RoleMarker>>,
+    /// Pinged in a new ticket; the @everyone role (the guild id) pings everyone.
+    pub ping_roles: Vec<Id<RoleMarker>>,
+    pub ping_here: bool,
+    /// Sent to the member when a ticket opens / closes; `{username}` `{userid}` `{usermention}`.
+    pub greeting: String,
+    pub closing: String,
+    /// Staff replies hide their name by default.
+    pub anonymous: bool,
+    /// Only `reply` reaches the member; other messages stay staff talk.
+    pub command_only: bool,
+    /// No new tickets; the reason is shown to members ("" = none given).
+    pub paused: bool,
+    pub pause_reason: String,
+    /// Cannot open tickets or get replies.
+    pub blocked: Vec<Id<UserMarker>>,
+    pub snippets: Vec<Snippet>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Snippet {
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub author: Option<Id<UserMarker>>,
 }
 
 impl Default for TicketsCfg {
@@ -434,9 +459,19 @@ impl Default for TicketsCfg {
         Self {
             enabled: false,
             category: None,
-            panel_channel: None,
             log_channel: None,
-            max_open: 1,
+            full_log: true,
+            access_roles: vec![],
+            ping_roles: vec![],
+            ping_here: false,
+            greeting: String::new(),
+            closing: String::new(),
+            anonymous: false,
+            command_only: false,
+            paused: false,
+            pause_reason: String::new(),
+            blocked: vec![],
+            snippets: vec![],
         }
     }
 }

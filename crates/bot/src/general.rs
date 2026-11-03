@@ -300,9 +300,177 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "notes MEMBER | note add MEMBER ?r TEXT",
         "Staff notes",
     ),
+    (
+        "reply",
+        &["areply", "ar"],
+        "tickets",
+        "reply MESSAGE",
+        "Reply to the ticket (areply: anonymously)",
+    ),
+    (
+        "close",
+        &["aclose", "ac"],
+        "tickets",
+        "close [REASON]",
+        "Close the ticket (aclose: anonymously)",
+    ),
+    (
+        "closeall",
+        &["acloseall"],
+        "tickets",
+        "closeall [REASON]",
+        "Close every ticket",
+    ),
+    (
+        "blacklist",
+        &["block"],
+        "tickets",
+        "blacklist [USERS]",
+        "Stop users from opening tickets",
+    ),
+    (
+        "unblock",
+        &[],
+        "tickets",
+        "unblock [USERS]",
+        "Let users open tickets again",
+    ),
+    (
+        "blacklistclear",
+        &[],
+        "tickets",
+        "blacklistclear",
+        "Empty the ticket blacklist",
+    ),
+    (
+        "viewblacklist",
+        &[],
+        "tickets",
+        "viewblacklist",
+        "The ticket blacklist",
+    ),
+    (
+        "snippet",
+        &["asnippet", "as"],
+        "tickets",
+        "snippet NAME",
+        "Send a saved reply (asnippet: anonymously)",
+    ),
+    (
+        "snippetadd",
+        &[],
+        "tickets",
+        "snippetadd NAME CONTENT",
+        "Save a reply; {username} {userid} {usermention}",
+    ),
+    (
+        "snippetremove",
+        &[],
+        "tickets",
+        "snippetremove NAME",
+        "Remove a saved reply",
+    ),
+    (
+        "snippetclear",
+        &[],
+        "tickets",
+        "snippetclear",
+        "Remove every saved reply",
+    ),
+    (
+        "viewsnippet",
+        &["viewsnippets", "snippetlist", "vs"],
+        "tickets",
+        "viewsnippet [NAME]",
+        "Saved replies",
+    ),
+    (
+        "ticketsetup",
+        &[],
+        "tickets",
+        "ticketsetup",
+        "Create the ticket category and log",
+    ),
+    (
+        "category",
+        &[],
+        "tickets",
+        "category [NAME]",
+        "Create the ticket category again",
+    ),
+    (
+        "accessrole",
+        &["modrole", "supportrole"],
+        "tickets",
+        "accessrole [ROLES]",
+        "Roles that handle tickets",
+    ),
+    (
+        "pingrole",
+        &["mentionrole"],
+        "tickets",
+        "pingrole [ROLES | everyone | here]",
+        "Pinged on a new ticket",
+    ),
+    (
+        "logging",
+        &["logs"],
+        "tickets",
+        "logging [CHANNEL]",
+        "Ticket log on or off",
+    ),
+    (
+        "loggingplus",
+        &["advancedlogging", "advancedlogs"],
+        "tickets",
+        "loggingplus",
+        "Full conversation in the ticket log",
+    ),
+    (
+        "commandonly",
+        &["commandrequired"],
+        "tickets",
+        "commandonly",
+        "Only reply sends to the member",
+    ),
+    (
+        "anonymous",
+        &[],
+        "tickets",
+        "anonymous",
+        "Anonymous replies by default",
+    ),
+    (
+        "greetingmessage",
+        &["welcomemessage", "greetmessage"],
+        "tickets",
+        "greetingmessage [TEXT]",
+        "Sent when a ticket opens",
+    ),
+    (
+        "closingmessage",
+        &["goodbyemessage", "closemessage"],
+        "tickets",
+        "closingmessage [TEXT]",
+        "Sent when a ticket closes",
+    ),
+    (
+        "toggle",
+        &["enable", "disable"],
+        "tickets",
+        "toggle [REASON]",
+        "Turn new tickets off or on",
+    ),
+    (
+        "viewconfig",
+        &[],
+        "tickets",
+        "viewconfig",
+        "Ticket settings",
+    ),
 ];
 
-const CATEGORIES: [(&str, &[&str]); 3] = [
+const CATEGORIES: [(&str, &[&str]); 4] = [
     (
         "General Commands:",
         &[
@@ -363,6 +531,35 @@ const CATEGORIES: [(&str, &[&str]); 3] = [
             "ncases",
             "notes",
             "backups",
+        ],
+    ),
+    (
+        "Ticket Commands:",
+        &[
+            "reply",
+            "close",
+            "closeall",
+            "blacklist",
+            "unblock",
+            "blacklistclear",
+            "viewblacklist",
+            "snippet",
+            "snippetadd",
+            "snippetremove",
+            "snippetclear",
+            "viewsnippet",
+            "ticketsetup",
+            "category",
+            "accessrole",
+            "pingrole",
+            "logging",
+            "loggingplus",
+            "commandonly",
+            "anonymous",
+            "greetingmessage",
+            "closingmessage",
+            "toggle",
+            "viewconfig",
         ],
     ),
 ];
@@ -438,7 +635,7 @@ pub fn commands_page(level: &Level, prefix: &str, page: usize) -> (Embed, usize)
     (e.build(), CATEGORIES.len())
 }
 
-fn dashboard() -> Option<String> {
+pub(crate) fn dashboard() -> Option<String> {
     std::env::var("DASHBOARD_URL")
         .ok()
         .filter(|u| !u.is_empty())
@@ -927,7 +1124,7 @@ mod tests {
     #[test]
     fn commands_are_filtered_by_permit() {
         let (e, pages) = commands_page(&Level::None, "w!", 2);
-        assert_eq!(pages, 3);
+        assert_eq!(pages, 4);
         assert!(e.description.is_none());
         let (e, _) = commands_page(&Level::Owner, "w!", 2);
         assert!(e.description.unwrap().starts_with("❯ `w!ban` Ban"));

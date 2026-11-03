@@ -17,7 +17,7 @@ mod search;
 mod wizard;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealForm, AppealList, Blacklist};
-use records::{CaseList, NoteList, RaidLog, ReportList};
+use records::{CaseList, NoteList, RaidLog, ReportList, TicketLog};
 use common::*;
 use embeds::Embeds;
 use form::Section;
@@ -259,6 +259,7 @@ fn App() -> impl IntoView {
                                 ("channel_setup", _) => view! { <ChannelSetup guild=g.clone() enrolled /> }.into_any(),
                                 ("automod_panic", _) => view! { <Panic guild=g.clone() part="heat,general" enrolled /> }.into_any(),
                                 ("antinuke_panic", _) => view! { <Panic guild=g.clone() part="nuke,general" enrolled /> }.into_any(),
+                                ("tickets", Some(l)) if l == "log" && rest.len() == 3 => view! { <TicketLog guild=g.clone() channel=rest[1].clone() message=rest[2].clone() /> }.into_any(),
                                 ("tickets", _) => view! { <Tickets guild=g.clone() enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
                                 ("lockdown", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownManage guild=g.clone() /> }.into_any(),

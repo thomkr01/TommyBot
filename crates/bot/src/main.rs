@@ -130,7 +130,8 @@ async fn main() -> Result<()> {
         | Intents::GUILD_MESSAGES
         | Intents::MESSAGE_CONTENT
         | Intents::GUILD_VOICE_STATES
-        | Intents::GUILD_MESSAGE_REACTIONS;
+        | Intents::GUILD_MESSAGE_REACTIONS
+        | Intents::DIRECT_MESSAGES;
     let mut shard = Shard::new(ShardId::ONE, cfg.discord_token, intents);
 
     let stop = shutdown_signal();

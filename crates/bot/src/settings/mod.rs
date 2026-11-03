@@ -762,6 +762,8 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             crate::modview::cases_page(app, gid.get() as i64, user, page).await?
         }
         None if kind == "ginfo" => crate::info::server_page(app, gid, page).await?,
+        None if kind == "tkblock" => crate::tickets::blocked_page(&cfg.tickets, page),
+        None if kind == "tksnip" => crate::tickets::snippets_page(&cfg.tickets, page),
         None => return Ok(true),
     };
     let r = InteractionResponse {

@@ -19,7 +19,7 @@ TommyBot is a fast, all-in-one Discord security and moderation bot written in Ru
 - **Verification**: captcha in Discord or on the web.
 - **Logging**: message, member, role, channel, voice and moderation logs in tidy embeds, sent only to private log channels.
 - **Appeals, reports and cases**: ban and timeout appeals, a report button for members, notes and a searchable case history.
-- **Tickets, embeds and Discord AutoMod**: a ticket panel, an embed builder and control of Discord's own AutoMod rules.
+- **Tickets, embeds and Discord AutoMod**: members DM TommyBot to open a ticket with any server they share with it, staff answer in a private channel (anonymous replies, snippets, greeting and closing messages, blacklist, full transcripts viewable on the dashboard); plus an embed builder and control of Discord's own AutoMod rules.
 - **Web dashboard**: log in with Discord, run the setup wizard and change every setting in the browser, protected by two-factor login.
 
 ## Installation

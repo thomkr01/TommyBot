@@ -26,6 +26,18 @@ fn status_code(e: &Error) -> Option<(u16, Option<u64>)> {
     }
 }
 
+/// Discord's JSON error code (50035 invalid form, 30013 too many channels, ...).
+pub fn code(e: &anyhow::Error) -> Option<u64> {
+    e.downcast_ref::<Error>()
+        .and_then(status_code)
+        .and_then(|(_, c)| c)
+}
+
+/// 404, or 403 "Missing Access": the bot is not in that server (any more).
+pub fn no_access(e: &Error) -> bool {
+    status_code(e).is_some_and(|(s, _)| s == 403 || s == 404)
+}
+
 /// The message, member, channel, role, ban or webhook no longer exists.
 pub fn gone(e: &Error) -> bool {
     status_code(e).is_some_and(|(s, _)| s == 404)
