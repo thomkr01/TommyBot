@@ -130,7 +130,7 @@ const BY_WORD: &[(&str, &str)] = &[
     ("owner", "owner"),
     ("author", "member"),
     ("attachment", "attachments"),
-    ("sent", "calendar"),
+    ("sent", "send"),
     ("username", "nickname"),
     ("nick", "nickname"),
     ("rate limit", "slowmode"),
