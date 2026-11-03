@@ -137,6 +137,7 @@ const BY_WORD: &[(&str, &str)] = &[
     ("type", "tag"),
     ("explicit", "nsfw_filter"),
     ("notification", "notifications_feed"),
+    ("message id", "message_id"),
     ("content", "message"),
     ("message", "message"),
     ("reason", "reason"),
@@ -246,7 +247,7 @@ mod tests {
         assert_eq!(for_label("Account Accessories:").name, "avatar_field");
         assert_eq!(for_label("Essential Roles").name, "role");
         assert_eq!(for_label("Rate limit per user").name, "slowmode");
-        assert_eq!(for_label("Message Id").name, "message");
+        assert_eq!(for_label("Message Id").name, "message_id");
         assert_eq!(for_label("Case").name, "case");
     }
 
