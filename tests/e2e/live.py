@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|purge|emojis|edit|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
+Usage: live.py spam|lock|mention_lock|nuke|purge|emojis|edit|restart|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
@@ -193,6 +193,12 @@ def wait_for(q, want, tries=20):
     return n
 
 
+def can_send(chan):
+    """@everyone is not denied Send Messages in this channel."""
+    everyone = [o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == GUILD]
+    return not everyone or int(everyone[0]["deny"]) & (1 << 11) == 0
+
+
 def lock():
     """A timed channel lock via the scheduler: #general loses Send Messages, then gets it back."""
     chan = text_channel("general")
@@ -209,10 +215,30 @@ def lock():
             break
         time.sleep(1)
     unlocked = wait_for(locks, lambda n: n == 0)
-    everyone = [o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == GUILD]
-    back = not everyone or int(everyone[0]["deny"]) & send == 0
+    back = can_send(chan)
     return check(locked > 0 and denied and unlocked == 0 and back,
                  f"lock: locked={locked > 0}, send denied={denied}, timed unlock={unlocked == 0 and back}")
+
+
+def restart():
+    """The bot dies mid timed lock and is down when the unlock is due: after the restart it must still unlock."""
+    chan = text_channel("general")
+    locks = f"select count(*) from lock_snapshots where guild_id = {GUILD}"
+    sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+            values ({GUILD}, 'lock', '{{"kind": "channel", "channel": {chan}, "duration_s": 10}}', now())""")
+    locked = wait_for(locks, lambda n: n > 0)
+    time.sleep(2)  # let the overwrite land
+    pid_file = os.environ["BOT_PID_FILE"]
+    os.kill(int(open(pid_file).read()), 9)  # a crash, not a clean shutdown
+    time.sleep(15)  # the unlock comes due while the bot is down
+    held = int(sql(locks))
+    log = open("target/live-bot.log", "a")
+    bot = subprocess.Popen(["./target/release/tommybot"], stdout=log, stderr=log)
+    open(pid_file, "w").write(str(bot.pid))
+    unlocked = wait_for(locks, lambda n: n == 0, 30)
+    back = can_send(chan)
+    return check(locked > 0 and held > 0 and unlocked == 0 and back,
+                 f"restart: locked={locked > 0}, still locked while down={held > 0}, unlocked after restart={unlocked == 0 and back}")
 
 
 def mention_lock():
@@ -315,7 +341,7 @@ def edit():
 
 
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
-             "purge": purge, "emojis": emojis, "edit": edit}
+             "purge": purge, "emojis": emojis, "edit": edit, "restart": restart}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
