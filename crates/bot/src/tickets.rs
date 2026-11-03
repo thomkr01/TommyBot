@@ -77,12 +77,19 @@ async fn open(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<S
         return Ok("Tickets are not set up on this server.".into());
     };
     let g = gid.get() as i64;
+    // One open at a time per server, so two quick presses can neither share a number nor both
+    // pass `max_open`. The lock ends with the transaction, before the Discord call.
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(g)
+        .execute(&mut *tx)
+        .await?;
     let mine: Vec<Option<i64>> = sqlx::query_scalar(
         "SELECT channel_id FROM tickets WHERE guild_id = $1 AND user_id = $2 AND closed_at IS NULL",
     )
     .bind(g)
     .bind(user.get() as i64)
-    .fetch_all(&app.pool)
+    .fetch_all(&mut *tx)
     .await?;
     if mine.len() >= t.max_open.max(1) as usize {
         let at = mine
@@ -98,20 +105,20 @@ async fn open(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<S
     )
     .bind(g)
     .bind(user.get() as i64)
-    .fetch_one(&app.pool)
+    .fetch_one(&mut *tx)
     .await?;
     if recent >= TICKETS_PER_HOUR {
         return Ok("You opened too many tickets this hour, try again later.".into());
     }
-    // shortcut: two opens at the same instant can collide on the number (the loser presses again) or pass max_open together; fine for button clicks.
     let number: i32 = sqlx::query_scalar(
         "INSERT INTO tickets (guild_id, number, user_id)
          SELECT $1, COALESCE(MAX(number), 0) + 1, $2 FROM tickets WHERE guild_id = $1 RETURNING number",
     )
     .bind(g)
     .bind(user.get() as i64)
-    .fetch_one(&app.pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     let staff = permits::roles_with(&app.pool, g, "tickets").await?;
     let name = format!("ticket-{number:04}");
     let ows = overwrites(gid, user.get(), app.me.get(), &staff);
