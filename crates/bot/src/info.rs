@@ -286,9 +286,7 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
         e = e.text(&format!("{ARROW} +{hidden} more rows on the dashboard."));
     }
     if rows.iter().any(|r| r.fix.is_some()) {
-        let link = std::env::var("DASHBOARD_URL")
-            .ok()
-            .filter(|u| !u.is_empty())
+        let link = crate::general::dashboard()
             .map_or("the dashboard".into(), |u| format!("[the dashboard]({u})"));
         e = e.text(&format!(
             "{TIP} Fix the marked rows with one click on the Overview page of {link}."

@@ -446,7 +446,7 @@ pub fn commands_page(level: &Level, prefix: &str, page: usize) -> (Embed, usize)
     (e.build(), CATEGORIES.len())
 }
 
-fn dashboard() -> Option<String> {
+pub(crate) fn dashboard() -> Option<String> {
     std::env::var("DASHBOARD_URL")
         .ok()
         .filter(|u| !u.is_empty())
