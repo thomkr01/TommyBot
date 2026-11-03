@@ -3,7 +3,7 @@
 use anyhow::Result;
 use captcha::{
     filters::{Dots, Noise, Wave},
-    Captcha,
+    Captcha, Geometry,
 };
 use image::{Rgb, RgbImage};
 use rand::Rng;
@@ -441,15 +441,19 @@ fn rgb(hex: &str) -> Option<Rgb<u8>> {
 }
 
 /// The code and its PNG. Sync so the non-Send generator never crosses an await.
-pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
-    // The captcha crate panics in `view` when its random text lands near the canvas edge
-    // (u32 underflow), so a failed draw is retried instead of taking the task down.
-    (0..5)
-        .find_map(|_| std::panic::catch_unwind(|| draw_captcha(c)).ok())
-        .unwrap_or_default()
+/// The `w` x `h` box centered on the text, kept inside the crate's 400x300 canvas. The crate's own
+/// `Captcha::view` underflows (and panics) when the random text lands near the left or top edge.
+fn crop(a: Geometry, w: u32, h: u32) -> Geometry {
+    let left = ((a.left + a.right) / 2).saturating_sub(w / 2).min(400 - w);
+    let top = ((a.top + a.bottom) / 2).saturating_sub(h / 2).min(300 - h);
+    Geometry::new(left, left + w, top, top + h)
 }
 
-fn draw_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
+fn view(cap: &mut Captcha, w: u32, h: u32) {
+    cap.extract(crop(cap.text_area(), w, h));
+}
+
+pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let (w, h) = (c.width.clamp(150, 300), c.height.clamp(60, 200));
     // The library draws 40 px text on a fixed 400x300 canvas: crop a smaller or larger box and scale it to
     // w x h. These bounds keep the crop inside the canvas and the text mostly inside the crop.
@@ -460,7 +464,7 @@ fn draw_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     if c.trace {
         cap.apply_filter(Wave::new(2.0, 8.0));
     }
-    cap.view(cw, ch);
+    view(&mut cap, cw, ch);
     // The text alone, so the decoys added next can be told apart and colored separately.
     let text = cap.as_png();
     if c.mixed {
@@ -472,7 +476,7 @@ fn draw_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let load = |png: Option<Vec<u8>>| Some(image::load_from_memory(&png?).ok()?.into_luma8());
     // Faint background letters: a second code that is never the answer.
     let mut bg = Captcha::new();
-    bg.add_chars(5).view(cw, ch);
+    view(bg.add_chars(5), cw, ch);
     let (Some(text), Some(all), Some(bg)) = (load(text), load(cap.as_png()), load(bg.as_png()))
     else {
         return (cap.chars_as_string(), vec![]);
@@ -915,6 +919,16 @@ mod tests {
                 Step::Web
             );
         }
+    }
+
+    #[test]
+    fn crop_stays_on_the_canvas_when_text_is_near_an_edge() {
+        let c = crop(Geometry::new(10, 30, 5, 20), 300, 200);
+        assert_eq!((c.left, c.right, c.top, c.bottom), (0, 300, 0, 200));
+        let c = crop(Geometry::new(380, 399, 280, 299), 300, 200);
+        assert_eq!((c.left, c.right, c.top, c.bottom), (100, 400, 100, 300));
+        let c = crop(Geometry::new(150, 250, 100, 200), 100, 60);
+        assert_eq!((c.left, c.right, c.top, c.bottom), (150, 250, 120, 180));
     }
 
     #[test]
