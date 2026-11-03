@@ -129,6 +129,13 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
                 .is_some_and(|t| t.starts_with("image/"))
         })
         .count();
+    // Edits cannot add attachments, so images are only read once.
+    let qr_scam = !edit && images > 0 && (f.scam_links.enabled || f.bad_sites.enabled) && {
+        let qr = crate::qr::texts(app, &m.attachments).await;
+        filters::is_discord_login(&qr)
+            || f.bad_sites.enabled && app.sites.phishing(&filters::hosts(&qr))
+            || f.scam_links.enabled && filters::is_nitro_steam_scam(&qr)
+    };
     let mut facts = MsgFacts {
         content,
         emojis: count_emojis(content),
@@ -149,7 +156,9 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
                 .or_default()
                 .on_message(now, f.inactive_messages, f.inactive_hours),
         invite_link: f.invites.enabled && is_invite(content, &checked),
-        malicious_link: bad_site || f.scam_links.enabled && filters::is_nitro_steam_scam(content),
+        malicious_link: bad_site
+            || qr_scam
+            || f.scam_links.enabled && filters::is_nitro_steam_scam(content),
         nsfw_link: f.nsfw_links.enabled && app.sites.nsfw(&checked),
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),

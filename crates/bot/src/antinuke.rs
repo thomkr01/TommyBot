@@ -672,6 +672,7 @@ pub(crate) async fn revert_and_report(
         .line("Recreated", &format!("`{}`", sum.recreated))
         .line("Kicked, re-invite", &reinvite);
     send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
+    crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
     if !auto {
         return Ok(());
     }

@@ -70,6 +70,13 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "Server info",
     ),
     ("setup", &[], "*", "setup", "Setup panel"),
+    (
+        "security",
+        &["sec", "scan"],
+        "*",
+        "security",
+        "Server security check",
+    ),
     ("config", &[], "*", "config", "Config overview"),
     (
         "statics",
@@ -314,6 +321,7 @@ const CATEGORIES: [(&str, &[&str]); 3] = [
             "info",
             "roleinfo",
             "serverinfo",
+            "security",
         ],
     ),
     (
@@ -438,7 +446,7 @@ pub fn commands_page(level: &Level, prefix: &str, page: usize) -> (Embed, usize)
     (e.build(), CATEGORIES.len())
 }
 
-fn dashboard() -> Option<String> {
+pub(crate) fn dashboard() -> Option<String> {
     std::env::var("DASHBOARD_URL")
         .ok()
         .filter(|u| !u.is_empty())
@@ -677,7 +685,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
 pub fn slash_words(name: &str, o: &[CommandDataOption]) -> Option<Vec<String>> {
     if !matches!(
         name,
-        "about" | "ping" | "help" | "invite" | "commands" | "info"
+        "about" | "ping" | "help" | "invite" | "commands" | "info" | "security"
     ) {
         return None;
     }
@@ -706,6 +714,7 @@ pub fn definitions() -> Vec<Command> {
         ("help", "Help panel and links"),
         ("invite", "Add TommyBot to a server"),
         ("commands", "The commands you can use"),
+        ("security", "Server security check"),
     ]
     .map(|(n, d)| chat(n, d).build())
     .into();
@@ -855,6 +864,7 @@ async fn answer(
             embed(log.build())
         }
         "serverinfo" => server_info(app, gid, invoker).await,
+        "security" => embed(crate::info::security_page(app, gid).await?),
         "roleinfo" | "info" => {
             let staff = *level != Level::None;
             let e = match arg {

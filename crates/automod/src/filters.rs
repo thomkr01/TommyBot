@@ -188,6 +188,14 @@ pub fn is_nitro_steam_scam(s: &str) -> bool {
                 .any(|h| !OFFICIAL.iter().any(|d| on_domain(h, d))))
 }
 
+/// A Discord login QR code (`discord.com/ra/...`): whoever scans it hands their account over.
+pub fn is_discord_login(s: &str) -> bool {
+    let s = s.to_lowercase();
+    ["discord.com/ra/", "discordapp.com/ra/"]
+        .iter()
+        .any(|p| s.contains(p))
+}
+
 /// Number of blacklist hits. A `*` term is a wildcard matched per space-separated chunk; a plain term
 /// matches whole words only, so "ass" does not hit "class".
 pub fn word_hits(s: &str, words: &[String]) -> usize {
@@ -309,6 +317,13 @@ mod tests {
             shortener_urls("see <https://bit.ly/x> and https://example.com/y"),
             ["https://bit.ly/x"]
         );
+    }
+
+    #[test]
+    fn discord_login_qr() {
+        assert!(is_discord_login("https://discord.com/ra/abc123"));
+        assert!(is_discord_login("https://PTB.discordapp.com/ra/x"));
+        assert!(!is_discord_login("https://discord.com/invite/abc"));
     }
 
     #[test]

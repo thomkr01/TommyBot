@@ -23,6 +23,7 @@ mod native;
 mod panic;
 mod prefix;
 mod purge;
+mod qr;
 mod reply;
 mod reports;
 mod scheduler;

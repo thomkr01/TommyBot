@@ -252,14 +252,29 @@ impl Discord {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<reqwest::Response> {
-        let mut r = self
-            .http
-            .request(method, format!("{}{path}", self.api))
-            .header("Authorization", format!("Bot {}", self.bot_token));
-        if let Some(b) = body {
-            r = r.json(&b);
+        // A 429 waits the time Discord asks for (at most 10 s) and tries again, up to 3 times.
+        let mut tries = 0;
+        loop {
+            let mut r = self
+                .http
+                .request(method.clone(), format!("{}{path}", self.api))
+                .header("Authorization", format!("Bot {}", self.bot_token));
+            if let Some(b) = &body {
+                r = r.json(b);
+            }
+            let res = r.send().await?;
+            if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || tries == 3 {
+                return Ok(res);
+            }
+            tries += 1;
+            let wait = res
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()?.parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.0, 10.0);
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
         }
-        Ok(r.send().await?)
     }
 
     /// Posts a log embed with mentions disabled.
@@ -322,7 +337,43 @@ pub(crate) fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn send_retries_after_429() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static HITS: AtomicU32 = AtomicU32::new(0);
+        let app = axum::Router::new().route(
+            "/x",
+            axum::routing::get(|| async {
+                if HITS.fetch_add(1, Ordering::SeqCst) < 2 {
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "0")],
+                    )
+                        .into_response()
+                } else {
+                    "{}".into_response()
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let d = Discord {
+            http: reqwest::Client::new(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            bot_token: String::new(),
+            redirect_uri: String::new(),
+            api,
+            memo: Default::default(),
+        };
+        let res = d.send(reqwest::Method::GET, "/x", None).await.unwrap();
+        assert!(res.status().is_success());
+        assert_eq!(HITS.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn everyone_sees_follows_base_and_overwrite() {

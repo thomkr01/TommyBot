@@ -105,6 +105,11 @@ pub const SERVERS: Emoji = e("server", "▸");
 
 pub const CLOCK: Emoji = e("clock", "▸");
 
+pub const SHIELD: Emoji = e("shield_check", "🛡️");
+pub const CRITICAL: Emoji = e("shield_x", "⛔");
+pub const WARNING: Emoji = e("warning", "⚠️");
+pub const TIP: Emoji = e("info", "ℹ️");
+
 /// Label word → icon name for [`for_label`]; first match wins.
 const BY_WORD: &[(&str, &str)] = &[
     ("kicked", "kick"),
