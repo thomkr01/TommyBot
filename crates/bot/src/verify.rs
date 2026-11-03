@@ -6,7 +6,6 @@ use captcha::{
     Captcha, Geometry,
 };
 use image::{Rgb, RgbImage};
-use rand::Rng;
 use serde::Deserialize;
 use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
@@ -484,19 +483,18 @@ pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let (font, decoy) = (rgb(&c.font_color), rgb(&c.decoy_color));
     let custom = |c: Option<Rgb<u8>>| c.filter(|c| c.0 != [0, 0, 0]);
     // Each character slot gets its own green or yellow unless the settings name a color.
-    let mut rng = rand::thread_rng();
     let slots = c.length.clamp(3, 7);
     let pick: Vec<(Rgb<u8>, Rgb<u8>)> = (0..slots)
         .map(|_| {
-            let t = if rng.gen() {
+            let t = if rand::random() {
                 Rgb([40, 190, 60])
             } else {
                 Rgb([225, 200, 30])
             };
             let d = Rgb([
-                rng.gen_range(150..230),
-                rng.gen_range(150..230),
-                rng.gen_range(150..230),
+                rand::random_range(150..230),
+                rand::random_range(150..230),
+                rand::random_range(150..230),
             ]);
             (custom(font).unwrap_or(t), custom(decoy).unwrap_or(d))
         })
@@ -544,9 +542,7 @@ pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     }
     let img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
     let mut png = std::io::Cursor::new(vec![]);
-    let ok = img
-        .write_to(&mut png, image::ImageOutputFormat::Png)
-        .is_ok();
+    let ok = img.write_to(&mut png, image::ImageFormat::Png).is_ok();
     (
         cap.chars_as_string(),
         if ok { png.into_inner() } else { vec![] },

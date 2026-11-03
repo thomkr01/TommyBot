@@ -37,9 +37,9 @@ async fn is_discord_owner(st: &AppState, s: &Sess, guild: i64) -> Result<bool, A
 /// Re-resolved on every request, including writes (spec 3.1).
 pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Level, ApiError> {
     let flag = |table: &'static str| async move {
-        sqlx::query_scalar::<_, bool>(&format!(
+        sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(format!(
             "select exists(select 1 from {table} where guild_id = $1 and user_id = $2)"
-        ))
+        )))
         .bind(guild)
         .bind(s.user_id)
         .fetch_one(&st.db)

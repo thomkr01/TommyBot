@@ -17,10 +17,10 @@ serde_json.workspace = true
 sqlx.workspace = true
 chrono.workspace = true
 axum = "0.8"
-axum-extra = { version = "0.10", features = ["cookie"] }
-base64 = "0.22"
-rand = "0.8"
+axum-extra = { version = "0.12", features = ["cookie"] }
+base64 = "0.23"
+rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
-sha2 = "0.10"
+totp-rs = { version = "6", features = ["gen_secret", "otpauth"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "set-header"] }
+sha2 = "0.11"

@@ -142,11 +142,13 @@ mod tests {
 
     async fn clean(pool: &PgPool, gid: i64) {
         for t in ["scheduled_jobs", "cases"] {
-            sqlx::query(&format!("DELETE FROM {t} WHERE guild_id = $1"))
-                .bind(gid)
-                .execute(pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {t} WHERE guild_id = $1"
+            )))
+            .bind(gid)
+            .execute(pool)
+            .await
+            .unwrap();
         }
     }
 
@@ -271,10 +273,10 @@ mod tests {
             (2, "now() + interval '1 hour'"),
             (3, "NULL"),
         ] {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id, expires_at)
                  VALUES ($1, $2, 'warn', 1, 1, {expiry})"
-            ))
+            )))
             .bind(gid)
             .bind(no)
             .execute(&pool)

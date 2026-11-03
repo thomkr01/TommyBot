@@ -32,11 +32,11 @@ pub async fn texts(app: &App, attachments: &[Attachment]) -> String {
 
 fn decode(bytes: &[u8]) -> Vec<String> {
     // A tiny file can claim a huge size; the limits stop it before it allocates.
-    let mut limits = image::io::Limits::default();
+    let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(128 << 20);
-    let Ok(mut reader) = image::io::Reader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    let Ok(mut reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
     else {
         return vec![];
     };

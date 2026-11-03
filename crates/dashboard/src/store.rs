@@ -141,14 +141,16 @@ pub async fn write_permits(c: &mut PgConnection, guild: i64, p: &Value) -> Resul
         .execute(&mut *c)
         .await?;
     for (table, key) in [("extra_owners", "eo"), ("trusted_admins", "ta")] {
-        sqlx::query(&format!("delete from {table} where guild_id = $1"))
-            .bind(guild)
-            .execute(&mut *c)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "delete from {table} where guild_id = $1"
+        )))
+        .bind(guild)
+        .execute(&mut *c)
+        .await?;
         for u in ids(&p[key]) {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "insert into {table} (guild_id, user_id) values ($1,$2) on conflict do nothing"
-            ))
+            )))
             .bind(guild)
             .bind(u)
             .execute(&mut *c)

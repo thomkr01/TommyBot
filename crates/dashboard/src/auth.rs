@@ -9,11 +9,9 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use chrono::{DateTime, Duration, Utc};
-use rand::RngCore;
 use serde::Deserialize;
 use serde_json::json;
 use std::time::{Duration as StdDuration, Instant};
-use totp_rs::{Algorithm, Secret, TOTP};
 
 const STEP_UP_MINUTES: i64 = 10;
 /// Wrong TOTP codes allowed per user within `TOTP_WINDOW`.
@@ -92,7 +90,7 @@ pub async fn rate_limit(State(st): State<AppState>, req: Request, next: Next) ->
 
 pub fn token() -> String {
     let mut b = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut b);
+    rand::fill(&mut b);
     B64.encode(b)
 }
 
@@ -236,22 +234,6 @@ pub async fn me(State(st): State<AppState>, s: Sess) -> Result<Json<serde_json::
     ))
 }
 
-pub(crate) fn totp(secret_b32: &str, user: &str) -> Result<TOTP, ApiError> {
-    let raw = Secret::Encoded(secret_b32.into())
-        .to_bytes()
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    Ok(TOTP::new(
-        Algorithm::SHA1,
-        6,
-        1,
-        30,
-        raw,
-        Some("TommyBot".into()),
-        user.into(),
-    )
-    .map_err(anyhow::Error::from)?)
-}
-
 /// Starts (or restarts, until confirmed) enrollment; returns the otpauth URI to render as a QR code.
 pub async fn totp_enroll(
     State(st): State<AppState>,
@@ -265,8 +247,8 @@ pub async fn totp_enroll(
     {
         return Err(ApiError::Forbidden("totp already enrolled"));
     }
-    let secret = Secret::generate_secret().to_encoded().to_string();
-    let dm_code = format!("{:06}", rand::rngs::OsRng.next_u32() % 1_000_000);
+    let secret = crate::otp::new_secret();
+    let dm_code = format!("{:06}", rand::random_range(0..1_000_000));
     // The code goes to the logged-in Discord account, which a stolen session cookie can't read.
     st.discord
         .dm(s.user_id, &format!("Your TommyBot authenticator setup code is **{dm_code}**. If you didn't start this, don't share it: someone may have your dashboard session."))
@@ -275,7 +257,7 @@ pub async fn totp_enroll(
     sqlx::query("insert into dash_totp (user_id, secret, dm_code) values ($1,$2,$3) on conflict (user_id) do update set secret = $2, dm_code = $3")
         .bind(s.user_id).bind(&secret).bind(&dm_code).execute(&st.db).await?;
     Ok(Json(
-        json!({"secret": secret, "uri": totp(&secret, &s.username)?.get_url()}),
+        json!({"secret": secret, "uri": crate::otp::uri(&secret, &s.username)?}),
     ))
 }
 
@@ -300,14 +282,7 @@ pub async fn totp_verify(
     .fetch_optional(&st.db)
     .await?
     .ok_or(ApiError::Forbidden("totp not enrolled"))?;
-    let totp = totp(&secret, &s.username)?;
-    let now_step = std::time::UNIX_EPOCH
-        .elapsed()
-        .map_err(anyhow::Error::from)?
-        .as_secs()
-        / 30;
-    // Same window as `check_current` (skew 1), but we need the step to refuse a replay.
-    let step = (now_step - 1..=now_step + 1).find(|t| totp.generate(t * 30) == c.code);
+    let step = crate::otp::step(&secret, &c.code)?;
     // A wrong DM code counts as a miss, so it shares the TOTP lockout.
     let step = step.filter(|_| confirmed || dm_code.as_deref() == Some(c.dm_code.as_str()));
     {
