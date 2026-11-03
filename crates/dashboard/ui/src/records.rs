@@ -292,7 +292,7 @@ pub fn TicketLog(guild: String, channel: String, message: String) -> impl IntoVi
     view! {
         <Toast msg />
         <div class="card">
-            <h3>"Ticket transcript"</h3>
+            <h3>{crate::icons::icon("modmail")}" Ticket transcript"</h3>
             {move || text.get().lines().map(|l| {
                 let (time, name, role, body) = log_line(l);
                 let chip = match role { "User" => "chip blue", "Staff" => "chip", _ => "chip muted" };

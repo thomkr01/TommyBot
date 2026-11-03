@@ -198,7 +198,15 @@ pub fn blocked_page(t: &TicketsCfg, page: usize) -> (Embed, usize) {
         .take(25)
         .map(|u| format!("<@{u}> ({u})"))
         .collect();
-    (emb("Blacklist", &lines.join("\n"), BLUE).build(), pages)
+    (
+        emb(
+            &format!("{TICKET_BLOCK} Blacklist"),
+            &lines.join("\n"),
+            BLUE,
+        )
+        .build(),
+        pages,
+    )
 }
 
 pub fn snippets_page(t: &TicketsCfg, page: usize) -> (Embed, usize) {

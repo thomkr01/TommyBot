@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use tommybot_core::{permits, sections::TicketsCfg};
 use tommybot_logging::embed::{avatar, clip, Log, BLUE, GREEN, ORANGE, RED};
+use tommybot_logging::emoji::{TICKET, TICKET_BLOCK, TICKET_CLOSE, TICKET_NEW, TICKET_REPLY};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::{

@@ -33,7 +33,11 @@ pub(super) async fn relay(
         text.to_string()
     };
     let staff = &m.author;
-    let mut to_member = s.footer(stamp(emb("Message Received", &text, ORANGE)));
+    let mut to_member = s.footer(stamp(emb(
+        &format!("{TICKET_REPLY} Message Received"),
+        &text,
+        ORANGE,
+    )));
     if !anon {
         to_member = author(to_member, &staff.name, avatar(staff));
     }
@@ -65,7 +69,7 @@ pub(super) async fn relay(
         staff.name.clone()
     };
     let copy = author(
-        stamp(emb("Message Sent", &text, ORANGE)),
+        stamp(emb(&format!("{TICKET_REPLY} Message Sent"), &text, ORANGE)),
         &shown,
         avatar(staff),
     );
@@ -84,15 +88,15 @@ pub(super) async fn relay(
 
 /// Who wrote a line of the history, from the relay embeds the bot posts in the ticket.
 fn speaker(title: &str, author: Option<&str>, footer: Option<&str>) -> Option<String> {
+    // Titles start with an emoji, so match the words at the end.
     match title {
-        // From the member: the footer is "name | id".
-        "Message Received" => Some(format!(
+        t if t.ends_with("Message Received") => Some(format!(
             "{} (User)",
             footer
                 .and_then(|f| f.rsplit_once(" | "))
                 .map_or("Unknown", |x| x.0)
         )),
-        "Message Sent" => Some(format!(
+        t if t.ends_with("Message Sent") => Some(format!(
             "{} (Staff)",
             author.map_or("Unknown", |a| a.strip_suffix(" (Anonymous)").unwrap_or(a))
         )),
@@ -249,7 +253,7 @@ pub(super) async fn close(
         .id;
     if !t.closing.is_empty() {
         let e = s.footer(stamp(emb(
-            "Closing Message",
+            &format!("{TICKET_CLOSE} Closing Message"),
             &tags(&t.closing, &member.user),
             ORANGE,
         )));
@@ -258,7 +262,11 @@ pub(super) async fn close(
             "ticket closing message",
         );
     }
-    let mut e = s.footer(stamp(emb("Ticket Closed", reason, RED)));
+    let mut e = s.footer(stamp(emb(
+        &format!("{TICKET_CLOSE} Ticket Closed"),
+        reason,
+        RED,
+    )));
     if !anon {
         e = author(e, &staff.name, avatar(staff));
     }
@@ -341,11 +349,16 @@ mod tests {
     #[test]
     fn history_names_the_speaker_of_relay_embeds() {
         assert_eq!(
-            speaker("Message Received", None, Some("ann | 12")).as_deref(),
+            speaker(
+                "<:modmail_reply:1> Message Received",
+                None,
+                Some("ann | 12")
+            )
+            .as_deref(),
             Some("ann (User)")
         );
         assert_eq!(
-            speaker("Message Sent", Some("bob (Anonymous)"), None).as_deref(),
+            speaker("💬 Message Sent", Some("bob (Anonymous)"), None).as_deref(),
             Some("bob (Staff)")
         );
         assert_eq!(speaker("New Ticket", None, None), None);

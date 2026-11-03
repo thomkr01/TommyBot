@@ -105,6 +105,12 @@ pub const SERVERS: Emoji = e("server", "▸");
 
 pub const CLOCK: Emoji = e("clock", "▸");
 
+pub const TICKET: Emoji = e("modmail", "📨");
+pub const TICKET_NEW: Emoji = e("modmail_new", "📬");
+pub const TICKET_REPLY: Emoji = e("modmail_reply", "💬");
+pub const TICKET_CLOSE: Emoji = e("modmail_close", "📪");
+pub const TICKET_BLOCK: Emoji = e("modmail_block", "⛔");
+
 pub const SHIELD: Emoji = e("shield_check", "🛡️");
 pub const CRITICAL: Emoji = e("shield_x", "⛔");
 pub const WARNING: Emoji = e("warning", "⚠️");
@@ -297,6 +303,11 @@ mod tests {
             SIZE,
             SERVERS,
             CLOCK,
+            TICKET,
+            TICKET_NEW,
+            TICKET_REPLY,
+            TICKET_CLOSE,
+            TICKET_BLOCK,
         ];
         let names = consts
             .iter()

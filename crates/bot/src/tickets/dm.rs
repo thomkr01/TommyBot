@@ -97,7 +97,7 @@ async fn confirmation(app: &App, m: &Message) -> Result<()> {
 
 async fn ask(app: &App, m: &Message, s: &Server) -> Result<()> {
     let e = emb(
-        "Confirmation",
+        &format!("{TICKET} Confirmation"),
         &format!(
             "You're sending this message to **{}** (ID: {}). Press **Send** to confirm.\nWant to send to another server? Press **Other server**.\nTo cancel this request, press **Cancel**.",
             s.name, s.id
@@ -200,7 +200,7 @@ async fn pick_view(
         required: None,
     });
     let e = emb(
-        "Select Server",
+        &format!("{TICKET} Select Server"),
         "Please select the server you want to send this message to.",
         BLUE,
     );
@@ -254,7 +254,11 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
             } else {
                 &t.pause_reason
             };
-            let e = s.footer(stamp(emb("Ticket Creation Disabled", reason, RED)));
+            let e = s.footer(stamp(emb(
+                &format!("{TICKET_BLOCK} Ticket Creation Disabled"),
+                reason,
+                RED,
+            )));
             return say(app, dm, e.build()).await;
         }
         None => match create(app, &s, m, &member.roles, t, category).await? {
@@ -264,7 +268,11 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
     };
     let text = body(&m.content, app.me);
     let files = download(&m.attachments).await;
-    let sent = s.footer(stamp(emb("Message Sent", &text, GREEN)));
+    let sent = s.footer(stamp(emb(
+        &format!("{TICKET_REPLY} Message Sent"),
+        &text,
+        GREEN,
+    )));
     let dm_msg = app
         .http
         .create_message(dm)
@@ -273,7 +281,14 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         .await?
         .model()
         .await?;
-    let got = user_footer(stamp(emb("Message Received", &text, GREEN)), &m.author);
+    let got = user_footer(
+        stamp(emb(
+            &format!("{TICKET_REPLY} Message Received"),
+            &text,
+            GREEN,
+        )),
+        &m.author,
+    );
     let got = attachment_fields(got, &dm_msg.attachments);
     if let Err(e) = app
         .http
@@ -371,7 +386,7 @@ async fn create(
         l if l.len() <= 1024 => l.to_string(),
         _ => format!("*{} roles*", roles.len()),
     };
-    let intro = stamp(emb("New Ticket", &how, BLUE))
+    let intro = stamp(emb(&format!("{TICKET_NEW} New Ticket"), &how, BLUE))
         .field(EmbedFieldBuilder::new("User", format!("<@{}> ({})", user.id, user.id)).inline())
         .field(EmbedFieldBuilder::new("Roles", role_list).inline());
     let intro = user_footer(intro, user);
@@ -391,7 +406,7 @@ async fn create(
     }
     if !t.greeting.is_empty() {
         let e = s.footer(stamp(emb(
-            "Greeting Message",
+            &format!("{TICKET} Greeting Message"),
             &tags(&t.greeting, user),
             ORANGE,
         )));
