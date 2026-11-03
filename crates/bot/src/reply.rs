@@ -309,7 +309,7 @@ mod tests {
         ];
         assert_eq!(
             summary("kick", true, &t, Some("spam"), 9),
-            "✅ Successful kicks: `1`\n❎ Unsuccessful kicks: `1`\n📄 Reason: spam\n👤 Moderator: <@9>\nCannot kick <@6>: they are immune"
+            "✅ Successful kicks: `1`\n❌ Unsuccessful kicks: `1`\n📄 Reason: spam\n👤 Moderator: <@9>\nCannot kick <@6>: they are immune"
         );
         assert_eq!(summary("kick", false, &t, None, 9), t.join("\n"));
         assert_eq!(summary("kick", true, &t[..1], None, 9), t[0]);
@@ -324,7 +324,7 @@ mod tests {
         let e = result_embeds("timeout", &t, None, 9);
         assert_eq!(e.len(), 2);
         let d = e[0].description.clone().unwrap();
-        assert!(d.contains("No reason.") && d.contains("✅ <@5> [`5`]") && d.contains("❎ Cannot"));
+        assert!(d.contains("No reason.") && d.contains("✅ <@5> [`5`]") && d.contains("❌ Cannot"));
         assert!(e[1].description.clone().unwrap().contains("(Case: 4)"));
         assert_eq!(result_embeds("timeout", &t, Some("x"), 9).len(), 1);
     }
