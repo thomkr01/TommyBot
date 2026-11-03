@@ -951,7 +951,7 @@ pub fn schema() -> Vec<Value> {
                 ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
                 ti(
                     dv(fg("Lock scope", "pause_invites", "bool"), true),
-                    "Pause invites when kicking new members",
+                    "Pause invites and member DMs when kicking new members",
                 ),
                 ti(
                     fg("Lock scope", "voice", "bool"),

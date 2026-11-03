@@ -82,7 +82,8 @@ impl Api {
         bail!("discord rate limit: still limited after {MAX_RETRIES} tries")
     }
 
-    /// Pause invites until `until_ms` (unix ms, clamped to 24h from `now_ms`), or lift the pause with `None`.
+    /// Pause invites and DMs between members until `until_ms` (unix ms, clamped to 24h from
+    /// `now_ms`), or lift both pauses with `None`.
     pub async fn pause_invites(&self, guild: u64, until: Option<(i64, i64)>) -> Result<()> {
         let body = invites_body(until);
         self.send(
@@ -357,7 +358,8 @@ fn invites_body(until: Option<(i64, i64)>) -> Value {
         let ms = until.min(now + MAX_INVITE_PAUSE_MS);
         chrono::DateTime::from_timestamp_millis(ms).map(|d| d.to_rfc3339())
     });
-    json!({ "invites_disabled_until": until.flatten() })
+    let until = until.flatten();
+    json!({ "invites_disabled_until": until, "dms_disabled_until": until })
 }
 
 fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
@@ -421,7 +423,9 @@ mod tests {
     fn invite_pause_is_capped_and_lifted_with_null() {
         let v = invites_body(Some((0, 10 * MAX_INVITE_PAUSE_MS)));
         assert_eq!(v["invites_disabled_until"], "1970-01-02T00:00:00+00:00");
+        assert_eq!(v["dms_disabled_until"], v["invites_disabled_until"]);
         assert!(invites_body(None)["invites_disabled_until"].is_null());
+        assert!(invites_body(None)["dms_disabled_until"].is_null());
     }
 
     #[test]
