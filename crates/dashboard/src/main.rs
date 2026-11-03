@@ -8,6 +8,7 @@ mod discord;
 mod embeds;
 mod lockdown;
 mod ops;
+mod otp;
 mod records;
 mod recovery;
 mod schema;

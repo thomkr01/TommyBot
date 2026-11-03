@@ -22,7 +22,6 @@ use tommybot_antinuke::{
     security::{checks, setting_fix, strip_targets, stripped, GuildSafety, Setup},
     Inverse, RoleImg,
 };
-use totp_rs::Secret;
 
 type ActionRow = (
     i64,
@@ -374,7 +373,7 @@ async fn rescue_status(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
 async fn rescue_regenerate(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Owner, true).await?;
     let key = auth::token();
-    let secret = Secret::generate_secret().to_encoded().to_string();
+    let secret = crate::otp::new_secret();
     sqlx::query(
         "insert into rescue_key (guild_id, key_hash, totp_secret) values ($1, $2, $3)
                  on conflict (guild_id) do update set key_hash = $2, totp_secret = $3, created_at = now()",
@@ -384,7 +383,7 @@ async fn rescue_regenerate(State(st): State<AppState>, s: Sess, Path(guild): Pat
     .bind(&secret)
     .execute(&st.db)
     .await?;
-    let uri = auth::totp(&secret, &format!("rescue {guild}"))?.get_url();
+    let uri = crate::otp::uri(&secret, &format!("rescue {guild}"))?;
     Ok(Json(json!({"key": key, "uri": uri})))
 }
 
@@ -434,11 +433,7 @@ async fn claim_key(
             .fetch_optional(&mut *tx)
             .await?;
             match secret.flatten() {
-                Some(s)
-                    if auth::totp(&s, "rescue")?
-                        .check_current(code)
-                        .unwrap_or(false) =>
-                {
+                Some(s) if crate::otp::step(&s, code)?.is_some() => {
                     sqlx::query("delete from rescue_key where guild_id = $1")
                         .bind(guild)
                         .execute(&mut *tx)
@@ -513,14 +508,11 @@ mod tests {
         };
         let db = tommybot_core::db::connect(&url).await.unwrap();
         let g = 9_200_000_000 + std::process::id() as i64;
-        let secret = Secret::generate_secret().to_encoded().to_string();
+        let secret = crate::otp::new_secret();
         sqlx::query("insert into rescue_key (guild_id, key_hash, totp_secret) values ($1, 'x', $2) on conflict (guild_id) do update set totp_secret = $2")
             .bind(g).bind(&secret).execute(&db).await.unwrap();
         assert!(claim_key(&db, g, 6, (None, Some("000000"))).await.is_err());
-        let code = auth::totp(&secret, "rescue")
-            .unwrap()
-            .generate_current()
-            .unwrap();
+        let code = crate::otp::current(&secret);
         claim_key(&db, g, 6, (None, Some(&code))).await.unwrap();
         assert!(claim_key(&db, g, 6, (None, Some(&code))).await.is_err());
         sqlx::query("delete from extra_owners where guild_id = $1")

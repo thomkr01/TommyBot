@@ -21,7 +21,11 @@ fn gid(offset: i64) -> i64 {
 async fn cleanup(p: &PgPool, g: i64) {
     for t in ["automod_strikes", "lock_snapshots", "scheduled_jobs"] {
         let sql = format!("DELETE FROM {t} WHERE guild_id = $1");
-        sqlx::query(&sql).bind(g).execute(p).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(g)
+            .execute(p)
+            .await
+            .unwrap();
     }
 }
 

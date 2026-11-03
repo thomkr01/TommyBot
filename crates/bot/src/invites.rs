@@ -60,10 +60,8 @@ pub fn short_id(id: u64) -> String {
 
 /// `<10 random>_<last 10 digits of the guild id>`: names a raid on the public report page.
 pub fn raid_code(gid: u64) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
     let random: String = (0..10)
-        .map(|_| char::from(b"abcdefghijklmnopqrstuvwxyz0123456789"[rng.gen_range(0..36)]))
+        .map(|_| char::from(b"abcdefghijklmnopqrstuvwxyz0123456789"[rand::random_range(0..36)]))
         .collect();
     let id = gid.to_string();
     format!("{random}_{}", &id[id.len().saturating_sub(10)..])

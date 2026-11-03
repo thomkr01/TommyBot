@@ -28,7 +28,11 @@ async fn cleanup(p: &PgPool, g: i64) {
         "quarantines",
     ] {
         let sql = format!("DELETE FROM {t} WHERE guild_id = $1");
-        sqlx::query(&sql).bind(g).execute(p).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(g)
+            .execute(p)
+            .await
+            .unwrap();
     }
 }
 
