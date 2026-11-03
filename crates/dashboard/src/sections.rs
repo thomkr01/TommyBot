@@ -621,7 +621,6 @@ async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<us
         .await
         .ok()?;
     let body = json!({"type": 0, "deny": QUARANTINE_DENY});
-    // shortcut: no 429 retry, so a rate-limited channel counts as failed; running it again fixes it.
     let mut failed = 0;
     for id in channels.as_array()?.iter().filter_map(|c| c["id"].as_str()) {
         let path = format!("/channels/{id}/permissions/{role}");

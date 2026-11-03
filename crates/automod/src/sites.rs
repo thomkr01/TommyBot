@@ -156,6 +156,24 @@ impl Sites {
         }
     }
 
+    /// Downloads an attachment for the QR check; `None` past `max` bytes or on any error.
+    pub async fn fetch(&self, url: &str, max: usize) -> Option<Vec<u8>> {
+        let r = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        if r.content_length().is_some_and(|l| l > max as u64) {
+            return None;
+        }
+        let b = r.bytes().await.ok()?;
+        (b.len() <= max).then(|| b.to_vec())
+    }
+
     async fn download(&self, url: &str) -> reqwest::Result<SiteList> {
         let text = self
             .http

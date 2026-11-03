@@ -109,7 +109,7 @@ const FILTERS: &[(&str, &str, &str)] = &[
     ("inactive_channel", "spam_text", "Inactive channel"),
     ("invites", "invites", "Invite links"),
     ("bad_sites", "malicious", "Bad websites"),
-    ("scam_links", "malicious", "Nitro and Steam scam links"),
+    ("scam_links", "malicious", "Scam links and login QR codes"),
     ("nsfw_links", "nsfw", "NSFW links"),
     ("words.filter", "words", "Word blacklist"),
     ("links", "links", "Link blacklist"),
@@ -971,7 +971,7 @@ pub fn schema() -> Vec<Value> {
                 ti(fg("Lock scope", "updates", "bool"), "Make lockdown updates"),
                 ti(
                     dv(fg("Lock scope", "pause_invites", "bool"), true),
-                    "Pause invites when kicking new members",
+                    "Pause invites and member DMs when kicking new members",
                 ),
                 ti(
                     fg("Lock scope", "voice", "bool"),

@@ -22,6 +22,49 @@ fn fetch(path: String, rows: WriteSignal<Vec<Value>>, msg: Msg, loaded: RwSignal
     });
 }
 
+/// "Export CSV": loads every page of `list` (a list URL ending in `page=`, so the export keeps the
+/// current filter) and downloads it as `{name}.csv`.
+pub fn export_csv(list: impl Fn() -> String + Copy + 'static, name: &'static str, cols: &'static [&'static str], msg: Msg) -> impl IntoView {
+    let go = move |_| {
+        let base = list();
+        spawn_local(async move {
+            let mut all = vec![];
+            for p in 0.. {
+                match api("GET", &format!("{base}{p}"), None).await {
+                    Ok(v) => {
+                        let page = v.as_array().cloned().unwrap_or_default();
+                        let last = page.len() < 50;
+                        all.extend(page);
+                        if last { break }
+                    }
+                    Err(e) => return msg.err(e),
+                }
+            }
+            let Some(a) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.create_element("a").ok()) else { return };
+            let href = format!("data:text/csv;charset=utf-8,{}", enc(&to_csv(cols, &all)));
+            let _ = a.set_attribute("href", &href);
+            let _ = a.set_attribute("download", &format!("{name}.csv"));
+            if let Ok(a) = wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(a) { a.click() }
+        });
+    };
+    view! { <button class="ghost" on:click=go>"Export CSV"</button> }
+}
+
+/// Every cell quoted; text starting with = + - @ gets a leading ' so spreadsheets do not run it as a formula.
+fn to_csv(cols: &[&str], rows: &[Value]) -> String {
+    let cell = |v: &Value| {
+        let t = match v { Value::String(t) => t.clone(), Value::Null => String::new(), v => v.to_string() };
+        let t = if t.starts_with(['=', '+', '-', '@']) { format!("'{t}") } else { t };
+        format!("\"{}\"", t.replace('"', "\"\""))
+    };
+    let mut out = cols.join(",") + "\r\n";
+    for r in rows {
+        out += &cols.iter().map(|c| cell(&r[*c])).collect::<Vec<_>>().join(",");
+        out += "\r\n";
+    }
+    out
+}
+
 /// Previous/next buttons for lists the API serves 50 rows a page.
 pub fn pager(page: RwSignal<i64>, count: impl Fn() -> usize + Copy + Send + Sync + 'static, load: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
     let shown = move || page.get() > 0 || count() == 50;
@@ -58,7 +101,8 @@ pub fn CaseList(guild: String) -> impl IntoView {
     let (q, kind, state, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()), Msg::default());
     let g = StoredValue::new(guild);
     let page = RwSignal::new(0i64);
-    let load = move || fetch(format!("/api/guilds/{}/cases?q={}&kind={}&state={}&page={}", g.get_value(), enc(&q.get_untracked()), kind.get_untracked(), state.get_untracked(), page.get_untracked()), set_rows, msg, loaded);
+    let list = move || format!("/api/guilds/{}/cases?q={}&kind={}&state={}&page=", g.get_value(), enc(&q.get_untracked()), kind.get_untracked(), state.get_untracked());
+    let load = move || fetch(format!("{}{}", list(), page.get_untracked()), set_rows, msg, loaded);
     let first = move || { page.set(0); load() };
     load();
     let names = RwSignal::new(std::collections::HashMap::<String, String>::new());
@@ -83,6 +127,7 @@ pub fn CaseList(guild: String) -> impl IntoView {
             </select>
             <input placeholder="User or mod ID" aria-label="user or mod ID" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| first() />
             <button class="ghost" on:click=move |_| first()>"Search"</button>
+            {export_csv(list, "cases", &["case_no", "kind", "user_id", "mod_id", "reason", "proof", "points", "active", "at"], msg)}
             <Toast msg />
         </div>
         <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No cases found."</p></Show>
@@ -116,7 +161,8 @@ pub fn NoteList(guild: String) -> impl IntoView {
     let (q, text, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), Msg::default());
     let g = StoredValue::new(guild);
     let page = RwSignal::new(0i64);
-    let load = move || fetch(format!("/api/guilds/{}/notes?q={}&page={}", g.get_value(), enc(&q.get_untracked()), page.get_untracked()), set_rows, msg, loaded);
+    let list = move || format!("/api/guilds/{}/notes?q={}&page=", g.get_value(), enc(&q.get_untracked()));
+    let load = move || fetch(format!("{}{}", list(), page.get_untracked()), set_rows, msg, loaded);
     let first = move || { page.set(0); load() };
     load();
     let post = move |path: String, body: Value| spawn_local(async move {
@@ -132,6 +178,7 @@ pub fn NoteList(guild: String) -> impl IntoView {
             <input placeholder="New note" aria-label="new note" maxlength="500" prop:value=text on:input=move |e| text.set(event_target_value(&e)) />
             <button on:click=move |_| { post(String::new(), json!({"user_id": q.get_untracked(), "text": text.get_untracked()})); text.set(String::new()) }>"Add note"</button>
             <button class="ghost" on:click=move |_| if confirm("Remove every note of this user?") { post("/sweep".into(), json!({"user_id": q.get_untracked()})) }>"Sweep user"</button>
+            {export_csv(list, "notes", &["id", "user_id", "author_id", "text", "at"], msg)}
             <Toast msg />
         </div>
         <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No notes found."</p></Show>
@@ -159,7 +206,8 @@ pub fn ReportList(guild: String) -> impl IntoView {
     let (state, msg) = (RwSignal::new("open".to_string()), Msg::default());
     let g = StoredValue::new(guild);
     let page = RwSignal::new(0i64);
-    let load = move || fetch(format!("/api/guilds/{}/reports?state={}&page={}", g.get_value(), state.get_untracked(), page.get_untracked()), set_rows, msg, loaded);
+    let list = move || format!("/api/guilds/{}/reports?state={}&page=", g.get_value(), state.get_untracked());
+    let load = move || fetch(format!("{}{}", list(), page.get_untracked()), set_rows, msg, loaded);
     let first = move || { page.set(0); load() };
     load();
     let set_open = move |id: i64, open: bool| spawn_local(async move {
@@ -172,6 +220,7 @@ pub fn ReportList(guild: String) -> impl IntoView {
         <div class="card row">
             {chips(state, &[("open", "Open"), ("dismissed", "Dismissed"), ("actioned", "Actioned"), ("", "All")], first)}
             <span class="muted">"Warn, timeout, kick and ban are done with the buttons on the report in Discord."</span>
+            {export_csv(list, "reports", &["id", "reporter_id", "target_id", "channel_id", "message_id", "content", "status", "action", "handled_by", "at"], msg)}
             <Toast msg />
         </div>
         <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No reports."</p></Show>
@@ -264,5 +313,16 @@ mod log_tests {
     fn transcript_lines_split_into_parts() {
         assert_eq!(super::log_line("[2026-11-03 08:55:29] ann (User): hi: there"), ("2026-11-03 08:55:29", "ann", "User", "hi: there"));
         assert_eq!(super::log_line("odd"), ("", "", "", "odd"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_quotes_cells_and_defuses_formulas() {
+        let rows = [json!({"a": "say \"hi\"", "b": 3, "c": null}), json!({"a": "=HYPERLINK(1)", "b": true})];
+        assert_eq!(to_csv(&["a", "b", "c"], &rows), "a,b,c\r\n\"say \"\"hi\"\"\",\"3\",\"\"\r\n\"'=HYPERLINK(1)\",\"true\",\"\"\r\n");
     }
 }

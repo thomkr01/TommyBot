@@ -2,6 +2,7 @@
 use anyhow::Result;
 use tommybot_core::{cases, permits::Level};
 use tommybot_logging::embed::{self, Log, ARROW, BLUE, NO, YES};
+use tommybot_logging::emoji::{CRITICAL, SHIELD, TIP, WARNING};
 use twilight_model::{
     channel::message::{Component, Embed},
     id::{
@@ -238,6 +239,60 @@ pub(crate) async fn server_info(
         Some(e),
         vec![settings::page_row(invoker.get(), "ginfo", 0, pages)],
     ))
+}
+
+/// `security`: the security score of the dashboard Overview; its fixes run there.
+pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
+    use tommybot_antinuke::security::{checks, score, GuildSafety, Setup, Severity};
+    let g = app.http.guild(gid).await?.model().await?;
+    let cfg = app.cfg(gid.get()).await?;
+    let safety = GuildSafety {
+        id: gid.get(),
+        mfa: u8::from(g.mfa_level),
+        verification: u8::from(g.verification_level),
+        content_filter: u8::from(g.explicit_content_filter),
+        notifications: u8::from(g.default_message_notifications),
+    };
+    let setup = Setup {
+        quarantine_role: cfg.antinuke.quarantine_role.map(|r| r.get()),
+        log_fallback: cfg.logging.fallback.is_some(),
+    };
+    let bot_top = app.guild_info(gid).await?.bot_top;
+    let roles: Vec<_> = g.roles.into_iter().map(crate::backup::role_img).collect();
+    let mut rows = checks(&safety, &roles, bot_top, &setup);
+    let points = score(&rows);
+    // Worst first; 12 rows with details stay under the embed's 4096 characters.
+    rows.sort_by_key(|r| std::cmp::Reverse(r.severity));
+    let hidden = rows.len().saturating_sub(12);
+    rows.truncate(12);
+    let color = match points {
+        90.. => embed::GREEN,
+        60..90 => embed::ORANGE,
+        _ => embed::RED,
+    };
+    let mut e = Log::new(&format!("Security Score: {points}%"), color);
+    for r in &rows {
+        let icon = match r.severity {
+            Severity::Ok => SHIELD,
+            Severity::Warn => WARNING,
+            Severity::Bad => CRITICAL,
+        };
+        e = e.text(&format!("{icon} **{}**", r.title));
+        if r.severity != Severity::Ok {
+            e = e.text(&format!("{ARROW} {}", r.detail));
+        }
+    }
+    if hidden > 0 {
+        e = e.text(&format!("{ARROW} +{hidden} more rows on the dashboard."));
+    }
+    if rows.iter().any(|r| r.fix.is_some()) {
+        let link = crate::general::dashboard()
+            .map_or("the dashboard".into(), |u| format!("[the dashboard]({u})"));
+        e = e.text(&format!(
+            "{TIP} Fix the marked rows with one click on the Overview page of {link}."
+        ));
+    }
+    Ok(e.build())
 }
 
 #[cfg(test)]
