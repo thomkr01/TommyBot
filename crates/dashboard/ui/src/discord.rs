@@ -111,7 +111,12 @@ pub fn bot(m: &Value) -> AnyView {
 
 /// A sample by key, as the bot sends it.
 pub fn show(key: &str) -> AnyView {
-    match sample(key) {
+    show_msg(sample(key))
+}
+
+/// A sample message, or a note while the samples have not loaded.
+pub fn show_msg(m: Value) -> AnyView {
+    match m {
         Value::Null => view! { <p class="muted">"The preview appears once TommyBot has started."</p> }.into_any(),
         m => bot(&m),
     }
