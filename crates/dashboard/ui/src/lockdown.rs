@@ -71,7 +71,7 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
             view! { <div class="card row lockrow">
                 <h3 title=*what>{*title}</h3><span class="sp"></span>
                 <Show when=move || *kind == "server" && hidden()><span class="chip">"CHANNELS HIDDEN"</span></Show>
-                <Show when=paused><span class="chip">"PAUSE INVITES"</span></Show>
+                <Show when=paused><span class="chip">"PAUSE INVITES + DMS"</span></Show>
                 <Show when=move || join && !is_on()><span class="chip">"ONLY 1 JOIN LOCK ALLOWED"</span></Show>
                 <Show when=move || *kind == "server" && !is_on()><button class="ghost" title="Individual Channels" on:click=move |_| single.update(|x| *x = !*x)>"Individual channels"</button></Show>
                 <Show when=is_on fallback=move || view! { <span class="chip ok">"Already Unlocked"</span><button class="danger" disabled=move || join && join_locked() on:click=move |_| if *kind == "server" { hide.set(true) } else { lock(kind, None) }>"Lock"</button> }>
@@ -221,7 +221,7 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
                 <Show when=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!("lock")))>
                     <label>"Lock mode"</label>
                     <select on:change=move |e| val.update(|v| v["lock"] = json!(event_target_value(&e)))>
-                        {[("", "Server lockdown settings"), ("channel", "Channel"), ("server", "All Public Channels"), ("kick", "Kick New Members"), ("ban", "Ban New Members"), ("invites", "Pause Invites")].into_iter().map(|(k, t)| view! { <option value=k selected=move || s(&val.get()["lock"]) == k>{t}</option> }).collect_view()}
+                        {[("", "Server lockdown settings"), ("channel", "Channel"), ("server", "All Public Channels"), ("kick", "Kick New Members"), ("ban", "Ban New Members"), ("invites", "Pause Invites + DMs")].into_iter().map(|(k, t)| view! { <option value=k selected=move || s(&val.get()["lock"]) == k>{t}</option> }).collect_view()}
                     </select></Show></div></Show>
             <h3>"3 Allowed Keywords"</h3>
             <Show when=move || matches!(trigger().as_str(), "keyword" | "preset")>{fld("allow", "list", "Add Keyword")}</Show>

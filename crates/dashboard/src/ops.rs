@@ -18,7 +18,10 @@ use std::{
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
-use tommybot_antinuke::Inverse;
+use tommybot_antinuke::{
+    security::{checks, setting_fix, strip_targets, stripped, GuildSafety, Setup},
+    Inverse, RoleImg,
+};
 use totp_rs::Secret;
 
 type ActionRow = (
@@ -45,8 +48,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/rescue/claim", post(rescue_claim))
 }
 
-const DANGEROUS: u64 = 0x8 | 0x20 | 0x1000_0000 | 0x10 | 0x4 | 0x2 | 0x2000_0000;
-
 #[derive(Deserialize, Clone)]
 pub(crate) struct Role {
     pub id: String,
@@ -61,152 +62,6 @@ impl Role {
     pub fn perms(&self) -> u64 {
         self.permissions.parse().unwrap_or(0)
     }
-}
-
-/// Roles the bot can safely strip in one go: not managed, not @everyone, below the bot.
-fn strip_targets(roles: &[Role], guild: i64, bot_pos: i64) -> Vec<&Role> {
-    roles
-        .iter()
-        .filter(|r| {
-            !r.managed
-                && r.id != guild.to_string()
-                && r.position < bot_pos
-                && r.perms() & DANGEROUS != 0
-        })
-        .collect()
-}
-
-fn row(id: &str, severity: &str, title: &str, detail: String, fix: Option<(&str, &str)>) -> Value {
-    json!({"id": id, "severity": severity, "title": title, "detail": detail,
-           "fix": fix.map(|(label, role_id)| json!({"label": label, "role_id": role_id}))})
-}
-
-fn checks(roles: &[Role], guild: i64, bot_pos: i64, config: &Value) -> Vec<Value> {
-    let mut out = vec![];
-    let quarantine = config["antinuke"]["quarantine_role"]
-        .as_str()
-        .and_then(|q| roles.iter().find(|r| r.id == q));
-    match (config["antinuke"]["quarantine_role"].as_str(), quarantine) {
-        (None, _) => out.push(row(
-            "quarantine_unset",
-            "warn",
-            "No quarantine role",
-            "Anti-nuke has no role to quarantine offenders into.".into(),
-            None,
-        )),
-        (Some(_), None) => out.push(row(
-            "quarantine_missing",
-            "bad",
-            "Quarantine role missing",
-            "The configured quarantine role no longer exists.".into(),
-            None,
-        )),
-        (Some(_), Some(q)) => {
-            if q.position >= bot_pos {
-                out.push(row(
-                    "quarantine_above_bot",
-                    "bad",
-                    "Quarantine role above the bot",
-                    format!(
-                        "{} is not below the bot's top role, so the bot cannot assign it.",
-                        q.name
-                    ),
-                    None,
-                ));
-            }
-            if q.perms() & DANGEROUS != 0 {
-                out.push(row(
-                    "quarantine_perms",
-                    "bad",
-                    "Quarantine role is too powerful",
-                    format!("{} grants dangerous permissions.", q.name),
-                    Some(("Strip permissions", &q.id)),
-                ));
-            }
-        }
-    }
-    let above: Vec<&str> = roles
-        .iter()
-        .filter(|r| r.position > bot_pos && !r.managed && r.id != guild.to_string())
-        .map(|r| r.name.as_str())
-        .collect();
-    if above.is_empty() {
-        out.push(row(
-            "bot_position",
-            "ok",
-            "Bot role is near the top",
-            "No manageable roles sit above the bot.".into(),
-            None,
-        ));
-    } else {
-        out.push(row(
-            "bot_position",
-            "warn",
-            "Roles above the bot",
-            format!("The bot cannot manage: {}.", above.join(", ")),
-            None,
-        ));
-    }
-    for r in roles.iter().filter(|r| {
-        !r.managed
-            && r.id != guild.to_string()
-            && r.perms() & DANGEROUS != 0
-            && quarantine.is_none_or(|q| q.id != r.id)
-    }) {
-        out.push(row(
-            &format!("role_{}", r.id),
-            "bad",
-            "Role holds dangerous permissions",
-            format!("{} can administer, ban, kick or manage the server.", r.name),
-            Some(("Strip permissions", &r.id)),
-        ));
-    }
-    let strippable = strip_targets(roles, guild, bot_pos).len();
-    if strippable > 1 {
-        out.push(row(
-            "roles_bulk",
-            "warn",
-            "Remove dangerous permissions from all roles",
-            format!(
-                "{strippable} roles below the bot can administer, ban, kick or manage the server."
-            ),
-            Some(("Strip all", "*")),
-        ));
-    }
-    if config["logging"]["fallback"]
-        .as_str()
-        .is_none_or(str::is_empty)
-    {
-        out.push(row(
-            "log_fallback",
-            "warn",
-            "No fallback log channel",
-            "Events without a dedicated channel are dropped.".into(),
-            None,
-        ));
-    }
-    out
-}
-
-/// Server settings Discord itself offers against raids and explicit media (Medium or higher; scan all members).
-fn server_checks(g: &Value) -> Vec<Value> {
-    let sev = |ok: bool| if ok { "ok" } else { "warn" };
-    vec![
-        row(
-            "verification_level",
-            sev(g["verification_level"].as_u64().unwrap_or(0) >= 2),
-            "Server verification level",
-            "Set it to at least Medium so brand new accounts cannot post at once.".into(),
-            None,
-        ),
-        row(
-            "content_filter",
-            sev(g["explicit_content_filter"].as_u64() == Some(2)),
-            "Explicit media content filter",
-            "Set it to scan media from all members.".into(),
-            None,
-        ),
-    ]
 }
 
 async fn roles_of(st: &AppState, guild: i64) -> Result<Vec<Role>, ApiError> {
@@ -238,24 +93,55 @@ pub(crate) async fn roles_and_bot_pos(
     Ok((roles, bot_pos))
 }
 
+fn img(r: &Role) -> RoleImg {
+    RoleImg {
+        id: r.id.parse().unwrap_or(0),
+        name: r.name.clone(),
+        color: 0,
+        permissions: r.perms(),
+        position: r.position,
+        hoist: false,
+        mentionable: false,
+        managed: r.managed,
+    }
+}
+
 async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
     let (_, config) = crate::store::current(&st.db, guild).await?;
     let (roles, bot_pos) = roles_and_bot_pos(&st, guild).await?;
-    let mut rows = checks(&roles, guild, bot_pos, &config);
-    let info = st
+    let g = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}"), None)
         .await?;
-    rows.extend(server_checks(&info));
-    Ok(Json(json!(rows)))
+    let n = |k: &str| g[k].as_u64().unwrap_or(0) as u8;
+    let safety = GuildSafety {
+        id: guild as u64,
+        mfa: n("mfa_level"),
+        verification: n("verification_level"),
+        content_filter: n("explicit_content_filter"),
+        notifications: n("default_message_notifications"),
+    };
+    let setup = Setup {
+        quarantine_role: config["antinuke"]["quarantine_role"]
+            .as_str()
+            .and_then(|q| q.parse().ok()),
+        log_fallback: config["logging"]["fallback"]
+            .as_str()
+            .is_some_and(|f| !f.is_empty()),
+    };
+    let roles: Vec<RoleImg> = roles.iter().map(img).collect();
+    Ok(Json(json!(checks(&safety, &roles, bot_pos, &setup))))
 }
 
+/// One of a row's `fix`: a role id (`*` for every strippable role) or a server setting.
 #[derive(Deserialize)]
 struct FixBody {
-    role_id: String,
+    role_id: Option<String>,
+    setting: Option<String>,
 }
 
+/// Role strips take a backup first, so Backups can put the old permissions back.
 async fn fix(
     State(st): State<AppState>,
     s: Sess,
@@ -263,45 +149,91 @@ async fn fix(
     Json(b): Json<FixBody>,
 ) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
+    let (_, c) = crate::store::current(&st.db, guild).await?;
+    if let Some(setting) = b.setting {
+        let (key, value) =
+            setting_fix(&setting).ok_or_else(|| ApiError::BadRequest("unknown setting".into()))?;
+        st.discord
+            .call(
+                Method::PATCH,
+                &format!("/guilds/{guild}"),
+                Some(json!({ key: value })),
+            )
+            .await?;
+        log_change(
+            &st,
+            guild,
+            &c,
+            format!(
+                "{} (<@{}>) set `{key}` to `{value}` from the security score",
+                s.username, s.user_id
+            ),
+        )
+        .await;
+        return Ok(Json(json!({"ok": true})));
+    }
+    let role_id = b
+        .role_id
+        .ok_or_else(|| ApiError::BadRequest("nothing to fix".into()))?;
     let (roles, bot_pos) = roles_and_bot_pos(&st, guild).await?;
-    let targets = if b.role_id == "*" {
-        strip_targets(&roles, guild, bot_pos)
+    let roles: Vec<RoleImg> = roles.iter().map(img).collect();
+    let targets = if role_id == "*" {
+        strip_targets(&roles, guild as u64, bot_pos)
     } else {
         let r = roles
             .iter()
-            .find(|r| r.id == b.role_id)
+            .find(|r| r.id.to_string() == role_id)
             .ok_or(ApiError::NotFound)?;
-        if r.managed || r.id == guild.to_string() {
+        if r.managed {
             return Err(ApiError::BadRequest(
-                "managed and @everyone roles cannot be changed here".into(),
+                "managed roles cannot be changed here".into(),
             ));
         }
         vec![r]
     };
+    let channels = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
+        .await?;
+    let roles_json = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/roles"), None)
+        .await?;
+    let backup: i64 =
+        sqlx::query_scalar("INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id")
+            .bind(guild)
+            .bind(sqlx::types::Json(crate::recovery::live_image(
+                guild,
+                &roles_json,
+                &channels,
+            )))
+            .fetch_one(&st.db)
+            .await?;
     for r in &targets {
         st.discord
             .call(
                 Method::PATCH,
                 &format!("/guilds/{guild}/roles/{}", r.id),
-                Some(json!({"permissions": (r.perms() & !DANGEROUS).to_string()})),
+                Some(
+                    json!({"permissions": stripped(r.id, guild as u64, r.permissions).to_string()}),
+                ),
             )
             .await?;
     }
     let names: Vec<&str> = targets.iter().map(|r| r.name.as_str()).collect();
-    let (_, c) = crate::store::current(&st.db, guild).await?;
     log_change(
         &st,
         guild,
         &c,
         format!(
-            "{} (<@{}>) stripped dangerous permissions from role(s) `{}`",
+            "{} (<@{}>) stripped dangerous permissions from role(s) `{}`, backup #{backup}",
             s.username,
             s.user_id,
             names.join("`, `")
         ),
     )
     .await;
-    Ok(Json(json!({"ok": true})))
+    Ok(Json(json!({"ok": true, "backup": backup})))
 }
 
 #[derive(Deserialize)]
@@ -573,82 +505,6 @@ async fn rescue_claim(State(st): State<AppState>, s: Sess, Json(b): Json<Claim>)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn role(id: &str, pos: i64, managed: bool, perms: u64) -> Role {
-        Role {
-            id: id.into(),
-            name: format!("r{id}"),
-            position: pos,
-            managed,
-            permissions: perms.to_string(),
-        }
-    }
-
-    #[test]
-    fn server_settings_checks() {
-        let sev = |g: Value| -> Vec<String> {
-            server_checks(&g)
-                .iter()
-                .map(|r| r["severity"].as_str().unwrap().into())
-                .collect()
-        };
-        assert_eq!(
-            sev(json!({"verification_level": 1, "explicit_content_filter": 0})),
-            ["warn", "warn"]
-        );
-        assert_eq!(
-            sev(json!({"verification_level": 2, "explicit_content_filter": 2})),
-            ["ok", "ok"]
-        );
-    }
-
-    #[test]
-    fn score_flags_dangerous_roles_and_missing_fallback() {
-        let roles = [
-            role("1", 0, false, 0),
-            role("2", 5, false, 0x8),
-            role("3", 6, true, 0x8),
-            role("4", 1, false, 0x400),
-            role("9", 3, false, 0x1),
-        ];
-        let cfg = json!({"antinuke": {"quarantine_role": "9"}, "logging": {}});
-        let rows = checks(&roles, 1, 4, &cfg);
-        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
-        assert!(ids.contains(&"role_2") && !ids.contains(&"role_3") && !ids.contains(&"role_4"));
-        assert!(ids.contains(&"log_fallback") && ids.contains(&"bot_position"));
-        assert_eq!(
-            rows.iter().find(|r| r["id"] == "role_2").unwrap()["fix"]["role_id"],
-            "2"
-        );
-        let rows = checks(
-            &roles,
-            1,
-            2,
-            &json!({"antinuke": {"quarantine_role": "9"}, "logging": {"fallback": "5"}}),
-        );
-        assert!(rows.iter().any(|r| r["id"] == "quarantine_above_bot"));
-    }
-
-    #[test]
-    fn bulk_strip_skips_managed_everyone_and_roles_above_bot() {
-        let roles = [
-            role("1", 0, false, 0x8),
-            role("2", 2, false, 0x8),
-            role("3", 3, true, 0x8),
-            role("4", 4, false, 0x8),
-            role("5", 1, false, 0x400),
-        ];
-        let ids: Vec<&str> = strip_targets(&roles, 1, 4)
-            .iter()
-            .map(|r| r.id.as_str())
-            .collect();
-        assert_eq!(ids, ["2"]);
-    }
-
-    #[test]
-    fn strips_only_dangerous_bits() {
-        assert_eq!((0x8 | 0x400u64) & !DANGEROUS, 0x400);
-    }
 
     #[tokio::test]
     async fn authenticator_code_claims_once() {

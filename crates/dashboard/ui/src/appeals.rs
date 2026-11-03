@@ -13,8 +13,9 @@ pub fn AppealList(guild: String) -> impl IntoView {
     let (kind, q, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), Msg::default());
     let loaded = RwSignal::new(false);
     let (g, page) = (StoredValue::new(guild), RwSignal::new(0i64));
+    let list = move || format!("/api/guilds/{}/appeals?kind={}&q={}&page=", g.get_value(), kind.get_untracked(), js_sys::encode_uri_component(&q.get_untracked()));
     let load = move || spawn_local(async move {
-        let path = format!("/api/guilds/{}/appeals?kind={}&q={}&page={}", g.get_value(), kind.get_untracked(), js_sys::encode_uri_component(&q.get_untracked()), page.get_untracked());
+        let path = format!("{}{}", list(), page.get_untracked());
         match api("GET", &path, None).await {
             Ok(v) => { msg.clear(); set_rows.set(v.as_array().cloned().unwrap_or_default()) }
             Err(e) => msg.err(e),
@@ -40,6 +41,7 @@ pub fn AppealList(guild: String) -> impl IntoView {
             <input placeholder="User ID/tag" aria-label="user ID or tag" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| first() />
             <button class="ghost" on:click=move |_| first()>"Search"</button>
             <input placeholder="Reply to the member (optional)" aria-label="reply to the member" prop:value=reply on:input=move |e| reply.set(event_target_value(&e)) />
+            {crate::records::export_csv(list, "appeals", &["id", "user_id", "username", "kind", "answers", "status", "at"], msg)}
             <Toast msg />
         </div>
         <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No pending appeals."</p></Show>

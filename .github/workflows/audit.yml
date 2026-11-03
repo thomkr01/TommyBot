@@ -1,0 +1,22 @@
+name: Audit
+
+# Fails when a dependency has a known security advisory (RustSec). Runs weekly too, so a new
+# advisory shows up even when nobody pushes. Ignored advisories are listed in .cargo/audit.toml.
+on:
+  push:
+    paths: ["**/Cargo.toml", "Cargo.lock", ".cargo/audit.toml", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["**/Cargo.toml", "Cargo.lock", ".cargo/audit.toml", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

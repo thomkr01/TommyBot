@@ -1,10 +1,12 @@
 //! Reply-shaping helpers driven by `MiscCfg`: compact text, DMs, delayed deletes, message purges.
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use tommybot_core::jobs;
 use tommybot_logging::embed::{Log, ARROW, BLUE, GREEN, NO, YES};
-use tommybot_logging::emoji::{MODERATOR, REASON};
+use tommybot_logging::emoji::{MODERATOR, PANIC, REASON};
+use tommybot_logging::LogKind;
 use twilight_model::channel::message::Embed;
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
@@ -163,6 +165,37 @@ pub async fn dm(app: &App, user: Id<UserMarker>, text: &str) {
         app.http.create_message(ch.id).content(text).await,
         "send DM",
     );
+}
+
+/// DMs the server owner that an attack started, so they hear about it even when nobody watches
+/// the log channel. At most one DM per server per 10 minutes: a nuke that trips panic mode is one alert.
+pub async fn alert_owner(app: &App, gid: Id<GuildMarker>, what: &str) {
+    static LAST: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
+    if !alert_due(&mut LAST.lock().unwrap(), gid.get(), now_secs()) {
+        return;
+    }
+    let info = match app.guild_info(gid).await {
+        Ok(i) => i,
+        Err(e) => return tracing::warn!(?e, "owner alert: guild lookup failed"),
+    };
+    let logs = app
+        .cfg(gid.get())
+        .await
+        .ok()
+        .and_then(|c| c.logging.target(LogKind::Panic, None))
+        .map_or(String::new(), |ch| {
+            format!("\nDetails: https://discord.com/channels/{gid}/{ch}")
+        });
+    let text = format!("{PANIC} **{what}** on your server. TommyBot is handling it.{logs}");
+    dm(app, info.owner, &text).await;
+}
+
+fn alert_due(last: &mut BTreeMap<u64, i64>, guild: u64, now: i64) -> bool {
+    if last.get(&guild).is_some_and(|t| now - t < 600) {
+        return false;
+    }
+    last.insert(guild, now);
+    true
 }
 
 /// Queued as a job so it survives restarts and never blocks the handler.
@@ -338,5 +371,14 @@ mod tests {
             "You received a ban in a server. Reason: none given"
         );
         assert!(dm_text("kick", Some("r"), Some(9)).contains("from <@9>"));
+    }
+
+    #[test]
+    fn owner_alert_waits_ten_minutes_per_server() {
+        let mut last = BTreeMap::new();
+        assert!(alert_due(&mut last, 1, 1000));
+        assert!(!alert_due(&mut last, 1, 1599));
+        assert!(alert_due(&mut last, 2, 1599));
+        assert!(alert_due(&mut last, 1, 1600));
     }
 }
