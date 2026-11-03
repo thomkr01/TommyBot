@@ -146,18 +146,46 @@ async fn send(
 async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     let mentions = AllowedMentions::default();
     let id = send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await?;
-    // Discord shows attachments above the embed, so the file is its own message below it, replying to it.
     if let Some((name, text)) = &m.file {
         let file = Attachment::from_bytes(name.clone(), text.as_bytes().to_vec(), 0);
-        app.http
-            .create_message(m.channel_id)
-            .reply(id)
-            .fail_if_not_exists(false)
-            .allowed_mentions(Some(&mentions))
-            .attachments(&[file])
-            .await?;
+        reply_file(app, m.channel_id, id, file).await?;
     }
     Ok(())
+}
+
+/// Discord shows attachments above the embed, so the file is its own message below it, replying to it.
+async fn reply_file(
+    app: &App,
+    channel: Id<ChannelMarker>,
+    to: Id<MessageMarker>,
+    file: Attachment,
+) -> Result<Id<MessageMarker>> {
+    Ok(app
+        .http
+        .create_message(channel)
+        .reply(to)
+        .fail_if_not_exists(false)
+        .allowed_mentions(Some(&AllowedMentions::default()))
+        .attachments(&[file])
+        .await?
+        .model()
+        .await?
+        .id)
+}
+
+/// A finished log embed (ticket logs) in a private channel, with an optional file below it.
+pub(crate) async fn send_private(
+    app: &App,
+    channel: Id<ChannelMarker>,
+    embed: &Embed,
+    file: Option<Attachment>,
+) -> Result<(Id<MessageMarker>, Option<Id<MessageMarker>>)> {
+    let id = send(app, channel, "", embed, None, &AllowedMentions::default()).await?;
+    let file = match file {
+        Some(f) => Some(reply_file(app, channel, id, f).await?),
+        None => None,
+    };
+    Ok((id, file))
 }
 
 /// Every log sent here ends with the date and time it happened.
@@ -322,9 +350,15 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if crate::catch::on_message(app, m).await? {
                 return Ok(());
             }
+            if let (false, None) = (m.author.bot, m.guild_id) {
+                return tickets::on_dm(app, m).await;
+            }
             if let (false, Some(gid)) = (m.author.bot, m.guild_id) {
                 let pfx = app.cfg(gid.get()).await?.misc.prefix.clone();
-                if let Some(rest) = m.content.strip_prefix(&pfx).filter(|r| !r.is_empty()) {
+                let rest = m.content.strip_prefix(&pfx).filter(|r| !r.is_empty());
+                if tickets::on_message(app, m, gid, rest).await? {
+                    // Relayed or a ticket command; automod still sees it below.
+                } else if let Some(rest) = rest {
                     // An ignored command still goes through automod below.
                     if !commands::ignored(app, m, gid, rest).await?
                         && !crate::general::try_run(app, m, rest).await?
@@ -370,6 +404,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         }
         Event::ChannelDelete(c) => {
             app.note_parent(&c.0);
+            tickets::on_channel_delete(app, c.id).await?;
             if let Some(g) = c.guild_id {
                 app.invalidate_guild(g);
                 forget_log_channel(app, g, &c.0).await?;

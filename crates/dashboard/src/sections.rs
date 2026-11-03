@@ -27,6 +27,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/guilds/{guild}/catch/setup", post(catch_channel))
         .route("/api/guilds/{guild}/tickets/setup", post(tickets_setup))
+        .route(
+            "/api/guilds/{guild}/tickets/log/{channel}/{message}",
+            get(ticket_log),
+        )
 }
 
 async fn schema_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -375,8 +379,7 @@ async fn catch_channel(
     Ok(Json(json!({"version": version, "channel": channel})))
 }
 
-/// One click: a private "Tickets" category with #ticket-logs, and #open-a-ticket holding the
-/// panel. Channels already set are reused; the panel is posted again on every run.
+/// One click: a private "Tickets" category with #ticket-logs. Channels already set are reused.
 async fn tickets_setup(
     State(st): State<AppState>,
     s: Sess,
@@ -388,18 +391,28 @@ async fn tickets_setup(
     if cur != b.expected_version {
         return Err(ApiError::Conflict(cur));
     }
-    // Staff are the roles of permits with Manage Tickets; they get View Channel and Read History.
-    let staff = tommybot_core::permits::roles_with(&st.db, guild, "tickets").await?;
-    // The bot also needs Attach Files in #ticket-logs for the transcripts.
-    let bot = json!({"id": st.discord.client_id, "type": 1, "allow": "19456"});
+    // Staff are the roles of permits with Manage Tickets plus the access roles.
+    let mut staff: Vec<String> = tommybot_core::permits::roles_with(&st.db, guild, "tickets")
+        .await?
+        .iter()
+        .map(i64::to_string)
+        .collect();
+    staff.extend(
+        config["tickets"]["access_roles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.as_str().map(String::from)),
+    );
+    // The bot reads the history for the log and posts files there.
     let mut hidden = vec![
         json!({"id": guild.to_string(), "type": 0, "deny": "1024"}),
-        json!({"id": st.discord.client_id, "type": 1, "allow": "52224"}),
+        json!({"id": st.discord.client_id, "type": 1, "allow": "117760"}),
     ];
     hidden.extend(
         staff
             .iter()
-            .map(|r| json!({"id": r.to_string(), "type": 0, "allow": "66560"})),
+            .map(|r| json!({"id": r, "type": 0, "allow": "117760"})),
     );
     let t = config["tickets"].clone();
     let category = create(
@@ -418,38 +431,16 @@ async fn tickets_setup(
         json!({"name": "ticket-logs", "type": 0, "parent_id": category, "permission_overwrites": hidden}),
     )
     .await?;
-    // @everyone reads the panel but cannot write there.
-    let panel = create(
-        &st,
-        guild,
-        own(&t["panel_channel"]),
-        "channels",
-        json!({"name": "open-a-ticket", "type": 0, "permission_overwrites": [
-            {"id": guild.to_string(), "type": 0, "allow": "66560", "deny": "2048"}, bot
-        ]}),
-    )
-    .await?;
+    if !config["tickets"].is_object() {
+        config["tickets"] = json!({});
+    }
     let tickets = &mut config["tickets"];
     tickets["enabled"] = json!(true);
     tickets["category"] = json!(category);
     tickets["log_channel"] = json!(log);
-    tickets["panel_channel"] = json!(panel);
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
-    st.discord
-        .call(
-            Method::POST,
-            &format!("/channels/{panel}/messages"),
-            Some(json!({
-                "embeds": [{"title": "Need help?", "color": 0x0D9DF8,
-                    "description": "Press the button to open a private ticket with the staff team."}],
-                "components": [{"type": 1, "components": [
-                    {"type": 2, "style": 1, "label": "Open a ticket", "custom_id": "ticket:open"}
-                ]}]
-            })),
-        )
-        .await?;
     api::log_change(
         &st,
         guild,
@@ -460,7 +451,58 @@ async fn tickets_setup(
         ),
     )
     .await;
-    Ok(Json(json!({"version": version, "channel": panel})))
+    Ok(Json(json!({"version": version, "channel": log})))
+}
+
+/// The conversation file of a closed ticket, read from the ticket log message that holds it.
+async fn ticket_log(
+    State(st): State<AppState>,
+    s: Sess,
+    Path((guild, channel, message)): Path<(i64, u64, u64)>,
+) -> Res {
+    api::require(&st, &s, guild, Level::Viewer, false).await?;
+    // The bot token reads every server's channels, so only this server's files are served.
+    let ch = st
+        .discord
+        .call(Method::GET, &format!("/channels/{channel}"), None)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
+    if ch["guild_id"].as_str() != Some(guild.to_string().as_str()) {
+        return Err(ApiError::NotFound);
+    }
+    let m = st
+        .discord
+        .call(
+            Method::GET,
+            &format!("/channels/{channel}/messages/{message}"),
+            None,
+        )
+        .await
+        .map_err(|_| ApiError::NotFound)?;
+    if m["author"]["id"].as_str() != Some(st.discord.client_id.as_str()) {
+        return Err(ApiError::NotFound);
+    }
+    let file = m["attachments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| {
+            a["filename"]
+                .as_str()
+                .is_some_and(|f| f.starts_with("ticket_log_"))
+        })
+        .ok_or(ApiError::NotFound)?;
+    let url = file["url"].as_str().ok_or(ApiError::NotFound)?;
+    let text = st
+        .discord
+        .http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    Ok(Json(json!({"file": file["filename"], "text": text})))
 }
 
 fn at<'a>(config: &'a Value, path: &[&str]) -> &'a Value {

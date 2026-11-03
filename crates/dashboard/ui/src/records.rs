@@ -267,6 +267,55 @@ pub fn RaidLog(guild: String) -> impl IntoView {
     }
 }
 
+/// One transcript line, `[time] Name (Role): text`, as (time, name, role, text).
+fn log_line(l: &str) -> (&str, &str, &str, &str) {
+    let Some((time, rest)) = l.strip_prefix('[').and_then(|r| r.split_once("] ")) else { return ("", "", "", l) };
+    let Some((who, text)) = rest.split_once(": ") else { return (time, "", "", rest) };
+    match who.rsplit_once(" (") {
+        Some((name, role)) => (time, name, role.trim_end_matches(')'), text),
+        None => (time, who, "", text),
+    }
+}
+
+/// A closed ticket's conversation, opened from the link on its ticket log.
+#[component]
+pub fn TicketLog(guild: String, channel: String, message: String) -> impl IntoView {
+    let (text, set_text) = signal(String::new());
+    let msg = Msg::default();
+    let path = format!("/api/guilds/{guild}/tickets/log/{channel}/{message}");
+    spawn_local(async move {
+        match api("GET", &path, None).await {
+            Ok(v) => set_text.set(v["text"].as_str().unwrap_or("").to_string()),
+            Err(e) => msg.err(e),
+        }
+    });
+    view! {
+        <Toast msg />
+        <div class="card">
+            <h3>{crate::icons::icon("modmail")}" Ticket transcript"</h3>
+            {move || text.get().lines().map(|l| {
+                let (time, name, role, body) = log_line(l);
+                let chip = match role { "User" => "chip blue", "Staff" => "chip", _ => "chip muted" };
+                view! { <div class="row">
+                    <span class="muted">{time.to_string()}</span>
+                    <b>{name.to_string()}</b>
+                    {(!role.is_empty()).then(|| view! { <span class=chip>{role.to_string()}</span> })}
+                    <span>{body.to_string()}</span>
+                </div> }
+            }).collect_view()}
+        </div>
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    #[test]
+    fn transcript_lines_split_into_parts() {
+        assert_eq!(super::log_line("[2026-11-03 08:55:29] ann (User): hi: there"), ("2026-11-03 08:55:29", "ann", "User", "hi: there"));
+        assert_eq!(super::log_line("odd"), ("", "", "", "odd"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

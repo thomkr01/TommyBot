@@ -1,12 +1,14 @@
 # TommyBot Privacy Policy
 
-Last updated: 2026-10-13
+Last updated: 2026-11-03
 
 This policy explains what TommyBot ("the bot") stores, why, and how long it is kept. The bot is free and open source. Its code is at [github.com/thomkr01/TommyBot](https://github.com/thomkr01/TommyBot).
 
 ## What the bot receives from Discord
 
 When the bot is in your server, Discord sends it the events it needs to do its job: member joins and leaves, role and channel changes, audit log entries, and messages in channels it can read. The bot reads message content so that automod and logging can work.
+
+If you send the bot a direct message, it is treated as a ticket: the bot forwards it (with its files) to a staff-only ticket channel in the server you pick, and forwards staff replies back to you.
 
 ## What the bot stores
 
@@ -24,9 +26,10 @@ The bot keeps data in a PostgreSQL database. It stores:
 | **Nuke incident records** (who was quarantined and what was reverted). | Recovery history after an attack. | Until deletion is requested. |
 | **Dashboard sessions** (your Discord user ID and username, your Discord OAuth access token, a CSRF token, and a step-up timestamp). | To keep you signed in to the dashboard. | 7 days from sign-in, then expired. |
 | **Dashboard two-factor setup** (your user ID and TOTP secret). | Optional second factor for dashboard changes. | Until you remove it or deletion is requested. |
+| **Tickets** (server, ticket number, channel, your user ID, open and close times, who closed it) and your ticket preferences (whether to confirm before sending, the server your last ticket message went to). | To route ticket messages between you and the server's staff. | Until deletion is requested. |
 | **Rescue keys** (a hash of the key, not the key itself). | Lets a server owner reclaim bot ownership if they lose their Discord account. | Until the key is used or deletion is requested. |
 
-Message content is not written to the database. The bot keeps a short-term in-memory cache of recent messages (up to 50,000 messages per server, for 24 hours, then discarded) so it can log edits and deletions. This cache is lost when the bot restarts.
+Message content is not written to the database. When staff close a ticket, the conversation is posted as a text file in the server's private ticket log channel on Discord, where it stays until staff delete it. The bot keeps a short-term in-memory cache of recent messages (up to 50,000 messages per server, for 24 hours, then discarded) so it can log edits and deletions. This cache is lost when the bot restarts.
 
 The bot does not sell data, show ads, or send data to third parties beyond Discord and the hosting provider that runs the bot.
 

@@ -2679,6 +2679,7 @@ dependencies = [
  "image",
  "qrcode",
  "rand 0.8.8",
+ "reqwest",
  "rqrr",
  "serde",
  "serde_json",
