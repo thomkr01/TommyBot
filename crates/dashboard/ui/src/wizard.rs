@@ -178,7 +178,7 @@ pub const VERIFICATION: &[Card] = &[Card {
         let (chip, after) = match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
             "Web" | "ThirdParty" => (Some(("ok", "This is recommended!")), show("verify_web")),
             "Dm" => {
-                let mut dm = sample("verify_captcha").clone();
+                let mut dm = sample("verify_captcha");
                 dm["flags"] = Value::Null;
                 (None, view! { {show("verify_dm")}<p class="muted">"In DMs:"</p>{bot(&dm)} }.into_any())
             }

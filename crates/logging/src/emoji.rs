@@ -10,12 +10,6 @@ use twilight_model::{
 
 static IDS: OnceLock<HashMap<String, u64>> = OnceLock::new();
 
-#[cfg(feature = "preview")]
-thread_local! {
-    /// Set by the preview test on its own thread, so other tests still see the fallbacks.
-    pub static AS_NAMES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// Stores the application's emojis as (name, id). Only the first call counts.
 pub fn load(ids: impl IntoIterator<Item = (String, u64)>) {
     let _ = IDS.set(ids.into_iter().collect());
@@ -54,10 +48,6 @@ impl Emoji {
 /// `<:name:id>` in message text, or the fallback.
 impl fmt::Display for Emoji {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        #[cfg(feature = "preview")]
-        if AS_NAMES.with(std::cell::Cell::get) {
-            return write!(f, "<:{}:0>", self.name);
-        }
         match self.id() {
             Some(id) => write!(f, "<:{}:{id}>", self.name),
             None => f.write_str(self.fallback),

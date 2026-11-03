@@ -118,10 +118,7 @@ fn token(t: &str) -> Option<String> {
     }
     let (name, eid) = t.strip_prefix("a:").unwrap_or(t).strip_prefix(':')?.split_once(':')?;
     let eid = id(eid)?;
-    Some(match crate::icons::svg(name) {
-        "" => format!("<img class=\"emo\" alt=\":{name}:\" src=\"https://cdn.discordapp.com/emojis/{eid}.webp\">"),
-        svg => format!("<span class=\"i emo\">{}</span>", svg.trim()),
-    })
+    Some(format!("<img class=\"emo\" alt=\":{name}:\" src=\"https://cdn.discordapp.com/emojis/{eid}.webp\">"))
 }
 
 #[cfg(test)]
@@ -147,8 +144,7 @@ mod tests {
         assert_eq!(md("```rs\nlet *a*;\n```"), "<pre>let *a*;</pre>");
         assert_eq!(md("## H"), "<div class=\"h2\">H</div>");
         // mentions and emojis keep their underscores away from the italic pass
-        assert_eq!(inline(&esc("<@1001> <#2001> <@&9> <:right_sort:0> _a_")).replace(crate::icons::svg("right_sort").trim(), "SVG"),
-            "<span class=\"mention\">@member</span> <span class=\"mention\">#general</span> <span class=\"mention\">@unknown-role</span> <span class=\"i emo\">SVG</span> <i>a</i>");
-        assert_eq!(inline(&esc("<:pepe:42> <x> a & b")), "<img class=\"emo\" alt=\":pepe:\" src=\"https://cdn.discordapp.com/emojis/42.webp\"> &lt;x&gt; a &amp; b");
+        assert_eq!(inline(&esc("<@1001> <#2001> <@&9> <:right_sort:42> _a_ <x> a & b")),
+            "<span class=\"mention\">@unknown-user</span> <span class=\"mention\">#unknown</span> <span class=\"mention\">@unknown-role</span> <img class=\"emo\" alt=\":right_sort:\" src=\"https://cdn.discordapp.com/emojis/42.webp\"> <i>a</i> &lt;x&gt; a &amp; b");
     }
 }

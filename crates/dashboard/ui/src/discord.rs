@@ -1,24 +1,32 @@
 //! Discord look-alike messages for the wizard previews and the Embed Builder. The bot's own
-//! messages come from `assets/previews/messages.json`, which a bot test builds with the same code
-//! that sends them, so the previews match Discord.
+//! messages come from `/api/previews`: the bot builds them at startup with the code that sends
+//! them, so the previews match Discord.
 use crate::md::{esc, inline, md};
 use leptos::prelude::*;
 use serde_json::Value;
-use std::sync::OnceLock;
 
-fn samples() -> &'static Value {
-    static S: OnceLock<Value> = OnceLock::new();
-    S.get_or_init(|| serde_json::from_str(include_str!("../../../../assets/previews/messages.json")).unwrap_or_default())
+thread_local! {
+    static SAMPLES: ArcRwSignal<Value> = {
+        let s = ArcRwSignal::new(Value::Null);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let s = s.clone();
+            leptos::task::spawn_local(async move {
+                if let Ok(v) = crate::common::api("GET", "/api/previews", None).await { s.set(v) }
+            });
+        }
+        s
+    };
 }
 
-/// One of the bot's sample messages.
-pub fn sample(key: &str) -> &'static Value {
-    &samples()[key]
+/// One of the bot's sample messages; null until they have loaded or before the bot first started.
+pub fn sample(key: &str) -> Value {
+    SAMPLES.with(|s| s.with(|v| v[key].clone()))
 }
 
 /// The name behind a sample id: `kind` is users, channels or roles.
 pub fn name(kind: &str, id: &str) -> Option<String> {
-    samples()["names"][kind][id].as_str().map(String::from)
+    SAMPLES.with(|s| s.with_untracked(|v| v["names"][kind][id].as_str().map(String::from)))
 }
 
 /// A `<t:unix:style>` timestamp as Discord shows it; 0 is now.
@@ -65,7 +73,7 @@ fn embed(e: &Value) -> AnyView {
     let s = |p: &str| p.split('.').fold(e, |v, k| &v[k]).as_str().unwrap_or("").to_string();
     // Discord's bar for an embed without a colour.
     let color = e["color"].as_u64().map_or("#1e1f22".into(), |c| format!("#{c:06x}"));
-    let image = s("image.url").replace("attachment://", "/");
+    let image = s("image.url");
     let footer = [s("footer.text"), if s("timestamp").is_empty() { String::new() } else { now() }].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" • ");
     view! {
         <div class="embed" style=format!("border-left-color:{color}")>
@@ -103,7 +111,10 @@ pub fn bot(m: &Value) -> AnyView {
 
 /// A sample by key, as the bot sends it.
 pub fn show(key: &str) -> AnyView {
-    bot(sample(key))
+    match sample(key) {
+        Value::Null => view! { <p class="muted">"The preview appears once TommyBot has started."</p> }.into_any(),
+        m => bot(&m),
+    }
 }
 
 /// Marks the preview's lines whose text is new since the last call, so a settings change shows

@@ -364,11 +364,8 @@ pub(crate) fn embed_reply(embed: Embed) -> InteractionResponse {
     }
 }
 
-fn web_link(gid: Id<GuildMarker>) -> InteractionResponse {
-    web_link_at(&std::env::var("DASHBOARD_URL").unwrap_or_default(), gid)
-}
-
-pub(crate) fn web_link_at(base: &str, gid: Id<GuildMarker>) -> InteractionResponse {
+pub(crate) fn web_link(gid: Id<GuildMarker>) -> InteractionResponse {
+    let base = std::env::var("DASHBOARD_URL").unwrap_or_default();
     let mut r = ephemeral(
         InteractionResponseType::ChannelMessageWithSource,
         Some("The dashboard URL is not configured, ask the server staff."),
@@ -545,16 +542,12 @@ pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
 }
 
 /// A sum a member types; no image, so screen readers and slow connections cope. Returns (question, answer).
-fn new_sum() -> (String, String) {
+pub(crate) fn new_sum() -> (String, String) {
     use std::hash::{BuildHasher, Hasher};
     let r = std::collections::hash_map::RandomState::new()
         .build_hasher()
         .finish();
-    sum(r % 9 + 1, (r >> 8) % 9 + 1)
-}
-
-/// The question and its answer.
-pub(crate) fn sum(a: u64, b: u64) -> (String, String) {
+    let (a, b) = (r % 9 + 1, (r >> 8) % 9 + 1);
     (format!("What is {a} + {b}?"), (a + b).to_string())
 }
 

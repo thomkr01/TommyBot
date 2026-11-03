@@ -1,12 +1,15 @@
-//! The sample messages the dashboard shows in its wizard previews, built with the same functions
-//! the bot sends them with, so a preview can never drift from Discord. `messages.json` is checked
-//! here; run `UPDATE_PREVIEWS=1 cargo test -p tommybot previews` to rewrite it after a change.
+//! The sample messages the dashboard shows in its previews. The bot builds them at startup with
+//! the same functions it sends them with and saves them for the dashboard, so a preview always
+//! matches what this bot version sends, custom emojis included.
+use anyhow::Result;
+use base64::Engine as _;
 use serde_json::{json, Value};
+use sqlx::PgPool;
 use tommybot_automod::{
     join::{Action, RaidCfg},
     strike::{strike, StrikeCfg, StrikeState},
 };
-use tommybot_logging::{embed::verify_panel, emoji::AS_NAMES, Log};
+use tommybot_logging::{embed::verify_panel, Log};
 use twilight_model::{
     http::interaction::{InteractionResponse, InteractionResponseType},
     id::Id,
@@ -20,16 +23,10 @@ const YOU: u64 = 1002;
 const ROGUE: u64 = 1003;
 const GENERAL: u64 = 2001;
 const SERVER: &str = "Your Server";
-const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/previews");
 
-/// A log as `send_log` sends it, with the clock line's time zeroed.
+/// A log as `send_log` sends it.
 fn log(l: Log) -> Value {
-    let mut v = json!({"embeds": [l.time().build()]});
-    let d = v["embeds"][0]["description"].as_str().unwrap_or_default();
-    let at = d.rfind("<t:").map_or(d.len(), |i| i + 3);
-    let end = d[at..].find(':').map_or(at, |e| at + e);
-    v["embeds"][0]["description"] = json!(format!("{}0{}", &d[..at], &d[end..]));
-    v
+    json!({"embeds": [l.time().build()]})
 }
 
 fn interaction(r: InteractionResponse) -> Value {
@@ -72,7 +69,18 @@ fn messages() -> Value {
     let code = "Ab3dE9fGh1_0123456789";
     let (panel, buttons) = verify_panel(SERVER);
     let answer = verify::row(verify::button("Answer", &format!("{}1", verify::ENTER)));
-    let challenge = |body: &str, png: bool| json!({"embeds": [verify::challenge_embed(body, png, png, 120_000)], "components": [answer], "flags": 64});
+    let captcha = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD
+            .encode(verify::new_captcha(&Default::default()).1)
+    );
+    let challenge = |body: &str, png: bool| {
+        let mut e = json!(verify::challenge_embed(body, png, png, 120_000));
+        if png {
+            e["image"]["url"] = json!(captcha);
+        }
+        json!({"embeds": [e], "components": [answer], "flags": 64})
+    };
     let reply_text = |t: &str| {
         interaction(verify::ephemeral(
             InteractionResponseType::ChannelMessageWithSource,
@@ -89,40 +97,37 @@ fn messages() -> Value {
         "mod_log": log(commands::mod_log_embed((4151, "ban"), (YOU, MEMBER), None, Some("DM ads"))),
         "nuke_quarantined": nuke(true, true),
         "nuke_no_quarantine": nuke(false, false),
-        "raid": log(joingate::raid_trigger_log(&raid, &raiders, code, Some(format!("https://tommybot.example/raid/{code}")))),
+        "raid": log(joingate::raid_trigger_log(&raid, &raiders, code, crate::invites::raid_url(code))),
         "verify_panel": {"embeds": [panel], "components": [buttons]},
         "verify_button": interaction(verify::embed_reply(verify::passed_embed(SERVER))),
-        "verify_web": interaction(verify::web_link_at("https://tommybot.example", Id::new(1))),
+        "verify_web": interaction(verify::web_link(Id::new(1))),
         "verify_captcha": challenge(verify::PROMPT, true),
-        "verify_simple": challenge(&verify::sum(4, 3).0, false),
+        "verify_simple": challenge(&verify::new_sum().0, false),
         "verify_dm": reply_text("Check your DMs for the challenge."),
     })
 }
 
+/// Saves the samples for the dashboard; run at startup, once the custom emojis are loaded.
+pub async fn publish(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO bot_previews (id, messages) VALUES (true, $1)
+         ON CONFLICT (id) DO UPDATE SET messages = excluded.messages, updated_at = now()",
+    )
+    .bind(messages())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[test]
-fn previews_match_the_bot() {
-    AS_NAMES.with(|n| n.set(true));
-    let got = serde_json::to_string_pretty(&messages()).unwrap() + "\n";
-    let path = format!("{DIR}/messages.json");
-    if std::env::var_os("UPDATE_PREVIEWS").is_some() {
-        std::fs::write(&path, &got).unwrap();
-        // A captcha is random, so keep the one there is.
-        let png = format!("{DIR}/captcha.png");
-        if !std::path::Path::new(&png).exists() {
-            std::fs::write(png, verify::new_captcha(&Default::default()).1).unwrap();
-        }
-    }
-    let want = std::fs::read_to_string(&path).unwrap_or_default();
-    assert!(
-        got == want,
-        "dashboard previews are stale: run UPDATE_PREVIEWS=1 cargo test -p tommybot previews"
-    );
-    // Every emoji the previews use must be drawable by the dashboard.
-    let icons = include_str!("../../dashboard/ui/src/icons.rs");
-    for name in got.split("<:").skip(1).filter_map(|r| r.split(':').next()) {
+fn every_sample_has_a_message() {
+    let m = messages();
+    let o = m.as_object().unwrap();
+    assert!(o.len() > 10);
+    for (k, v) in o.iter().filter(|(k, _)| *k != "names") {
         assert!(
-            icons.contains(&format!("\"{name}\"")),
-            "add \"{name}\" to the icons! list in dashboard/ui/src/icons.rs"
+            v["embeds"].is_array() || v["content"].is_string(),
+            "{k} is empty"
         );
     }
 }
