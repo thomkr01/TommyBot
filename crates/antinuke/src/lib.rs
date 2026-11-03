@@ -6,6 +6,7 @@
 
 mod backup;
 mod incident;
+pub mod security;
 pub use backup::*;
 pub use incident::*;
 
