@@ -67,16 +67,16 @@ const fn e(name: &'static str, fallback: &'static str) -> Emoji {
 
 pub const ARROW: Emoji = e("right_sort", "▸");
 pub const YES: Emoji = e("success", "✅");
-pub const NO: Emoji = e("error", "❎");
+pub const NO: Emoji = e("error", "❌");
 pub const REASON: Emoji = e("reason", "📄");
 pub const MODERATOR: Emoji = e("moderator_field", "👤");
 pub const MEMBER: Emoji = e("member", "👤");
 pub const AGE: Emoji = e("account_age", "🎂");
-pub const TARGET: Emoji = e("target", "🎟️");
+pub const TARGET: Emoji = e("target", "🎯");
 pub const QUARANTINED: Emoji = e("quarantine_role", "🧍");
 pub const PANIC: Emoji = e("panic", "🛑");
 pub const LOCKDOWN: Emoji = e("lockdown", "🔒");
-pub const HELP: Emoji = e("help", "🫴");
+pub const HELP: Emoji = e("help", "🛟");
 pub const ONLINE: Emoji = e("online_dot", "🟢");
 pub const CHEVRON: Emoji = e("chevron_right", "❯");
 pub const LINK: Emoji = e("external_link", "↗");
@@ -96,10 +96,10 @@ pub const JOIN_GATE: Emoji = e("join_gate", "▸");
 pub const JOIN_RAID: Emoji = e("join_raid", "▸");
 pub const PERSISTENCE: Emoji = e("quarantine", "▸");
 pub const LATENCY: Emoji = e("duration", "▸");
-pub const UPTIME: Emoji = e("pending", "▸");
-pub const RESOURCES: Emoji = e("settings", "▸");
+pub const UPTIME: Emoji = e("clock", "▸");
+pub const RESOURCES: Emoji = e("analytics", "▸");
 pub const RAM: Emoji = e("database", "▸");
-pub const CPU: Emoji = e("loading", "▸");
+pub const CPU: Emoji = e("meter_high", "▸");
 pub const SIZE: Emoji = e("stats", "▸");
 pub const SERVERS: Emoji = e("server", "▸");
 
@@ -110,74 +110,110 @@ pub const CRITICAL: Emoji = e("shield_x", "⛔");
 pub const WARNING: Emoji = e("warning", "⚠️");
 pub const TIP: Emoji = e("info", "ℹ️");
 
+/// Label word → icon name for [`for_label`]; first match wins.
+const BY_WORD: &[(&str, &str)] = &[
+    ("kicked", "kick"),
+    ("revert", "restore"),
+    ("recreat", "backup"),
+    ("responsible", "moderator_field"),
+    ("moderator", "moderator_field"),
+    ("executor", "moderator_field"),
+    ("inviter", "invite"),
+    ("closed by", "moderator_field"),
+    ("opened by", "member"),
+    ("owner", "owner"),
+    ("author", "member"),
+    ("attachment", "attachments"),
+    ("sent", "calendar"),
+    ("username", "nickname"),
+    ("nick", "nickname"),
+    ("rate limit", "slowmode"),
+    ("user limit", "members"),
+    ("member", "member"),
+    ("user", "member"),
+    ("target", "target"),
+    ("channel", "channel_text"),
+    ("roles added", "role_add"),
+    ("roles removed", "role_remove"),
+    ("role", "role"),
+    ("permission", "permissions"),
+    ("additions", "plus"),
+    ("removals", "minus"),
+    ("type", "tag"),
+    ("explicit", "nsfw_filter"),
+    ("notification", "notifications_feed"),
+    ("message id", "message_id"),
+    ("content", "message"),
+    ("message", "message"),
+    ("reason", "reason"),
+    ("case", "case"),
+    ("action", "settings"),
+    ("duration", "duration"),
+    ("uptime", "clock"),
+    ("creat", "account_age"),
+    ("joined", "joined_date"),
+    ("invite", "invite_code"),
+    ("position", "position"),
+    ("name", "nickname"),
+    ("tag", "tag"),
+    ("topic", "reason"),
+    ("nsfw", "nsfw_filter"),
+    ("slowmode", "slowmode"),
+    ("emoji", "emoji"),
+    ("webhook", "webhook"),
+    ("avatar", "avatar_field"),
+    ("badge", "nitro_badge"),
+    ("bot", "bot"),
+    ("count", "counting"),
+    ("strike", "warn_points"),
+    ("rule", "rules"),
+    ("factor", "heat"),
+    ("error", "error"),
+    ("result", "logs"),
+    ("appeal", "appeal"),
+    ("banned", "ban"),
+    ("timed out", "timeout"),
+    ("quarantine", "quarantine"),
+    ("server", "server"),
+    ("version", "info"),
+    ("suspicious", "suspicious_account"),
+    ("whitelist", "whitelist"),
+    ("warn", "warn_points"),
+    ("same ip", "fingerprint"),
+    ("categor", "category"),
+    ("accessor", "avatar_field"),
+    ("price", "coin"),
+    ("communication", "timeout"),
+    ("mention", "mentions"),
+    ("color", "palette"),
+    ("colour", "palette"),
+    ("afk", "idle_dot"),
+    ("verification", "verification"),
+    ("code", "invite_code"),
+    ("mute", "mute"),
+    ("deaf", "mute"),
+    ("bitrate", "channel_voice"),
+    ("sticker", "sticker"),
+    ("banner", "image"),
+    ("icon", "image"),
+    ("splash", "image"),
+    ("descr", "reason"),
+    ("id", "user_id"),
+];
+
 /// The icon in front of a `**Label:**` line, matched on words in the label (first match wins),
 /// per-field icons. Unknown labels keep the plain arrow.
 pub fn for_label(label: &str) -> Emoji {
-    const BY_WORD: &[(&str, &str)] = &[
-        ("kicked", "kick"),
-        ("revert", "restore"),
-        ("recreat", "backup"),
-        ("responsible", "moderator_field"),
-        ("moderator", "moderator_field"),
-        ("executor", "moderator_field"),
-        ("inviter", "moderator_field"),
-        ("owner", "owner"),
-        ("author", "member"),
-        ("attachment", "attachments"),
-        ("sent", "calendar"),
-        ("member", "member"),
-        ("user", "member"),
-        ("target", "target"),
-        ("channel", "channel_text"),
-        ("role", "role"),
-        ("permission", "permissions"),
-        ("additions", "plus"),
-        ("removals", "minus"),
-        ("id", "user_id"),
-        ("type", "tag"),
-        ("content", "message"),
-        ("message", "message"),
-        ("reason", "reason"),
-        ("case", "case_number"),
-        ("action", "settings"),
-        ("duration", "duration"),
-        ("uptime", "pending"),
-        ("creat", "account_age"),
-        ("joined", "joined_date"),
-        ("invite", "invite_code"),
-        ("position", "position"),
-        ("name", "nickname"),
-        ("tag", "tag"),
-        ("topic", "reason"),
-        ("nsfw", "nsfw_filter"),
-        ("slowmode", "slowmode"),
-        ("emoji", "emoji"),
-        ("webhook", "webhook"),
-        ("avatar", "avatar_field"),
-        ("badge", "nitro_badge"),
-        ("bot", "bot"),
-        ("count", "counting"),
-        ("strike", "warn_points"),
-        ("rule", "rules"),
-        ("factor", "heat"),
-        ("error", "error"),
-        ("result", "logs"),
-        ("appeal", "appeal"),
-        ("banned", "ban"),
-        ("timed out", "timeout"),
-        ("quarantine", "quarantine"),
-        ("server", "server"),
-        ("version", "info"),
-    ];
     let l = label.to_ascii_lowercase();
+    // Keys match at the start of a word, so "Account" is not "count" and "Essential" is not
+    // "sent". "id" must be the whole word, or "identity" would match.
     let word = |w: &str| {
-        // "id" must be a whole word, or "inside"/"valid" would match.
-        if w == "id" {
-            l.split(|c: char| !c.is_ascii_alphanumeric())
-                .any(|p| p == "id")
-        } else {
-            l.contains(w)
-        }
+        l.match_indices(w).any(|(i, _)| {
+            let b = l.as_bytes();
+            let start = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+            let end = w != "id" || b.get(i + 2).is_none_or(|c| !c.is_ascii_alphanumeric());
+            start && end
+        })
     };
     BY_WORD
         .iter()
@@ -205,7 +241,7 @@ mod tests {
         assert_eq!(LINK.on(b()).label.as_deref(), Some("View Message ↗"));
         load([("success".into(), 5), ("external_link".into(), 6)]);
         assert_eq!(YES.to_string(), "<:success:5>");
-        assert_eq!(NO.to_string(), "❎");
+        assert_eq!(NO.to_string(), "❌");
         let l = LINK.on(b());
         assert_eq!(l.label.as_deref(), Some("View Message"));
         assert!(matches!(l.emoji, Some(EmojiReactionType::Custom { .. })));
@@ -213,5 +249,62 @@ mod tests {
         assert_eq!(for_label("Id").name, "user_id");
         assert_eq!(for_label("Recreated").name, "backup");
         assert_eq!(for_label("Valid").name, "right_sort");
+        assert_eq!(for_label("Account Accessories:").name, "avatar_field");
+        assert_eq!(for_label("Essential Roles").name, "role");
+        assert_eq!(for_label("Rate limit per user").name, "slowmode");
+        assert_eq!(for_label("Message Id").name, "message_id");
+        assert_eq!(for_label("Case").name, "case");
+    }
+
+    #[test]
+    fn every_icon_has_an_svg() {
+        let consts = [
+            ARROW,
+            YES,
+            NO,
+            REASON,
+            MODERATOR,
+            MEMBER,
+            AGE,
+            TARGET,
+            QUARANTINED,
+            PANIC,
+            LOCKDOWN,
+            HELP,
+            ONLINE,
+            CHEVRON,
+            LINK,
+            RUNNING,
+            WAITING,
+            PAGE_FIRST,
+            PAGE_PREV,
+            PAGE_NEXT,
+            PAGE_LAST,
+            CLOSE,
+            ON,
+            OFF,
+            ANTI_NUKE,
+            HEAT,
+            VERIFICATION,
+            JOIN_GATE,
+            JOIN_RAID,
+            PERSISTENCE,
+            LATENCY,
+            UPTIME,
+            RESOURCES,
+            RAM,
+            CPU,
+            SIZE,
+            SERVERS,
+            CLOCK,
+        ];
+        let names = consts
+            .iter()
+            .map(|e| e.name)
+            .chain(BY_WORD.iter().map(|w| w.1));
+        for n in names {
+            let path = format!("{}/../../assets/icons/{n}.svg", env!("CARGO_MANIFEST_DIR"));
+            assert!(std::path::Path::new(&path).exists(), "{n}.svg missing");
+        }
     }
 }

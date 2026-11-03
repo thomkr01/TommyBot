@@ -873,7 +873,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             } else {
                 let fail = EmbedBuilder::new()
                     .color(RED)
-                    .title("❎ Unsuccessful Operation!")
+                    .title("❌ Unsuccessful Operation!")
                     .description(format!(
                         "{ARROW} Wrong answer, try again before it's too late."
                     ))
