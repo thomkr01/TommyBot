@@ -24,6 +24,7 @@ mod panic;
 mod prefix;
 mod previews;
 mod purge;
+mod qr;
 mod reply;
 mod reports;
 mod scheduler;

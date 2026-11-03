@@ -171,6 +171,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
         "exempt": exempted
     });
     jobs::replace(&app.pool, gid.get() as i64, "panic_end", payload, ends).await?;
+    crate::reply::alert_owner(app, gid, "Panic mode started").await;
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
             PanicStep::LockServer => {

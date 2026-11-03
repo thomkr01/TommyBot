@@ -105,6 +105,11 @@ pub const SERVERS: Emoji = e("server", "▸");
 
 pub const CLOCK: Emoji = e("clock", "▸");
 
+pub const SHIELD: Emoji = e("shield_check", "🛡️");
+pub const CRITICAL: Emoji = e("shield_x", "⛔");
+pub const WARNING: Emoji = e("warning", "⚠️");
+pub const TIP: Emoji = e("info", "ℹ️");
+
 /// The icon in front of a `**Label:**` line, matched on words in the label (first match wins),
 /// per-field icons. Unknown labels keep the plain arrow.
 pub fn for_label(label: &str) -> Emoji {

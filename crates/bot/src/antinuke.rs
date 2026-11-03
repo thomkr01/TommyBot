@@ -648,6 +648,7 @@ pub(crate) async fn revert_and_report(
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
     let log = report_log((case, &nuke), actor.get(), (auto, quarantined), why, &sum);
     send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
+    crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
     if !auto {
         return Ok(());
     }

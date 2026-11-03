@@ -220,6 +220,7 @@ async fn join_raid(
             .collect();
         let log = raid_trigger_log(raid, &flagged, &code, crate::invites::raid_url(&code));
         send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
+        crate::reply::alert_owner(app, gid, "A join raid started").await;
     }
     let auto_lock = cfg.automod.auto_lockdown.enabled;
     if let Some(kind) = (out.triggered && auto_lock)

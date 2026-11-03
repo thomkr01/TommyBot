@@ -442,6 +442,14 @@ fn rgb(hex: &str) -> Option<Rgb<u8>> {
 
 /// The code and its PNG. Sync so the non-Send generator never crosses an await.
 pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
+    // The captcha crate panics in `view` when its random text lands near the canvas edge
+    // (u32 underflow), so a failed draw is retried instead of taking the task down.
+    (0..5)
+        .find_map(|_| std::panic::catch_unwind(|| draw_captcha(c)).ok())
+        .unwrap_or_default()
+}
+
+fn draw_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let (w, h) = (c.width.clamp(150, 300), c.height.clamp(60, 200));
     // The library draws 40 px text on a fixed 400x300 canvas: crop a smaller or larger box and scale it to
     // w x h. These bounds keep the crop inside the canvas and the text mostly inside the crop.

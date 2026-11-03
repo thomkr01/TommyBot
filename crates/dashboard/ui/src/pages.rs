@@ -182,10 +182,10 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 let (g, load) = (guild.clone(), load.clone());
                 let class = match r["severity"].as_str() { Some("ok") => "ok", Some("warn") => "warn", _ => "err" };
                 let fix = r["fix"]["label"].as_str().map(|l| {
-                    let role = r["fix"]["role_id"].clone();
+                    let body = r["fix"].clone();
                     let l = l.to_string();
-                    view! { <button on:click=move |_| { let (g, role, load) = (g.clone(), role.clone(), load.clone());
-                        run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(json!({"role_id": role}))).await }, msg, need, move |_| load()) }>{l}</button> }
+                    view! { <button on:click=move |_| { let (g, body, load) = (g.clone(), body.clone(), load.clone());
+                        run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(body)).await }, msg, need, move |_| load()) }>{l}</button> }
                 });
                 view! { <div class="row note"><b class=class>{crate::icons::icon(if class == "ok" { "success" } else { "warning" })}" "{s(&r["title"])}</b><span class="muted">{s(&r["detail"])}</span>{fix}</div> }
             }

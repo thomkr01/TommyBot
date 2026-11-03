@@ -73,7 +73,7 @@ pub const AUTOMOD: &[Card] = &[
         ("automod.filters.invites.enabled", "Moderate invite links posted"),
         ("automod.filters.nsfw_links.enabled", "Filter out NSFW links"),
         ("automod.filters.bad_sites.enabled", "Filter out malicious links"),
-        ("automod.filters.scam_links.enabled", "Filter out Nitro and Steam scam links"),
+        ("automod.filters.scam_links.enabled", "Filter out scam links and login QR codes"),
     ], |_, _| show("automod_kick")),
     card("Antispam module", "Do you want TommyBot to also monitor and fight off spam in your server?", &[
         ("automod.anti_spam", "Enable Anti Spam"),

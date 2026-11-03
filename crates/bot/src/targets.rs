@@ -35,8 +35,19 @@ pub async fn resolve_banned(
     gid: Id<GuildMarker>,
     name: &str,
 ) -> Result<Result<Id<UserMarker>, String>> {
-    // shortcut: only the first 1000 bans are searched; page with `after` if a server needs more.
-    let bans = app.http.bans(gid).limit(1000).await?.models().await?;
+    let mut bans: Vec<twilight_model::guild::Ban> = Vec::new();
+    loop {
+        let mut req = app.http.bans(gid).limit(1000);
+        if let Some(last) = bans.last().map(|b| b.user.id) {
+            req = req.after(last);
+        }
+        let page = req.await?.models().await?;
+        let full = page.len() == 1000;
+        bans.extend(page);
+        if !full {
+            break;
+        }
+    }
     let cands: Vec<_> = bans
         .into_iter()
         .map(|b| {

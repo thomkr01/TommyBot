@@ -219,7 +219,6 @@ async fn apply(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
             .fetch_one(&st.db)
             .await?;
     let (mut applied, mut failed) = (0, vec![]);
-    // shortcut: no 429 retry here, so a big server can see rate-limit failures; Apply again resumes.
     for c in &changes {
         let path = format!("/channels/{}/permissions/{}", c.channel, c.role);
         let body = json!({"type": 0, "allow": c.allow.to_string(), "deny": c.deny.to_string()});
