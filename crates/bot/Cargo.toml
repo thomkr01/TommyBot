@@ -21,10 +21,10 @@ tommybot-automod.workspace = true
 tommybot-logging.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 captcha = "1"
-rand = "0.8"
-base64 = "0.22"
+rand = "0.10"
+base64 = "0.23"
 # Same version captcha already pulls in.
-image = { version = "0.24", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rqrr = { version = "0.11.0", default-features = false }
 
 [dev-dependencies]
