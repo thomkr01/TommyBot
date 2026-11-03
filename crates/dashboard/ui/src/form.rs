@@ -243,14 +243,14 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         "snippets" => {
             let upd = move |i: usize, k: &'static str, x: Value| { let mut cur = get(); cur[i][k] = x; set(cur) };
             let count = move || get().as_array().map_or(0, Vec::len);
-            view! { <div class="pick">
+            view! { <div style="display:grid;gap:8px;width:100%">
                 <Show when=move || count() == 0><span class="muted">"No snippets"</span></Show>
-                {move || (0..count()).map(|i| view! { <div class="row">
+                {move || (0..count()).map(|i| view! { <div style="display:grid;gap:4px">
                     <input aria-label="name" placeholder="name" prop:value=move || show(&get()[i]["name"]) on:change=move |e| upd(i, "name", json!(event_target_value(&e).trim().to_lowercase())) />
-                    <textarea aria-label="content" maxlength="1000" prop:value=move || show(&get()[i]["content"]) on:change=move |e| upd(i, "content", json!(event_target_value(&e))) />
-                    <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
+                    <textarea aria-label="content" maxlength="1000" style="min-height:60px" prop:value=move || show(&get()[i]["content"]) on:change=move |e| upd(i, "content", json!(event_target_value(&e))) />
+                    <div><button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button></div>
                 </div> }).collect_view()}
-                <button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"name": "", "content": ""})); set(json!(cur)) }>"Add snippet"</button>
+                <div><button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"name": "", "content": ""})); set(json!(cur)) }>"Add snippet"</button></div>
             </div> }.into_any()
         }
         "customs" => {

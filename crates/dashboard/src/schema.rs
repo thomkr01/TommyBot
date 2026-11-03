@@ -906,11 +906,11 @@ pub fn schema() -> Vec<Value> {
     ];
     let tickets =
         vec![
+        ti(fg("General", "enabled", "bool"), "Members can DM TommyBot to open a ticket"),
         hp(
-            ti(fg("General", "enabled", "bool"), "Members can DM TommyBot to open a ticket"),
+            ti(fg("General", "category", "category"), "Ticket category"),
             "Staff with the Manage Tickets permit or an access role see and answer every ticket.",
         ),
-        ti(fg("General", "category", "category"), "Ticket category"),
         ti(fg("General", "log_channel", "channel"), "Ticket log channel"),
         ti(
             dv(fg("General", "full_log", "bool"), true),
