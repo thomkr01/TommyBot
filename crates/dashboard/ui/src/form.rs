@@ -428,6 +428,21 @@ pub fn Section(
     };
     let card_view = cards.map(|cs| {
         let at = RwSignal::new(0usize);
+        let pv = NodeRef::<leptos::html::Div>::new();
+        // (card, texts of its preview): a new card starts over, so only a settings change flashes.
+        let seen = StoredValue::new((usize::MAX, None::<Vec<String>>));
+        Effect::new(move |_| {
+            val.track();
+            dc.track();
+            let (i, ready) = (at.get(), loaded.get());
+            request_animation_frame(move || {
+                let Some(el) = pv.get_untracked() else { return };
+                seen.update_value(|(card, texts)| {
+                    if *card != i || !ready { *card = i; *texts = None; }
+                    crate::discord::flash_changes(&el, texts);
+                });
+            });
+        });
         let g = guild.clone();
         let act = move |path: &'static str| {
             let (g, v, reload) = (g.clone(), version.get_untracked(), reload.clone());
@@ -446,7 +461,7 @@ pub fn Section(
                         {c.notes.iter().map(|t| view! { <p class="note">{*t}</p> }).collect_view()}
                         <div class="split"><div>{fs}
                             {c.action.map(|(label, path)| view! { <button class="go" disabled=move || val.get() != orig.get() on:click=move |_| act(path)>{label}</button> })}</div>
-                            <div class="preview">{move || (cs[at.get_untracked()].preview)(&val.get(), &dc.get())}</div></div>
+                            <div class="preview" node_ref=pv>{move || (cs[at.get_untracked()].preview)(&val.get(), &dc.get())}</div></div>
                     </div> } }}
                 <p class="muted">{move || format!("{} / {}", at.get() + 1, cs.len())}</p>
             </div>

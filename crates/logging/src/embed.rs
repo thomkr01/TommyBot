@@ -1,7 +1,13 @@
 //! Log layout, shared by every log in the bot: a bold title, a colour bar, then
 //! description lines that start with an arrow (`▸ **Responsible:** @user *`id`*`), bold section
 //! headings ("Changes", "Previous Settings") and red/green diff blocks for before/after text.
-use twilight_model::{channel::message::Embed, user::User};
+use twilight_model::{
+    channel::message::{
+        component::{ActionRow, Button, ButtonStyle, Component},
+        Embed,
+    },
+    user::User,
+};
 use twilight_util::builder::embed::{
     EmbedAuthorBuilder, EmbedBuilder, EmbedFieldBuilder, EmbedFooterBuilder, ImageSource,
 };
@@ -239,6 +245,42 @@ pub fn clip(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max - 1).collect();
     out.push('…');
     out
+}
+
+pub const VERIFY_START: &str = "verify:start";
+pub const VERIFY_HELP: &str = "verify:help";
+
+/// A button that sends an interaction with `id`.
+pub fn button(label: &str, id: &str, style: ButtonStyle) -> Component {
+    Component::Button(Button {
+        id: None,
+        custom_id: Some(id.into()),
+        disabled: false,
+        emoji: None,
+        label: Some(label.into()),
+        style,
+        url: None,
+        sku_id: None,
+    })
+}
+
+/// The verify panel, posted by the `verifysetup` command and by the dashboard wizard.
+pub fn verify_panel(server: &str) -> (Embed, Component) {
+    let embed = EmbedBuilder::new()
+        .color(GREEN)
+        .title("🧩 Verification Required!")
+        .description(format!(
+            "To access `{server}`, you need to pass the verification first.\n{ARROW} Press on the **Verify** button below."
+        ))
+        .build();
+    let row = Component::ActionRow(ActionRow {
+        id: None,
+        components: vec![
+            button("Verify", VERIFY_START, ButtonStyle::Success),
+            button("Help", VERIFY_HELP, ButtonStyle::Secondary),
+        ],
+    });
+    (embed, row)
 }
 
 #[cfg(test)]

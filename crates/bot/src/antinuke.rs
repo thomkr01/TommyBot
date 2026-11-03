@@ -646,7 +646,23 @@ pub(crate) async fn revert_and_report(
     let sum = revert_actor(app, gid, actor, since, Some(&cfg.backups)).await?;
     let case = open_case(app, gid, actor, why).await?;
     let nuke = record_nuke(app, gid, actor, &sum.done).await?;
-    let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
+    let log = report_log((case, &nuke), actor.get(), (auto, quarantined), why, &sum);
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
+    crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
+    if !auto {
+        return Ok(());
+    }
+    crate::panic::note(app, gid, actor, false).await
+}
+
+/// The log after a nuke is stopped and reverted.
+pub(crate) fn report_log(
+    (case, nuke): (i32, &str),
+    actor: u64,
+    (auto, quarantined): (bool, bool),
+    why: &str,
+    sum: &RevertSummary,
+) -> Log {
     let action = if quarantined {
         format!("{YES} **Quarantined** (bots are kicked)")
     } else if auto {
@@ -654,14 +670,18 @@ pub(crate) async fn revert_and_report(
     } else {
         format!("{NO} **Not quarantined** (auto quarantine is off)")
     };
-    let reinvite = if reinvite.is_empty() {
+    let reinvite = if sum.reinvite.is_empty() {
         "None".into()
     } else {
-        reinvite.join(" ")
+        sum.reinvite
+            .iter()
+            .map(|u| format!("<@{u}>"))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
-    let log = Log::new("Anti Nuke Report:", ALERT)
+    Log::new("Anti Nuke Report:", ALERT)
         .line("CASE", &format!("`{case}` (nuke `{nuke}`)"))
-        .user("Responsible", actor.get())
+        .user("Responsible", actor)
         .text(&action)
         .line("Reason", why)
         .section("Revert Report:")
@@ -670,13 +690,7 @@ pub(crate) async fn revert_and_report(
             &format!("`{}/{}`", sum.ops - sum.failed, sum.ops),
         )
         .line("Recreated", &format!("`{}`", sum.recreated))
-        .line("Kicked, re-invite", &reinvite);
-    send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
-    crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
-    if !auto {
-        return Ok(());
-    }
-    crate::panic::note(app, gid, actor, false).await
+        .line("Kicked, re-invite", &reinvite)
 }
 
 /// A quiet gap this long starts a new nuke case instead of extending the last one.

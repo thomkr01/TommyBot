@@ -112,6 +112,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .route("/api/totp/verify", post(auth::totp_verify))
         .route("/api/guilds", get(api::guilds))
         .route("/api/permit-catalog", get(api::permit_catalog))
+        .route("/api/previews", get(api::previews))
         .route(&format!("{g}/config"), get(api::get_config))
         .route(
             &format!("{g}/config/{{section}}"),

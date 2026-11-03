@@ -488,18 +488,32 @@ pub(crate) async fn mod_log(
     duration_s: Option<i64>,
     reason: Option<&str>,
 ) {
-    let mut log = Log::new("", case_color(name))
-        .inline("Case:", &format!("`{case_no}`"))
-        .inline("Type:", &format!("`{}`", case_title(name)))
-        .inline("Moderator:", &embed::user(actor.get()))
-        .field("Target:", &format!("{ARROW} {}", embed::user(target.get())));
-    if let Some(d) = duration_s {
-        log = log.field("Duration:", &format!("`{}`", duration(d)));
-    }
-    let log = log.field("Reason:", reason.unwrap_or("No reason provided"));
+    let log = mod_log_embed(
+        (case_no, name),
+        (actor.get(), target.get()),
+        duration_s,
+        reason,
+    );
     if let Err(e) = send_log(app, gid.get(), LogKind::ModCommand, log).await {
         tracing::warn!(?e, "mod log failed");
     }
+}
+
+pub(crate) fn mod_log_embed(
+    (case_no, name): (i32, &str),
+    (actor, target): (u64, u64),
+    duration_s: Option<i64>,
+    reason: Option<&str>,
+) -> Log {
+    let mut log = Log::new("", case_color(name))
+        .inline("Case:", &format!("`{case_no}`"))
+        .inline("Type:", &format!("`{}`", case_title(name)))
+        .inline("Moderator:", &embed::user(actor))
+        .field("Target:", &format!("{ARROW} {}", embed::user(target)));
+    if let Some(d) = duration_s {
+        log = log.field("Duration:", &format!("`{}`", duration(d)));
+    }
+    log.field("Reason:", reason.unwrap_or("No reason provided"))
 }
 
 fn case_title(kind: &str) -> String {

@@ -4,7 +4,7 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
-use crate::md::{esc, inline, line, md, wrap};
+use crate::md::{line, wrap};
 
 fn get_at(e: &Value, path: &str) -> String {
     path.split('.').fold(e, |v, k| &v[k]).as_str().unwrap_or("").to_string()
@@ -20,7 +20,7 @@ fn set_at(e: &mut Value, path: &str, v: String) {
 
 fn edit(cur: RwSignal<Value>, f: impl FnOnce(&mut Value)) { cur.update(|c| f(&mut c["embed"])) }
 
-fn blank() -> Value { json!({"id": null, "name": "", "channel": null, "embed": {}}) }
+fn blank() -> Value { json!({"id": null, "name": "", "channel": null, "embed": {"color": 0x0d9df8}}) }
 
 /// Toolbar wraps: (label, tooltip, open, close, shortcut key, needs Shift). Keys follow Discord and Word.
 const WRAPS: [(&str, &str, &str, &str, &str, bool); 6] = [
@@ -120,7 +120,7 @@ pub fn Embeds(guild: String) -> impl IntoView {
         });
     };
     let posted = move || cur.with(|c| c["message"].as_str().map(|m| format!("https://discord.com/channels/{}/{}/{m}", g.get_value(), c["message_channel"].as_str().unwrap_or(""))));
-    let color = move || format!("#{:06x}", cur.with(|c| c["embed"]["color"].as_u64().unwrap_or(0x0d9df8)));
+    let color = move || format!("#{:06x}", cur.with(|c| c["embed"]["color"].as_u64().unwrap_or(0x1e1f22)));
     view! {
         <div class="card row">
             <select aria-label="saved embeds" on:change=move |e| { let v = event_target_value(&e); msg.clear();
@@ -170,28 +170,7 @@ pub fn Embeds(guild: String) -> impl IntoView {
                     on:click=move |_| edit(cur, |em| { let f = json!({"name": "", "value": "", "inline": false}); match em["fields"].as_array_mut() { Some(a) => a.push(f), None => em["fields"] = json!([f]) } })>"Add field"</button>
             </div>
             <div class="card">
-                {move || cur.with(|c| { let e = c["embed"].clone(); let s = |p: &str| get_at(&e, p); view! {
-                    <div class="dmsg">
-                        <i>"T"</i>
-                        <div>
-                            <b>"TommyBot "</b><span class="chip">"APP"</span>
-                            <div class="embed" style=format!("border-left-color:{}", color())>
-                                {(!s("thumbnail.url").is_empty()).then(|| view! { <img class="thumb" src=s("thumbnail.url") alt="" /> })}
-                                {(!s("author.name").is_empty()).then(|| view! { <small class="author">
-                                    {(!s("author.icon_url").is_empty()).then(|| view! { <img class="ico" src=s("author.icon_url") alt="" /> })}
-                                    <b>{s("author.name")}</b></small> })}
-                                {(!s("title").is_empty()).then(|| view! { <b class:link=!s("url").is_empty() inner_html=inline(&esc(&s("title"))) /> })}
-                                {(!s("description").is_empty()).then(|| view! { <div class="md" inner_html=md(&s("description")) /> })}
-                                <div class="fields">{e["fields"].as_array().into_iter().flatten().map(|f| view! {
-                                    <div class:wide=f["inline"] != true><b inner_html=inline(&esc(&get_at(f, "name"))) /><div class="md" inner_html=md(&get_at(f, "value")) /></div> }).collect_view()}</div>
-                                {(!s("image.url").is_empty()).then(|| view! { <img src=s("image.url") alt="" /> })}
-                                <small class="muted author">
-                                    {(!s("footer.icon_url").is_empty()).then(|| view! { <img class="ico" src=s("footer.icon_url") alt="" /> })}
-                                    {[s("footer.text"), s("timestamp").get(..16).unwrap_or("").replace('T', " ")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" • ")}
-                                </small>
-                            </div>
-                        </div>
-                    </div> } })}
+                {move || cur.with(|c| crate::discord::bot(&json!({"embeds": [c["embed"]]})))}
                 <div class="row">
                     <button on:click=move |_| save(None)>"Save draft"</button>
                     <button on:click=move |_| save(Some(false))>{move || if cur.with(|c| c["message"].is_string()) { "Update message" } else { "Post" }}</button>

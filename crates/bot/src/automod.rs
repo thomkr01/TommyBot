@@ -465,15 +465,13 @@ async fn strike_member(
         )
         .await?;
     }
-    let log = Log::new(&format!("*{} has been timed out!*", name), ORANGE)
-        .line("Reason", &format!("*{reason}*"))
-        .user("Member", user.get())
-        .line("Channel", &channel(ch.get()))
-        .line(
-            "Duration",
-            &format!("`{}`", duration(act.timeout_ms / 1000)),
-        )
-        .line("Strike", &format!("`{}`", act.strike));
+    let log = timeout_log(
+        name,
+        reason,
+        (user.get(), ch.get()),
+        act.timeout_ms,
+        act.strike,
+    );
     send_log(app, gid.get(), LogKind::AutoMod, log).await?;
     if lock.enabled
         && lock.strikes.is_some_and(|n| act.strike >= n)
@@ -719,13 +717,30 @@ async fn filter_action(
         app,
         gid.get(),
         LogKind::AutoMod,
-        Log::new(&action_title(&m.author.name, action), action_color(action))
-            .line("Factor", &format!("*{factor}*"))
-            .line("Channel", &channel(m.channel_id.get()))
-            .line("Message", &format!("||{}||", clip(&m.content, 500)))
-            .user("Member", uid.get()),
+        filter_log(
+            &m.author.name,
+            action,
+            factor,
+            (m.channel_id.get(), &m.content),
+            uid.get(),
+        ),
     )
     .await
+}
+
+/// The automod log for a filter's own action.
+pub(crate) fn filter_log(
+    name: &str,
+    action: FilterAction,
+    factor: &str,
+    (ch, content): (u64, &str),
+    uid: u64,
+) -> Log {
+    Log::new(&action_title(name, action), action_color(action))
+        .line("Factor", &format!("*{factor}*"))
+        .line("Channel", &channel(ch))
+        .line("Message", &format!("||{}||", clip(content, 500)))
+        .user("Member", uid)
 }
 
 /// Automod log title: "*name has been warned!*".
@@ -737,6 +752,22 @@ fn action_title(name: &str, action: FilterAction) -> String {
         FilterAction::Kick => format!("*{name} has been kicked!*"),
         FilterAction::Ban => format!("*{name} has been banned!*"),
     }
+}
+
+/// The automod log for a heat timeout.
+pub(crate) fn timeout_log(
+    name: &str,
+    reason: &str,
+    (user, ch): (u64, u64),
+    timeout_ms: i64,
+    strike: u32,
+) -> Log {
+    Log::new(&format!("*{name} has been timed out!*"), ORANGE)
+        .line("Reason", &format!("*{reason}*"))
+        .user("Member", user)
+        .line("Channel", &channel(ch))
+        .line("Duration", &format!("`{}`", duration(timeout_ms / 1000)))
+        .line("Strike", &format!("`{strike}`"))
 }
 
 fn action_color(action: FilterAction) -> u32 {

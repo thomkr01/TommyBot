@@ -22,6 +22,7 @@ mod modview;
 mod native;
 mod panic;
 mod prefix;
+mod previews;
 mod purge;
 mod qr;
 mod reply;
@@ -63,6 +64,9 @@ async fn main() -> Result<()> {
     let me = http.current_user().await?.model().await?.id;
     if let Err(e) = load_emojis(&http).await {
         tracing::warn!(?e, "custom emojis not loaded, using Unicode fallbacks");
+    }
+    if let Err(e) = previews::publish(&pool).await {
+        tracing::warn!(?e, "saving the dashboard previews failed");
     }
     let app = Arc::new(app::App::new(
         http,

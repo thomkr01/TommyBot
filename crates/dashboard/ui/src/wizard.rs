@@ -19,19 +19,7 @@ const fn card(title: &'static str, desc: &'static str, fields: &'static [(&'stat
     Card { title, desc, notes: &[], fields, preview, action: None }
 }
 
-/// A fake Discord message.
-fn chat(author: &str, body: AnyView) -> AnyView {
-    view! { <div class="dmsg"><b>{author.to_string()}</b>" "<span class="muted">"Today at 09:11"</span><div>{body}</div></div> }.into_any()
-}
-
-fn bot(body: AnyView) -> AnyView {
-    chat("TommyBot", body)
-}
-
-/// A fake embed: colour bar, bold title, lines.
-fn embed(color: &str, title: &str, lines: Vec<String>) -> AnyView {
-    view! { <div class="dembed" style=format!("border-color:{color}")><b>{title.to_string()}</b>{lines.into_iter().map(|l| view! { <div>{crate::icons::rich(&l)}</div> }).collect_view()}</div> }.into_any()
-}
+use crate::discord::{bot, chat, sample, show};
 
 /// The message box with something typed in it.
 fn typed(text: String) -> AnyView {
@@ -55,24 +43,19 @@ pub const MISC: &[Card] = &[
         if on(c, "misc.use_slash", true) { typed("/ban user: @member reason: toxic".into()) } else { text("Slash commands are off, only the prefix works.") }
     }),
     card("Compact mode", "Do you want TommyBot's messages to have a compact style?", &[("misc.compact_replies", "Minify TommyBot's message replies")], |c, _| {
-        let lines = if on(c, "misc.compact_replies", false) {
-            vec!["✅ Successful bans: 1".into(), "❌ Unsuccessful bans: 0".into(), "Reason: toxic".into(), "Moderator: @you".into()]
-        } else {
-            vec!["Reason: toxic".into(), "Moderator: @you".into(), "Details:".into(), "▸ Duration: ❌".into(), "▸ Soft Ban: ❌".into(), "▸ Hack Ban: ✅".into(), "▸ DM Members: ❌".into(), "✅ Successful bans: member".into(), "❌ Unsuccessful bans: All users were banned!".into()]
-        };
-        bot(embed("var(--ok)", if on(c, "misc.compact_replies", false) { "" } else { "Ban Result:" }, lines))
+        show(if on(c, "misc.compact_replies", false) { "ban_compact" } else { "ban_result" })
     }),
     Card {
         notes: &["If you want TommyBot to make the log channel for you, leave it empty and run Auto Setup."],
         ..card("Logging channel", "Where do you want TommyBot to log its actions?", &[("logging.fallback", "Logs channel")], |c, dc| {
             let ch = name_of(dc, "channels", c["logging"]["fallback"].as_str().unwrap_or(""));
-            view! { <p class="muted">{format!("Logs go to {}", if ch.is_empty() { "nowhere yet".into() } else { ch })}</p>{bot(embed("var(--warn)", "member has been warned!", vec!["▸ Factor: Use of blacklisted words".into(), "▸ Channel: #general".into(), "▸ Member: @member".into(), "▸ Warns: 1/5".into()]))} }.into_any()
+            view! { <p class="muted">{format!("Logs go to {}", if ch.is_empty() { "nowhere yet".into() } else { ch })}</p>{show("automod_warn")} }.into_any()
         })
     },
     Card {
         notes: &["If you want TommyBot to make the modlog channel for you, leave it empty and run Auto Setup."],
         ..card("Moderation logs channel", "Where do you want TommyBot to log moderation actions made by your staff members?", &[("logging.routes.mod_command", "Modlogs channel")], |_, _| {
-            bot(embed("var(--bad)", "Case #4151 | Ban", vec!["▸ Target: @member".into(), "▸ Moderator: @you".into(), "▸ Reason: DM ads".into()]))
+            show("mod_log")
         })
     },
     Card {
@@ -91,7 +74,7 @@ pub const AUTOMOD: &[Card] = &[
         ("automod.filters.nsfw_links.enabled", "Filter out NSFW links"),
         ("automod.filters.bad_sites.enabled", "Filter out malicious links"),
         ("automod.filters.scam_links.enabled", "Filter out scam links and login QR codes"),
-    ], |_, _| bot(embed("var(--bad)", "member has been kicked!", vec!["▸ Reason: Posting an invite link".into()]))),
+    ], |_, _| show("automod_kick")),
     card("Antispam module", "Do you want TommyBot to also monitor and fight off spam in your server?", &[
         ("automod.anti_spam", "Enable Anti Spam"),
         ("automod.filters.mentions.enabled", "Track and stop @mention spam"),
@@ -101,7 +84,7 @@ pub const AUTOMOD: &[Card] = &[
         ("automod.filters.emojis.enabled", "Monitor emoji spam"),
         ("automod.filters.newlines.enabled", "Monitor new lines in messages"),
         ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
-    ], |_, _| bot(embed("var(--warn)", "member has been timed out!", vec!["▸ Reason: Spamming the same message".into()]))),
+    ], |_, _| show("automod_timeout")),
     card("Webhook coverage", "Do you want TommyBot to also monitor webhooks sending messages in your server?", &[("automod.monitor_webhooks", "Monitor unwhitelisted webhooks")], |c, _| {
         text(if on(c, "automod.monitor_webhooks", true) { "Webhook messages count towards spam like members' messages do." } else { "Webhook messages are ignored." })
     }),
@@ -112,14 +95,17 @@ pub const ANTINUKE: &[Card] = &[
         ("antinuke.enabled", "Enable Antinuke"),
         ("antinuke.prune", "Detect and react to member prunes"),
         ("antinuke.vanity_guard", "Guard the server's vanity url"),
-    ], |_, _| bot(embed("var(--bad)", "Anti Nuke", vec!["▸ Responsible: @rogue-admin".into(), "▸ Action: deleted 5 channels in 10 seconds".into(), "✅ Quarantined".into()]))),
+    ], |_, _| show("nuke_quarantined")),
     card("Auto quarantine", "Quarantine anyone who gives dangerous permissions without being allowed to.", &[
         ("antinuke.auto_quarantine", "Use the auto quarantine"),
         ("antinuke.quarantine_role", "Quarantine role"),
         ("antinuke.strict_mode", ""),
         ("antinuke.monitor_public_roles", ""),
         ("antinuke.monitor_channel_perms", ""),
-    ], |c, dc| text(&format!("Quarantined members only keep {}.", name_of(dc, "roles", c["antinuke"]["quarantine_role"].as_str().unwrap_or("the quarantine role"))))),
+    ], |c, dc| view! {
+        <p>{format!("Quarantined members only keep {}.", name_of(dc, "roles", c["antinuke"]["quarantine_role"].as_str().unwrap_or("the quarantine role")))}</p>
+        {show(if on(c, "antinuke.auto_quarantine", true) { "nuke_quarantined" } else { "nuke_no_quarantine" })}
+    }.into_any()),
     Card {
         notes: &[
             "ONLY owners and trusted admins are whitelisted automatically.",
@@ -182,18 +168,24 @@ pub const JOINRAID: &[Card] = &[card("Anti raid status", "If you want to keep yo
     ("joinraid.count", "Joins that count as a raid"),
     ("joinraid.span_ms", "Within (milliseconds)"),
     ("joinraid.lock", "Lock when a raid starts"),
-], |_, _| bot(embed("var(--bad)", "Join raid detected!", vec!["▸ 30 accounts joined in 10 seconds".into(), "✅ Raiders removed".into()])))];
+], |_, _| show("raid"))];
 
 pub const VERIFICATION: &[Card] = &[Card {
     notes: &["Save your changes first, then set up the channel."],
     action: Some(("Set up channel", "wizard/verify-channel")),
     ..card("Verification status", "Do you want to filter in only genuine members? Use the verification and fend off bots!", &[("verification.enabled", "Enable Verification"), ("verification.mode", "Verification mode")], |c, _| {
-        let panel = |button: &'static str| bot(view! { {embed("var(--primary)", "Verification Required!", vec!["To access the server, you need to pass the verification first.".into()])}<button class="go">{button}</button> }.into_any());
-        match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
-            "Web" | "ThirdParty" => view! { <span class="chip ok">"This is recommended!"</span><div class="dembed"><b>"VERIFICATION"</b><div>{crate::icons::icon("checkbox_off")}" I am human"</div></div> }.into_any(),
-            "Dm" => view! { <p class="muted">"The captcha is sent in DMs."</p>{panel("Verify")} }.into_any(),
-            "Button" => view! { <span class="chip warn">"This is very weak!"</span>{panel("Instant Access")} }.into_any(),
-            _ => view! { <p class="muted">"# verify-here"</p>{panel("Verify")} }.into_any(),
-        }
+        // The panel, then what a member sees after pressing Verify.
+        let (chip, after) = match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
+            "Web" | "ThirdParty" => (Some(("ok", "This is recommended!")), show("verify_web")),
+            "Dm" => {
+                let mut dm = sample("verify_captcha");
+                dm["flags"] = Value::Null;
+                (None, view! { {show("verify_dm")}<p class="muted">"In DMs:"</p>{bot(&dm)} }.into_any())
+            }
+            "Button" => (Some(("warn", "This is very weak!")), show("verify_button")),
+            "SimpleCaptcha" => (None, show("verify_simple")),
+            _ => (None, show("verify_captcha")),
+        };
+        view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after} }.into_any()
     })
 }];
