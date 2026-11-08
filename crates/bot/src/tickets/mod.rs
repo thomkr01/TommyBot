@@ -163,7 +163,7 @@ async fn make_category(
     Ok((category, Some(l)))
 }
 
-/// Tickets are on but the category is unset or deleted: make it (and the log when it is unset too)
+/// Tickets are on but the category is unset or deleted: make it (and the log when that is unset)
 /// so turning Tickets on is all the setup a server needs. Returns the category.
 pub async fn ensure_category(app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<ChannelMarker>>> {
     let cfg = app.cfg(gid.get()).await?;
@@ -171,12 +171,18 @@ pub async fn ensure_category(app: &App, gid: Id<GuildMarker>) -> Result<Option<I
     if !t.enabled {
         return Ok(None);
     }
-    let channels = &app.guild_info(gid).await?.channels;
-    if let Some(c) = t.category.filter(|c| channels.contains(c)) {
-        return Ok(Some(c));
+    if let Some(c) = t.category {
+        // The cache can miss a category the dashboard made a moment ago, so ask Discord.
+        if app.guild_info(gid).await?.channels.contains(&c) {
+            return Ok(Some(c));
+        }
+        match app.http.channel(c).await.map_err(anyhow::Error::from) {
+            Ok(_) => return Ok(Some(c)),
+            Err(e) if http_err::code(&e) == Some(10003) => {}
+            Err(e) => return Err(e),
+        }
     }
-    let want_log = !t.log_channel.is_some_and(|c| channels.contains(&c));
-    let (category, log) = make_category(app, gid, t, "Tickets", want_log).await?;
+    let (category, log) = make_category(app, gid, t, "Tickets", t.log_channel.is_none()).await?;
     settings::save(app, gid, app.me.get(), &["tickets"], |doc| {
         if !doc["tickets"].is_object() {
             doc["tickets"] = json!({});
