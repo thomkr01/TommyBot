@@ -230,6 +230,7 @@ pub async fn me(State(st): State<AppState>, s: Sess) -> Result<Json<serde_json::
             .unwrap_or(false);
     Ok(Json(
         json!({"user_id": s.user_id.to_string(), "username": s.username, "csrf": csrf, "totp_enrolled": enrolled, "stepped_up": s.stepped_up,
+            "bot_owner": crate::update::is_bot_owner(&st, &s).await,
             "support_url": std::env::var("SUPPORT_URL").ok().filter(|u| !u.is_empty())}),
     ))
 }

@@ -66,6 +66,25 @@ services:
       SUPPORT_URL: ${SUPPORT_URL:-}
       RUST_LOG: ${RUST_LOG:-info}
 
+  # Runs updates started from the dashboard (bot owner only). It alone holds the Docker socket, has no
+  # open port, and only ever pulls this project's images and recreates bot and dashboard.
+  updater:
+    image: ghcr.io/thomkr01/tommybot-updater:${TOMMYBOT_TAG:-latest}
+    build:
+      context: .
+      target: updater
+    restart: unless-stopped
+    <<: *logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://tommybot:${POSTGRES_PASSWORD}@postgres:5432/tommybot
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The compose file and .env, so it recreates the containers exactly as configured.
+      - .:/project:ro
+
   # Cloudflare Tunnel to the dashboard. Off unless COMPOSE_PROFILES=tunnel; see DEPLOY.md.
   cloudflared:
     image: cloudflare/cloudflared:latest

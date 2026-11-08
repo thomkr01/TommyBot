@@ -14,6 +14,7 @@ mod recovery;
 mod schema;
 mod sections;
 mod store;
+mod update;
 mod verify;
 
 use axum::{
@@ -141,6 +142,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(records::routes())
         .merge(verify::routes())
         .merge(embeds::routes())
+        .merge(update::routes())
         // Only routes, not the static UI: one page load fetches many assets.
         .route_layer(middleware::from_fn_with_state(st.clone(), auth::rate_limit))
         // Hash routing means the server never needs an index.html fallback; one would also hide

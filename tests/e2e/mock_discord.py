@@ -23,6 +23,8 @@ class H(BaseHTTPRequestHandler):
             self.reply(USER)
         elif p == "/users/@me/guilds":
             self.reply([GUILD])
+        elif p == "/applications/@me":
+            self.reply({"id": "1", "owner": USER})
         elif p == "/sent":
             self.reply(sent)
         elif p == f"/guilds/{GUILD['id']}":

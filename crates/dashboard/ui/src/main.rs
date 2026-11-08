@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 mod appeals;
 mod channels;
 mod commands;
+mod update;
 mod records;
 mod common;
 mod discord;
@@ -32,6 +33,7 @@ use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
 use channels::ChannelSetup;
 use commands::Commands;
+use update::Update;
 
 /// Sidebar with only with the pages TommyBot has.
 const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("channel_setup", "Channel Setup"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
@@ -262,6 +264,7 @@ fn App() -> impl IntoView {
                 <button class="ghost menu-btn" aria-label="menu" aria-expanded=move || nav_open.get().to_string() on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/"><img src="/logo.svg" alt="" width="32" height="32" />"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
                 <a class="ghost" href="#/commands">"Commands"</a>
+                <Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="ghost" href="#/update">"Update"</a></Show>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
@@ -274,7 +277,7 @@ fn App() -> impl IntoView {
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
                         None => view! { <a href="#/">"Servers"</a> }.into_any(),
-                        Some(a) if a == "commands" => view! { <a href="#/">"Servers"</a> }.into_any(),
+                        Some(a) if a == "commands" || a == "update" => view! { <a href="#/">"Servers"</a> }.into_any(),
                         Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
@@ -315,6 +318,7 @@ fn App() -> impl IntoView {
                                 <b>{g["name"].as_str().unwrap_or("").to_string()}</b><span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></a></div> }).collect_view()}</div>
                         }.into_any(),
                         [a] if a == "commands" => view! { <Commands /> }.into_any(),
+                        [a] if a == "update" => view! { <Update enrolled /> }.into_any(),
                         [a, g] if a == "appeal" =>view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview").0 /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, rest @ ..] => {

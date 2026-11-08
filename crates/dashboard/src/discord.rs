@@ -34,6 +34,14 @@ pub struct Guild {
     pub icon: Option<String>,
 }
 
+fn app_owner(app: Option<&serde_json::Value>) -> Option<String> {
+    let app = app?;
+    app["team"]["owner_user_id"]
+        .as_str()
+        .or(app["owner"]["id"].as_str())
+        .map(String::from)
+}
+
 impl Discord {
     pub fn authorize_url(&self, state: &str) -> String {
         format!(
@@ -169,6 +177,12 @@ impl Discord {
             .and_then(|g| g["owner_id"].as_str())
             .map(String::from)
             .ok_or_else(|| anyhow::anyhow!("guild {guild} not found"))
+    }
+
+    /// The user id of the bot application's owner (the team owner for a team app).
+    pub async fn bot_owner(&self) -> Result<String> {
+        let app = self.memo_get("/applications/@me".into()).await?;
+        app_owner(app.as_ref()).ok_or_else(|| anyhow::anyhow!("application has no owner"))
     }
 
     /// The member's role ids, or None when they are not in the guild.
@@ -339,6 +353,15 @@ mod tests {
     use super::*;
     use axum::response::IntoResponse;
     use serde_json::json;
+
+    #[test]
+    fn app_owner_prefers_the_team_owner() {
+        let solo = json!({"owner": {"id": "1"}});
+        let team = json!({"owner": {"id": "9"}, "team": {"owner_user_id": "2"}});
+        assert_eq!(app_owner(Some(&solo)).as_deref(), Some("1"));
+        assert_eq!(app_owner(Some(&team)).as_deref(), Some("2"));
+        assert_eq!(app_owner(None), None);
+    }
 
     #[tokio::test]
     async fn send_retries_after_429() {
