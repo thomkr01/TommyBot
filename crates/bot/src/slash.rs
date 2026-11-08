@@ -71,7 +71,7 @@ pub enum BackupCmd {
     Delete {
         id: String,
     },
-    /// Deletes every backup (`w!backups clear`, `/backups purge`).
+    /// Deletes every backup (`t!backups clear`, `/backups purge`).
     Clear,
 }
 

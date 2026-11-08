@@ -96,7 +96,7 @@ pub(crate) async fn view_cases(
     })
 }
 
-/// One member's cases, a page at a time, with the page count (`w!cases NAME`).
+/// One member's cases, a page at a time, with the page count (`t!cases NAME`).
 pub(crate) async fn cases_page(
     app: &App,
     g: i64,
