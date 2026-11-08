@@ -1,4 +1,4 @@
-//! Thank-you message posted once when the bot joins a server.
+//! Thank-you message posted once when the bot joins a server, and data deletion after it leaves.
 use anyhow::Result;
 use tommybot_logging::emoji::YES;
 use twilight_model::{
@@ -6,7 +6,7 @@ use twilight_model::{
         message::component::{ActionRow, Button, ButtonStyle, Component},
         ChannelType,
     },
-    gateway::payload::incoming::GuildCreate,
+    gateway::payload::incoming::{GuildCreate, GuildDelete},
     guild::audit_log::AuditLogEventType,
     id::{
         marker::{GuildMarker, UserMarker},
@@ -38,7 +38,38 @@ pub(crate) fn link(label: &str, url: String) -> Component {
     }))
 }
 
+/// Days a removed server's data is kept, in case the bot is added back (PRIVACY.md).
+const KEEP_DAYS: i32 = 30;
+
+/// Starts the 30-day countdown when the bot is removed; an outage (`unavailable`) is not a removal.
+pub async fn on_guild_delete(app: &App, ev: &GuildDelete) -> Result<()> {
+    if ev.unavailable != Some(true) {
+        sqlx::query("INSERT INTO guild_left (guild_id) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(ev.id.get() as i64)
+            .execute(&app.pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Deletes the data of servers the bot left more than `KEEP_DAYS` ago, hourly.
+pub async fn purge_left(app: std::sync::Arc<App>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+    loop {
+        tick.tick().await;
+        match tommybot_core::db::purge_left(&app.pool, KEEP_DAYS).await {
+            Ok(ids) if !ids.is_empty() => tracing::info!(?ids, "purged data of removed servers"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(?e, "purging removed servers failed"),
+        }
+    }
+}
+
 pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
+    sqlx::query("DELETE FROM guild_left WHERE guild_id = $1")
+        .bind(ev.id().get() as i64)
+        .execute(&app.pool)
+        .await?;
     let GuildCreate::Available(g) = ev else {
         return Ok(());
     };

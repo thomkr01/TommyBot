@@ -123,6 +123,7 @@ async fn main() -> Result<()> {
     }
     tokio::spawn(events::flush_logs(app.clone()));
     tokio::spawn(backup::auto_backup(app.clone()));
+    tokio::spawn(welcome::purge_left(app.clone()));
 
     if let Err(e) = slash::register(&app).await {
         tracing::warn!(?e, "slash command registration failed");

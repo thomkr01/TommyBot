@@ -301,6 +301,40 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     }
 }
 
+/// Owner-only "delete all stored data" for the server, confirmed by typing the server's name.
+#[component]
+pub fn PurgeData(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+    let guilds = expect_context::<ReadSignal<Vec<Value>>>();
+    let gid = StoredValue::new(guild);
+    let name = Memo::new(move |_| guilds.get().iter().find(|x| x["id"] == gid.get_value().as_str()).map(|x| s(&x["name"])).unwrap_or_default());
+    let (open, typed) = (RwSignal::new(false), RwSignal::new(String::new()));
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
+    let matches = move || !typed.get().trim().is_empty() && typed.get().trim() == name.get().trim();
+    let purge = move |_| {
+        let g = gid.get_value();
+        open.set(false);
+        run_act(async move { api("POST", &format!("/api/guilds/{g}/purge"), None).await }, msg, need, move |_| { typed.set(String::new()); msg.ok("All stored data for this server was deleted. TommyBot now runs on default settings.") });
+    };
+    let r = NodeRef::new();
+    focus_on_open(r);
+    view! {
+        <div class="card">
+            <h3>"Delete server data"</h3>
+            <p class="muted">"Deletes everything TommyBot stores for this server: settings, cases, logs, backups, tickets and permits. This cannot be undone. Data is also deleted automatically 30 days after TommyBot is removed."</p>
+            <button class="danger" on:click=move |_| open.set(true)>"Delete all data"</button>
+        </div>
+        <AnimatedShow when=open hide_class="out" hide_delay=OUT>
+            <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete server data" on:keydown=move |e| dialog_keys(&e, || open.set(false))><div class="card">
+                <p>"Type the server name "<b>{name}</b>" to delete all of its stored data."</p>
+                <input aria-label="server name" autocomplete="off" prop:value=typed on:input=move |e| typed.set(event_target_value(&e)) />
+                <div class="row"><button class="ghost" on:click=move |_| open.set(false)>"Abort"</button><button class="danger" disabled=move || !matches() on:click=purge>"Delete"</button></div>
+            </div></div>
+        </AnimatedShow>
+        <Toast msg />
+        <StepUp need enrolled />
+    }
+}
+
 /// "Lost control over TommyBot in a server?": claims Extra Owner with the rescue key or the
 /// authenticator's 6-digit code. Works from the Servers page, before any server is open.
 #[component]

@@ -1,6 +1,6 @@
 # TommyBot Privacy Policy
 
-Last updated: 2026-11-03
+Last updated: 2026-11-08
 
 This policy explains what TommyBot ("the bot") stores, why, and how long it is kept. The bot is free and open source. Its code is at [github.com/thomkr01/TommyBot](https://github.com/thomkr01/TommyBot).
 
@@ -16,7 +16,7 @@ The bot keeps data in a PostgreSQL database. It stores:
 
 | Data | Why | Kept for |
 |---|---|---|
-| **Server config** (automod settings, log channels, permit roles, limits). Every change is saved as a new version. | To run the bot's features and to show config history on the dashboard. | As long as the server uses the bot, and until deletion is requested. |
+| **Server config** (automod settings, log channels, permit roles, limits). Every change is saved as a new version. | To run the bot's features and to show config history on the dashboard. | As long as the server uses the bot: deleted 30 days after the bot is removed, or when the owner deletes it. |
 | **Moderation cases** (action type, target and moderator user IDs, reason, proof link you provide, points, expiry). | Warnings, bans, and history for `/case` and warn thresholds. | Until deletion is requested. Not removed automatically. |
 | **Action log** (each mutating action with the data needed to undo it). | `/revert` and audit history. | Until deletion is requested. Not removed automatically. |
 | **Automod strike state** (user IDs, strike counts and timestamps). | Keeps repeat-offender penalties working across restarts. | Until deletion is requested. |
@@ -44,8 +44,9 @@ Only to run the features you turn on: moderation, logging, automod, anti-nuke, b
 
 ## Deleting data
 
-- **Remove the bot from your server.** This stops new data collection. It does not by itself delete stored data.
-- **Request deletion.** Open an issue at [github.com/thomkr01/TommyBot/issues](https://github.com/thomkr01/TommyBot/issues) and say which server ID, or which user ID, you want removed. Server owners can request deletion of a whole server's data. Users can request deletion of their own user ID from stored cases, strike state, and dashboard records. Please do not post private personal data in a public issue; say you want to send it privately and a maintainer will reply.
+- **Delete it from the dashboard.** A server owner can delete all of the server's stored data under Miscellaneous > Delete server data. This needs the authenticator code and the server's name typed in, and it cannot be undone. The bot stays in the server and goes back to its default settings.
+- **Remove the bot from your server.** This stops new data collection. All of the server's stored data is deleted automatically 30 days after the bot is removed, unless the bot is added back before then.
+- **Request deletion of your user ID.** Open an issue at [github.com/thomkr01/TommyBot/issues](https://github.com/thomkr01/TommyBot/issues) and say which user ID you want removed. Users can request deletion of their own user ID from stored cases, strike state, and dashboard records. Please do not post private personal data in a public issue; say you want to send it privately and a maintainer will reply.
 - We aim to complete deletion requests within 30 days.
 - Backups for a server are deleted with that server's data.
 

@@ -399,6 +399,18 @@ pub async fn rollback(
     Ok(Json(json!({"version": version})))
 }
 
+/// Deletes everything stored for the server (PRIVACY.md); the bot keeps running on defaults.
+pub async fn purge(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    require(&st, &s, guild, Level::Owner, true).await?;
+    tommybot_core::db::purge_guild(&st.db, guild).await?;
+    tracing::info!(
+        guild,
+        user = s.user_id,
+        "server data purged from the dashboard"
+    );
+    Ok(Json(json!({})))
+}
+
 /// The highest level any section a rollback from `now` to `old` changes needs (permits are checked apart).
 fn rollback_bar(old: &Value, now: &Value) -> Level {
     let keys = |v: &Value| {

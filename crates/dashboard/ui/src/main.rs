@@ -23,7 +23,7 @@ use common::*;
 use embeds::Embeds;
 use form::Section;
 use permits::Permits;
-use pages::{Catch, Logging, LostControl, Rescue, Revert, Score, Tickets, Wizard};
+use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Tickets, Wizard};
 use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
 use channels::ChannelSetup;
@@ -263,6 +263,7 @@ fn App() -> impl IntoView {
                                 ("tickets", Some(l)) if l == "log" && rest.len() == 3 => view! { <TicketLog guild=g.clone() channel=rest[1].clone() message=rest[2].clone() /> }.into_any(),
                                 ("tickets", _) => view! { <Tickets guild=g.clone() enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
+                                ("misc", _) => view! { {sec("misc", "")}<PurgeData guild=g.clone() enrolled /> }.into_any(),
                                 ("lockdown", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownManage guild=g.clone() /> }.into_any(),
                                 ("lockdown_settings", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownSettings guild=g.clone() enrolled /> }.into_any(),
                                 ("discord_automod", _) => view! { <DiscordRules guild=g.clone() /> }.into_any(),
