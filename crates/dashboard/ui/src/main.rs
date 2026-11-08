@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 
 mod appeals;
 mod channels;
+mod commands;
 mod records;
 mod common;
 mod discord;
@@ -23,10 +24,11 @@ use common::*;
 use embeds::Embeds;
 use form::Section;
 use permits::Permits;
-use pages::{Catch, Logging, LostControl, Rescue, Revert, Score, Tickets, Wizard};
+use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Tickets, Wizard};
 use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
 use channels::ChannelSetup;
+use commands::Commands;
 
 /// Sidebar with only with the pages TommyBot has.
 const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("channel_setup", "Channel Setup"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
@@ -133,8 +135,62 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         }) }
     };
     load();
+    // Import is previewed first: the server answers with the diff and the ids it will clear.
+    let preview = RwSignal::new(None::<(Value, Value)>);
+    let shown = Memo::new(move |prev: Option<&Option<(Value, Value)>>| preview.get().or(prev.cloned().flatten()));
+    let export = { let g = guild.clone(); move |_| { let g = g.clone(); spawn_local(async move {
+        match api("GET", &format!("/api/guilds/{g}/config"), None).await {
+            Ok(v) => download(&format!("tommybot-settings-{g}.json"), &format!("data:application/json;charset=utf-8,{}",
+                js_sys::encode_uri_component(&serde_json::to_string_pretty(&json!({"version": v["version"], "config": v["config"]})).unwrap_or_default()))),
+            Err(e) => msg.err(e),
+        }}) } };
+    let send = { let g = guild.clone(); move |cfg: Value, apply: bool| { let g = g.clone(); async move {
+        api("POST", &format!("/api/guilds/{g}/import"), Some(json!({"expected_version": version.get_untracked(), "config": cfg, "apply": apply}))).await
+    } } };
+    let import = { let send = send.clone(); move |e: leptos::ev::Event| {
+        let input = event_target::<web_sys::HtmlInputElement>(&e);
+        let Some(file) = input.files().and_then(|l| l.get(0)) else { return };
+        input.set_value("");
+        let send = send.clone();
+        spawn_local(async move {
+            let text = wasm_bindgen_futures::JsFuture::from(file.text()).await.ok().and_then(|t| t.as_string()).unwrap_or_default();
+            let Ok(f) = serde_json::from_str::<Value>(&text) else { return msg.err("This file is not valid JSON") };
+            let cfg = f["config"].clone();
+            run_act(send(cfg.clone(), false), msg, need, move |p| preview.set(Some((cfg, p))));
+        });
+    } };
+    let apply = { let load = load.clone(); move |_| {
+        let Some((cfg, _)) = preview.get_untracked() else { return };
+        preview.set(None);
+        let load = load.clone();
+        run_act(send(cfg, true), msg, need, move |v| {
+            load();
+            let cleared = csv(&v["cleared"]);
+            msg.ok(if cleared.is_empty() { format!("Imported as version {}", v["version"]) } else { format!("Imported as version {}. Set these again, their ids were cleared: {cleared}", v["version"]) });
+        });
+    } };
+    let file = NodeRef::<leptos::html::Input>::new();
     let (g1, g2) = (guild.clone(), guild);
     view! {
+        <div class="row">
+            <button class="ghost" on:click=export>"Export settings"</button>
+            <button class="ghost" on:click=move |_| { if let Some(i) = file.get() { i.click() } }>"Import settings"</button>
+            <input type="file" accept=".json,application/json" hidden=true node_ref=file on:change=import />
+        </div>
+        <AnimatedShow when=Signal::derive(move || preview.get().is_some()) hide_class="out" hide_delay=OUT>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
+            let apply = apply.clone();
+            let r = NodeRef::new();
+            focus_on_open(r);
+            let changes = p["diff"].as_array().cloned().unwrap_or_default();
+            let cleared = csv(&p["cleared"]);
+            let lines = changes.iter().map(|c| format!("{}: {}", c["path"].as_str().unwrap_or(""), if c["new"].is_null() { "removed".into() } else { c["new"].to_string() })).collect::<Vec<_>>().join("\n");
+            view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Import settings" on:keydown=move |e| dialog_keys(&e, || preview.set(None))><div class="card">
+                <b>"Import settings"</b>
+                {if changes.is_empty() { view! { <p class="muted">"This file changes nothing on this server."</p> }.into_any() } else { view! { <p>{format!("{} changes:", changes.len())}</p><pre>{lines}</pre> }.into_any() }}
+                {(!cleared.is_empty()).then(|| view! { <p class="info">{format!("Ids from the other server are cleared; set these again after the import: {cleared}")}</p> })}
+                <div class="row"><button class="ghost" on:click=move |_| preview.set(None)>"Abort"</button><button disabled=changes.is_empty() on:click=apply>"Import"</button></div>
+            </div></div> }
+        })}</AnimatedShow>
         <For each=move || rows.get() key=|r| r["version"].as_i64() let:r>
             {
                 let v = r["version"].as_i64().unwrap_or(0);
@@ -198,10 +254,11 @@ fn App() -> impl IntoView {
         }
     });
     view! {
-        <Show when=move || me.get().is_some() fallback=|| view! { <main><img class="hero" src="/logo.svg" alt="" width="128" height="128" /><h1>"TommyBot"</h1><p class="muted">"Fast, free server security: anti-nuke, automod, join gate and logs, all set up from here."</p><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a></main> }>
+        <Show when=move || me.get().is_some() fallback=move || if route.get().first().is_some_and(|a| a == "commands") { view! { <main><Commands /></main> }.into_any() } else { view! { <main><img class="hero" src="/logo.svg" alt="" width="128" height="128" /><h1>"TommyBot"</h1><p class="muted">"Fast, free server security: anti-nuke, automod, join gate and logs, all set up from here."</p><a class="btn" href=format!("/auth/login?next=/{}", js_sys::encode_uri_component(&web_sys::window().unwrap().location().hash().unwrap_or_default()))>"Log in with Discord"</a>" "<a class="ghost" href="#/commands">"Commands"</a></main> }.into_any() }>
             <header>
                 <button class="ghost menu-btn" aria-label="menu" aria-expanded=move || nav_open.get().to_string() on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/"><img src="/logo.svg" alt="" width="32" height="32" />"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
+                <a class="ghost" href="#/commands">"Commands"</a>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
@@ -214,6 +271,7 @@ fn App() -> impl IntoView {
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
                         None => view! { <a href="#/">"Servers"</a> }.into_any(),
+                        Some(a) if a == "commands" => view! { <a href="#/">"Servers"</a> }.into_any(),
                         Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
@@ -244,7 +302,8 @@ fn App() -> impl IntoView {
                                 None => view! { <i>{g["name"].as_str().unwrap_or("?").chars().next().unwrap_or('?').to_string()}</i> }.into_any() }}
                                 <b>{g["name"].as_str().unwrap_or("").to_string()}</b><span class="muted">{g["level"].as_str().unwrap_or("").to_string()}</span></a></div> }).collect_view()}</div>
                         }.into_any(),
-                        [a, g] if a == "appeal" => view! { <AppealForm guild=g.clone() /> }.into_any(),
+                        [a] if a == "commands" => view! { <Commands /> }.into_any(),
+                        [a, g] if a == "appeal" =>view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview").0 /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, rest @ ..] => {
                             let sec = |name: &str, part: &str| view! { <Section guild=g.clone() name=name.to_string() part=part.to_string() enrolled /> }.into_any();
@@ -263,6 +322,7 @@ fn App() -> impl IntoView {
                                 ("tickets", Some(l)) if l == "log" && rest.len() == 3 => view! { <TicketLog guild=g.clone() channel=rest[1].clone() message=rest[2].clone() /> }.into_any(),
                                 ("tickets", _) => view! { <Tickets guild=g.clone() enrolled /> }.into_any(),
                                 ("rescue", _) => view! { <Rescue guild=g.clone() enrolled /> }.into_any(),
+                                ("misc", _) => view! { {sec("misc", "")}<PurgeData guild=g.clone() enrolled /> }.into_any(),
                                 ("lockdown", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownManage guild=g.clone() /> }.into_any(),
                                 ("lockdown_settings", _) => view! { <Tabs guild=g.clone() items=LOCK_TABS active=p.clone() /><LockdownSettings guild=g.clone() enrolled /> }.into_any(),
                                 ("discord_automod", _) => view! { <DiscordRules guild=g.clone() /> }.into_any(),

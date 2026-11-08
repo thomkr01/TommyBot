@@ -114,12 +114,14 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .route("/api/guilds", get(api::guilds))
         .route("/api/permit-catalog", get(api::permit_catalog))
         .route("/api/previews", get(api::previews))
+        .route("/api/commands", get(api::commands))
         .route(&format!("{g}/config"), get(api::get_config))
         .route(
             &format!("{g}/config/{{section}}"),
             put(api::put_section).layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(&format!("{g}/permits"), put(api::put_permits))
+        .route(&format!("{g}/import"), post(api::import))
         .route(&format!("{g}/history"), get(api::history))
         .route(
             &format!("{g}/history/{{from}}/{{to}}"),
@@ -129,6 +131,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
             &format!("{g}/history/{{version}}/rollback"),
             post(api::rollback),
         )
+        .route(&format!("{g}/purge"), post(api::purge))
         .merge(sections::routes())
         .merge(ops::routes())
         .merge(lockdown::routes())

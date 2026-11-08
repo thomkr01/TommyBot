@@ -145,3 +145,4 @@ button.link.err { color:var(--bad); }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-delay:0s !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; transition-delay:0s !important; } }
 .wizbody > .card { background:none; box-shadow:none; padding:0; margin:0; }
 .scrim { display:none; } @media (max-width:900px) { .scrim { display:block; position:fixed; inset:80px 0 0; z-index:19; background:#000a; animation:fade var(--dur) var(--ease); } }
+.cmds { gap:6px; } .cmds h3 { margin:12px 0 0; } .cmds .card { padding:8px 12px; } .cmds .card p, .cmds ul { margin:4px 0; } .cmds summary { cursor:pointer; display:flex; flex-wrap:wrap; gap:4px 12px; align-items:center; } .cmds summary .chip { margin-left:auto; text-transform:none; }

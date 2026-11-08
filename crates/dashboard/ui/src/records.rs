@@ -40,11 +40,7 @@ pub fn export_csv(list: impl Fn() -> String + Copy + 'static, name: &'static str
                     Err(e) => return msg.err(e),
                 }
             }
-            let Some(a) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.create_element("a").ok()) else { return };
-            let href = format!("data:text/csv;charset=utf-8,{}", enc(&to_csv(cols, &all)));
-            let _ = a.set_attribute("href", &href);
-            let _ = a.set_attribute("download", &format!("{name}.csv"));
-            if let Ok(a) = wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(a) { a.click() }
+            download(&format!("{name}.csv"), &format!("data:text/csv;charset=utf-8,{}", enc(&to_csv(cols, &all))));
         });
     };
     view! { <button class="ghost" on:click=go>"Export CSV"</button> }

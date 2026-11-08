@@ -94,15 +94,23 @@ async fn staff_roles(app: &App, gid: Id<GuildMarker>, t: &TicketsCfg) -> Result<
     Ok(v)
 }
 
-/// `{username}`, `{userid}` and `{usermention}` in greeting, closing and snippet texts.
+/// The message variables `tags` fills in, listed on the dashboard's Commands page.
+pub const TAGS: [(&str, &str); 3] = [
+    ("{username}", "The member's username"),
+    ("{userid}", "The member's user id"),
+    ("{usermention}", "A mention of the member"),
+];
+/// Where `tags` runs.
+pub const TAGS_IN: &str = "Ticket greeting and closing messages and snippets";
+
+/// Fills `TAGS` in greeting, closing and snippet texts.
 fn tags(text: &str, u: &User) -> String {
-    clip(
-        &text
-            .replace("{username}", &u.name)
-            .replace("{userid}", &u.id.to_string())
-            .replace("{usermention}", &format!("<@{}>", u.id)),
-        2048,
-    )
+    let values = [u.name.clone(), u.id.to_string(), format!("<@{}>", u.id)];
+    let text = TAGS
+        .iter()
+        .zip(values)
+        .fold(text.to_string(), |t, ((k, _), v)| t.replace(k, &v));
+    clip(&text, 2048)
 }
 
 /// The username without punctuation, or the id when nothing is left.
@@ -399,6 +407,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 3]
         );
+    }
+
+    #[test]
+    fn every_documented_variable_is_filled_in() {
+        let u: User = serde_json::from_value(
+            json!({"id": "5", "username": "tom", "discriminator": "0", "avatar": null}),
+        )
+        .unwrap();
+        let all: String = TAGS.iter().map(|(k, _)| *k).collect();
+        assert_eq!(tags(&all, &u), "tom5<@5>");
     }
 
     #[test]
