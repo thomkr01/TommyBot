@@ -416,6 +416,137 @@ fn rollback_bar(old: &Value, now: &Value) -> Level {
         .unwrap_or(Level::None)
 }
 
+/// A Discord snowflake: channel, role, user, webhook and message ids are 17-20 digits.
+fn is_id(v: &Value) -> bool {
+    match v {
+        Value::String(s) => (17..=20).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()),
+        Value::Number(n) => n.as_u64().is_some_and(|n| n >= 10u64.pow(16)),
+        _ => false,
+    }
+}
+
+/// Drops every id (as a value, list item or map key) and records where, as `section.field`.
+fn strip_ids(v: &mut Value, path: &str, cleared: &mut Vec<String>) {
+    match v {
+        Value::Object(o) => o.retain(|k, x| {
+            let p = format!("{path}.{k}");
+            if is_id(&Value::String(k.clone())) || is_id(x) {
+                cleared.push(p);
+                return false;
+            }
+            strip_ids(x, &p, cleared);
+            true
+        }),
+        Value::Array(a) => {
+            let n = a.len();
+            a.retain(|x| !is_id(x));
+            if a.len() < n {
+                cleared.push(path.into());
+            }
+            for (i, x) in a.iter_mut().enumerate() {
+                strip_ids(x, &format!("{path}.{i}"), cleared);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `now` with the sections of an exported config copied over, minus the ids of the server it came
+/// from (they do not exist here). EO/TA stay as they are; custom permits come over without roles.
+fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiError> {
+    let file = file
+        .as_object()
+        .ok_or_else(|| ApiError::BadRequest("this is not a TommyBot settings export".into()))?;
+    let (mut new, mut cleared) = (now.clone(), vec![]);
+    for (k, v) in file {
+        if k != "permits" && !access::SECTIONS.contains(&k.as_str()) {
+            return Err(ApiError::BadRequest(format!("unknown section `{k}`")));
+        }
+        if !v.is_object() {
+            return Err(ApiError::BadRequest(format!("{k} must be an object")));
+        }
+        let mut v = v.clone();
+        strip_ids(&mut v, k, &mut cleared);
+        if k == "permits" {
+            v["eo"] = now["permits"]["eo"].clone();
+            v["ta"] = now["permits"]["ta"].clone();
+            cleared.retain(|p| !p.starts_with("permits.eo") && !p.starts_with("permits.ta"));
+        } else {
+            // A custom log type cannot exist without its channel.
+            let custom = v.get_mut("custom").and_then(Value::as_array_mut);
+            if let Some(custom) = custom.filter(|_| k == "logging") {
+                let n = custom.len();
+                custom.retain(|c| !c["channel"].is_null());
+                if custom.len() < n {
+                    cleared.retain(|p| !p.starts_with("logging.custom."));
+                    cleared.push("logging.custom (log types without a channel removed)".into());
+                }
+            }
+            validate(k, &v)?;
+        }
+        new[k] = v;
+    }
+    Ok((new, cleared))
+}
+
+/// Level and step-up an import needs: the bar of every section it changes, Admin + step-up for permits.
+fn import_bar(new: &Value, now: &Value) -> (Level, bool) {
+    let permits = new.get("permits") != now.get("permits");
+    let step_up = permits || access::SENSITIVE.iter().any(|k| new.get(*k) != now.get(*k));
+    let floor = if permits { Level::Admin } else { Level::Editor };
+    (rollback_bar(new, now).max(floor), step_up)
+}
+
+#[derive(Deserialize)]
+pub struct Import {
+    expected_version: i32,
+    config: Value,
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Copies another server's exported settings here; without `apply` it only previews the diff.
+pub async fn import(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Json(b): Json<Import>,
+) -> Res {
+    let (_, mut now) = store::current(&st.db, guild).await?;
+    let mut tx = st.db.begin().await?;
+    now["permits"] = store::read_permits(&mut tx, guild).await?;
+    let (new, cleared) = import_config(&b.config, &now)?;
+    let (min, step_up) = import_bar(&new, &now);
+    require(&st, &s, guild, min, step_up).await?;
+    let web = ["verification", "lockdown"]
+        .iter()
+        .any(|k| new.get(*k) != now.get(*k));
+    if let Some(e) = tommybot_automod::join::web_mode_error(&new).filter(|_| web) {
+        return Err(ApiError::BadRequest(e.into()));
+    }
+    if !b.apply {
+        return Ok(Json(
+            json!({"diff": diff::diff(&now, &new), "cleared": cleared}),
+        ));
+    }
+    if new["permits"] != now["permits"] {
+        store::write_permits(&mut tx, guild, &new["permits"]).await?;
+    }
+    let version = store::commit(&mut tx, guild, b.expected_version, &new, s.user_id).await?;
+    tx.commit().await?;
+    log_change(
+        &st,
+        guild,
+        &new,
+        format!(
+            "{} (<@{}>) imported settings from another server -> config v{version}",
+            s.username, s.user_id
+        ),
+    )
+    .await;
+    Ok(Json(json!({"version": version, "cleared": cleared})))
+}
+
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is.
 pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{
@@ -551,6 +682,103 @@ mod logging_validate_tests {
             Level::Owner,
             "a dropped section counts"
         );
+    }
+
+    #[test]
+    fn import_keeps_settings_and_clears_server_ids() {
+        let (ch, ro, us) = (
+            "123456789012345678",
+            "223456789012345678",
+            "323456789012345678",
+        );
+        let file = json!({
+            "automod": {"enabled": true, "filters": {"blacklisted_domains": ["evil.example"]}},
+            "logging": {"fallback": ch, "events": {"member_kick": ch}, "ignored_channels": [ch],
+                "custom": [{"events": ["member_kick"], "channel": ch}]},
+            "whitelist": {"users": [us], "roles": [ro], "webhooks": [us]},
+            "tickets": {"enabled": true, "greeting": "Hi", "ping_roles": [ro], "log_channel": ch},
+            "permits": {"eo": [us], "ta": [us], "custom": [{"name": "Mod", "rank": 2, "perms": ["ban"], "roles": [ro]}]},
+        });
+        let now = json!({"tickets": {"enabled": false}, "permits": {"eo": ["5"], "ta": [], "custom": []}});
+        let (new, cleared) = import_config(&file, &now).unwrap();
+        assert_eq!(new["automod"], file["automod"]);
+        assert_eq!(
+            new["logging"],
+            json!({"events": {}, "ignored_channels": [], "custom": []})
+        );
+        assert_eq!(
+            new["whitelist"],
+            json!({"users": [], "roles": [], "webhooks": []})
+        );
+        assert_eq!(
+            new["tickets"],
+            json!({"enabled": true, "greeting": "Hi", "ping_roles": []})
+        );
+        assert_eq!(
+            new["permits"],
+            json!({"eo": ["5"], "ta": [], "custom": [{"name": "Mod", "rank": 2, "perms": ["ban"], "roles": []}]}),
+            "EO/TA stay, permit roles are cleared"
+        );
+        for p in [
+            "logging.fallback",
+            "logging.events.member_kick",
+            "logging.custom (log types without a channel removed)",
+            "whitelist.users",
+            "tickets.log_channel",
+            "permits.custom.0.roles",
+        ] {
+            assert!(cleared.contains(&p.to_string()), "{p} in {cleared:?}");
+        }
+        assert!(!cleared.iter().any(|p| p.starts_with("permits.eo")));
+        // Importing the result again changes nothing and clears nothing.
+        let (again, cleared) = import_config(&new, &new).unwrap();
+        assert_eq!((again, cleared.len()), (new, 0));
+    }
+
+    #[test]
+    fn import_needs_the_bar_of_every_changed_section() {
+        let now = json!({"permits": {"eo": [], "ta": [], "custom": []}});
+        let bar = |file| {
+            let (new, _) = import_config(&file, &now).unwrap();
+            import_bar(&new, &now)
+        };
+        assert_eq!(
+            bar(json!({"automod": {"enabled": true}})),
+            (Level::Editor, false)
+        );
+        assert_eq!(
+            bar(json!({"whitelist": {"users": []}})),
+            (Level::Admin, true)
+        );
+        assert_eq!(
+            bar(json!({"antinuke": {"enabled": true}})),
+            (Level::Owner, true)
+        );
+        assert_eq!(
+            bar(json!({"permits": {"custom": [{"name": "Mod", "perms": []}]}})),
+            (Level::Admin, true)
+        );
+        // An editor is refused anything above their level.
+        assert!(Level::Editor < bar(json!({"misc": {}})).0);
+    }
+
+    #[test]
+    fn malformed_imports_are_refused() {
+        let now = json!({});
+        for file in [
+            json!(null),
+            json!("text"),
+            json!([1]),
+            json!({"nope": {}}),
+            json!({"automod": 5}),
+            json!({"automod": {"heat": {"max": 0}}}),
+            json!({"tickets": {"enabled": "yes"}}),
+        ] {
+            assert!(
+                matches!(import_config(&file, &now), Err(ApiError::BadRequest(_))),
+                "{file}"
+            );
+        }
     }
 
     #[test]
