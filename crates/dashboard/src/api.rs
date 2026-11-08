@@ -109,7 +109,6 @@ pub(crate) async fn staff(
     }
 }
 
-/// The toggles of the permit editor, so the page never carries its own copy of the permission list.
 /// The sample messages the bot saved at startup, for the previews; empty before its first start.
 pub async fn previews(State(st): State<AppState>, _: Sess) -> Res {
     let m: Option<Value> = sqlx::query_scalar("select messages from bot_previews")
@@ -118,6 +117,16 @@ pub async fn previews(State(st): State<AppState>, _: Sess) -> Res {
     Ok(Json(m.unwrap_or_else(|| json!({}))))
 }
 
+/// The command list the bot saved with the previews, for the public Commands page (no login).
+pub async fn commands(State(st): State<AppState>) -> Res {
+    let m = sqlx::query_scalar::<_, Option<Value>>("select messages->'commands' from bot_previews")
+        .fetch_optional(&st.db)
+        .await?
+        .flatten();
+    Ok(Json(m.unwrap_or_else(|| json!({}))))
+}
+
+/// The toggles of the permit editor, so the page never carries its own copy of the permission list.
 pub async fn permit_catalog(_: Sess) -> Json<Value> {
     Json(json!(tommybot_core::permits::CATALOG
         .iter()

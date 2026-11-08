@@ -170,13 +170,16 @@ fn messages() -> Value {
     all
 }
 
-/// Saves the samples for the dashboard; run at startup, once the custom emojis are loaded.
+/// Saves the samples, and the command list under `commands`, for the dashboard; run at startup,
+/// once the custom emojis are loaded.
 pub async fn publish(pool: &PgPool) -> Result<()> {
+    let mut m = messages();
+    m["commands"] = crate::general::catalog();
     sqlx::query(
         "INSERT INTO bot_previews (id, messages) VALUES (true, $1)
          ON CONFLICT (id) DO UPDATE SET messages = excluded.messages, updated_at = now()",
     )
-    .bind(messages())
+    .bind(m)
     .execute(pool)
     .await?;
     Ok(())

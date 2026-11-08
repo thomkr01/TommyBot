@@ -35,25 +35,43 @@ use crate::{
 };
 use twilight_util::builder::command::{CommandBuilder, SubCommandBuilder, UserBuilder};
 
-/// (name, aliases, permit, usage, what). Permit "" is anyone, "*" any permit, "owner" Owner or Extra Owner.
-const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
-    ("about", &[], "", "about", "About TommyBot"),
+/// (name, aliases, permit, usage, what, example). Permit "" is anyone, "*" any permit, "owner" Owner
+/// or Extra Owner. An empty example means the usage is the example. `ARGS` explains the usage words.
+type Cmd = (
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+const CMDS: &[Cmd] = &[
+    ("about", &[], "", "about", "About TommyBot", ""),
     (
         "commands",
         &["command", "cmd", "cmds"],
         "",
         "commands",
         "The commands you can use",
+        "",
     ),
-    ("help", &["docs", "h"], "", "help", "Help panel and links"),
-    ("invite", &[], "", "invite", "Add TommyBot to a server"),
-    ("ping", &[], "", "ping", "Latency, uptime and memory"),
+    (
+        "help",
+        &["docs", "h"],
+        "",
+        "help",
+        "Help panel and links",
+        "",
+    ),
+    ("invite", &[], "", "invite", "Add TommyBot to a server", ""),
+    ("ping", &[], "", "ping", "Latency, uptime and memory", ""),
     (
         "info",
         &["whois", "i"],
         "",
         "info [MEMBER | ID | @role | -server]",
         "Member, user, role or server info",
+        "info @member",
     ),
     (
         "roleinfo",
@@ -61,6 +79,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "roleinfo ROLE",
         "Role info",
+        "roleinfo @Moderators",
     ),
     (
         "serverinfo",
@@ -68,22 +87,25 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "serverinfo",
         "Server info",
+        "",
     ),
-    ("setup", &[], "*", "setup", "Setup panel"),
+    ("setup", &[], "*", "setup", "Setup panel", ""),
     (
         "security",
         &["sec", "scan"],
         "*",
         "security",
         "Server security check",
+        "",
     ),
-    ("config", &[], "*", "config", "Config overview"),
+    ("config", &[], "*", "config", "Config overview", ""),
     (
         "statics",
         &["s"],
         "*",
         "statics [VALUE ?set N | OBJ ?add N]",
         "Quarantine role, main roles, log channels",
+        "statics @Muted ?set 1",
     ),
     (
         "heat",
@@ -91,13 +113,15 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "heat [N ?on | VALUE ?set N]",
         "Heat system panel",
+        "heat 3 ?on",
     ),
     (
         "hfilters",
         &[],
         "*",
-        "hfilters [page]",
+        "hfilters [PAGE]",
         "Heat system filters",
+        "hfilters 2",
     ),
     (
         "antinuke",
@@ -105,6 +129,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "antinuke [N ?on | N ?off]",
         "Anti nuke panel",
+        "antinuke 2 ?off",
     ),
     (
         "anpanic",
@@ -112,6 +137,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "anpanic [N ?on | OBJ ?add N]",
         "Panic mode panel",
+        "anpanic 1 ?on",
     ),
     (
         "antinukerestore",
@@ -119,6 +145,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "anr [N ?on | N ?off]",
         "Restore system filters",
+        "anr 1 ?on",
     ),
     (
         "joingate",
@@ -126,6 +153,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "jg [N ?on | VALUE ?set N]",
         "Join gate panel",
+        "jg 2 ?on",
     ),
     (
         "joinraid",
@@ -133,6 +161,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "jr [N ?on | VALUE ?set N]",
         "Join raid panel",
+        "jr 10 ?set 1",
     ),
     (
         "verification",
@@ -140,6 +169,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "v [N ?on | VALUE ?set N]",
         "Verification panel",
+        "v 1 ?on",
     ),
     (
         "misc",
@@ -147,6 +177,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "misc [N ?on | VALUE ?set N]",
         "Miscellaneous panel",
+        "misc t! ?set 1",
     ),
     (
         "whitelist",
@@ -154,6 +185,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "whitelist TARGET",
         "Interactive whitelist",
+        "whitelist @Helpers",
     ),
     (
         "tshoot",
@@ -161,6 +193,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "*",
         "tshoot [lockdown]",
         "Clear caches; `lockdown` resets View/Send on roles",
+        "tshoot lockdown",
     ),
     (
         "ban",
@@ -168,6 +201,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "ban",
         "ban MEMBERS [TIME] [?r REASON] [?dm] [?s] [?p]",
         "Ban, softban with ?s",
+        "ban @member 7d ?r spamming links ?dm",
     ),
     (
         "hackban",
@@ -175,6 +209,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "ban",
         "hackban IDS [?r REASON] [?dm]",
         "Ban someone not in the server",
+        "hackban 123456789012345678 ?r raid bot",
     ),
     (
         "unban",
@@ -182,6 +217,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "ban",
         "unban MEMBERS [?r REASON]",
         "Lift a ban",
+        "unban 123456789012345678 ?r appeal accepted",
     ),
     (
         "kick",
@@ -189,6 +225,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "kick",
         "kick MEMBERS [?r REASON] [?dm]",
         "Kick",
+        "kick @member ?r ads ?dm",
     ),
     (
         "timeout",
@@ -196,6 +233,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "timeout",
         "timeout MEMBERS [TIME] [?r REASON]",
         "Time out",
+        "timeout @member 10m ?r spam",
     ),
     (
         "untimeout",
@@ -203,16 +241,39 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "timeout",
         "untimeout MEMBER",
         "Lift a timeout",
+        "untimeout @member",
     ),
-    ("warn", &["wa"], "warn", "warn MEMBERS [?r REASON]", "Warn"),
-    ("unwarn", &[], "warn", "unwarn CASE", "Remove a warn"),
-    ("warns", &[], "warn", "warns MEMBER", "A member's warns"),
+    (
+        "warn",
+        &["wa"],
+        "warn",
+        "warn MEMBERS [?r REASON]",
+        "Warn",
+        "warn @member ?r rude",
+    ),
+    (
+        "unwarn",
+        &[],
+        "warn",
+        "unwarn CASE",
+        "Remove a warn",
+        "unwarn 4151",
+    ),
+    (
+        "warns",
+        &[],
+        "warn",
+        "warns MEMBER",
+        "A member's warns",
+        "warns @member",
+    ),
     (
         "clearwarns",
         &[],
         "warn",
         "clearwarns MEMBER",
         "Remove all warns",
+        "clearwarns @member",
     ),
     (
         "quarantine",
@@ -220,6 +281,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "quarantine",
         "quarantine MEMBER [?r REASON]",
         "Quarantine",
+        "quarantine @member ?r compromised account",
     ),
     (
         "unquarantine",
@@ -227,6 +289,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "quarantine",
         "unquarantine MEMBER",
         "Release from quarantine",
+        "unquarantine @member",
     ),
     (
         "purge",
@@ -234,6 +297,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "purge",
         "purge [COUNT] [MEMBER]",
         "Delete messages",
+        "purge 50 @member",
     ),
     (
         "slowmode",
@@ -241,6 +305,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "slowmode",
         "slowmode TIME | off",
         "Channel slowmode",
+        "slowmode 10s",
     ),
     (
         "lock",
@@ -248,14 +313,23 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "lockdown",
         "lock [?t TYPE] [TIME]",
         "Lock the server or channel",
+        "lock ?t server 30m",
     ),
-    ("unlock", &["ul"], "lockdown", "unlock [?t TYPE]", "Unlock"),
+    (
+        "unlock",
+        &["ul"],
+        "lockdown",
+        "unlock [?t TYPE]",
+        "Unlock",
+        "unlock ?t server",
+    ),
     (
         "sanitize",
         &["san", "dehoist"],
         "sanitize",
         "sanitize MEMBER",
         "Clean a nickname",
+        "sanitize @member",
     ),
     (
         "verify",
@@ -263,6 +337,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "verify",
         "verify MEMBER",
         "Verify a member by hand",
+        "verify @member",
     ),
     (
         "cases",
@@ -270,6 +345,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "cases",
         "cases [CASE | MEMBER] [?t TYPE]",
         "View cases",
+        "cases @member ?t ban",
     ),
     (
         "modcases",
@@ -277,6 +353,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "cases",
         "modcases MODERATOR [?t TYPE]",
         "Cases made by a moderator",
+        "modcases @moderator ?t warn",
     ),
     (
         "editc",
@@ -284,6 +361,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "cases",
         "editc CASE REASON",
         "Change a case's reason",
+        "editc 4151 posted scam links",
     ),
     (
         "closecase",
@@ -291,14 +369,23 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "cases",
         "closecase CASE",
         "Switch a case off or on",
+        "closecase 4151",
     ),
-    ("ncases", &[], "cases", "ncases [ID]", "Anti-nuke cases"),
+    (
+        "ncases",
+        &[],
+        "cases",
+        "ncases [ID]",
+        "Anti-nuke cases",
+        "ncases n7Kd2x",
+    ),
     (
         "backups",
         &["backup"],
         "backups",
         "backups [take | load ID ?confirm | delete ID | clear]",
         "Server backups",
+        "backups load 3 ?confirm",
     ),
     (
         "notes",
@@ -306,6 +393,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "notes_view",
         "notes MEMBER | note add MEMBER ?r TEXT",
         "Staff notes",
+        "note add @member ?r warned in DMs",
     ),
     (
         "reply",
@@ -313,6 +401,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "reply MESSAGE",
         "Reply to the ticket (areply: anonymously)",
+        "reply Thanks, we are looking into it.",
     ),
     (
         "close",
@@ -320,6 +409,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "close [REASON]",
         "Close the ticket (aclose: anonymously)",
+        "close Solved, thanks",
     ),
     (
         "closeall",
@@ -327,6 +417,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "closeall [REASON]",
         "Close every ticket",
+        "closeall Server maintenance",
     ),
     (
         "blacklist",
@@ -334,6 +425,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "blacklist [USERS]",
         "Stop users from opening tickets",
+        "blacklist @member",
     ),
     (
         "unblock",
@@ -341,6 +433,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "unblock [USERS]",
         "Let users open tickets again",
+        "unblock @member",
     ),
     (
         "blacklistclear",
@@ -348,6 +441,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "blacklistclear",
         "Empty the ticket blacklist",
+        "",
     ),
     (
         "viewblacklist",
@@ -355,6 +449,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "viewblacklist",
         "The ticket blacklist",
+        "",
     ),
     (
         "snippet",
@@ -362,6 +457,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "snippet NAME",
         "Send a saved reply (asnippet: anonymously)",
+        "snippet rules",
     ),
     (
         "snippetadd",
@@ -369,6 +465,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "snippetadd NAME CONTENT",
         "Save a reply; {username} {userid} {usermention}",
+        "snippetadd rules Hi {usermention}, please read #rules.",
     ),
     (
         "snippetremove",
@@ -376,6 +473,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "snippetremove NAME",
         "Remove a saved reply",
+        "snippetremove rules",
     ),
     (
         "snippetclear",
@@ -383,6 +481,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "snippetclear",
         "Remove every saved reply",
+        "",
     ),
     (
         "viewsnippet",
@@ -390,6 +489,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "viewsnippet [NAME]",
         "Saved replies",
+        "viewsnippet rules",
     ),
     (
         "ticketsetup",
@@ -397,6 +497,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "ticketsetup",
         "Create the ticket category and log",
+        "",
     ),
     (
         "category",
@@ -404,6 +505,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "category [NAME]",
         "Create the ticket category again",
+        "category Tickets",
     ),
     (
         "accessrole",
@@ -411,6 +513,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "accessrole [ROLES]",
         "Roles that handle tickets",
+        "accessrole @Support",
     ),
     (
         "pingrole",
@@ -418,6 +521,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "pingrole [ROLES | everyone | here]",
         "Pinged on a new ticket",
+        "pingrole @Support",
     ),
     (
         "logging",
@@ -425,6 +529,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "logging [CHANNEL]",
         "Ticket log on or off",
+        "logging #ticket-log",
     ),
     (
         "loggingplus",
@@ -432,6 +537,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "loggingplus",
         "Full conversation in the ticket log",
+        "",
     ),
     (
         "commandonly",
@@ -439,6 +545,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "commandonly",
         "Only reply sends to the member",
+        "",
     ),
     (
         "anonymous",
@@ -446,6 +553,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "anonymous",
         "Anonymous replies by default",
+        "",
     ),
     (
         "greetingmessage",
@@ -453,6 +561,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "greetingmessage [TEXT]",
         "Sent when a ticket opens",
+        "greetingmessage Hi {username}, staff will answer soon.",
     ),
     (
         "closingmessage",
@@ -460,6 +569,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "closingmessage [TEXT]",
         "Sent when a ticket closes",
+        "closingmessage Thanks {username}, this ticket is closed.",
     ),
     (
         "toggle",
@@ -467,6 +577,7 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "toggle [REASON]",
         "Turn new tickets off or on",
+        "toggle Back on Monday",
     ),
     (
         "viewconfig",
@@ -474,8 +585,79 @@ const CMDS: &[(&str, &[&str], &str, &str, &str)] = &[
         "tickets",
         "viewconfig",
         "Ticket settings",
+        "",
     ),
 ];
+
+/// What each word in a `CMDS` usage means; shown by `COMMAND -h` and on the dashboard's Commands page.
+const ARGS: &[(&str, &str)] = &[
+    ("MEMBER", "A member: @mention, user id or name"),
+    ("MEMBERS", "One or more members: @mentions, user ids or names (separate names with spaces by commas)"),
+    ("MODERATOR", "A staff member: @mention or user id"),
+    ("USERS", "One or more users: @mentions or user ids; inside a ticket, empty means its member"),
+    ("IDS", "One or more user ids, also of people who are not in the server"),
+    ("ID", "An id: the user for info, the anti-nuke case for ncases, the backup for backups"),
+    ("TARGET", "What to whitelist: @member, @role, #channel, category id or webhook id"),
+    ("ROLE", "A role: @mention, id or name"),
+    ("ROLES", "One or more roles: @mentions or ids; empty clears the list"),
+    ("@role", "A role mention, to show role info"),
+    ("CHANNEL", "A channel: #mention or id; empty turns the log off"),
+    ("-server", "Show this server instead of a member"),
+    ("TIME", "A duration: a number then s, m, h, d or w (30s, 10m, 2h, 7d, 1w). ban: unban after it (none = permanent); timeout: its length (none = the default from settings); lock: unlock after it; slowmode: the delay between messages"),
+    ("REASON", "Free text, saved in the case and the log"),
+    ("?r", "Starts the reason (or note text): every word after it up to the next ?flag"),
+    ("?dm", "Also tell the member by DM"),
+    ("?s", "Softban: ban and unban right away, to delete their recent messages"),
+    ("?p", "Short one-line reply instead of the result embed"),
+    ("?t", "Starts the type, see TYPE"),
+    ("TYPE", "lock/unlock: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s); cases: b, ub, k, timeout, wa, q or uq"),
+    ("CASE", "A case number, e.g. 4151"),
+    ("COUNT", "How many messages to delete, up to 1000"),
+    ("N", "The number shown next to a setting in the panel"),
+    ("VALUE", "The new value for setting N"),
+    ("OBJ", "A role or channel to add to list N"),
+    ("?on", "Turn setting N on"),
+    ("?off", "Turn setting N off"),
+    ("?set", "Set setting N to VALUE"),
+    ("?add", "Add OBJ to list N"),
+    ("?confirm", "Apply the backup; without it you get a preview"),
+    ("PAGE", "The panel page number"),
+    ("NAME", "A name: the snippet, or the new ticket category"),
+    ("CONTENT", "The saved reply text; message variables are filled in"),
+    ("MESSAGE", "The reply sent to the member"),
+    ("TEXT", "The message text, message variables are filled in; empty turns it off. notes: the note text"),
+];
+
+/// The `ARGS` entries for the words in `usage`, in order of first use.
+fn args(usage: &str) -> Vec<(&'static str, &'static str)> {
+    let mut v: Vec<(&str, &str)> = vec![];
+    for w in usage.split([' ', '[', ']', '|']) {
+        if let Some(a) = ARGS.iter().find(|a| a.0 == w).filter(|a| !v.contains(a)) {
+            v.push(*a);
+        }
+    }
+    v
+}
+
+/// Who may run a command, as the `-h` help and the Commands page say it.
+fn who(perm: &str) -> String {
+    match perm {
+        "" => "Anyone".into(),
+        "*" => "Anyone with a permit".into(),
+        "owner" => "Owner or Extra Owner".into(),
+        p => {
+            let cat = tommybot_core::permits::CATALOG;
+            match cat.iter().flat_map(|s| s.items).find(|d| d.key == p) {
+                Some(d) => format!("Permit: {}", d.label),
+                // `lockdown` is any permit of the Lockdown section.
+                None => format!(
+                    "Any {} permit",
+                    cat.iter().find(|s| s.id == p).map_or(p, |s| s.title)
+                ),
+            }
+        }
+    }
+}
 
 const CATEGORIES: [(&str, &[&str]); 4] = [
     (
@@ -581,15 +763,98 @@ fn allowed(level: &Level, perm: &str) -> bool {
     }
 }
 
-fn lookup(
-    word: &str,
-) -> Option<&'static (
-    &'static str,
-    &'static [&'static str],
-    &'static str,
-    &'static str,
-    &'static str,
-)> {
+/// `COMMAND -h`: what it does, usage, the meaning of each argument, an example and who may run it.
+fn help_text(c: &Cmd, pfx: &str) -> String {
+    let mut t = vec![format!("**{pfx}{}**: {}\nUsage: `{pfx}{}`", c.0, c.4, c.3)];
+    t.extend(args(c.3).iter().map(|(a, what)| format!("- `{a}` {what}")));
+    if !c.5.is_empty() {
+        t.push(format!("Example: `{pfx}{}`", c.5));
+    }
+    if !c.1.is_empty() {
+        t.push(format!("Aliases: {}", c.1.join(", ")));
+    }
+    t.push(format!("Who: {}", who(c.2)));
+    t.join("\n")
+}
+
+/// Every command with its help and slash form, published at startup for the dashboard's public
+/// Commands page (the dashboard cannot use this crate).
+pub fn catalog() -> serde_json::Value {
+    use twilight_model::application::command::CommandOptionType as T;
+    let defs = crate::slash::definitions();
+    let opts = |o: &[twilight_model::application::command::CommandOption]| {
+        o.iter()
+            .map(|o| match o.required {
+                Some(true) => format!(" {}", o.name),
+                _ => format!(" [{}]", o.name),
+            })
+            .collect::<String>()
+    };
+    // `/ban add user [reason]`, one line per subcommand.
+    let forms = |d: &Command| -> Vec<String> {
+        match d.options.first().map(|o| o.kind) {
+            Some(T::SubCommand) => d
+                .options
+                .iter()
+                .map(|s| {
+                    format!(
+                        "/{} {}{}",
+                        d.name,
+                        s.name,
+                        opts(s.options.as_deref().unwrap_or(&[]))
+                    )
+                })
+                .collect(),
+            _ => vec![format!("/{}{}", d.name, opts(&d.options))],
+        }
+    };
+    let cat = |n: &str| {
+        CATEGORIES
+            .iter()
+            .find(|c| c.1.contains(&n))
+            .map_or("", |c| c.0.trim_end_matches(':'))
+    };
+    let commands: Vec<_> = CMDS
+        .iter()
+        .map(|c| {
+            let slash: Vec<String> = defs
+                .iter()
+                .filter(|d| d.kind == CommandType::ChatInput && (d.name == c.0 || c.1.contains(&d.name.as_str())))
+                .flat_map(forms)
+                .collect();
+            serde_json::json!({
+                "name": c.0, "aliases": c.1, "category": cat(c.0), "usage": c.3, "what": c.4,
+                "example": if c.5.is_empty() { c.3 } else { c.5 }, "who": who(c.2),
+                "args": args(c.3).iter().map(|(a, w)| serde_json::json!([a, w])).collect::<Vec<_>>(),
+                "slash": slash,
+            })
+        })
+        .collect();
+    // Slash commands and right-click apps with no prefix command of the same name.
+    let apps: Vec<_> = defs
+        .iter()
+        .filter(|d| d.kind != CommandType::ChatInput || lookup(&d.name).is_none())
+        .map(|d| match d.kind {
+            CommandType::ChatInput => {
+                serde_json::json!({"name": forms(d).join("\n"), "what": d.description})
+            }
+            CommandType::User => {
+                serde_json::json!({"name": d.name, "what": "Right-click a member > Apps"})
+            }
+            _ => serde_json::json!({"name": d.name, "what": "Right-click a message > Apps"}),
+        })
+        .collect();
+    let vars: Vec<_> = crate::tickets::TAGS
+        .iter()
+        .map(|(k, w)| serde_json::json!([k, w]))
+        .collect();
+    serde_json::json!({
+        "prefix": tommybot_core::sections::MiscCfg::default().prefix,
+        "commands": commands, "apps": apps, "variables": vars, "variables_in": crate::tickets::TAGS_IN,
+    })
+}
+
+fn lookup(word: &str) -> Option<&'static Cmd> {
     CMDS.iter().find(|c| c.0 == word || c.1.contains(&word))
 }
 
@@ -831,19 +1096,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         let Some(c) = lookup(&first) else {
             return Ok(false);
         };
-        let aliases = if c.1.is_empty() {
-            String::new()
-        } else {
-            format!("\nAliases: {}", c.1.join(", "))
-        };
-        send(
-            app,
-            msg,
-            &format!("**{pfx}{}**: {}\nUsage: `{pfx}{}`{aliases}", c.0, c.4, c.3),
-            None,
-            vec![],
-        )
-        .await?;
+        send(app, msg, &help_text(c, &pfx), None, vec![]).await?;
         return Ok(true);
     }
     let Some(&(name, _, perm, ..)) = lookup(&first) else {
@@ -975,10 +1228,21 @@ async fn answer(
             ))
         }
         "help" => {
-            let e = Log::new("TommyBot's Help Panel:", BLUE)
+            let mut e = Log::new("TommyBot's Help Panel:", BLUE)
                 .text(&format!("{HELP} **General Help:**"))
-                .text(&format!("{ARROW} To view the commands you can use, do: `{pfx}commands`"))
-                .text(&format!("{ARROW} To see how one command works, do: `{pfx}COMMAND -h`"))
+                .text(&format!(
+                    "{ARROW} To view the commands you can use, do: `{pfx}commands`"
+                ))
+                .text(&format!(
+                    "{ARROW} To see how one command works, do: `{pfx}COMMAND -h`"
+                ));
+            if let Some(d) = dashboard() {
+                e = e.text(&format!(
+                    "{ARROW} Every command explained: {}/#/commands",
+                    d.trim_end_matches('/')
+                ));
+            }
+            let e = e
                 .text(&format!("{ARROW} To set things up, do: `{pfx}setup`, then `{pfx}heat`, `{pfx}an`, `{pfx}jg`..."))
                 .text(&format!("{ARROW} Quick Troubleshooting: `{pfx}tshoot`"))
                 .build();
@@ -1128,6 +1392,73 @@ mod tests {
         assert_eq!(
             CATEGORIES.iter().map(|c| c.1.len()).sum::<usize>(),
             CMDS.len()
+        );
+    }
+
+    #[test]
+    fn every_command_has_help_and_every_usage_word_is_explained() {
+        for c in CMDS {
+            assert!(!c.4.is_empty(), "{} has no description", c.0);
+            let names = |s: &str| {
+                s.split(' ')
+                    .next()
+                    .is_some_and(|w| w == c.0 || c.1.contains(&w))
+            };
+            assert!(names(c.3), "{} usage must start with its name", c.0);
+            assert!(
+                c.5.is_empty() || names(c.5),
+                "{} example must start with its name",
+                c.0
+            );
+            for w in c.3.split([' ', '[', ']', '|']) {
+                let arg = w.starts_with(['?', '-', '@'])
+                    || (!w.is_empty() && w.bytes().all(|b| b.is_ascii_uppercase()));
+                assert!(
+                    !arg || ARGS.iter().any(|a| a.0 == w),
+                    "{}: `{w}` is not in ARGS",
+                    c.0
+                );
+            }
+            assert!(
+                args(c.3).is_empty() || !c.5.is_empty(),
+                "{} needs an example",
+                c.0
+            );
+        }
+        let used: Vec<_> = CMDS.iter().flat_map(|c| args(c.3)).collect();
+        assert!(ARGS.iter().all(|a| used.contains(a)), "unused ARGS entry");
+        let h = help_text(lookup("b").unwrap(), "w!");
+        assert!(
+            h.contains("- `TIME` A duration")
+                && h.contains("Example: `w!ban @member 7d")
+                && h.ends_with("Who: Permit: Ban Command"),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn catalog_lists_commands_slash_forms_and_variables() {
+        let c = catalog();
+        assert_eq!(c["commands"].as_array().unwrap().len(), CMDS.len());
+        let ban = &c["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == "ban")
+            .unwrap();
+        assert_eq!(ban["category"], "Moderation Commands");
+        assert!(ban["slash"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("/ban add user [reason]"));
+        let apps = c["apps"].as_array().unwrap();
+        assert!(apps
+            .iter()
+            .any(|a| a["name"].as_str().unwrap().starts_with("/softban user")));
+        assert!(apps.iter().any(|a| a["name"] == "Report Message"));
+        assert_eq!(
+            c["variables"].as_array().unwrap().len(),
+            crate::tickets::TAGS.len()
         );
     }
 
