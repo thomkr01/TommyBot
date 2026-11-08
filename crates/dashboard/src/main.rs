@@ -129,6 +129,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
             &format!("{g}/history/{{version}}/rollback"),
             post(api::rollback),
         )
+        .route(&format!("{g}/purge"), post(api::purge))
         .merge(sections::routes())
         .merge(ops::routes())
         .merge(lockdown::routes())

@@ -335,3 +335,69 @@ async fn antinuke_revert_and_quarantine_sql() {
     assert_eq!(saved, first);
     cleanup(&p, g).await;
 }
+
+/// Stores a little in several guild tables, plus a ticket user whose last server is `g`.
+async fn seed(p: &PgPool, g: i64, user: i64) {
+    cases::create(p, case(g, "ban", user, 0, None))
+        .await
+        .unwrap(); // cases + action_log
+    for sql in [
+        "INSERT INTO guild_config (guild_id, version) VALUES ($1, 1)",
+        "INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, 1)",
+        "INSERT INTO welcomed_guilds (guild_id) VALUES ($1)",
+    ] {
+        sqlx::query(sql).bind(g).execute(p).await.unwrap();
+    }
+    sqlx::query("INSERT INTO ticket_users (user_id, last_guild) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET last_guild = $2")
+        .bind(user).bind(g).execute(p).await.unwrap();
+}
+
+/// Rows left for `g` in the seeded tables, and whether the ticket user still points at it.
+async fn left(p: &PgPool, g: i64, user: i64) -> (i64, bool) {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM cases WHERE guild_id = $1) + (SELECT count(*) FROM action_log WHERE guild_id = $1)
+              + (SELECT count(*) FROM guild_config WHERE guild_id = $1) + (SELECT count(*) FROM extra_owners WHERE guild_id = $1)
+              + (SELECT count(*) FROM welcomed_guilds WHERE guild_id = $1) + (SELECT count(*) FROM guild_left WHERE guild_id = $1)",
+    )
+    .bind(g).fetch_one(p).await.unwrap();
+    let points: bool = sqlx::query_scalar(
+        "SELECT exists(SELECT 1 FROM ticket_users WHERE user_id = $1 AND last_guild = $2)",
+    )
+    .bind(user)
+    .bind(g)
+    .fetch_one(p)
+    .await
+    .unwrap();
+    (n, points)
+}
+
+#[tokio::test]
+async fn purge_deletes_one_guild_only() {
+    let Some(p) = pool().await else { return };
+    let (a, b) = (gid(20), gid(21));
+    for g in [a, b] {
+        db::purge_guild(&p, g).await.unwrap();
+        seed(&p, g, g).await;
+    }
+    db::purge_guild(&p, a).await.unwrap();
+    assert_eq!(left(&p, a, a).await, (0, false));
+    assert_eq!(left(&p, b, b).await, (5, true));
+    db::purge_guild(&p, b).await.unwrap();
+}
+
+#[tokio::test]
+async fn purge_left_takes_only_guilds_gone_over_30_days() {
+    let Some(p) = pool().await else { return };
+    let (old, new) = (gid(22), gid(23));
+    for (g, days) in [(old, 31), (new, 29)] {
+        db::purge_guild(&p, g).await.unwrap();
+        seed(&p, g, g).await;
+        sqlx::query("INSERT INTO guild_left (guild_id, left_at) VALUES ($1, now() - make_interval(days => $2))")
+            .bind(g).bind(days).execute(&p).await.unwrap();
+    }
+    let ids = db::purge_left(&p, 30).await.unwrap();
+    assert!(ids.contains(&old) && !ids.contains(&new));
+    assert_eq!(left(&p, old, old).await, (0, false));
+    assert_eq!(left(&p, new, new).await, (6, true));
+    db::purge_guild(&p, new).await.unwrap();
+}
