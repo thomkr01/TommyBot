@@ -169,11 +169,13 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             msg.ok(if cleared.is_empty() { format!("Imported as version {}", v["version"]) } else { format!("Imported as version {}. Set these again, their ids were cleared: {cleared}", v["version"]) });
         });
     } };
+    let file = NodeRef::<leptos::html::Input>::new();
     let (g1, g2) = (guild.clone(), guild);
     view! {
         <div class="row">
             <button class="ghost" on:click=export>"Export settings"</button>
-            <label class="ghost">"Import settings"<input type="file" accept=".json,application/json" hidden=true on:change=import /></label>
+            <button class="ghost" on:click=move |_| { if let Some(i) = file.get() { i.click() } }>"Import settings"</button>
+            <input type="file" accept=".json,application/json" hidden=true node_ref=file on:change=import />
         </div>
         <AnimatedShow when=Signal::derive(move || preview.get().is_some()) hide_class="out" hide_delay=OUT>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
             let apply = apply.clone();
