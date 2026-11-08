@@ -25,6 +25,7 @@ services:
       retries: 10
 
   bot:
+    image: ghcr.io/thomkr01/tommybot-bot:${TOMMYBOT_TAG:-latest}
     build:
       context: .
       target: bot
@@ -42,6 +43,7 @@ services:
       SUPPORT_URL: ${SUPPORT_URL:-}
 
   dashboard:
+    image: ghcr.io/thomkr01/tommybot-dashboard:${TOMMYBOT_TAG:-latest}
     build:
       context: .
       target: dashboard

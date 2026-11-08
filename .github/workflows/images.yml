@@ -1,0 +1,42 @@
+name: Images
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [bot, dashboard]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Short sha
+        run: echo "SHORT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: true
+          tags: |
+            ghcr.io/thomkr01/tommybot-${{ matrix.target }}:latest
+            ghcr.io/thomkr01/tommybot-${{ matrix.target }}:${{ env.SHORT }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,scope=${{ matrix.target }},mode=max
+      # Private packages on GitHub Free get 500 MB, so keep only the newest 3 versions.
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: tommybot-${{ matrix.target }}
+          package-type: container
+          min-versions-to-keep: 3
