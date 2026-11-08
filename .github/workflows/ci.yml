@@ -54,3 +54,38 @@ jobs:
         run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
       - name: Test
         run: cargo test
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SKIP_UNIT: "1" # the check job already runs the workspace tests
+      E2E_OUT: ${{ github.workspace }}/e2e-out
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+      - run: mkdir -p "$E2E_OUT" && npm i --no-save playwright && npx playwright install --with-deps chromium
+      - name: Dashboard browser sweep
+        run: tests/e2e/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-screenshots
+          path: e2e-out
