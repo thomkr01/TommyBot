@@ -19,10 +19,13 @@ use crate::{
     app::{now_secs, App},
     events::send_log,
 };
+use std::time::{Duration, Instant};
 use tommybot_logging::{
-    embed::{self, ALERT, ARROW, DONE, YES},
+    embed::{self, ALERT, ARROW, BLUE, DONE, GREEN, NO, RED, YES},
+    emoji::{ANNOUNCE, LOCK, MODERATOR, RUNNING, UNLOCK},
     Log, LogKind,
 };
+use twilight_model::channel::message::Embed;
 
 /// Runs one op; returns the channel it created, if any.
 async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Result<Option<u64>> {
@@ -451,36 +454,168 @@ fn lock_name(k: &LockKind) -> String {
 pub const LOCK_TYPES: &str =
     "Lock type: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s)";
 
+/// A lock command's answer: `text` for compact replies, `embed` otherwise.
+pub struct Reply {
+    pub text: String,
+    pub embed: Embed,
+}
+
+fn fail(lift: bool, text: String) -> Reply {
+    let title = if lift {
+        "Unlock Result:"
+    } else {
+        "Lock Result:"
+    };
+    let embed = Log::new(title, BLUE)
+        .text(&format!("{ARROW} {text}"))
+        .build();
+    Reply { text, embed }
+}
+
+/// Shown while a server-wide lock or unlock runs; replaced by the result.
+pub fn loading(kind: Option<&LockKind>, lift: bool) -> Embed {
+    let name = kind.map_or("all".into(), type_name);
+    let (title, verb) = if lift {
+        ("TommyBot Unlocking:", "Disabling")
+    } else {
+        ("TommyBot Lockdown:", "Enabling")
+    };
+    Log::new(title, BLUE)
+        .text(&format!("{RUNNING} {verb} `{name}` lockdown!"))
+        .build()
+}
+
+/// `channels (blind)` -> `Channels (blind)`, as the Type line shows it.
+fn type_name(k: &LockKind) -> String {
+    let n = lock_name(k);
+    let mut c = n.chars();
+    c.next()
+        .map_or(n.clone(), |f| f.to_uppercase().chain(c).collect())
+}
+
+/// The finished lock or unlock, with how long it took.
+fn finished(
+    kind: Option<&LockKind>,
+    name: String,
+    lift: bool,
+    took: Duration,
+    actor: Id<UserMarker>,
+) -> Reply {
+    if let Some(LockKind::Channel(c)) = kind {
+        let (color, icon, done, body) = if lift {
+            (
+                GREEN,
+                UNLOCK,
+                "unlocked",
+                "Everyone now has access to this channel.",
+            )
+        } else {
+            (
+                RED,
+                LOCK,
+                "locked",
+                "You will gain access again once the lockdown is lifted.",
+            )
+        };
+        let embed = Log::new("", color)
+            .text(&format!("{icon} **<#{c}> has been {done}!**"))
+            .text(body)
+            .build();
+        return Reply {
+            text: format!("<#{c}> has been {done}"),
+            embed,
+        };
+    }
+    let ms = took.as_secs_f64() * 1000.0;
+    let (title, icon, line, ok, verb) = if lift {
+        (
+            "TommyBot Unlocking:",
+            UNLOCK,
+            "has been lifted",
+            "Unlocking",
+            "unlocking",
+        )
+    } else {
+        (
+            "TommyBot Lockdown:",
+            LOCK,
+            "has been successfully enforced",
+            "Lockdown",
+            "locking down",
+        )
+    };
+    let embed = Log::new(title, GREEN)
+        .text(&format!(
+            "{icon} `{name}` lockdown mode {line} in `{ms:.0} ms`."
+        ))
+        .text("")
+        .text(&format!("{YES} **{ok} successful!**"))
+        .text(&format!(
+            "{ARROW} *TommyBot has finished {verb} in `{ms:.2} ms`.*"
+        ))
+        .text(&format!("{MODERATOR} **Staff:** <@{actor}> `{actor}`"))
+        .line("Type", &name)
+        .build();
+    Reply {
+        text: format!("{ok} successful: {name} ({ms:.0} ms)"),
+        embed,
+    }
+}
+
+/// A bare prefix `lock`: the active locks, or how to add one.
+pub async fn overview(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
+    let active = active(app, gid).await?;
+    let mut log = Log::new("Active lockdown modes:", RED);
+    if active.is_empty() {
+        let prefix = app.cfg(gid.get()).await?.misc.prefix.clone();
+        log = log
+            .text(&format!(
+                "{NO} There are no active lockdown modes currently!"
+            ))
+            .text("")
+            .text(&format!("{ANNOUNCE} **Add a lockdown:**"))
+            .text(&format!(
+                "You can add a lockdown by doing `{prefix}lock ?t [TYPE]`"
+            ));
+    }
+    for k in &active {
+        log = log.text(&format!("{LOCK} {}", type_name(k)));
+    }
+    Ok(log.build())
+}
+
 /// Lock or unlock the server; shared by the prefix and slash commands. `kind` overrides the dashboard's lock type.
 pub async fn command(
     app: &App,
     gid: Id<GuildMarker>,
-    actor: &tommybot_core::permits::Level,
+    (actor_id, actor): (Id<UserMarker>, &tommybot_core::permits::Level),
     lift: bool,
     kind: Option<LockKind>,
     duration_s: Option<i64>,
-) -> Result<String> {
+) -> Result<Reply> {
     if !actor.has("lockdown") {
-        return Ok("Cannot lock: no permit".into());
+        return Ok(fail(lift, "Cannot lock: no permit".into()));
     }
+    let start = Instant::now();
     if lift {
+        // Named before the locks are gone, for the Type line.
+        let name = match &kind {
+            Some(k) => type_name(k),
+            None => active(app, gid)
+                .await?
+                .iter()
+                .map(type_name)
+                .collect::<Vec<_>>()
+                .join(" + "),
+        };
         return Ok(match unlock(app, gid, kind.as_ref()).await? {
-            0 => "Nothing to unlock".into(),
-            1 => "Unlocked".into(),
-            n => format!("Lifted {n} locks"),
+            0 => fail(lift, "Nothing to unlock".into()),
+            _ => finished(kind.as_ref(), name, lift, start.elapsed(), actor_id),
         });
     }
     let kind = match kind {
         Some(k) => k,
-        None => {
-            // A bare `lock` while locked shows what is locked.
-            let active = active(app, gid).await?;
-            if !active.is_empty() {
-                let list: Vec<String> = active.iter().map(lock_name).collect();
-                return Ok(format!("Active locks: {}", list.join(", ")));
-            }
-            app.cfg(gid.get()).await?.lockdown_prefs.kind()
-        }
+        None => app.cfg(gid.get()).await?.lockdown_prefs.kind(),
     };
     let name = lock_name(&kind);
     let (channels, roles, joins) = kind.covers();
@@ -493,19 +628,52 @@ pub async fn command(
         (joins.is_some(), "lock_joins"),
     ];
     if let Some((_, p)) = needs.iter().find(|(on, p)| *on && !actor.has(p)) {
-        return Ok(format!("Cannot lock {name}: you lack the {p} permit"));
+        return Ok(fail(
+            lift,
+            format!("Cannot lock {name}: you lack the {p} permit"),
+        ));
     }
-    let done = lock_for(app, gid, kind.clone(), duration_s).await?;
-    Ok(if done {
-        format!("Locked: {name}")
+    Ok(if lock_for(app, gid, kind.clone(), duration_s).await? {
+        finished(
+            Some(&kind),
+            type_name(&kind),
+            lift,
+            start.elapsed(),
+            actor_id,
+        )
     } else {
-        format!("Cannot lock {name}: an active lock already covers it")
+        fail(
+            lift,
+            format!("Cannot lock {name}: an active lock already covers it"),
+        )
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_replies_read_like_the_panels() {
+        assert_eq!(type_name(&LockKind::Server), "Channels");
+        let r = finished(
+            Some(&LockKind::Channel(5)),
+            String::new(),
+            true,
+            Duration::ZERO,
+            Id::new(1),
+        );
+        assert_eq!(r.text, "<#5> has been unlocked");
+        let r = finished(
+            Some(&LockKind::Role),
+            "Roles".into(),
+            false,
+            Duration::from_micros(390_110),
+            Id::new(1),
+        );
+        assert_eq!(r.text, "Lockdown successful: Roles (390 ms)");
+        assert!(r.embed.description.unwrap().contains("`390.11 ms`"));
+    }
 
     #[test]
     fn join_lock_maps_from_kind() {

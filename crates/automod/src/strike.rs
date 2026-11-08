@@ -30,7 +30,7 @@ impl Default for StrikeCfg {
             reoffend_window_ms: 60 * 60_000,
             strike_expiry_ms: 60 * 60_000,
             reset_heat_on_timeout: false,
-            multiply: true,
+            multiply: false,
             multiplier_pct: 200,
         }
     }
@@ -93,7 +93,10 @@ mod tests {
 
     #[test]
     fn example_sequence() {
-        let cfg = StrikeCfg::default();
+        let cfg = StrikeCfg {
+            multiply: true,
+            ..Default::default()
+        };
         let mut s = StrikeState::default();
         let mut now = 0;
         let mut seq = vec![];
@@ -106,10 +109,7 @@ mod tests {
             seq,
             [(1, false), (1, false), (11, true), (22, true), (44, true)]
         );
-        let flat = StrikeCfg {
-            multiply: false,
-            ..Default::default()
-        };
+        let flat = StrikeCfg::default();
         let mut s = StrikeState::default();
         let caps: Vec<_> = (0..4)
             .map(|i| strike(&mut s, &flat, i).timeout_ms / M)
@@ -119,7 +119,10 @@ mod tests {
 
     #[test]
     fn grown_cap_is_limited_to_28_days() {
-        let cfg = StrikeCfg::default();
+        let cfg = StrikeCfg {
+            multiply: true,
+            ..Default::default()
+        };
         let mut s = StrikeState {
             last_cap_duration_ms: 20 * 86_400_000,
             cap_end_ms: 1,

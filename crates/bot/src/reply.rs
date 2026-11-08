@@ -137,15 +137,6 @@ pub fn result_embeds(kind: &str, texts: &[String], reason: Option<&str>, actor: 
     out
 }
 
-/// A command with no case of its own (lock, unlock): its reply text in a result embed.
-pub fn plain_embed(title: &str, text: &str) -> Vec<Embed> {
-    let lines = text
-        .lines()
-        .map(|l| format!("{ARROW} {l}"))
-        .collect::<Vec<_>>();
-    vec![Log::new(title, BLUE).text(&lines.join("\n")).build()]
-}
-
 /// What the target is told; `actor` is None when staff identity is hidden.
 pub fn dm_text(kind: &str, reason: Option<&str>, actor: Option<u64>) -> String {
     let mut s = format!("You received a {kind} in a server");
@@ -342,11 +333,6 @@ mod tests {
             .clone()
             .unwrap();
         assert!(d.contains("✅ <@5> [`5`]"));
-        assert!(plain_embed("Lock Result:", "Unlocked")[0]
-            .description
-            .clone()
-            .unwrap()
-            .contains("▸ Unlocked"));
     }
 
     #[test]

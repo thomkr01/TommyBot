@@ -322,7 +322,7 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Auto timeouts", "strike.cap", "int"), 3), "Strikes before the CAP strike"),
         ti(dv(fg("Auto timeouts", "strike.reoffend_window_ms", "int"), 3_600_000), "Reoffend window"),
         ti(dv(fg("Auto timeouts", "strike.strike_expiry_ms", "int"), 3_600_000), "Strike expiry"),
-        ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), true), "Multiply timeouts"),
+        ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), false), "Multiply timeouts"),
         ti(dv(fg("Auto timeouts", "strike.multiplier_pct", "int"), 200), "Multiplier percentage"),
         ti(dv(fg("Heat settings", "heat.max", "float"), 100.0), "Max heat"),
         ti(dv(fg("Heat settings", "heat.decay_per_sec", "pct"), 0.05), "Heat degradation (every second)"),

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tommybot_automod::lockdown::kind_from;
+use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
 use tommybot_logging::{
     embed::{self, duration, ARROW, ORANGE, RED},
@@ -392,23 +392,51 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
                 }
             }
             let unlock = p.command == "unlock";
-            let mut out = vec![];
-            for kind in kinds
-                .into_iter()
-                .map(Some)
-                .chain(name.is_none().then_some(None))
-            {
-                out.push(lockdown::command(app, gid, &actor, unlock, kind, p.duration_s).await?);
+            if name.is_none() {
+                if !unlock {
+                    // A bare `lock` lists the active locks instead of locking.
+                    let e = lockdown::overview(app, gid).await?;
+                    return say_embeds(app, msg, "", &[e]).await;
+                }
+                // A bare `unlock` in a locked channel lifts that channel only.
+                let here = LockKind::Channel(msg.channel_id.get());
+                if lockdown::active(app, gid).await?.contains(&here) {
+                    kinds.push(here);
+                }
             }
-            if cfg_compact(app, gid, p.flags).await? {
-                return say(app, msg, &out.join("\n")).await;
-            }
-            let title = if unlock {
-                "Unlock Result:"
-            } else {
-                "Lock Result:"
+            let kinds: Vec<Option<LockKind>> = match kinds.is_empty() {
+                true => vec![None],
+                false => kinds.into_iter().map(Some).collect(),
             };
-            return say_embeds(app, msg, "", &reply::plain_embed(title, &out.join("\n"))).await;
+            let compact = cfg_compact(app, gid, p.flags).await?;
+            // Server-wide locks take a while: show a loading reply, then edit in the result.
+            let pending = match kinds.as_slice() {
+                [k] if !compact && !matches!(k, Some(LockKind::Channel(_))) => {
+                    Some(send_reply(app, msg, "", &[lockdown::loading(k.as_ref(), unlock)]).await?)
+                }
+                _ => None,
+            };
+            let mut out = vec![];
+            for kind in kinds {
+                let actor = (msg.author.id, &actor);
+                out.push(lockdown::command(app, gid, actor, unlock, kind, p.duration_s).await?);
+            }
+            if compact {
+                let text: Vec<String> = out.into_iter().map(|r| r.text).collect();
+                return say(app, msg, &text.join("\n")).await;
+            }
+            // shortcut: Discord shows at most 10 embeds, so more than 10 channels show the first 10.
+            let embeds: Vec<_> = out.into_iter().take(10).map(|r| r.embed).collect();
+            return match pending {
+                Some(m) => {
+                    app.http
+                        .update_message(msg.channel_id, m.id)
+                        .embeds(Some(&embeds))
+                        .await?;
+                    Ok(())
+                }
+                None => say_embeds(app, msg, "", &embeds).await,
+            };
         }
         "unban" | "untimeout" | "unwarn" | "quarantine" | "unquarantine" | "purge" | "slowmode"
         | "cases" | "case" | "verify" | "sanitize" | "note" | "notes" | "editc" | "editreason"
@@ -668,6 +696,16 @@ pub(crate) async fn say_embeds(
     text: &str,
     embeds: &[twilight_model::channel::message::Embed],
 ) -> Result<()> {
+    send_reply(app, msg, text, embeds).await.map(drop)
+}
+
+/// Sends a reply (deleted later if the server wants that) and returns it.
+async fn send_reply(
+    app: &App,
+    msg: &MessageCreate,
+    text: &str,
+    embeds: &[twilight_model::channel::message::Embed],
+) -> Result<twilight_model::channel::Message> {
     let sent = app
         .http
         .create_message(msg.channel_id)
@@ -682,7 +720,7 @@ pub(crate) async fn say_embeds(
             reply::delete_later(app, gid, msg.channel_id, sent.id, secs).await?;
         }
     }
-    Ok(())
+    Ok(sent)
 }
 
 /// `w!backups take|load ID|delete ID|clear` and its aliases.
