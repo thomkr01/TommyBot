@@ -383,7 +383,9 @@ pub fn panel(m: &Module, cfg: &GuildCfg, gid: u64, page: usize) -> (Embed, usize
     for (name, value) in all.into_iter().skip(page * per).take(per) {
         e = e.inline(&name, &value);
     }
-    let footer = match (pages, m.footer) {
+    // Footers name commands with the default prefix; show the server's own.
+    let f = m.footer.replace("t!", &cfg.misc.prefix);
+    let footer = match (pages, f.as_str()) {
         (1, f) => f.to_string(),
         (n, "") => format!("Page: {}/{n}", page + 1),
         (n, f) => format!("{f} · Page: {}/{n}", page + 1),

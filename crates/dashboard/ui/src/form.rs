@@ -427,6 +427,14 @@ pub fn Section(
                     f["path"] = json!(format!("{}.{}", f["section"].as_str().unwrap_or(&n), f["path"].as_str().unwrap_or("")));
                     f
                 }).collect());
+                // Unset values take their defaults, so changing one and back leaves nothing to save.
+                let mut c = val.get_untracked();
+                for f in fields.get_untracked() {
+                    let p = f["path"].as_str().unwrap_or("");
+                    if !f["default"].is_null() && get_path(&c, p).is_null() { set_path(&mut c, p, f["default"].clone()) }
+                }
+                orig.set(c.clone());
+                val.set(c);
                 if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(d); }
             }
         }
@@ -439,8 +447,16 @@ pub fn Section(
             if let Ok(c) = api("GET", &format!("/api/guilds/{g}/config"), None).await { val.set(c["config"].clone()); orig.set(c["config"].clone()); }
         }) }
     };
+    let at = RwSignal::new(0usize);
+    let act = {
+        let g = guild.clone();
+        let reload = reload.clone();
+        move |path: &'static str| {
+            let (g, v, reload) = (g.clone(), version.get_untracked(), reload.clone());
+            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.ok("Done"); reload(r["version"].as_i64().unwrap_or(0)) });
+        }
+    };
     let card_view = cards.map(|cs| {
-        let at = RwSignal::new(0usize);
         let pv = NodeRef::<leptos::html::Div>::new();
         // (card, texts of its preview): a new card starts over, so only a settings change flashes.
         let seen = StoredValue::new((usize::MAX, None::<Vec<String>>));
@@ -456,11 +472,7 @@ pub fn Section(
                 });
             });
         });
-        let g = guild.clone();
-        let act = move |path: &'static str| {
-            let (g, v, reload) = (g.clone(), version.get_untracked(), reload.clone());
-            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.ok("Done"); reload(r["version"].as_i64().unwrap_or(0)) });
-        };
+        let act = act.clone();
         view! { <div class="card wiz">
             <button class="nav back" aria-label="previous" disabled=move || at.get() == 0 on:click=move |_| at.update(|i| *i = i.saturating_sub(1))>{crate::icons::icon("page_prev")}</button>
             <div class="wizbody">
@@ -488,14 +500,24 @@ pub fn Section(
         names.extend(fields.get_untracked().iter().filter_map(|f| f["section"].as_str().map(String::from)));
         names.sort();
         names.dedup();
-        run_save(async move {
+        // A wizard card whose switch was just turned on runs its setup (channel, category) right after.
+        let setup = cards.and_then(|cs| cs.get(at.get_untracked())).and_then(|c| {
+            let switch = c.fields.first()?.0;
+            (get_path(&cur, switch) == json!(true) && get_path(&before, switch) != json!(true)).then_some(c.action?.1)
+        });
+        let act = act.clone();
+        run_act(async move {
             let mut last = json!({"version": version.get_untracked()});
             for s in names.iter().filter(|s| cur[s.as_str()] != before[s.as_str()]) {
                 let body = json!({"expected_version": last["version"], "value": cur[s.as_str()]});
                 last = api("PUT", &format!("/api/guilds/{g}/config/{s}"), Some(body)).await?;
             }
             Ok(last)
-        }, version, msg, need);
+        }, msg, need, move |v| {
+            version.set(v["version"].as_i64().unwrap_or(0));
+            msg.ok(format!("Saved as version {}", version.get_untracked()));
+            if let Some(path) = setup { act(path) }
+        });
     };
     // Read per card, not in the grouping closure: rebuilding the cards on every switch flip cut the knob's animation.
     let off = Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));

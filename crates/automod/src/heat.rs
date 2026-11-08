@@ -49,11 +49,11 @@ impl Default for HeatCfg {
             max: 100.0,
             decay_per_sec: 0.05,
             base: 15.0,
-            per_char: 0.05,
+            // Long messages heat through per_upper/per_lower alone, as the reference defaults do.
+            per_char: 0.0,
             free_chars: 200,
             per_newline: 5.0,
-            // 10 emojis in one message (a celebration) stay well under the max.
-            per_emoji: 4.0,
+            per_emoji: 9.0,
             per_mention: 15.0,
             per_role_mention: 20.0,
             per_everyone: 100.0,
@@ -489,10 +489,10 @@ mod tests {
     }
 
     #[test]
-    fn ten_emojis_are_not_spam() {
+    fn five_emojis_are_not_spam() {
         let cfg = HeatCfg::default();
-        let mut m = msg("🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉");
-        m.emojis = 10;
+        let mut m = msg("🎉🎉🎉🎉🎉");
+        m.emojis = 5;
         assert!(!HeatState::default().apply(&heat(&m, &UserHistory::default(), &cfg), 0, &cfg));
     }
 

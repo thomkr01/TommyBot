@@ -196,14 +196,7 @@ async fn auto_setup(
     if cur != b.expected_version {
         return Err(ApiError::Conflict(cur)); // before any Discord side effect
     }
-    let role = create(
-        &st,
-        guild,
-        own(&config["antinuke"]["quarantine_role"]),
-        "roles",
-        json!({"name": "Quarantine", "permissions": "0"}),
-    )
-    .await?;
+    let role = quarantine_role(&st, guild, &config).await?;
     config["antinuke"]["quarantine_role"] = json!(role);
     // Lockdown and verification need a main role; members get "Member" when they verify.
     let empty = |v: &Value| v.as_array().is_none_or(Vec::is_empty);
@@ -391,6 +384,30 @@ async fn tickets_setup(
     if cur != b.expected_version {
         return Err(ApiError::Conflict(cur));
     }
+    let log = ticket_channels(&st, guild, &mut config).await?;
+    let mut tx = st.db.begin().await?;
+    let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
+    tx.commit().await?;
+    api::log_change(
+        &st,
+        guild,
+        &config,
+        format!(
+            "{} (<@{}>) set up tickets -> config v{version}",
+            s.username, s.user_id
+        ),
+    )
+    .await;
+    Ok(Json(json!({"version": version, "channel": log})))
+}
+
+/// Makes the Tickets category and #ticket-logs (each only when unset) and turns Tickets on in
+/// `config`. Returns the log channel.
+pub(crate) async fn ticket_channels(
+    st: &AppState,
+    guild: i64,
+    config: &mut Value,
+) -> Result<String, ApiError> {
     // Staff are the roles of permits with Manage Tickets plus the access roles.
     let mut staff: Vec<String> = tommybot_core::permits::roles_with(&st.db, guild, "tickets")
         .await?
@@ -416,7 +433,7 @@ async fn tickets_setup(
     );
     let t = config["tickets"].clone();
     let category = create(
-        &st,
+        st,
         guild,
         own(&t["category"]),
         "channels",
@@ -424,7 +441,7 @@ async fn tickets_setup(
     )
     .await?;
     let log = create(
-        &st,
+        st,
         guild,
         own(&t["log_channel"]),
         "channels",
@@ -438,20 +455,7 @@ async fn tickets_setup(
     tickets["enabled"] = json!(true);
     tickets["category"] = json!(category);
     tickets["log_channel"] = json!(log);
-    let mut tx = st.db.begin().await?;
-    let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
-    tx.commit().await?;
-    api::log_change(
-        &st,
-        guild,
-        &config,
-        format!(
-            "{} (<@{}>) set up tickets -> config v{version}",
-            s.username, s.user_id
-        ),
-    )
-    .await;
-    Ok(Json(json!({"version": version, "channel": log})))
+    Ok(log)
 }
 
 /// The conversation file of a closed ticket, read from the ticket log message that holds it.
@@ -510,7 +514,7 @@ fn at<'a>(config: &'a Value, path: &[&str]) -> &'a Value {
 }
 
 fn own(v: &Value) -> Option<String> {
-    v.as_str().map(String::from)
+    v.as_str().filter(|s| !s.is_empty()).map(String::from)
 }
 
 /// Deletes the text channels named `name` that `config` does not use, so a fresh setup
@@ -535,10 +539,43 @@ fn stale<'a>(channels: &'a Value, config: &Value, name: &str) -> Vec<&'a str> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|c| c["type"] == 0 && c["name"] == name)
+        // Roles have no type; of channels only text channels count.
+        .filter(|c| (c["type"] == 0 || c["type"].is_null()) && c["name"] == name)
         .filter_map(|c| c["id"].as_str())
         .filter(|id| !used.contains(&format!("\"{id}\"")))
         .collect()
+}
+
+/// The quarantine role. A picked role is kept and stripped of every permission. With none picked,
+/// leftover roles named Quarantine are deleted first so the server never ends up with several.
+async fn quarantine_role(st: &AppState, guild: i64, config: &Value) -> Result<String, ApiError> {
+    if let Some(id) = own(&config["antinuke"]["quarantine_role"]) {
+        st.discord
+            .call(
+                Method::PATCH,
+                &format!("/guilds/{guild}/roles/{id}"),
+                Some(json!({"permissions": "0"})),
+            )
+            .await?;
+        return Ok(id);
+    }
+    let roles = st
+        .discord
+        .call(Method::GET, &format!("/guilds/{guild}/roles"), None)
+        .await?;
+    for id in stale(&roles, config, "Quarantine") {
+        st.discord
+            .call(Method::DELETE, &format!("/guilds/{guild}/roles/{id}"), None)
+            .await?;
+    }
+    create(
+        st,
+        guild,
+        None,
+        "roles",
+        json!({"name": "Quarantine", "permissions": "0"}),
+    )
+    .await
 }
 
 /// Returns `existing`, or creates the role or channel on Discord and returns its id.
@@ -773,5 +810,8 @@ mod tests {
         ]);
         let config = json!({"logging": {"events": {"ban": "2"}}});
         assert_eq!(stale(&channels, &config, "reports"), ["1"]);
+        let roles = json!([{"id": "5", "name": "Quarantine"}, {"id": "6", "name": "Quarantine"}, {"id": "7", "name": "Member"}]);
+        let config = json!({"misc": {"quarantine_role": "6"}});
+        assert_eq!(stale(&roles, &config, "Quarantine"), ["5"]);
     }
 }

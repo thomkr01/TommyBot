@@ -208,13 +208,20 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         )
         .await;
     };
+    let category = match ensure_category(app, gid).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            let text = "That server does not take tickets right now.";
+            return say(app, dm, error(text)).await;
+        }
+        Err(e) => {
+            tracing::warn!(?e, %gid, "making the ticket category failed");
+            let text = "A ticket category is not found and TommyBot could not make one. Please contact an admin on the server.";
+            return say(app, dm, error(text)).await;
+        }
+    };
     let cfg = app.cfg(gid.get()).await?;
     let t = &cfg.tickets;
-    let channels = &app.guild_info(gid).await?.channels;
-    let Some(category) = t.category.filter(|c| t.enabled && channels.contains(c)) else {
-        let text = "A ticket category is not found. The bot is not set up properly in the server.";
-        return say(app, dm, error(text)).await;
-    };
     if t.blocked.contains(&m.author.id) {
         let text = "That server has blacklisted you from sending a message there.";
         return say(app, dm, error(text)).await;
@@ -300,7 +307,7 @@ async fn create(
             anyhow::Ok(r.model().await?.id)
         }
     };
-    let made = match make(channel_name(&user.name, user.id)).await {
+    let made = match make(channel_name(&user.name, user.id, rand::random())).await {
         // Discord refuses names with words it does not allow (50035); the id always passes.
         Err(e) if http_err::code(&e) == Some(50035) => make(user.id.to_string()).await,
         r => r,
@@ -338,18 +345,25 @@ async fn create(
     let pfx = &app.cfg(gid.get()).await?.misc.prefix;
     let intro = intro(pfx, t.command_only, user, roles);
     let (pings, mentions) = pings(gid, t);
-    if let Err(e) = app
+    let sent = app
         .http
         .create_message(ch)
         .content(&pings)
         .embeds(&[intro])
         .allowed_mentions(Some(&mentions))
-        .await
-    {
-        tracing::warn!(?e, %ch, "ticket intro failed");
-        let text = "The bot is missing permissions. Please contact an admin on the server.";
-        say(app, dm, error(text)).await?;
-        return Ok(None);
+        .await;
+    match sent {
+        // Pinned, so staff always find who the member is and how to reply.
+        Ok(r) => {
+            let id = r.model().await?.id;
+            best_effort(app.http.create_pin(ch, id).await, "pin ticket intro");
+        }
+        Err(e) => {
+            tracing::warn!(?e, %ch, "ticket intro failed");
+            let text = "The bot is missing permissions. Please contact an admin on the server.";
+            say(app, dm, error(text)).await?;
+            return Ok(None);
+        }
     }
     if !t.greeting.is_empty() {
         say(app, dm, notice(s, false, &t.greeting, user)).await?;
@@ -487,7 +501,7 @@ mod tests {
     fn dm_commands_and_message_bodies() {
         let me = Id::new(7);
         assert_eq!(
-            dm_command("w!New hi there", me),
+            dm_command("t!New hi there", me),
             Some(("new".into(), "hi there"))
         );
         assert_eq!(
@@ -495,8 +509,8 @@ mod tests {
             Some(("confirmation".into(), ""))
         );
         assert_eq!(dm_command("hello", me), None);
-        assert_eq!(body("w!send 123 hi there", me), "hi there");
-        assert_eq!(body("w!switch hi", me), "hi");
+        assert_eq!(body("t!send 123 hi there", me), "hi there");
+        assert_eq!(body("t!switch hi", me), "hi");
         assert_eq!(body("plain text", me), "plain text");
     }
 

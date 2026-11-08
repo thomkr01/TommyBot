@@ -544,7 +544,7 @@ pub struct MiscCfg {
 impl Default for MiscCfg {
     fn default() -> Self {
         Self {
-            prefix: "w!".into(),
+            prefix: "t!".into(),
             use_slash: true,
             compact_replies: false,
             delete_replies_secs: None,
@@ -740,7 +740,7 @@ mod tests {
             json!({"default_timeout_secs": 99_999_999, "ban_purge_days": 30}),
         )
         .unwrap();
-        assert_eq!(m.prefix, "w!");
+        assert_eq!(m.prefix, "t!");
         assert!(m.use_slash && m.auto_warn_actions);
         assert_eq!(m.timeout_secs(), 28 * 86_400);
         let zero: MiscCfg = serde_json::from_value(json!({"default_timeout_secs": 0})).unwrap();

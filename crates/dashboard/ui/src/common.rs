@@ -157,6 +157,18 @@ pub fn dialog_keys(e: &leptos::ev::KeyboardEvent, close: impl FnOnce()) {
     let _ = to.focus();
 }
 
+/// Scrolls the element with `id` into view, smoothly.
+pub fn scroll_to(id: &str) {
+    let id = id.to_string();
+    request_animation_frame(move || {
+        if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id(&id)) {
+            let o = web_sys::ScrollIntoViewOptions::new();
+            o.set_behavior(web_sys::ScrollBehavior::Smooth);
+            el.scroll_into_view_with_scroll_into_view_options(&o);
+        }
+    });
+}
+
 /// Moves focus into a dialog once it is on the page.
 pub fn focus_on_open(r: NodeRef<leptos::html::Div>) {
     Effect::new(move || if let Some(d) = r.get() { if let Some(f) = focusables(&d).first() { let _ = f.focus(); } });

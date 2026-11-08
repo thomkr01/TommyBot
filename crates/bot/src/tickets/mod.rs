@@ -42,7 +42,7 @@ use crate::{
 };
 
 /// Prefix for commands in DMs, where no server prefix applies.
-const DM_PREFIX: &str = "w!";
+const DM_PREFIX: &str = "t!";
 /// A confirmation or server menu stops working after this long.
 const MENU_SECS: i64 = 180;
 /// History read for the close log, newest first.
@@ -113,18 +113,89 @@ fn tags(text: &str, u: &User) -> String {
     clip(&text, 2048)
 }
 
-/// The username without punctuation, or the id when nothing is left.
-fn channel_name(name: &str, id: Id<UserMarker>) -> String {
+/// The username without punctuation (or the id when nothing is left), then `digits` as five
+/// figures so staff can tell two tickets of one member apart.
+fn channel_name(name: &str, id: Id<UserMarker>, digits: u32) -> String {
     let n: String = name
         .to_lowercase()
         .chars()
         .filter(|c| !c.is_ascii_punctuation() && !c.is_control())
         .collect();
-    if n.trim().is_empty() {
+    let n = if n.trim().is_empty() {
         id.to_string()
     } else {
         n
+    };
+    format!("{n}-{:05}", digits % 100_000)
+}
+
+/// Makes the staff-only category `name`, plus the `ticket-logs` channel in it when `log` is set.
+async fn make_category(
+    app: &App,
+    gid: Id<GuildMarker>,
+    t: &TicketsCfg,
+    name: &str,
+    log: bool,
+) -> Result<(Id<ChannelMarker>, Option<Id<ChannelMarker>>)> {
+    let ows = overwrites(gid, app.me.get(), &staff_roles(app, gid, t).await?);
+    let category = app
+        .http
+        .create_guild_channel(gid, name)
+        .kind(ChannelType::GuildCategory)
+        .permission_overwrites(&ows)
+        .await?
+        .model()
+        .await?
+        .id;
+    if !log {
+        return Ok((category, None));
     }
+    let l = app
+        .http
+        .create_guild_channel(gid, "ticket-logs")
+        .kind(ChannelType::GuildText)
+        .parent_id(category)
+        .permission_overwrites(&ows)
+        .await?
+        .model()
+        .await?
+        .id;
+    Ok((category, Some(l)))
+}
+
+/// Tickets are on but the category is unset or deleted: make it (and the log when that is unset)
+/// so turning Tickets on is all the setup a server needs. Returns the category.
+pub async fn ensure_category(app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<ChannelMarker>>> {
+    let cfg = app.cfg(gid.get()).await?;
+    let t = &cfg.tickets;
+    if !t.enabled {
+        return Ok(None);
+    }
+    if let Some(c) = t.category {
+        // The cache can miss a category the dashboard made a moment ago, so ask Discord.
+        if app.guild_info(gid).await?.channels.contains(&c) {
+            return Ok(Some(c));
+        }
+        match app.http.channel(c).await.map_err(anyhow::Error::from) {
+            Ok(_) => return Ok(Some(c)),
+            Err(e) if http_err::code(&e) == Some(10003) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let (category, log) = make_category(app, gid, t, "Tickets", t.log_channel.is_none()).await?;
+    settings::save(app, gid, app.me.get(), &["tickets"], |doc| {
+        if !doc["tickets"].is_object() {
+            doc["tickets"] = json!({});
+        }
+        doc["tickets"]["category"] = json!(category.to_string());
+        if let Some(l) = log {
+            doc["tickets"]["log_channel"] = json!(l.to_string());
+        }
+        Ok(())
+    })
+    .await?
+    .map_err(anyhow::Error::msg)?;
+    Ok(Some(category))
 }
 
 fn emb(title: &str, text: &str, color: u32) -> EmbedBuilder {
@@ -421,8 +492,8 @@ mod tests {
 
     #[test]
     fn channel_names_drop_punctuation_and_fall_back_to_the_id() {
-        assert_eq!(channel_name("Tom.Bot!", Id::new(5)), "tombot");
-        assert_eq!(channel_name("...", Id::new(5)), "5");
+        assert_eq!(channel_name("Tom.Bot!", Id::new(5), 42), "tombot-00042");
+        assert_eq!(channel_name("...", Id::new(5), 123_456), "5-23456");
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres.

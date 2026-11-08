@@ -387,7 +387,7 @@ async fn rescue_regenerate(State(st): State<AppState>, s: Sess, Path(guild): Pat
     Ok(Json(json!({"key": key, "uri": uri})))
 }
 
-/// Either the rescue key or a current 6-digit code from the key's authenticator.
+/// The rescue key, plus a current 6-digit code from its authenticator.
 #[derive(Deserialize)]
 struct Claim {
     guild_id: String,
@@ -414,37 +414,30 @@ async fn claim_key(
     (key, code): (Option<&str>, Option<&str>),
 ) -> Result<(), ApiError> {
     let mut tx = db.begin().await?;
-    // The delete is the single-use gate: a concurrent claim sees zero rows.
-    let ok = match (key, code) {
-        (Some(key), _) => {
-            sqlx::query("delete from rescue_key where guild_id = $1 and key_hash = $2")
-                .bind(guild)
-                .bind(hash(key))
-                .execute(&mut *tx)
-                .await?
-                .rows_affected()
-                > 0
-        }
-        (None, Some(code)) => {
-            let secret: Option<Option<String>> = sqlx::query_scalar(
-                "select totp_secret from rescue_key where guild_id = $1 for update",
-            )
-            .bind(guild)
-            .fetch_optional(&mut *tx)
-            .await?;
-            match secret.flatten() {
-                Some(s) if crate::otp::step(&s, code)?.is_some() => {
-                    sqlx::query("delete from rescue_key where guild_id = $1")
-                        .bind(guild)
-                        .execute(&mut *tx)
-                        .await?;
-                    true
-                }
-                _ => false,
-            }
-        }
-        _ => false,
+    // Both are needed: the key alone (a leaked note) or the phone alone is not enough.
+    let secret: Option<Option<String>> = sqlx::query_scalar(
+        "select totp_secret from rescue_key where guild_id = $1 and key_hash = $2 for update",
+    )
+    .bind(guild)
+    .bind(hash(key.unwrap_or_default()))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let ok = match secret {
+        Some(Some(s)) => match code {
+            Some(c) => crate::otp::step(&s, c)?.is_some(),
+            None => false,
+        },
+        // Keys made before the authenticator existed have no secret.
+        Some(None) => true,
+        None => false,
     };
+    // The delete is the single-use gate: the row lock makes a concurrent claim wait and then miss.
+    if ok {
+        sqlx::query("delete from rescue_key where guild_id = $1")
+            .bind(guild)
+            .execute(&mut *tx)
+            .await?;
+    }
     if !ok {
         return Err(ApiError::Forbidden("invalid rescue key or code"));
     }
@@ -502,19 +495,24 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn authenticator_code_claims_once() {
+    async fn claim_needs_key_and_code_once() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
         let db = tommybot_core::db::connect(&url).await.unwrap();
         let g = 9_200_000_000 + std::process::id() as i64;
         let secret = crate::otp::new_secret();
-        sqlx::query("insert into rescue_key (guild_id, key_hash, totp_secret) values ($1, 'x', $2) on conflict (guild_id) do update set totp_secret = $2")
-            .bind(g).bind(&secret).execute(&db).await.unwrap();
-        assert!(claim_key(&db, g, 6, (None, Some("000000"))).await.is_err());
+        sqlx::query("insert into rescue_key (guild_id, key_hash, totp_secret) values ($1, $2, $3) on conflict (guild_id) do update set key_hash = $2, totp_secret = $3")
+            .bind(g).bind(hash("k")).bind(&secret).execute(&db).await.unwrap();
         let code = crate::otp::current(&secret);
-        claim_key(&db, g, 6, (None, Some(&code))).await.unwrap();
         assert!(claim_key(&db, g, 6, (None, Some(&code))).await.is_err());
+        assert!(claim_key(&db, g, 6, (Some("k"), None)).await.is_err());
+        claim_key(&db, g, 6, (Some("k"), Some(&code)))
+            .await
+            .unwrap();
+        assert!(claim_key(&db, g, 6, (Some("k"), Some(&code)))
+            .await
+            .is_err());
         sqlx::query("delete from extra_owners where guild_id = $1")
             .bind(g)
             .execute(&db)
