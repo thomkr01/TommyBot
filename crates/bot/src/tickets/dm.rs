@@ -1,6 +1,6 @@
 use super::*;
 
-/// `w!word args` or `@bot word args` in a DM.
+/// `t!word args` or `@bot word args` in a DM.
 fn dm_command(content: &str, me: Id<UserMarker>) -> Option<(String, &str)> {
     let rest = [
         DM_PREFIX.to_string(),

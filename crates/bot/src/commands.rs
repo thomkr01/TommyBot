@@ -723,7 +723,7 @@ async fn send_reply(
     Ok(sent)
 }
 
-/// `w!backups take|load ID|delete ID|clear` and its aliases.
+/// `t!backups take|load ID|delete ID|clear` and its aliases.
 async fn backup_prefix(
     app: &App,
     msg: &MessageCreate,
@@ -764,7 +764,7 @@ async fn backup_prefix(
     say(app, msg, &text).await
 }
 
-/// `/backups create|list|load|delete|purge` and `w!backups take|load|delete|clear`. `load`
+/// `/backups create|list|load|delete|purge` and `t!backups take|load|delete|clear`. `load`
 /// previews unless `confirm` is set.
 pub async fn backup_cmd(
     app: &App,

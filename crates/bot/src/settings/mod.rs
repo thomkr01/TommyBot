@@ -1,6 +1,6 @@
-//! Discord-side config. `w!<module>` shows a numbered panel; `VALUE ?set N`, `N ?on` / `N ?off`
+//! Discord-side config. `t!<module>` shows a numbered panel; `VALUE ?set N`, `N ?on` / `N ?off`
 //! and `OBJ ?add N` / `OBJ ?remove N` change it. The numbers are public API (people memorise
-//! `w!jg 3c`), so never renumber a row: add new ones after the last.
+//! `t!jg 3c`), so never renumber a row: add new ones after the last.
 use anyhow::Result;
 use serde_json::{json, Value};
 use tommybot_automod::join::RaidCfg;
@@ -571,7 +571,7 @@ pub(crate) async fn send(
     Ok(())
 }
 
-/// Handles `w!<module> ...`; false when `rest` is not a settings command.
+/// Handles `t!<module> ...`; false when `rest` is not a settings command.
 pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool> {
     let Some(gid) = msg.guild_id else {
         return Ok(false);

@@ -1,4 +1,4 @@
-//! `w!setup run`: the Quarantine role and log channels, built step by step in one embed that is
+//! `t!setup run`: the Quarantine role and log channels, built step by step in one embed that is
 //! edited as each step finishes (setup, features §3). The dashboard wizard does more
 //! (Member role, staff permits); this is the part that runs from chat.
 use anyhow::Result;

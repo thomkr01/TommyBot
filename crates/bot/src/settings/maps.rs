@@ -336,7 +336,7 @@ pub(super) static MISC: Module = Module {
     ],
 };
 
-/// `w!setup` walks through these; the roles and channels themselves are made by the dashboard wizard.
+/// `t!setup` walks through these; the roles and channels themselves are made by the dashboard wizard.
 pub(super) static SETUP: Module = Module {
     names: &["setup"],
     title: "Setup Panel:",

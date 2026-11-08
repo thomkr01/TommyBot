@@ -1,4 +1,4 @@
-//! Interactive Whitelist: `w!whitelist TARGET` posts a multi-select of whitelist types with
+//! Interactive Whitelist: `t!whitelist TARGET` posts a multi-select of whitelist types with
 //! Save / Cancel. The ids carry executor, target and the picked types, so nothing is stored until Save.
 use anyhow::Result;
 use serde_json::json;
