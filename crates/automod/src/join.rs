@@ -373,7 +373,7 @@ fn default_id_min() -> Option<usize> {
 }
 
 fn default_raid_action() -> Action {
-    Action::Kick
+    Action::Ban
 }
 
 impl Default for RaidCfg {
@@ -383,14 +383,14 @@ impl Default for RaidCfg {
             count: 10,
             span_ms: 10 * 60_000,
             suspicious_only: false,
-            active_ms: 10 * 60_000,
+            active_ms: 30 * 60_000,
             string_patterns: vec![],
             flag_younger_than_ms: None,
             flag_no_avatar: false,
             id_flag_min: default_id_min(),
             id_granularity: IdGranularity::Adaptive,
-            id_margin_ms: 0,
-            action: Action::Kick,
+            id_margin_ms: 60 * 60_000,
+            action: Action::Ban,
             lock: None,
             warned_roles: vec![],
         }
@@ -983,17 +983,17 @@ mod tests {
     }
 
     #[test]
-    fn raid_action_defaults_to_kick() {
+    fn raid_action_defaults_to_ban() {
         let mut v = serde_json::to_value(RaidCfg::default()).unwrap();
         v.as_object_mut().unwrap().remove("action");
         assert_eq!(
             serde_json::from_value::<RaidCfg>(v.clone()).unwrap().action,
-            Action::Kick
+            Action::Ban
         );
-        v["action"] = serde_json::json!("Ban");
+        v["action"] = serde_json::json!("Kick");
         assert_eq!(
             serde_json::from_value::<RaidCfg>(v).unwrap().action,
-            Action::Ban
+            Action::Kick
         );
     }
 

@@ -547,12 +547,14 @@ async fn run(
             Ok(text)
         }
         Cmd::Lock { kind, duration_s } => {
-            let text = crate::lockdown::command(app, gid, &actor, false, kind, duration_s).await?;
-            embed_unless_compact(app, gid, out, "Lock Result:", text).await
+            let r = crate::lockdown::command(app, gid, (actor_id, &actor), false, kind, duration_s)
+                .await?;
+            lock_reply(app, gid, out, r).await
         }
         Cmd::Unlock { kind } => {
-            let text = crate::lockdown::command(app, gid, &actor, true, kind, None).await?;
-            embed_unless_compact(app, gid, out, "Unlock Result:", text).await
+            let r =
+                crate::lockdown::command(app, gid, (actor_id, &actor), true, kind, None).await?;
+            lock_reply(app, gid, out, r).await
         }
         Cmd::LockUpdate { text } => {
             let ch = i
@@ -627,18 +629,17 @@ async fn run(
     }
 }
 
-/// Puts `text` in a result embed unless the server wants compact replies.
-async fn embed_unless_compact(
+/// The lock result embed unless the server wants compact replies.
+async fn lock_reply(
     app: &App,
     gid: Id<twilight_model::id::marker::GuildMarker>,
     out: &mut Vec<twilight_model::channel::message::Embed>,
-    title: &str,
-    text: String,
+    r: crate::lockdown::Reply,
 ) -> Result<String> {
     if app.cfg(gid.get()).await?.misc.compact_replies {
-        return Ok(text);
+        return Ok(r.text);
     }
-    *out = reply::plain_embed(title, &text);
+    *out = vec![r.embed];
     Ok(String::new())
 }
 
