@@ -52,6 +52,23 @@ pub async fn on_guild_delete(app: &App, ev: &GuildDelete) -> Result<()> {
     Ok(())
 }
 
+/// Starts the countdown for servers that removed the bot while it was offline. One shard, so
+/// `Ready` lists every server the bot is in.
+pub async fn on_ready(
+    app: &App,
+    ev: &twilight_model::gateway::payload::incoming::Ready,
+) -> Result<()> {
+    let ids: Vec<i64> = ev.guilds.iter().map(|g| g.id.get() as i64).collect();
+    sqlx::query(
+        "INSERT INTO guild_left (guild_id) SELECT DISTINCT guild_id FROM guild_config \
+         WHERE guild_id <> ALL($1) ON CONFLICT DO NOTHING",
+    )
+    .bind(&ids)
+    .execute(&app.pool)
+    .await?;
+    Ok(())
+}
+
 /// Deletes the data of servers the bot left more than `KEEP_DAYS` ago, hourly.
 pub async fn purge_left(app: std::sync::Arc<App>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));

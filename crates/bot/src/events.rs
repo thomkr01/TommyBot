@@ -413,6 +413,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::GuildUpdate(g) => app.invalidate_guild(g.id),
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::GuildDelete(g) => crate::welcome::on_guild_delete(app, g).await?,
+        Event::Ready(r) => crate::welcome::on_ready(app, r).await?,
         Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),
         Event::MemberUpdate(m) => {
             if let Err(e) = antinuke::enforce_permits(app, m).await {
