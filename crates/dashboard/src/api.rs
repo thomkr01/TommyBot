@@ -411,6 +411,11 @@ pub async fn rollback(
 /// Deletes everything stored for the server (PRIVACY.md); the bot keeps running on defaults.
 pub async fn purge(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Owner, true).await?;
+    if !is_discord_owner(&st, &s, guild).await? {
+        return Err(ApiError::Forbidden(
+            "only the server owner can delete the server's data",
+        ));
+    }
     tommybot_core::db::purge_guild(&st.db, guild).await?;
     tracing::info!(
         guild,
