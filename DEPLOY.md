@@ -5,8 +5,8 @@ This runs TommyBot with Docker on a Linux server next to other services. The das
 ## 1. Cloudflare Tunnel
 
 1. In the Cloudflare dashboard, go to **Zero Trust > Networks > Tunnels > Create a tunnel**, pick **Cloudflared**, and name it `tommybot`.
-2. Copy the token from the install command (the long string after `--token`). Skip installing the connector; Docker runs it.
-3. Add a **public hostname**: subdomain `tommybot`, your domain, service type `HTTP`, URL `dashboard:8080`. Delete any existing DNS record for that name first.
+2. Copy the token from the install command: the long string after `--token`, not the tunnel ID. Skip installing the connector; Docker runs it.
+3. Add a **published application** route: subdomain `tommybot`, your domain, service URL `http://dashboard:8080`. Delete any existing DNS record for that name first.
 
 ## 2. Discord Developer Portal
 
@@ -14,7 +14,7 @@ Under **OAuth2 > Redirects**, add `https://tommybot.example.com/auth/callback`.
 
 ## 3. Server
 
-Needs Docker with the compose plugin (`curl -fsSL https://get.docker.com | sh` on a fresh server). Building takes a few GB of RAM.
+Needs Docker with the compose plugin (`curl -fsSL https://get.docker.com | sh` on a fresh server). To run `docker` without `sudo`, add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again); that group is root-equivalent. Building takes a few GB of RAM and up to 20 minutes on a small arm64 server.
 
 ```bash
 git clone https://github.com/thomkr01/tommybot.git

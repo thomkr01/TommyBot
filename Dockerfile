@@ -11,7 +11,10 @@ RUN rustup target add wasm32-unknown-unknown \
 WORKDIR /src/crates/dashboard/ui
 COPY assets /src/assets
 COPY crates/dashboard/ui ./
-RUN trunk build --release
+# Trunk's prebuilt wasm-bindgen needs glibc 2.38 on arm64 (bookworm has 2.36), so build the CLI that matches the locked crate.
+RUN cargo generate-lockfile \
+ && cargo install wasm-bindgen-cli --locked --version "$(cargo pkgid wasm-bindgen | sed 's/.*@//')" \
+ && trunk build --release
 
 FROM debian:bookworm-slim AS base
 RUN apt-get update \
