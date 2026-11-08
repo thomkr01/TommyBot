@@ -42,13 +42,13 @@ The containers restart on their own after a crash or reboot, as long as Docker s
 
 ## Updating
 
-GitHub Actions builds the images on every push to `main` and publishes them to `ghcr.io/thomkr01/tommybot-bot` and `tommybot-dashboard` (tags `latest` and the short commit sha; only the newest 3 versions are kept). Pulling is much lighter than building on the server:
+GitHub Actions builds the images on every push to `main` and publishes them to `ghcr.io/thomkr01/tommybot-bot` and `tommybot-dashboard` (arm64, tags `latest` and the short commit sha; only the newest 3 versions are kept). Pulling is much lighter than building on the server:
 
 ```bash
 cd ~/tommybot && git pull && docker compose pull && docker compose up -d && docker image prune -f
 ```
 
-If the repo or its packages are private, log in once with a classic personal access token that has only the `read:packages` scope:
+New packages on GitHub start private. Make both packages public once (package page > **Package settings** > **Change visibility**), which keeps them free. If you keep them private, log in once with a classic personal access token that has only the `read:packages` scope:
 
 ```bash
 echo <token> | docker login ghcr.io -u thomkr01 --password-stdin
