@@ -120,6 +120,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
             put(api::put_section).layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(&format!("{g}/permits"), put(api::put_permits))
+        .route(&format!("{g}/import"), post(api::import))
         .route(&format!("{g}/history"), get(api::history))
         .route(
             &format!("{g}/history/{{from}}/{{to}}"),

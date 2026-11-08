@@ -31,6 +31,14 @@ pub fn confirm(text: &str) -> bool {
     web_sys::window().is_some_and(|w| w.confirm_with_message(text).unwrap_or(false))
 }
 
+/// Saves `href` (a data: URL) as the file `name`.
+pub fn download(name: &str, href: &str) {
+    let Some(a) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.create_element("a").ok()) else { return };
+    let _ = a.set_attribute("href", href);
+    let _ = a.set_attribute("download", name);
+    if let Ok(a) = wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(a) { a.click() }
+}
+
 pub fn csv(v: &Value) -> String {
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
 }

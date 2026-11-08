@@ -133,8 +133,60 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         }) }
     };
     load();
+    // Import is previewed first: the server answers with the diff and the ids it will clear.
+    let preview = RwSignal::new(None::<(Value, Value)>);
+    let shown = Memo::new(move |prev: Option<&Option<(Value, Value)>>| preview.get().or(prev.cloned().flatten()));
+    let export = { let g = guild.clone(); move |_| { let g = g.clone(); spawn_local(async move {
+        match api("GET", &format!("/api/guilds/{g}/config"), None).await {
+            Ok(v) => download(&format!("tommybot-settings-{g}.json"), &format!("data:application/json;charset=utf-8,{}",
+                js_sys::encode_uri_component(&serde_json::to_string_pretty(&json!({"version": v["version"], "config": v["config"]})).unwrap_or_default()))),
+            Err(e) => msg.err(e),
+        }}) } };
+    let send = { let g = guild.clone(); move |cfg: Value, apply: bool| { let g = g.clone(); async move {
+        api("POST", &format!("/api/guilds/{g}/import"), Some(json!({"expected_version": version.get_untracked(), "config": cfg, "apply": apply}))).await
+    } } };
+    let import = { let send = send.clone(); move |e: leptos::ev::Event| {
+        let input = event_target::<web_sys::HtmlInputElement>(&e);
+        let Some(file) = input.files().and_then(|l| l.get(0)) else { return };
+        input.set_value("");
+        let send = send.clone();
+        spawn_local(async move {
+            let text = wasm_bindgen_futures::JsFuture::from(file.text()).await.ok().and_then(|t| t.as_string()).unwrap_or_default();
+            let Ok(f) = serde_json::from_str::<Value>(&text) else { return msg.err("This file is not valid JSON") };
+            let cfg = f["config"].clone();
+            run_act(send(cfg.clone(), false), msg, need, move |p| preview.set(Some((cfg, p))));
+        });
+    } };
+    let apply = { let load = load.clone(); move |_| {
+        let Some((cfg, _)) = preview.get_untracked() else { return };
+        preview.set(None);
+        let load = load.clone();
+        run_act(send(cfg, true), msg, need, move |v| {
+            load();
+            let cleared = csv(&v["cleared"]);
+            msg.ok(if cleared.is_empty() { format!("Imported as version {}", v["version"]) } else { format!("Imported as version {}. Set these again, their ids were cleared: {cleared}", v["version"]) });
+        });
+    } };
     let (g1, g2) = (guild.clone(), guild);
     view! {
+        <div class="row">
+            <button class="ghost" on:click=export>"Export settings"</button>
+            <label class="ghost">"Import settings"<input type="file" accept=".json,application/json" hidden=true on:change=import /></label>
+        </div>
+        <AnimatedShow when=Signal::derive(move || preview.get().is_some()) hide_class="out" hide_delay=OUT>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
+            let apply = apply.clone();
+            let r = NodeRef::new();
+            focus_on_open(r);
+            let changes = p["diff"].as_array().cloned().unwrap_or_default();
+            let cleared = csv(&p["cleared"]);
+            let lines = changes.iter().map(|c| format!("{}: {}", c["path"].as_str().unwrap_or(""), if c["new"].is_null() { "removed".into() } else { c["new"].to_string() })).collect::<Vec<_>>().join("\n");
+            view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Import settings" on:keydown=move |e| dialog_keys(&e, || preview.set(None))><div class="card">
+                <b>"Import settings"</b>
+                {if changes.is_empty() { view! { <p class="muted">"This file changes nothing on this server."</p> }.into_any() } else { view! { <p>{format!("{} changes:", changes.len())}</p><pre>{lines}</pre> }.into_any() }}
+                {(!cleared.is_empty()).then(|| view! { <p class="info">{format!("Ids from the other server are cleared; set these again after the import: {cleared}")}</p> })}
+                <div class="row"><button class="ghost" on:click=move |_| preview.set(None)>"Abort"</button><button disabled=changes.is_empty() on:click=apply>"Import"</button></div>
+            </div></div> }
+        })}</AnimatedShow>
         <For each=move || rows.get() key=|r| r["version"].as_i64() let:r>
             {
                 let v = r["version"].as_i64().unwrap_or(0);
