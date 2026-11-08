@@ -312,6 +312,9 @@ impl App {
                     if let Ok(g) = n.payload().parse::<u64>() {
                         self.cfgs.write().unwrap().remove(&g);
                         tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
+                        if let Some(gid) = Id::new_checked(g) {
+                            tokio::spawn(on_saved(self.clone(), gid));
+                        }
                     }
                 }
                 // The connection dropped and reconnects on the next call: changes saved meanwhile
@@ -319,6 +322,17 @@ impl App {
                 None => self.cfgs.write().unwrap().clear(),
             }
         }
+    }
+}
+
+/// Setup that follows from a saved setting: Tickets turned on gets its category, a catch channel
+/// gets its warning.
+async fn on_saved(app: Arc<App>, gid: Id<GuildMarker>) {
+    if let Err(e) = crate::tickets::ensure_category(&app, gid).await {
+        tracing::warn!(?e, %gid, "making the ticket category failed");
+    }
+    if let Err(e) = crate::catch::post_notice(&app, gid).await {
+        tracing::warn!(?e, %gid, "posting the catch channel warning failed");
     }
 }
 

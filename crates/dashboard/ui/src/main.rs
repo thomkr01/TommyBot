@@ -24,6 +24,9 @@ use common::*;
 use embeds::Embeds;
 use form::Section;
 use permits::Permits;
+/// The server list's empty state; its text is the marker that shows the help card.
+const NO_SERVERS: &str = "No servers";
+
 use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Tickets, Wizard};
 use search::{Search, SearchBox};
 use recovery::{Backups, Panic};
@@ -239,7 +242,7 @@ fn App() -> impl IntoView {
         match api("GET", "/api/guilds", None).await {
             Ok(g) => {
                 let list = g.as_array().cloned().unwrap_or_default();
-                set_guilds_note.set(if list.is_empty() { "No servers: the bot must be in the server, and you must be its owner, an extra owner, a trusted admin or hold a permit with dashboard_view.".into() } else { String::new() });
+                set_guilds_note.set(if list.is_empty() { NO_SERVERS.into() } else { String::new() });
                 set_guilds.set(list);
             }
             Err(e) => set_guilds_note.set(format!("Could not load servers: {e}")),
@@ -296,7 +299,16 @@ fn App() -> impl IntoView {
                     {move || match route.get().as_slice() {
                         [] => view! {
                             <div class="head"><h1>"Servers"</h1><input placeholder="Filter: [Type name or ID]" aria-label="filter servers" prop:value=filter on:input=move |e| set_filter.set(event_target_value(&e)) /><LostControl enrolled /><button class="ghost" on:click=move |_| { set_guilds_note.set("Loading servers...".into()); spawn_local(load_guilds()) }>"Refresh servers"</button></div>
-                            <p class="muted">{move || guilds_note.get()}</p>
+                            {move || if guilds_note.get() == NO_SERVERS { view! { <div class="card empty">
+                                <h2>"No servers you can manage."</h2>
+                                <ol>
+                                    <li>"To manage a server you need to be either:"<ul>
+                                        <li>"The "<b>"physical"</b>" server owner (the one with the crown)."</li>
+                                        <li>"An "<b>"Extra Owner"</b>" (added by the server owner in Permits)."</li>
+                                        <li>"A "<b>"Trusted Admin"</b>" (added by the server owner in Permits)."</li>
+                                        <li>"A member whose permit can view the dashboard."</li></ul></li>
+                                    <li>"Is the server freshly made, or TommyBot just added? "<button class="go" on:click=move |_| { set_guilds_note.set("Loading servers...".into()); spawn_local(load_guilds()) }>"Refresh"</button></li>
+                                </ol></div> }.into_any() } else { view! { <p class="muted">{guilds_note.get()}</p> }.into_any() }}
                             <div class="cards">{guilds.get().iter().filter(|g| { let f = filter.get().to_lowercase(); g["name"].as_str().unwrap_or("").to_lowercase().contains(&f) || g["id"].as_str().unwrap_or("").contains(&f) }).map(|g| view! { <div class="card"><a class="gcard" href=format!("#/{}/overview", g["id"].as_str().unwrap_or(""))>{match g["icon"].as_str() {
                                 Some(i) => view! { <img src=format!("https://cdn.discordapp.com/icons/{}/{i}.png?size=64", g["id"].as_str().unwrap_or("")) /> }.into_any(),
                                 None => view! { <i>{g["name"].as_str().unwrap_or("?").chars().next().unwrap_or('?').to_string()}</i> }.into_any() }}

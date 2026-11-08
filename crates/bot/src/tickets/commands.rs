@@ -607,31 +607,8 @@ async fn setup(
         };
         return say(app, ch, error(text)).await;
     }
-    let ows = overwrites(gid, app.me.get(), &staff_roles(app, gid, t).await?);
-    let category = app
-        .http
-        .create_guild_channel(gid, name)
-        .kind(ChannelType::GuildCategory)
-        .permission_overwrites(&ows)
-        .await?
-        .model()
-        .await?
-        .id;
-    let log = if w == "ticketsetup" {
-        let c = app
-            .http
-            .create_guild_channel(gid, "ticket-logs")
-            .kind(ChannelType::GuildText)
-            .parent_id(category)
-            .permission_overwrites(&ows)
-            .await?
-            .model()
-            .await?
-            .id;
-        Some(c.to_string())
-    } else {
-        None
-    };
+    let (category, log) = make_category(app, gid, t, name, w == "ticketsetup").await?;
+    let log = log.map(|l| l.to_string());
     let done = if w == "category" {
         "Successfully created the category.".to_string()
     } else {

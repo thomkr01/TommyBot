@@ -4,7 +4,10 @@ use anyhow::Result;
 use tommybot_core::{permits::Level, sections::CatchAction};
 use tommybot_logging::{embed::RED, Log, LogKind};
 use twilight_model::{
-    channel::Channel, gateway::payload::incoming::MessageCreate, http::channel_position::Position,
+    channel::Channel,
+    gateway::payload::incoming::MessageCreate,
+    http::channel_position::Position,
+    id::{marker::GuildMarker, Id},
 };
 
 use crate::{
@@ -98,6 +101,44 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     Ok(true)
 }
 
+const NOTICE: &str = "Catch channel";
+
+/// What the catch channel says about itself, for its action.
+fn notice(a: CatchAction) -> String {
+    let what = match a {
+        CatchAction::Ban | CatchAction::Softban => "get you automatically banned",
+        CatchAction::Kick => "get you automatically kicked",
+        CatchAction::Timeout => "get you automatically timed out",
+        CatchAction::Log => "be logged for the staff team",
+    };
+    format!("This channel is to catch bots which automatically spam each channel with scams before they are able to post to the rest of the server.\n\n**Sending a message in this channel will {what}.**")
+}
+
+/// Posts the warning in the catch channel once: skipped when the bot's warning is already there.
+pub async fn post_notice(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+    let cfg = app.cfg(gid.get()).await?;
+    let c = &cfg.catch;
+    let Some(ch) = c.channel.filter(|_| c.enabled) else {
+        return Ok(());
+    };
+    let recent = app
+        .http
+        .channel_messages(ch)
+        .limit(50)
+        .await?
+        .models()
+        .await?;
+    let mine = |m: &twilight_model::channel::Message| {
+        m.author.id == app.me && m.embeds.iter().any(|e| e.title.as_deref() == Some(NOTICE))
+    };
+    if recent.iter().any(mine) {
+        return Ok(());
+    }
+    let e = Log::new(NOTICE, RED).text(&notice(c.action)).build();
+    app.http.create_message(ch).embeds(&[e]).await?;
+    Ok(())
+}
+
 /// Moves the catch channel back to the top when someone drags it down.
 pub async fn keep_top(app: &App, ch: &Channel) -> Result<()> {
     let Some(gid) = ch.guild_id else {
@@ -115,4 +156,15 @@ pub async fn keep_top(app: &App, ch: &Channel) -> Result<()> {
     };
     app.http.update_guild_channel_positions(gid, &[pos]).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notice_names_the_action() {
+        assert!(notice(CatchAction::Softban).contains("automatically banned"));
+        assert!(notice(CatchAction::Log).contains("logged"));
+    }
 }

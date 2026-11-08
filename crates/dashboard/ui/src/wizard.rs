@@ -36,11 +36,13 @@ fn on(c: &Value, path: &str, default: bool) -> bool {
 
 pub const MISC: &[Card] = &[
     card("Prefix", "Choose a prefix that your staff members can memorize easily, the prefix . is usually recommended.", &[("misc.prefix", "Prefix")], |c, _| {
-        let p = c["misc"]["prefix"].as_str().unwrap_or("w!");
+        let p = c["misc"]["prefix"].as_str().unwrap_or("t!");
         view! { {chat("you", text("Your mom gay"))}{typed(format!("{p}ban @member ?r toxic"))} }.into_any()
     }),
     card("Slash commands", "Enable TommyBot's slash commands.", &[("misc.use_slash", "Enable slash commands")], |c, _| {
-        if on(c, "misc.use_slash", true) { typed("/ban user: @member reason: toxic".into()) } else { text("Slash commands are off, only the prefix works.") }
+        let p = c["misc"]["prefix"].as_str().unwrap_or("t!");
+        let note = format!("Prefix commands like {p}ban always work too, with slash commands on or off.");
+        if on(c, "misc.use_slash", true) { view! { {typed("/ban user: @member reason: toxic".into())}<p class="muted">{note}</p> }.into_any() } else { view! { <p>"Slash commands are off."</p><p class="muted">{note}</p> }.into_any() }
     }),
     card("Compact mode", "Do you want TommyBot's messages to have a compact style?", &[("misc.compact_replies", "Minify TommyBot's message replies")], |c, _| {
         show(if on(c, "misc.compact_replies", false) { "ban_compact" } else { "ban_result" })
@@ -96,7 +98,9 @@ pub const ANTINUKE: &[Card] = &[
         ("antinuke.prune", "Detect and react to member prunes"),
         ("antinuke.vanity_guard", "Guard the server's vanity url"),
     ], |_, _| show("nuke_quarantined")),
-    card("Auto quarantine", "Quarantine anyone who gives dangerous permissions without being allowed to.", &[
+    Card {
+        notes: &["Leave the role empty and Auto Setup makes @Quarantine for you (old Quarantine roles are deleted). Pick a role and Auto Setup removes all of its permissions and denies it in every channel and category."],
+        ..card("Auto quarantine", "Quarantine anyone who gives dangerous permissions without being allowed to.", &[
         ("antinuke.auto_quarantine", "Use the auto quarantine"),
         ("antinuke.quarantine_role", "Quarantine role"),
         ("antinuke.strict_mode", ""),
@@ -105,7 +109,8 @@ pub const ANTINUKE: &[Card] = &[
     ], |c, dc| view! {
         <p>{format!("Quarantined members only keep {}.", name_of(dc, "roles", c["antinuke"]["quarantine_role"].as_str().unwrap_or("the quarantine role")))}</p>
         {show(if on(c, "antinuke.auto_quarantine", true) { "nuke_quarantined" } else { "nuke_no_quarantine" })}
-    }.into_any()),
+    }.into_any())
+    },
     Card {
         notes: &[
             "ONLY owners and trusted admins are whitelisted automatically.",
@@ -116,10 +121,6 @@ pub const ANTINUKE: &[Card] = &[
             text("Timeout, kick, ban and role changes on a quarantined member are blocked for everyone else.")
         })
     },
-    card("Ticket categories", "Do you use a ticket bot? Pick the categories it opens and closes ticket channels in, so the antinuke does not punish it.", &[("antinuke.ticket_categories", "Ticket categories")], |c, dc| {
-        let picked: Vec<String> = strs(&c["antinuke"]["ticket_categories"]).iter().map(|id| name_of(dc, "categories", id)).collect();
-        if picked.is_empty() { text("No ticket categories: every channel a bot creates or deletes counts.") } else { text(&format!("Channels created or deleted in {} never count.", picked.join(", "))) }
-    }),
 ];
 
 const AUTO_WL: &str = "Owners, Trusted admins and members with dangerous Discord/TommyBot permissions are automatically whitelisted.";
@@ -171,7 +172,7 @@ pub const JOINRAID: &[Card] = &[card("Anti raid status", "If you want to keep yo
 ], |_, _| show("raid"))];
 
 pub const VERIFICATION: &[Card] = &[Card {
-    notes: &["Save your changes first, then set up the channel."],
+    notes: &["Turn it on and save: TommyBot makes the #verify-here channel with its panel."],
     action: Some(("Set up channel", "wizard/verify-channel")),
     ..card("Verification status", "Do you want to filter in only genuine members? Use the verification and fend off bots!", &[("verification.enabled", "Enable Verification"), ("verification.mode", "Verification mode")], |c, _| {
         // The panel, then what a member sees after pressing Verify.
@@ -212,7 +213,7 @@ fn ticket_preview(c: &Value, dc: &Value) -> AnyView {
     let (greeting, closing) = (tagged("greeting"), tagged("closing"));
     let mut pings: Vec<String> = strs(&t["ping_roles"]).iter().map(|r| name_of(dc, "roles", r)).map(|n| if n.starts_with('@') { n } else { format!("@{n}") }).collect();
     if on(c, "tickets.ping_here", false) { pings.push("@here".into()); }
-    let mut intro = filled(if on(c, "tickets.command_only", false) { "ticket_intro_cmd" } else { "ticket_intro" }, &[("prefix", c["misc"]["prefix"].as_str().unwrap_or("w!"))]);
+    let mut intro = filled(if on(c, "tickets.command_only", false) { "ticket_intro_cmd" } else { "ticket_intro" }, &[("prefix", c["misc"]["prefix"].as_str().unwrap_or("t!"))]);
     if !intro.is_null() && !pings.is_empty() { intro["content"] = Value::String(pings.join(" ")); }
     view! {
         <p class="muted">"In the member's DMs:"</p>
@@ -229,8 +230,7 @@ fn ticket_preview(c: &Value, dc: &Value) -> AnyView {
 }
 
 pub const TICKETS: &[Card] = &[Card {
-    notes: &["Members open a ticket by sending TommyBot a DM. Save your changes first, then set up the category and log channel."],
-    action: Some(("Set up category and log", "tickets/setup")),
+    notes: &["Members open a ticket by sending TommyBot a DM. Turn it on and save: TommyBot makes the Tickets category and #ticket-logs for you."],
     ..card("Tickets status", "Do you want members to reach your staff by sending TommyBot a DM?", &[
         ("tickets.enabled", "Enable Tickets"),
         ("tickets.category", ""),

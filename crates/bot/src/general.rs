@@ -763,18 +763,50 @@ fn allowed(level: &Level, perm: &str) -> bool {
     }
 }
 
-/// `COMMAND -h`: what it does, usage, the meaning of each argument, an example and who may run it.
-fn help_text(c: &Cmd, pfx: &str) -> String {
-    let mut t = vec![format!("**{pfx}{}**: {}\nUsage: `{pfx}{}`", c.0, c.4, c.3)];
-    t.extend(args(c.3).iter().map(|(a, what)| format!("- `{a}` {what}")));
+/// `COMMAND -h`: name, who may run it, category, what it does, usage, each argument, the message
+/// variables where text is filled in, an example and the aliases.
+fn help_embed(c: &Cmd, pfx: &str, asker: &str) -> Embed {
+    let cat = CATEGORIES
+        .iter()
+        .find(|k| k.1.contains(&c.0))
+        .map_or("general", |k| k.0.trim_end_matches(" Commands:"));
+    let mut e = Log::new(&format!("{asker}, here's some help!"), BLUE);
+    if let Some(d) = dashboard() {
+        e = e.text(&format!(
+            "{ARROW} [Every command explained]({}/#/commands)",
+            d.trim_end_matches('/')
+        ));
+    }
+    e = e
+        .text("**Command Details:**")
+        .text(&format!("{ARROW} **Name:** `{}`", c.0))
+        .text(&format!("{ARROW} **Permit:** `{}`", who(c.2)))
+        .text(&format!("{ARROW} **Category:** `{}`", cat.to_lowercase()))
+        .text(&format!("{ARROW} **Description:** {}", c.4))
+        .text(&format!("{ARROW} **Usage:** `{pfx}{}`", c.3));
+    let a = args(c.3);
+    if !a.is_empty() {
+        e = e.text("**Variables:**");
+        for (w, what) in &a {
+            e = e.text(&format!("{CHEVRON} `{w}` {what}"));
+        }
+    }
+    if a.iter()
+        .any(|(w, _)| matches!(*w, "TEXT" | "CONTENT" | "MESSAGE"))
+    {
+        let tags: Vec<String> = crate::tickets::TAGS
+            .iter()
+            .map(|(k, w)| format!("`{k}` {w}"))
+            .collect();
+        e = e.text(&format!("**Message variables:** {}", tags.join(", ")));
+    }
     if !c.5.is_empty() {
-        t.push(format!("Example: `{pfx}{}`", c.5));
+        e = e.text(&format!("**Example:** `{pfx}{}`", c.5));
     }
     if !c.1.is_empty() {
-        t.push(format!("Aliases: {}", c.1.join(", ")));
+        e = e.text(&format!("**Aliases:** {}", c.1.join(", ")));
     }
-    t.push(format!("Who: {}", who(c.2)));
-    t.join("\n")
+    e.build()
 }
 
 /// Every command with its help and slash form, published at startup for the dashboard's public
@@ -873,19 +905,35 @@ fn cpu_percent(up_secs: i64) -> String {
     }
 }
 
-/// `about`: page 1 the pitch, page 2 the version lines ("Nerdy Stats").
+/// `about`: the pitch, what it protects, and the version lines ("Nerdy Stats").
 pub fn about_page(page: usize) -> (Embed, usize) {
-    let page = page.min(1);
-    let e = if page == 0 {
-        Log::new("About TommyBot:", BLUE).text("Fast, all-in-one server security written in Rust: anti-nuke with automatic revert, heat automod, join gate, join raid, verification, lockdown and logs. Every feature is free.")
-    } else {
-        let up = now_secs() - metrics::STARTED.load(std::sync::atomic::Ordering::Relaxed) as i64;
-        Log::new("About TommyBot [Nerdy Stats]:", BLUE)
-            .line("Version", &format!("`{}`", env!("CARGO_PKG_VERSION")))
-            .line("Uptime", &format!("`{}`", embed::duration(up)))
-            .line("Price", "Everything is free")
+    const PAGES: usize = 3;
+    let page = page.min(PAGES - 1);
+    let e = match page {
+        0 => Log::new("About TommyBot:", BLUE)
+            .text(&format!("{ARROW} TommyBot is a Discord security and moderation bot, written in Rust to be fast and light. It stops nukes, raids and spam on its own, undoes the damage, and gives your staff moderation commands that are quick to use."))
+            .text(&format!("{ARROW} Every feature is free. There is no premium tier.")),
+        1 => Log::new("About TommyBot [What it protects]:", BLUE)
+            .text(&format!("{ANTI_NUKE} **Anti-nuke:** quarantines staff who mass ban, kick or delete, then reverts what they did"))
+            .text(&format!("{HEAT} **Heat automod:** spam, links, scams, mentions, words and more add heat until the member is punished"))
+            .text(&format!("{JOIN_GATE} **Join gate:** filters bots, young accounts and suspicious names the moment they join"))
+            .text(&format!("{JOIN_RAID} **Join raid:** spots join waves and kicks or bans the raiders"))
+            .text(&format!("{VERIFICATION} **Verification:** captcha, web or button checks before members get in"))
+            .text(&format!("{QUARANTINED} **Lockdown, tickets, appeals, backups and logs:** all in the dashboard")),
+        _ => {
+            let up = now_secs() - metrics::STARTED.load(std::sync::atomic::Ordering::Relaxed) as i64;
+            Log::new("About TommyBot [Nerdy Stats]:", BLUE)
+                .line("Version", &format!("`{}`", env!("CARGO_PKG_VERSION")))
+                .line("Uptime", &format!("`{}`", embed::duration(up)))
+                .line("Language", "`Rust`")
+                .line("Commands", &format!("`{}`", CMDS.len()))
+                .line("Price", "Everything is free")
+        }
     };
-    (e.footer(&format!("Page: {}/2", page + 1)).build(), 2)
+    (
+        e.footer(&format!("Page: {}/{PAGES}", page + 1)).build(),
+        PAGES,
+    )
 }
 
 /// One category per page, only the commands `level` may use.
@@ -900,11 +948,15 @@ pub fn commands_page(level: &Level, prefix: &str, page: usize) -> (Embed, usize)
     {
         e = e.text(&format!("{CHEVRON} `{prefix}{}` {}", name.0, name.4));
     }
-    let e = e.footer(&format!(
-        "Need more? {prefix}COMMAND -h · Page: {}/{}",
-        page + 1,
-        CATEGORIES.len()
-    ));
+    let e = e
+        .text("**Need more?**")
+        .text(&format!(
+            "{ARROW} Only commands you can use are displayed! With a higher permit you see more."
+        ))
+        .text(&format!(
+            "{ARROW} For details on one command, add `-h` after it, for example: `{prefix}ban -h`"
+        ))
+        .footer(&format!("Page: {}/{}", page + 1, CATEGORIES.len()));
     (e.build(), CATEGORIES.len())
 }
 
@@ -1096,7 +1148,8 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         let Some(c) = lookup(&first) else {
             return Ok(false);
         };
-        send(app, msg, &help_text(c, &pfx), None, vec![]).await?;
+        let e = help_embed(c, &pfx, &msg.author.name);
+        send(app, msg, "", Some(e), vec![]).await?;
         return Ok(true);
     }
     let Some(&(name, _, perm, ..)) = lookup(&first) else {
@@ -1427,13 +1480,18 @@ mod tests {
         }
         let used: Vec<_> = CMDS.iter().flat_map(|c| args(c.3)).collect();
         assert!(ARGS.iter().all(|a| used.contains(a)), "unused ARGS entry");
-        let h = help_text(lookup("b").unwrap(), "w!");
+        let h = help_embed(lookup("b").unwrap(), "t!", "Tom")
+            .description
+            .unwrap();
         assert!(
-            h.contains("- `TIME` A duration")
-                && h.contains("Example: `w!ban @member 7d")
-                && h.ends_with("Who: Permit: Ban Command"),
+            h.contains("`TIME` A duration")
+                && h.contains("**Example:** `t!ban @member 7d")
+                && h.contains("**Permit:** `Permit: Ban Command`")
+                && h.contains("**Category:** `moderation`"),
             "{h}"
         );
+        let g = help_embed(lookup("greetingmessage").unwrap(), "t!", "Tom");
+        assert!(g.description.unwrap().contains("Message variables"));
     }
 
     #[test]
@@ -1464,12 +1522,13 @@ mod tests {
 
     #[test]
     fn commands_are_filtered_by_permit() {
-        let (e, pages) = commands_page(&Level::None, "w!", 2);
+        let (e, pages) = commands_page(&Level::None, "t!", 2);
         assert_eq!(pages, 4);
-        assert!(e.description.is_none());
-        let (e, _) = commands_page(&Level::Owner, "w!", 2);
-        assert!(e.description.unwrap().starts_with("❯ `w!ban` Ban"));
-        let (e, _) = commands_page(&Level::None, "w!", 0);
-        assert!(e.description.unwrap().contains("`w!ping`"));
+        assert!(!e.description.unwrap().contains("`t!ban`"));
+        let (e, _) = commands_page(&Level::Owner, "t!", 2);
+        let d = e.description.unwrap();
+        assert!(d.starts_with("❯ `t!ban` Ban") && d.contains("Only commands you can use"));
+        let (e, _) = commands_page(&Level::None, "t!", 0);
+        assert!(e.description.unwrap().contains("`t!ping`"));
     }
 }

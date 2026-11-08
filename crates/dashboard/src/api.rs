@@ -267,9 +267,20 @@ pub async fn put_section(
     validate(&section, &b.value)?;
     let (min, step_up) = access::write_bar(&section);
     require(&st, &s, guild, min, step_up).await?;
-    let (_, mut config) = store::current(&st.db, guild).await?;
+    let (cur, mut config) = store::current(&st.db, guild).await?;
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
+    // Turning Tickets on is the whole setup: its category and log channel are made here.
+    let tickets_on = section == "tickets"
+        && b.value["enabled"] == true
+        && (b.value["category"].as_str().is_none_or(str::is_empty)
+            || b.value["log_channel"].as_str().is_none_or(str::is_empty));
     config[&section] = b.value;
+    if tickets_on {
+        if cur != b.expected_version {
+            return Err(ApiError::Conflict(cur)); // before any Discord side effect
+        }
+        crate::sections::ticket_channels(&st, guild, &mut config).await?;
+    }
     let web = matches!(section.as_str(), "verification" | "lockdown");
     if let Some(e) = tommybot_automod::join::web_mode_error(&config).filter(|_| web) {
         return Err(ApiError::BadRequest(e.into()));

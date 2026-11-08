@@ -49,7 +49,8 @@ impl Default for HeatCfg {
             max: 100.0,
             decay_per_sec: 0.05,
             base: 15.0,
-            per_char: 0.05,
+            // Long messages heat through per_upper/per_lower alone, as the reference defaults do.
+            per_char: 0.0,
             free_chars: 200,
             per_newline: 5.0,
             // 10 emojis in one message (a celebration) stay well under the max.

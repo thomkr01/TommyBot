@@ -115,7 +115,7 @@ pub(super) static HEAT: Module = Module {
     names: &["heat"],
     title: "Heat System Panel:",
     per_page: 0,
-    footer: "Advanced Settings: Heat System Filters: w!hfilters",
+    footer: "Advanced Settings: Heat System Filters: t!hfilters",
     rows: &[
         r!("1", "Status", "automod.enabled", Kind::Bool, |c| on(c.automod.enabled)),
         r!("2", "Spam Filters", "automod.anti_spam", Kind::Bool, |c| on(c.automod.anti_spam)),
@@ -181,7 +181,7 @@ pub(super) static ANTINUKE: Module = Module {
     names: &["antinuke", "an"],
     title: "Anti Nuke Panel:",
     per_page: 0,
-    footer: "Panic Mode: w!anp · Restore Filters: w!anr",
+    footer: "Panic Mode: t!anp · Restore Filters: t!anr",
     rows: &[
         r!("1", "Status", "antinuke.enabled", Kind::Bool, |c| on(c.antinuke.enabled)),
         dash!("2", "Limits"),
@@ -341,7 +341,7 @@ pub(super) static SETUP: Module = Module {
     names: &["setup"],
     title: "Setup Panel:",
     per_page: 0,
-    footer: "Quarantine role and log channels: w!setup run · Everything else: Dashboard wizard",
+    footer: "Quarantine role and log channels: t!setup run · Everything else: Dashboard wizard",
     rows: &[
         r!("1", "Anti Nuke", "antinuke.enabled", Kind::Bool, |c| on(c.antinuke.enabled)),
         r!("2", "Auto Mod", "automod.enabled", Kind::Bool, |c| on(c.automod.enabled)),

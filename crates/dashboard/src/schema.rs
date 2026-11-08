@@ -263,7 +263,10 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Status", "quarantine_hold", "bool"), true), "Punish anyone who touches a quarantined member"),
         ti(fg("Status", "vanity_guard", "bool"), "Have TommyBot guard your server's vanity url"),
         ti(dv(fg("Auto quarantine", "auto_quarantine", "bool"), true), "Use the auto quarantine module"),
-        ti(fg("Auto quarantine", "quarantine_role", "role"), "Quarantine role"),
+        hp(
+            ti(fg("Auto quarantine", "quarantine_role", "role"), "Quarantine role"),
+            "Leave it empty and Auto Setup makes @Quarantine for you, deleting old Quarantine roles. Pick a role and Auto Setup removes all of its permissions and denies it in every channel.",
+        ),
         ti(fg("Auto quarantine", "strict_mode", "bool"), "Strict mode: punish unauthorized admins giving dangerous perms to any role in the server"),
         ti(fg("Auto quarantine", "strict_member_roles", "bool"), "Strict member role addition: punish unauthorized admins giving dangerous perms to other members"),
         ti(fg("Auto quarantine", "monitor_public_roles", "bool"), "Monitor public roles: protect @everyone and main roles from getting dangerous permissions"),
@@ -322,7 +325,7 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Auto timeouts", "strike.cap", "int"), 3), "Strikes before the CAP strike"),
         ti(dv(fg("Auto timeouts", "strike.reoffend_window_ms", "int"), 3_600_000), "Reoffend window"),
         ti(dv(fg("Auto timeouts", "strike.strike_expiry_ms", "int"), 3_600_000), "Strike expiry"),
-        ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), true), "Multiply timeouts"),
+        ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), false), "Multiply timeouts"),
         ti(dv(fg("Auto timeouts", "strike.multiplier_pct", "int"), 200), "Multiplier percentage"),
         ti(dv(fg("Heat settings", "heat.max", "float"), 100.0), "Max heat"),
         ti(dv(fg("Heat settings", "heat.decay_per_sec", "pct"), 0.05), "Heat degradation (every second)"),
@@ -622,10 +625,16 @@ pub fn schema() -> Vec<Value> {
     ]);
     let raid = vec![
         fg("General", "enabled", "bool"),
-        ti(f("count", "int"), "Minimum trigger (accounts)"),
-        ti(f("span_ms", "int"), "Join history (milliseconds)"),
+        ti(dv(f("count", "int"), 10), "Minimum trigger (accounts)"),
+        ti(
+            dv(f("span_ms", "int"), 600_000),
+            "Join history (milliseconds)",
+        ),
         f("suspicious_only", "bool"),
-        ti(f("active_ms", "int"), "Trigger duration (milliseconds)"),
+        ti(
+            dv(f("active_ms", "int"), 600_000),
+            "Trigger duration (milliseconds)",
+        ),
         f("string_patterns", "list"),
         ti(
             f("flag_younger_than_ms", "int"),
@@ -726,7 +735,7 @@ pub fn schema() -> Vec<Value> {
         }
     }
     let misc = vec![
-        ti(dv(fg("General", "prefix", "text"), "w!"), "Prefix"),
+        ti(dv(fg("General", "prefix", "text"), "t!"), "Prefix"),
         ti(dv(fg("General", "use_slash", "bool"), true), "Use slash commands"),
         ti(fg("General", "compact_replies", "bool"), "Minify TommyBot's message replies to compact embeds"),
         ti(fg("General", "delete_replies_secs", "int"), "Delete TommyBot's auto messages after few seconds"),
