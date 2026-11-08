@@ -54,6 +54,12 @@ New packages on GitHub start private. Make both packages public once (package pa
 echo <token> | docker login ghcr.io -u thomkr01 --password-stdin
 ```
 
+### From the dashboard
+
+The bot owner (the owner of the Discord application) sees **Update** in the dashboard header. It shows the running and the newest published version and updates with one click, with live progress and a time estimate based on earlier updates. It needs the `updater` service, which starts with the others; on a server set up before it existed, run `git pull && docker compose up -d` once.
+
+The updater is the only container with the Docker socket. It has no open port and takes no input except an "update now" row in the database, so the dashboard (which faces the internet) never controls Docker. It pulls the bot and dashboard images, recreates both, and checks that they stay up. If anything fails it puts the previous images back and restarts on them (they stay on disk under the `rollback` tag). Changes to `docker-compose.yml` itself still need a `git pull` on the server, and the updater does not update itself: run the command above for that.
+
 Roll back by pinning an older sha tag (see the package versions on GitHub) in `.env`, then run `docker compose pull && docker compose up -d`. Remove the line to follow `latest` again:
 
 ```bash

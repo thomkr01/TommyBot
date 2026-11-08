@@ -26,7 +26,7 @@ fs.mkdirSync(out, { recursive: true });
     .filter((h) => /^#\/\d+\//.test(h));
   // tabs that no sidebar link reaches
   links.push(links[0].replace(/^(#\/\d+\/).*/, '$1raid_log'));
-  links.push('#/commands');
+  links.push('#/commands', '#/update');
   console.log(`${links.length} pages`);
   const failed = [];
   for (const h of links) {
@@ -58,6 +58,10 @@ fs.mkdirSync(out, { recursive: true });
   await page.waitForSelector('text=Embed edited.', { timeout: 5000 }).catch(() => failed.push('embeds: edit failed'));
   const sent = await (await fetch('http://127.0.0.1:9100/sent')).json();
   if (!sent.some((m) => /\/messages\/1$/.test(m.path) && m.body.includes('Hello'))) failed.push('embeds: no edit reached Discord');
+  // Update page: the mock user owns the app; no updater runs here, so the page says how to start it.
+  await page.goto(`${base}/#/update`);
+  await page.waitForSelector('text=The updater is not running', { timeout: 5000 }).catch(() => failed.push('update: no updater notice'));
+  if (!(await page.locator('header a[href="#/update"]').count())) failed.push('update: no header link for the bot owner');
   await browser.close();
   if (failed.length) { console.log('FAIL\n' + failed.join('\n')); process.exit(1); }
   console.log('PASS');

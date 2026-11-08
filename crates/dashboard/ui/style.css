@@ -57,6 +57,7 @@ input[type=checkbox].sw:disabled { opacity:.6; cursor:progress; }
 .step button { border-radius:0; background:var(--b3); border-color:var(--line); color:var(--fg); padding:6px 12px; } .step button:first-child { border-radius:8px 0 0 8px; }
 .step span, .step select { padding:6px 10px; background:var(--b3); border:1px solid var(--line); border-left:0; border-radius:0 8px 8px 0; color:var(--muted); }
 .chip { display:inline-block; font-size:11px; font-weight:600; text-transform:uppercase; padding:0 8px; border-radius:12px; background:var(--primary); color:var(--on-primary); }
+progress { width:100%; height:10px; accent-color:var(--primary); }
 .err { color:var(--bad); } .muted { color:var(--muted); } .warn { color:var(--warn); } .ok { color:var(--ok); } .info { color:var(--info); }
 pre { overflow:auto; border:1px solid var(--line); border-radius:6px; padding:8px; }
 .pick { display:flex; flex-wrap:wrap; gap:4px 12px; max-height:140px; overflow:auto; flex:1; }
@@ -106,7 +107,7 @@ details.notes { margin:8px 0 0; } details.notes summary { cursor:pointer; list-s
 .wiz .preview { background:var(--b3); border-radius:6px; padding:8px 12px; min-width:220px; }
 .note { background:var(--b3); border:1px solid var(--line); border-radius:6px; padding:4px 10px; margin:4px 0; font-size:13px; }
 .dinput { background:var(--b1); border-radius:6px; padding:6px 10px; margin-top:8px; font-family:monospace; }
-.checks { list-style:none; padding:0; } .checks li::before { content:"○ "; } .checks li { transition:color var(--dur) var(--ease) calc(var(--i, 0) * 60ms); } .checks li.ok { color:var(--ok); } .checks li.run { animation:pulse 1.2s var(--ease) calc(var(--i, 0) * 150ms) infinite; } @keyframes pulse { 50% { opacity:.35; } } .checks li.ok::before { content:"✓ "; }
+.checks { list-style:none; padding:0; } .checks li::before { content:"○ "; } .checks li { transition:color var(--dur) var(--ease) calc(var(--i, 0) * 60ms); } .checks li.ok { color:var(--ok); } .checks li.run { animation:pulse 1.2s var(--ease) calc(var(--i, 0) * 150ms) infinite; } @keyframes pulse { 50% { opacity:.35; } } .checks li.ok::before { content:"✓ "; } .checks li.err { color:var(--bad); } .checks li.err::before { content:"✕ "; }
 .checks.warn li { color:var(--warn); } .checks.warn li::before { content:"⚠ "; }
 pre.blur { filter:blur(6px); user-select:none; }
 .ring.small { width:56px; height:56px; } .ring.small b { width:40px; height:40px; font-size:13px; }

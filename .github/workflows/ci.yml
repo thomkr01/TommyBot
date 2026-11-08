@@ -84,6 +84,8 @@ jobs:
       - run: mkdir -p "$E2E_OUT" && npm i --no-save playwright && npx playwright install --with-deps chromium
       - name: Dashboard browser sweep
         run: tests/e2e/run.sh
+      - name: Updater against Docker
+        run: tests/e2e/updater.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
