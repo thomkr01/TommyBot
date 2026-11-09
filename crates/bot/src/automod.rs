@@ -854,6 +854,8 @@ mod tests {
     #[test]
     fn disabled_filters_lose_their_weight() {
         let mut am = AutomodCfg::default();
+        am.filters.emojis.enabled = true;
+        am.filters.invites.enabled = true;
         am.filters.zalgo.enabled = false;
         am.filters.regular.enabled = false;
         am.filters.mentions.enabled = false;

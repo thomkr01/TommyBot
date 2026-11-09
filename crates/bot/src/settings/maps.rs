@@ -1,4 +1,5 @@
 //! The number maps, one row per line. Never renumber a row: people type these numbers.
+use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
 use twilight_model::id::{marker::RoleMarker, Id};
@@ -34,6 +35,26 @@ macro_rules! filter {
             r!(concat!($n, "c"), "Heat", concat!("automod.heat.", stringify!($heat)), Kind::Num(1.0), |c| format!("{} {}", pct(c.automod.heat.$heat), $unit)),
         ]
     };
+}
+
+/// One anti-nuke cap card: status, minute cap, hour cap and heat, unset numbers showing the defaults.
+macro_rules! cap {
+    ($n:literal, $name:literal, $a:ident) => {
+        [
+            group!($n, $name),
+            r!(concat!($n, "a"), "Status", concat!("antinuke.limits.", stringify!($a), ".enabled"), Kind::Bool, |c| on(cap(c, NukeAction::$a).0)),
+            r!(concat!($n, "b"), "Minute Cap", concat!("antinuke.limits.", stringify!($a), ".per_minute"), Kind::Int(2, 50), |c| cap(c, NukeAction::$a).1.to_string()),
+            r!(concat!($n, "c"), "Hour Cap", concat!("antinuke.limits.", stringify!($a), ".per_hour"), Kind::Int(2, 1000), |c| cap(c, NukeAction::$a).2.to_string()),
+            r!(concat!($n, "d"), "Heat %", concat!("antinuke.limits.", stringify!($a), ".heat"), Kind::Int(0, 100), |c| format!("{}%", cap(c, NukeAction::$a).3)),
+        ]
+    };
+}
+
+/// (status, minute cap, hour cap, heat %) of an anti-nuke card.
+fn cap(c: &GuildCfg, a: NukeAction) -> (bool, u32, u32, u32) {
+    let l = c.antinuke.limits.get(&a).copied().unwrap_or_default();
+    let (m, h, heat) = a.default_limit().unwrap_or_default();
+    (l.enabled, l.per_minute.unwrap_or(m), l.per_hour.unwrap_or(h), l.heat.unwrap_or(heat))
 }
 
 /// One Join Gate card: status and action.
@@ -199,6 +220,28 @@ pub(super) static ANTINUKE: Module = Module {
     ],
 };
 
+static CAPS_ROWS: [Row; 35] = {
+    let [a1, a2, a3, a4, a5] = cap!("1", "Kicks & Bans", Ban);
+    let [b1, b2, b3, b4, b5] = cap!("2", "Role Creations", RoleCreate);
+    let [c1, c2, c3, c4, c5] = cap!("3", "Role Deletions", RoleDelete);
+    let [d1, d2, d3, d4, d5] = cap!("4", "Channel Creations", ChannelCreate);
+    let [e1, e2, e3, e4, e5] = cap!("5", "Channel Deletions", ChannelDelete);
+    let [f1, f2, f3, f4, f5] = cap!("6", "Webhook Creations", WebhookCreate);
+    let [g1, g2, g3, g4, g5] = cap!("7", "Webhook Deletions", WebhookDelete);
+    [
+        a1, a2, a3, a4, a5, b1, b2, b3, b4, b5, c1, c2, c3, c4, c5, d1, d2, d3, d4, d5, e1, e2, e3, e4, e5, f1, f2, f3, f4, f5, g1, g2, g3,
+        g4, g5,
+    ]
+};
+
+pub(super) static CAPS: Module = Module {
+    names: &["ancaps"],
+    title: "Anti-Nuke Caps:",
+    per_page: 0,
+    footer: "Change one: `1 ?off a` or `6 ?set 1b`. More caps on the dashboard.",
+    rows: &CAPS_ROWS,
+};
+
 pub(super) static PANIC: Module = Module {
     names: &["anpanic", "anp"],
     title: "Panic Mode Panel:",
@@ -356,7 +399,7 @@ pub(super) static SETUP: Module = Module {
     ],
 };
 
-pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &PANIC, &RESTORE, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP];
+pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &CAPS, &PANIC, &RESTORE, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP];
 
 pub fn module(name: &str) -> Option<&'static Module> {
     MODULES.iter().copied().find(|m| m.names.contains(&name))

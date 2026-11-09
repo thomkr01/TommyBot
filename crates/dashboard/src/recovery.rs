@@ -15,7 +15,7 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use tommybot_antinuke::{describe, plan, ChannelImg, Image, OverwriteImg, RoleImg};
-use tommybot_core::jobs;
+use tommybot_core::{jobs, sections::BackupsCfg};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -65,6 +65,18 @@ async fn announce(st: &AppState, s: &Sess, guild: i64, what: &str) -> Result<(),
 
 async fn create(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
+    let (_, config) = store::current(&st.db, guild).await?;
+    let on = config
+        .get("backups")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<BackupsCfg>(v).ok())
+        .unwrap_or_default()
+        .enabled;
+    if !on {
+        return Err(ApiError::BadRequest(
+            "Backups are turned off. Turn on Backups status under Settings first.".into(),
+        ));
+    }
     queue(&st, guild, "backup_create", json!({"by": s.user_id})).await?;
     announce(&st, &s, guild, "took a backup").await?;
     Ok(Json(json!({"queued": true})))

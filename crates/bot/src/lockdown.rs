@@ -71,7 +71,7 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .await?;
             app.http
                 .create_message(ch.id)
-                .content(&format!("{LOCKDOWN} **The server is locked down.** Staff are on it; channels open again when the lock ends."))
+                .embeds(&[locked_embed(&[])])
                 .await?;
             return Ok(Some(ch.id.get()));
         }
@@ -380,7 +380,8 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
     Ok(lifted)
 }
 
-/// `lock MESSAGE ?t update`: posts the message with the last five updates in `channel` and in the lock channel.
+/// `lock MESSAGE ?t update`: adds the message as UPDATE n to the blind lock's notice, or, without a
+/// blind lock, posts the last five updates in `channel`.
 pub async fn update(
     app: &App,
     gid: Id<GuildMarker>,
@@ -402,6 +403,10 @@ pub async fn update(
         .bind(embed::clip(text, 500))
         .execute(&app.pool)
         .await?;
+    if let Some(ch) = locks.iter().find_map(|s| s.locked_channel) {
+        refresh_notice(app, gid, Id::new(ch)).await?;
+        return Ok("Lock update added to the lock notice".into());
+    }
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT message, EXTRACT(EPOCH FROM created_at)::bigint FROM lock_updates
          WHERE guild_id=$1 ORDER BY id DESC LIMIT 5",
@@ -413,17 +418,83 @@ pub async fn update(
     for (m, at) in rows.iter().rev() {
         log = log.text(&format!("{ARROW} <t:{at}:R> {m}"));
     }
-    let e = log.build();
-    let locked = locks.iter().find_map(|s| s.locked_channel).map(Id::new);
-    for ch in std::iter::once(channel).chain(locked.filter(|c| *c != channel)) {
-        let r = app
-            .http
-            .create_message(ch)
-            .embeds(std::slice::from_ref(&e))
-            .await;
-        crate::http_err::best_effort(r, "post lock update");
-    }
+    let r = app
+        .http
+        .create_message(channel)
+        .embeds(&[log.build()])
+        .await;
+    crate::http_err::best_effort(r, "post lock update");
     Ok("Lock update posted".into())
+}
+
+/// Rewrites the blind lock's notice in `ch` with every stored update as UPDATE n.
+async fn refresh_notice(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>) -> Result<()> {
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT author_id, message FROM lock_updates WHERE guild_id=$1 ORDER BY id")
+            .bind(gid.get() as i64)
+            .fetch_all(&app.pool)
+            .await?;
+    let e = locked_embed(&rows);
+    // The channel only holds the notice: nobody else may write there.
+    let notice = app
+        .http
+        .channel_messages(ch)
+        .after(Id::new(1))
+        .limit(1)
+        .await?
+        .models()
+        .await?;
+    match notice.first() {
+        Some(m) => {
+            app.http
+                .update_message(ch, m.id)
+                .embeds(Some(std::slice::from_ref(&e)))
+                .await?;
+        }
+        None => {
+            app.http
+                .create_message(ch)
+                .embeds(std::slice::from_ref(&e))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Dashboard "Send an update" during a blind lock (job `lock_update`): stores it and refreshes the notice.
+pub async fn dashboard_update(app: &App, gid: Id<GuildMarker>, by: u64, text: &str) -> Result<()> {
+    let locks = store::locks(&app.pool, gid.get()).await?;
+    let Some(ch) = locks.iter().find_map(|s| s.locked_channel) else {
+        return Ok(());
+    };
+    sqlx::query("INSERT INTO lock_updates (guild_id, author_id, message) VALUES ($1,$2,$3)")
+        .bind(gid.get() as i64)
+        .bind(by as i64)
+        .bind(embed::clip(text, 500))
+        .execute(&app.pool)
+        .await?;
+    refresh_notice(app, gid, Id::new(ch)).await
+}
+
+/// The red notice in `#server-locked`, with every update (author id, text) numbered, newest last.
+/// Only the last six fit, so the numbers keep counting past the dropped ones.
+pub fn locked_embed(updates: &[(i64, String)]) -> Embed {
+    let mut log = Log::new(&format!("{LOCKDOWN} The server is locked"), RED)
+        .text(&format!("{ANNOUNCE} Staff have locked this server down."))
+        .text(&format!(
+            "{ARROW} You cannot see or talk in the channels until the lockdown ends."
+        ))
+        .text(&format!(
+            "{ARROW} **Hang tight while staff sort everything out.**"
+        ));
+    let skip = updates.len().saturating_sub(6);
+    for (n, (author, text)) in updates.iter().enumerate().skip(skip) {
+        log = log.text(&format!(
+            "\n📌 **UPDATE {}** (<@{author}>):\n{ARROW} {text}",
+            n + 1
+        ));
+    }
+    log.build()
 }
 
 fn lock_name(k: &LockKind) -> String {
@@ -673,6 +744,21 @@ mod tests {
         );
         assert_eq!(r.text, "Lockdown successful: Roles (390 ms)");
         assert!(r.embed.description.unwrap().contains("`390.11 ms`"));
+    }
+
+    #[test]
+    fn lock_notice_numbers_updates_past_the_dropped_ones() {
+        let e = locked_embed(&[]);
+        assert_eq!(e.color, Some(RED));
+        assert!(!e.description.unwrap().contains("UPDATE"));
+        let ups: Vec<(i64, String)> = (1..=8).map(|n| (7, format!("note {n}"))).collect();
+        let d = locked_embed(&ups).description.unwrap();
+        assert!(
+            !d.contains("UPDATE 2**")
+                && d.contains("**UPDATE 3** (<@7>):")
+                && d.contains("UPDATE 8")
+        );
+        assert!(d.contains("note 8"));
     }
 
     #[test]

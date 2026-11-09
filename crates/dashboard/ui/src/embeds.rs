@@ -1,26 +1,49 @@
 //! Embed builder: compose with a live preview, save as a draft, let the bot post it and edit it in place.
 use crate::common::*;
+use crate::md::{line, wrap};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlInputElement, HtmlTextAreaElement};
-use crate::md::{line, wrap};
 
 fn get_at(e: &Value, path: &str) -> String {
-    path.split('.').fold(e, |v, k| &v[k]).as_str().unwrap_or("").to_string()
+    path.split('.')
+        .fold(e, |v, k| &v[k])
+        .as_str()
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Writes `v` at `key` or `parent.key`; empty removes the key (and an emptied parent), since Discord rejects "".
 fn set_at(e: &mut Value, path: &str, v: String) {
-    let (parent, key) = path.split_once('.').map_or((None, path), |(p, k)| (Some(p), k));
-    let m = match parent { Some(p) => &mut e[p], None => &mut *e };
-    if v.is_empty() { if let Some(m) = m.as_object_mut() { m.remove(key); } } else { m[key] = json!(v); }
-    if let Some(p) = parent { if e[p].as_object().is_some_and(|m| m.is_empty()) { e.as_object_mut().map(|o| o.remove(p)); } }
+    let (parent, key) = path
+        .split_once('.')
+        .map_or((None, path), |(p, k)| (Some(p), k));
+    let m = match parent {
+        Some(p) => &mut e[p],
+        None => &mut *e,
+    };
+    if v.is_empty() {
+        if let Some(m) = m.as_object_mut() {
+            m.remove(key);
+        }
+    } else {
+        m[key] = json!(v);
+    }
+    if let Some(p) = parent {
+        if e[p].as_object().is_some_and(|m| m.is_empty()) {
+            e.as_object_mut().map(|o| o.remove(p));
+        }
+    }
 }
 
-fn edit(cur: RwSignal<Value>, f: impl FnOnce(&mut Value)) { cur.update(|c| f(&mut c["embed"])) }
+fn edit(cur: RwSignal<Value>, f: impl FnOnce(&mut Value)) {
+    cur.update(|c| f(&mut c["embed"]))
+}
 
-fn blank() -> Value { json!({"id": null, "name": "", "channel": null, "embed": {"color": 0x0d9df8}}) }
+fn blank() -> Value {
+    json!({"id": null, "name": "", "channel": null, "embed": {"color": 0x0d9df8}})
+}
 
 /// Toolbar wraps: (label, tooltip, open, close, shortcut key, needs Shift). Keys follow Discord and Word.
 const WRAPS: [(&str, &str, &str, &str, &str, bool); 6] = [
@@ -31,34 +54,67 @@ const WRAPS: [(&str, &str, &str, &str, &str, bool); 6] = [
     ("▒", "Spoiler (Ctrl+Shift+P)", "||", "||", "p", true),
     ("</>", "Code (Ctrl+E)", "`", "`", "e", false),
 ];
-const LINES: [(&str, &str, &str); 4] = [("H", "Heading", "## "), ("❝", "Quote", "> "), ("•", "List", "- "), ("ˢ", "Small text", "-# ")];
+const LINES: [(&str, &str, &str); 4] = [
+    ("H", "Heading", "## "),
+    ("❝", "Quote", "> "),
+    ("•", "List", "- "),
+    ("ˢ", "Small text", "-# "),
+];
 
 /// Runs `f` on the focused markdown field (`data-md`) and fires `input` so the form state follows.
 fn apply(f: impl FnOnce(&str, usize, usize) -> (String, usize, usize)) {
-    let Some(el) = document().active_element().filter(|e| e.has_attribute("data-md")) else { return };
+    let Some(el) = document()
+        .active_element()
+        .filter(|e| e.has_attribute("data-md"))
+    else {
+        return;
+    };
     let (v, a, b) = if let Some(t) = el.dyn_ref::<HtmlTextAreaElement>() {
         (t.value(), t.selection_start(), t.selection_end())
     } else if let Some(i) = el.dyn_ref::<HtmlInputElement>() {
         (i.value(), i.selection_start(), i.selection_end())
-    } else { return };
-    let (Ok(Some(a)), Ok(Some(b))) = (a, b) else { return };
+    } else {
+        return;
+    };
+    let (Ok(Some(a)), Ok(Some(b))) = (a, b) else {
+        return;
+    };
     let (v, a, b) = f(&v, a as usize, b as usize);
-    if let Some(t) = el.dyn_ref::<HtmlTextAreaElement>() { t.set_value(&v); let _ = t.set_selection_range(a as u32, b as u32); }
-    if let Some(i) = el.dyn_ref::<HtmlInputElement>() { i.set_value(&v); let _ = i.set_selection_range(a as u32, b as u32); }
+    if let Some(t) = el.dyn_ref::<HtmlTextAreaElement>() {
+        t.set_value(&v);
+        let _ = t.set_selection_range(a as u32, b as u32);
+    }
+    if let Some(i) = el.dyn_ref::<HtmlInputElement>() {
+        i.set_value(&v);
+        let _ = i.set_selection_range(a as u32, b as u32);
+    }
     let init = web_sys::EventInit::new();
     init.set_bubbles(true);
-    if let Ok(e) = web_sys::Event::new_with_event_init_dict("input", &init) { let _ = el.dispatch_event(&e); }
+    if let Ok(e) = web_sys::Event::new_with_event_init_dict("input", &init) {
+        let _ = el.dispatch_event(&e);
+    }
 }
 
 fn link() {
-    let url = window().prompt_with_message("Link URL (https://...)").ok().flatten().unwrap_or_default();
-    if url.starts_with("http") { apply(|v, a, b| wrap(v, a, b, "[", &format!("]({url})"))) }
+    let url = window()
+        .prompt_with_message("Link URL (https://...)")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if url.starts_with("http") {
+        apply(|v, a, b| wrap(v, a, b, "[", &format!("]({url})")))
+    }
 }
 
 fn on_key(e: leptos::ev::KeyboardEvent) {
-    if !(e.ctrl_key() || e.meta_key()) { return }
+    if !(e.ctrl_key() || e.meta_key()) {
+        return;
+    }
     let k = e.key().to_lowercase();
-    if k == "k" { e.prevent_default(); return link() }
+    if k == "k" {
+        e.prevent_default();
+        return link();
+    }
     if let Some(&(.., o, c, _, _)) = WRAPS.iter().find(|w| w.4 == k && w.5 == e.shift_key()) {
         e.prevent_default();
         apply(|v, a, b| wrap(v, a, b, o, c));
@@ -71,29 +127,58 @@ pub fn Embeds(guild: String) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let channels = RwSignal::new(Vec::<(String, String)>::new());
     let (cur, msg) = (RwSignal::new(blank()), Msg::default());
-    let load = move || spawn_local(async move {
-        match api("GET", &format!("/api/guilds/{}/embeds", g.get_value()), None).await {
-            Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
-            Err(e) => msg.err(e),
-        }
-    });
+    let load = move || {
+        spawn_local(async move {
+            match api(
+                "GET",
+                &format!("/api/guilds/{}/embeds", g.get_value()),
+                None,
+            )
+            .await
+            {
+                Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     load();
     spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{}/discord", g.get_value()), None).await {
-            channels.set(v["channels"].as_array().into_iter().flatten().filter(|c| c["kind"] != "category")
-                .map(|c| (c["id"].as_str().unwrap_or("").to_string(), format!("#{}", c["name"].as_str().unwrap_or("?")))).collect());
+        if let Ok(v) = api(
+            "GET",
+            &format!("/api/guilds/{}/discord", g.get_value()),
+            None,
+        )
+        .await
+        {
+            channels.set(
+                v["channels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|c| c["kind"] != "category")
+                    .map(|c| {
+                        (
+                            c["id"].as_str().unwrap_or("").to_string(),
+                            format!("#{}", c["name"].as_str().unwrap_or("?")),
+                        )
+                    })
+                    .collect(),
+            );
         }
     });
     // `md` marks fields Discord renders markdown in, so the toolbar and shortcuts only touch those.
-    let text = move |label: &'static str, path: &'static str, max: u32, md: bool| view! {
-        <div class="row"><label>{label}</label><input maxlength=max data-md=md.then_some("") prop:value=move || cur.with(|c| get_at(&c["embed"], path))
-            on:input=move |e| { let v = event_target_value(&e); edit(cur, move |em| set_at(em, path, v)) } /></div>
+    let text = move |label: &'static str, path: &'static str, max: u32, md: bool| {
+        view! {
+            <div class="row"><label>{label}</label><input maxlength=max data-md=md.then_some("") prop:value=move || cur.with(|c| get_at(&c["embed"], path))
+                on:input=move |e| { let v = event_target_value(&e); edit(cur, move |em| set_at(em, path, v)) } /></div>
+        }
     };
     // Saves the draft, then optionally has the bot post it (`Some(repost)`).
-    let save = move |post: Option<bool>| spawn_local(async move {
-        let c = cur.get_untracked();
-        let base = format!("/api/guilds/{}/embeds", g.get_value());
-        let r = async {
+    let save = move |post: Option<bool>| {
+        spawn_local(async move {
+            let c = cur.get_untracked();
+            let base = format!("/api/guilds/{}/embeds", g.get_value());
+            let r = async {
             let id = api("POST", &base, Some(json!({"id": c["id"], "name": c["name"], "embed": c["embed"], "channel": c["channel"]}))).await?["id"].clone();
             cur.update(|c| c["id"] = id.clone());
             match post {
@@ -105,22 +190,58 @@ pub fn Embeds(guild: String) -> impl IntoView {
                 None => Ok("Draft saved.".into()),
             }
         }.await;
-        match r { Ok(t) => msg.ok(t), Err(e) => msg.err(e) }
-        load();
-    });
+            match r {
+                Ok(t) => msg.ok(t),
+                Err(e) => msg.err(e),
+            }
+            load();
+        })
+    };
     let remove = move |_| {
         let id = cur.with_untracked(|c| c["id"].as_i64());
-        let Some(id) = id else { return cur.set(blank()) };
-        if !web_sys::window().is_some_and(|w| w.confirm_with_message("Delete this embed and the bot's message?").unwrap_or(false)) { return }
+        let Some(id) = id else {
+            return cur.set(blank());
+        };
+        if !web_sys::window().is_some_and(|w| {
+            w.confirm_with_message("Delete this embed and the bot's message?")
+                .unwrap_or(false)
+        }) {
+            return;
+        }
         spawn_local(async move {
-            match api("POST", &format!("/api/guilds/{}/embeds/{id}/delete", g.get_value()), Some(json!({}))).await {
-                Ok(_) => { cur.set(blank()); msg.ok("Deleted."); load() }
+            match api(
+                "POST",
+                &format!("/api/guilds/{}/embeds/{id}/delete", g.get_value()),
+                Some(json!({})),
+            )
+            .await
+            {
+                Ok(_) => {
+                    cur.set(blank());
+                    msg.ok("Deleted.");
+                    load()
+                }
                 Err(e) => msg.err(e),
             }
         });
     };
-    let posted = move || cur.with(|c| c["message"].as_str().map(|m| format!("https://discord.com/channels/{}/{}/{m}", g.get_value(), c["message_channel"].as_str().unwrap_or(""))));
-    let color = move || format!("#{:06x}", cur.with(|c| c["embed"]["color"].as_u64().unwrap_or(0x1e1f22)));
+    let posted = move || {
+        cur.with(|c| {
+            c["message"].as_str().map(|m| {
+                format!(
+                    "https://discord.com/channels/{}/{}/{m}",
+                    g.get_value(),
+                    c["message_channel"].as_str().unwrap_or("")
+                )
+            })
+        })
+    };
+    let color = move || {
+        format!(
+            "#{:06x}",
+            cur.with(|c| c["embed"]["color"].as_u64().unwrap_or(0x1e1f22))
+        )
+    };
     view! {
         <div class="card row">
             <select aria-label="saved embeds" on:change=move |e| { let v = event_target_value(&e); msg.clear();
@@ -196,6 +317,9 @@ mod tests {
         set_at(&mut e, "author.name", String::new());
         set_at(&mut e, "title", String::new());
         assert_eq!(e, json!({}));
-        assert_eq!(get_at(&json!({"footer": {"text": "x"}}), "footer.text"), "x");
+        assert_eq!(
+            get_at(&json!({"footer": {"text": "x"}}), "footer.text"),
+            "x"
+        );
     }
 }

@@ -197,8 +197,8 @@ struct UpdateBody {
     text: String,
 }
 
-/// "Send an update": a message to the people locked out, posted in the `#server-locked`
-/// channel of a hidden-channels lock, else in the Mod Logs channel.
+/// "Send an update": a message to the people locked out, added to the `#server-locked` notice
+/// of a hidden-channels lock, else posted in the Mod Logs channel.
 async fn send_update(
     State(st): State<AppState>,
     s: Sess,
@@ -210,19 +210,28 @@ async fn send_update(
     if text.is_empty() || text.chars().count() > 1900 {
         return Err(ApiError::BadRequest("write 1 to 1900 characters".into()));
     }
-    let locked: Option<(sqlx::types::Json<Snapshot>,)> = sqlx::query_as(
-        "select snapshot from lock_snapshots where guild_id = $1 and snapshot->>'locked_channel' is not null limit 1",
+    let locked: Option<(i32,)> = sqlx::query_as(
+        "select 1 from lock_snapshots where guild_id = $1 and snapshot->>'locked_channel' is not null limit 1",
     )
     .bind(guild)
     .fetch_optional(&st.db)
     .await?;
+    if locked.is_some() {
+        // The bot owns the lock notice and numbers the update into it.
+        jobs::enqueue(
+            &st.db,
+            guild,
+            "lock_update",
+            json!({"text": text, "by": s.user_id}),
+            chrono::Utc::now().timestamp(),
+        )
+        .await?;
+        return Ok(Json(json!({"ok": true})));
+    }
     let (_, c) = crate::store::current(&st.db, guild).await?;
-    let mod_logs = c["logging"]["routes"]["mod_command"]
+    let channel = c["logging"]["routes"]["mod_command"]
         .as_str()
-        .map(String::from);
-    let channel = locked
-        .and_then(|(snap,)| snap.0.locked_channel.map(|c| c.to_string()))
-        .or(mod_logs)
+        .map(String::from)
         .ok_or_else(|| {
             ApiError::BadRequest("no lock channel or Mod Logs channel to post in".into())
         })?;

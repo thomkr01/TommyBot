@@ -182,9 +182,6 @@ const STAFF: [(&str, i32, &[&str], &[&str]); 2] = [
     ),
 ];
 
-/// Quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
-const QUARANTINE_DENY: &str = "1051712";
-
 async fn auto_setup(
     State(st): State<AppState>,
     s: Sess,
@@ -658,7 +655,7 @@ async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<us
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
         .await
         .ok()?;
-    let body = json!({"type": 0, "deny": QUARANTINE_DENY});
+    let body = json!({"type": 0, "deny": tommybot_core::sections::QUARANTINE_DENY.to_string()});
     let mut failed = 0;
     for id in channels.as_array()?.iter().filter_map(|c| c["id"].as_str()) {
         let path = format!("/channels/{id}/permissions/{role}");
