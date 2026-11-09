@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::{
     heat::HeatCfg,
-    join::{Action as GateAction, Filter as GateFilter},
+    join::{Action as GateAction, Filter as GateFilter, GateCfg},
     strike::StrikeCfg,
 };
 use tommybot_logging::LogEvent;
@@ -598,14 +598,19 @@ pub fn schema() -> Vec<Value> {
         ]);
     }
     gate.extend([
-        ti(
-            dv(fg("Account age", "min_age_days", "int"), 7),
-            "Minimum account age",
-        ),
-        ti(
-            fg("Account age", "min_age_override_ms", "int"),
-            "Minimum account age in milliseconds (minutes to days, empty uses the days above)",
-        ),
+        {
+            // One duration with a unit; an unset value shows the days setting it replaces.
+            let days = GateCfg::default().min_age_days;
+            let mut v = ti(
+                dv(
+                    fg("Account age", "min_age_override_ms", "int"),
+                    i64::from(days) * 86_400_000,
+                ),
+                "Minimum account age",
+            );
+            v["fallback"] = json!({"path": "min_age_days", "scale": 86_400_000});
+            v
+        },
         ti(
             fg("Account age", "expose_min_age", "bool"),
             "Tell punished members the minimum age in the DM",

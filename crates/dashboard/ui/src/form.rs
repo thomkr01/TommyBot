@@ -431,7 +431,10 @@ pub fn Section(
                 let mut c = val.get_untracked();
                 for f in fields.get_untracked() {
                     let p = f["path"].as_str().unwrap_or("");
-                    if !f["default"].is_null() && get_path(&c, p).is_null() { set_path(&mut c, p, f["default"].clone()) }
+                    // `fallback`: an older field of the same section that held this value in other units.
+                    let old = f["fallback"]["path"].as_str().map(|o| get_path(&c, &format!("{}.{o}", p.rsplit_once('.').map_or("", |(s, _)| s))));
+                    let old = old.and_then(|o| o.as_f64()).map(|o| json!((o * f["fallback"]["scale"].as_f64().unwrap_or(1.0)) as i64));
+                    if get_path(&c, p).is_null() { if let Some(d) = old.or_else(|| (!f["default"].is_null()).then(|| f["default"].clone())) { set_path(&mut c, p, d) } }
                 }
                 orig.set(c.clone());
                 val.set(c);

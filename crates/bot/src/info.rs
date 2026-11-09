@@ -105,10 +105,10 @@ pub(crate) async fn user_info(
     }
     let young = now_secs() - created < cfg.joingate.min_age_ms() / 1000;
     let suspicious = format!(
-        "{} No Avatar\n{} Account Younger Than {}d",
+        "{} No Avatar\n{} Account Younger Than {}",
         yes(user.avatar.is_none()),
         yes(young),
-        cfg.joingate.min_age_days
+        tommybot_logging::embed::duration(cfg.joingate.min_age_ms() / 1000)
     );
     let points = cases::warn_points(&app.pool, gid.get() as i64, uid.get() as i64).await?;
     let wl = &cfg.whitelist;

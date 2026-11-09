@@ -903,10 +903,10 @@ mod tests {
         apply(
             &mut doc,
             r.path,
-            edit_for(r, &Op::Set("3c".into(), "15".into()), &[], None).unwrap(),
+            edit_for(r, &Op::Set("3c".into(), "15d".into()), &[], None).unwrap(),
         );
-        assert_eq!(GuildCfg::parse(&doc).joingate.min_age_days, 15);
-        assert!(edit_for(r, &Op::Set("3c".into(), "0".into()), &[], None).is_err());
+        assert_eq!(GuildCfg::parse(&doc).joingate.min_age_ms(), 15 * 86_400_000);
+        assert!(edit_for(r, &Op::Set("3c".into(), "abc".into()), &[], None).is_err());
         assert!(edit_for(r, &Op::Toggle("3c".into(), true), &[], None).is_err());
 
         let r = row(&STATICS, "5");

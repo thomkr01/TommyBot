@@ -183,12 +183,12 @@ pub const WHITELIST: &[Card] = &[
 ];
 
 pub const JOINGATE: &[Card] = &[Card {
-    when: &[("joingate.min_age_days", "joingate.account_age.enabled"), ("joingate.username_strict", "joingate.username_filter.enabled"), ("joingate.username_terms", "joingate.username_filter.enabled")],
+    when: &[("joingate.min_age_override_ms", "joingate.account_age.enabled"), ("joingate.username_strict", "joingate.username_filter.enabled"), ("joingate.username_terms", "joingate.username_filter.enabled")],
     ..boxed(card("Join Gate status", "If you want to use instant detection filters for new members joining your server, this is the module to tweak.", &[
     ("joingate.enabled", "Enable Join Gate"),
     ("joingate.unauthorized_bot.enabled", "Bots added by unauthorized members"),
     ("joingate.account_age.enabled", "Accounts younger than the minimum age"),
-    ("joingate.min_age_days", "Minimum account age"),
+    ("joingate.min_age_override_ms", "Minimum account age"),
     ("joingate.no_avatar.enabled", "Accounts that have no profile picture"),
     ("joingate.unverified_bot.enabled", "Discord unverified bots added by anyone"),
     ("joingate.invite_in_name.enabled", "Accounts with invite links in usernames"),
