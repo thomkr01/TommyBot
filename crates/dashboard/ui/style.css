@@ -1,6 +1,6 @@
 :root, [data-theme=dark] { --b1:#1c1c1c; --b2:#212121; --b3:#0d0d0d; --fg:#f5f5f5; --muted:#a1a1a1; --line:#3a3a3a; --primary:#9B7BFF; --on-primary:#1B1A24; --focus:#065bcb; --info:#4FC3F7; --ok:#00db5f; --bad:#ff2445; --warn:#ff9900; --page:linear-gradient(160deg,#2b2150 0%,#17122d 35%,#07060d 100%); }
 [data-theme=light] { --b1:#ffffff; --b2:#f8f9fa; --b3:#d3d7dd; --fg:#1f2937; --muted:#5b6472; --line:#c5cad2; --page:linear-gradient(160deg,#ece4ff 0%,#f6f3fb 50%,#ffffff 100%); }
-:root { --dur-fast:120ms; --dur:200ms; --dur-slow:320ms; --ease:cubic-bezier(.2,0,0,1); --brand:linear-gradient(135deg,#FFA36C,#FF6F91,#9B7BFF,#4FC3F7); }
+:root { --dur-fast:120ms; --dur:200ms; --dur-slow:320ms; --ease:cubic-bezier(.2,0,0,1); --quint:cubic-bezier(.23,1,.32,1); --brand:linear-gradient(135deg,#FFA36C,#FF6F91,#9B7BFF,#4FC3F7); }
 @property --p { syntax:'<number>'; inherits:false; initial-value:0; }
 @keyframes enter { from { opacity:0; transform:translateY(6px); } }
 @keyframes fade { from { opacity:0; } }
@@ -77,7 +77,7 @@ details { margin:12px 0; }
 .steps button i { display:inline-block; width:24px; height:24px; line-height:24px; border-radius:50%; background:var(--brand); box-shadow:inset 0 0 0 12px var(--line); font-style:normal; margin-right:6px; transition:box-shadow var(--dur) var(--ease); } .steps button:hover i { box-shadow:inset 0 0 0 12px var(--info); } .steps button.on i { box-shadow:inset 0 0 0 0 var(--line); color:var(--on-primary); }
 .tabs { display:flex; justify-content:center; gap:4px; margin:0 0 24px; } .tabs a { padding:8px 20px; text-transform:uppercase; text-decoration:none; color:var(--muted); border-bottom:2px solid var(--line); } .tabs a.on { color:var(--fg); border-color:var(--primary); }
 .link { display:flex; align-items:center; gap:16px; text-decoration:none; } .link .ico { width:56px; height:56px; border-radius:8px; background:var(--brand); flex:none; } .link .sp { flex:1; }
-.chips { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0; } .chips .chip { font-size:12px; padding:2px 10px; } .chips .orange { background:var(--warn); color:#000; } .chips .blue { background:var(--info); color:#000; }
+.chips { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0; } .chips .chip { font-size:12px; padding:2px 10px; } .chip.orange { background:var(--warn); color:#000; } .chip.blue { background:var(--info); color:#000; } .chip.bad { background:var(--bad); color:#fff; }
 .gcard { display:flex; align-items:center; gap:12px; text-decoration:none; }
 .qr { background:#fff; display:inline-block; padding:8px; border-radius:6px; } .qr svg { width:200px; height:200px; display:block; }
 @media (max-width:900px) { header .menu-btn { display:block; } nav { display:none; position:fixed; top:80px; z-index:20; } nav.open { display:flex; animation:fade var(--dur) var(--ease); } main { padding:16px 16px 96px; } .head h1 { font-size:30px; } }
@@ -143,6 +143,20 @@ header details div p { margin:0; padding:8px 12px; }
 [data-theme=light] .chip.ok, [data-theme=light] button.warn { color:#000; }
 @media (max-width:600px) { header { gap:8px; padding:0 12px; } header .logo, header .sp { display:none; } header .search { flex:1; min-width:0; } header .search input { width:100%; max-width:none; } .embed .fields { grid-template-columns:1fr; } }
 button.link.err { color:var(--bad); } button.link.err.on { border:1px solid var(--bad); border-radius:6px; padding:2px 8px; background:color-mix(in srgb, var(--bad) 15%, transparent); }
+/* Wizard: the sub-options of a switch, ringed red with a note while the switch is off. */
+.atit { background:var(--b3); border-radius:6px; padding:8px 12px; margin:8px 0; box-shadow:0 0 0 2px transparent; transition:box-shadow var(--dur) var(--ease); } .atit.off { box-shadow:0 0 0 2px var(--bad); }
+.atit .sw { width:36px; height:20px; } .atit .sw::after { width:14px; height:14px; } .atit .sw:checked::after { transform:translateX(16px); }
+.atit > i { display:block; font-size:16px; font-weight:600; text-transform:uppercase; margin-bottom:4px; }
+.chip.dot::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:#fff; margin-right:6px; vertical-align:middle; }
+/* A field that belongs to a switch slides open under it. */
+.cond { display:grid; grid-template-rows:0fr; opacity:0; transition:grid-template-rows var(--dur-slow) var(--ease), opacity var(--dur-slow) var(--ease); } .cond.open { grid-template-rows:1fr; opacity:1; }
+.cond > div { overflow:hidden; min-height:0; } .cond .pan { border:2px solid var(--ok); border-radius:6px; padding:4px 10px; margin:4px 0; }
+.alert { display:flex; gap:12px; align-items:center; background:var(--bad); color:#fff; border-radius:12px; padding:10px 14px; margin:8px 0; } .alert b { font-size:28px; } .alert p { margin:0; }
+.act { display:flex; flex-direction:column; align-items:flex-start; gap:4px; margin-top:8px; }
+/* Wizard previews replay in a loop: each message slides in after the one before it. */
+.preview.loop > :not(.chg) { animation:chat-in 8s var(--quint) calc(var(--i, 0) * 400ms) infinite backwards; }
+.preview.loop > :nth-child(2) { --i:1; } .preview.loop > :nth-child(3) { --i:2; } .preview.loop > :nth-child(4) { --i:3; } .preview.loop > :nth-child(5) { --i:4; } .preview.loop > :nth-child(6) { --i:5; } .preview.loop > :nth-child(n+7) { --i:6; }
+@keyframes chat-in { 0% { opacity:0; transform:translateX(-100px); } 6%, 100% { opacity:1; transform:none; } }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-delay:0s !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; transition-delay:0s !important; } }
 .wizbody > .card { background:none; box-shadow:none; padding:0; margin:0; }
 .scrim { display:none; } @media (max-width:900px) { .scrim { display:block; position:fixed; inset:80px 0 0; z-index:19; background:#000a; animation:fade var(--dur) var(--ease); } }

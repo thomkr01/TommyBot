@@ -142,7 +142,13 @@ pub fn SearchBox(
             if let Ok(v) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
                 for sec in v.as_array().into_iter().flatten() {
                     let name = sec["name"].as_str().unwrap_or("");
-                    for f in sec["fields"].as_array().into_iter().flatten() {
+                    // Wizard-only copies of fields that live on another page.
+                    for f in sec["fields"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|f| f["page"] != "wizard")
+                    {
                         let mut f = f.clone();
                         f["section_title"] = sec["title"].clone();
                         idx.push((route(name, f["page"].as_str()), f));

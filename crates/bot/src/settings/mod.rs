@@ -195,8 +195,19 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
                     }
                     json!(n * scale)
                 }
-                Kind::Secs => json!(duration::parse(v).ok_or_else(bad)?),
-                Kind::Ms => json!(duration::parse(v).ok_or_else(bad)? * 1000),
+                Kind::Secs | Kind::Ms => {
+                    let secs = duration::parse(v).ok_or_else(|| {
+                        format!(
+                            "{}. Give a number with a unit, like `15d`, `12h` or `30m`.",
+                            bad()
+                        )
+                    })?;
+                    json!(if matches!(kind, Kind::Ms) {
+                        secs.checked_mul(1000).ok_or_else(bad)?
+                    } else {
+                        secs
+                    })
+                }
                 Kind::Text if !v.is_empty() && v.len() <= 32 => json!(v),
                 Kind::Choice(opts) => {
                     let v = v.to_lowercase();
@@ -921,10 +932,11 @@ mod tests {
         apply(
             &mut doc,
             r.path,
-            edit_for(r, &Op::Set("3c".into(), "15".into()), &[], None).unwrap(),
+            edit_for(r, &Op::Set("3c".into(), "15d".into()), &[], None).unwrap(),
         );
-        assert_eq!(GuildCfg::parse(&doc).joingate.min_age_days, 15);
-        assert!(edit_for(r, &Op::Set("3c".into(), "0".into()), &[], None).is_err());
+        assert_eq!(GuildCfg::parse(&doc).joingate.min_age_ms(), 15 * 86_400_000);
+        let err = edit_for(r, &Op::Set("3c".into(), "15".into()), &[], None).unwrap_err();
+        assert!(err.contains("`15d`"), "{err}");
         assert!(edit_for(r, &Op::Toggle("3c".into(), true), &[], None).is_err());
 
         let r = row(&STATICS, "5");

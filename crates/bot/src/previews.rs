@@ -157,6 +157,10 @@ fn messages() -> Value {
         "nuke_quarantined": nuke(true, true),
         "nuke_no_quarantine": nuke(false, false),
         "raid": log(joingate::raid_trigger_log(&raid, &raiders, code, crate::invites::raid_url(code))),
+        "raid_report": {
+            "embeds": [joingate::raid_report_log(raiders.len() as i64, Some(code)).time().build()],
+            "components": [{"type": 1, "components": [{"type": 2, "style": 5, "label": joingate::RAID_REPORT, "url": crate::invites::raid_url(code)}]}],
+        },
         "verify_panel": {"embeds": [panel], "components": [buttons]},
         "verify_button": interaction(verify::embed_reply(verify::passed_embed(SERVER))),
         "verify_web": interaction(verify::web_link(Id::new(1))),

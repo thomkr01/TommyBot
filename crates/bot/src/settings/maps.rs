@@ -275,7 +275,7 @@ pub(super) static RESTORE: Module = Module {
     ],
 };
 
-static JOINGATE_ROWS: [Row; 27] = {
+static JOINGATE_ROWS: [Row; 26] = {
     let [a1, a2, a3] = gate_filter!("2", "No PfP Filter", no_avatar);
     let [b1, b2, b3] = gate_filter!("3", "Account Age Filter", account_age);
     let [c1, c2, c3] = gate_filter!("4", "Bot Addition Filter", unauthorized_bot);
@@ -288,8 +288,7 @@ static JOINGATE_ROWS: [Row; 27] = {
         r!("1a", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
         r!("1b", "DM Members", "joingate.dm_punished", Kind::Bool, |c| on(c.joingate.dm_punished)),
         a1, a2, a3, b1, b2, b3,
-        r!("3c", "Minimum Age", "joingate.min_age_days", Kind::Int(1, 3650), |c| format!("{}d", c.joingate.min_age_days)),
-        r!("3e", "Minimum Age (precise)", "joingate.min_age_override_ms", Kind::Ms, |c| ms(c.joingate.min_age_ms())),
+        r!("3c", "Minimum Age", "joingate.min_age_override_ms", Kind::Ms, |c| ms(c.joingate.min_age_ms())),
         r!("3d", "Expose Minimum Age", "joingate.expose_min_age", Kind::Bool, |c| on(c.joingate.expose_min_age)),
         c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3,
     ]

@@ -52,23 +52,25 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         ("tickets", TICKETS),
     ];
     let step = RwSignal::new(0usize);
-    // The furthest step reached, kept per server in this browser so the ring keeps its progress.
-    let key = format!("wizard:{guild}");
-    let store = || web_sys::window().and_then(|w| w.local_storage().ok().flatten());
-    let furthest = RwSignal::new(
-        store()
-            .and_then(|s| s.get_item(&key).ok().flatten())
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0),
-    );
+    // The ring scores the saved setup; it is worked out again each time the step changes.
+    let pct = RwSignal::new(0usize);
+    let dc = RwSignal::new(Value::Null);
+    let g = guild.clone();
     Effect::new(move |_| {
-        let i = step.get();
-        if i > furthest.get_untracked() {
-            furthest.set(i);
-            if let Some(s) = store() {
-                let _ = s.set_item(&key, &i.to_string());
+        step.track();
+        let g = g.clone();
+        spawn_local(async move {
+            if dc.get_untracked().is_null() {
+                dc.set(
+                    api("GET", &format!("/api/guilds/{g}/discord"), None)
+                        .await
+                        .unwrap_or(json!({})),
+                );
             }
-        }
+            if let Ok(c) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
+                pct.set(crate::wizard::score(&c["config"], &dc.get_untracked(), &g));
+            }
+        });
     });
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = guild.clone();
@@ -145,7 +147,7 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         <div class="card">
             <div class="split">
                 <div><h2>{move || format!("{} Setup Process", guilds.get().iter().find(|x| x["id"] == g_id.as_str()).and_then(|x| x["name"].as_str().map(String::from)).unwrap_or_default())}</h2><p>"This wizard helps simplify TommyBot's setup for you in detailed explained steps that you can follow to ensure the proper behavior you want from TommyBot."</p></div>
-                <div class="brand"><Ring pct=Signal::derive(move || (furthest.get().max(step.get()) + 1) * 100 / STEPS.len()) /></div>
+                <div class="brand"><Ring pct=pct.into() /></div>
                 <svg class="wizart" viewBox="0 0 120 120" aria-hidden="true"><defs><linearGradient id="tb-brand" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFA36C"/><stop offset=".35" stop-color="#FF6F91"/><stop offset=".7" stop-color="#9B7BFF"/><stop offset="1" stop-color="#4FC3F7"/></linearGradient></defs><path d="M60 8 104 26v32c0 28-19 46-44 54C35 104 16 86 16 58V26z" fill="url(#tb-brand)" fill-opacity=".25" stroke="url(#tb-brand)" stroke-width="4"/><path class="tick" d="m40 60 14 14 28-30" fill="none" stroke="url(#tb-brand)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </div>
             <h2>"Steps"</h2>
