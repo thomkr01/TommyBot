@@ -73,8 +73,10 @@ fn sx(section: &str, mut v: Value) -> Value {
     v
 }
 
-/// Verification modes that show the captcha image; Instant Access too, since a join raid upgrades it to the captcha.
-const IMAGE_MODES: &[&str] = &["Button", "Captcha", "Dm"];
+/// Verification modes that use the captcha card (Instant Access only during a join raid, so it rings red).
+const IMAGE_MODES: &[&str] = &["Captcha", "Dm"];
+/// Verification modes that show the helpful-notes switch (hidden for Website, Third-party and Instant Access).
+const NOTE_MODES: &[&str] = &["Captcha", "Dm", "SimpleCaptcha"];
 
 /// `key` "only" hides the field and "used" rings its card red unless the value at `path` is one of `vals`.
 fn unless(mut v: Value, key: &str, path: &str, vals: &[&str]) -> Value {
@@ -875,7 +877,7 @@ pub fn schema() -> Vec<Value> {
             ),
             "only",
             "verification.mode",
-            IMAGE_MODES,
+            NOTE_MODES,
         ),
         ti(
             fg("General", "regen_ms", "int"),
