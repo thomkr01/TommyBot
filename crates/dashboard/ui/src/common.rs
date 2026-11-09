@@ -124,11 +124,23 @@ impl Msg {
     pub fn get(self) -> String { self.text.get() }
 }
 
-/// Click-to-close message, red-edged for failures; keeps its last text while it fades out.
+/// How long a toast stays up before it closes itself; matches the `.life` strip in style.css.
+const TOAST_LIFE: Duration = Duration::from_secs(3);
+
+/// Message that closes itself after [`TOAST_LIFE`] (or on click), red-edged for failures; keeps its
+/// last text while it fades out.
 #[component]
 pub fn Toast(msg: Msg) -> impl IntoView {
     let text = Memo::new(move |prev: Option<&String>| { let m = msg.get(); if m.is_empty() { prev.cloned().unwrap_or_default() } else { m } });
-    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}</p></AnimatedShow> }
+    // Each new message restarts the timer; a stale timer sees a newer number and leaves it alone.
+    let shown = StoredValue::new(0u32);
+    Effect::new(move || {
+        if msg.get().is_empty() { return }
+        shown.update_value(|n| *n += 1);
+        let mine = shown.get_value();
+        set_timeout(move || if shown.get_value() == mine { msg.clear() }, TOAST_LIFE);
+    });
+    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}{move || { msg.text.track(); view! { <span class="life"></span> } }}</p></AnimatedShow> }
 }
 
 /// Runs a save, recording the new version.

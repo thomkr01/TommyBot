@@ -243,6 +243,27 @@ async fn permits_resolve_levels() {
     cleanup(&p, g).await;
 }
 
+#[tokio::test]
+async fn roleless_staff_lists_admins_and_moderators_without_a_role() {
+    let Some(p) = pool().await else { return };
+    let g = gid(12);
+    cleanup(&p, g).await;
+    permit(&p, g, "Admins", 2, &[], 100).await;
+    for name in ["Moderators", "Helpers"] {
+        sqlx::query("INSERT INTO permits (guild_id, name) VALUES ($1, $2)")
+            .bind(g)
+            .bind(name)
+            .execute(&p)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        permits::roleless_staff(&p, g).await.unwrap(),
+        ["Moderators"]
+    );
+    cleanup(&p, g).await;
+}
+
 /// Mirrors the SQL in crates/bot/src/antinuke.rs (`quarantine_and_revert` and `quarantine`). Keep in sync.
 #[tokio::test]
 async fn antinuke_revert_and_quarantine_sql() {

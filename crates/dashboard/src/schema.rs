@@ -73,6 +73,15 @@ fn sx(section: &str, mut v: Value) -> Value {
     v
 }
 
+/// Verification modes that show the captcha image; Instant Access too, since a join raid upgrades it to the captcha.
+const IMAGE_MODES: &[&str] = &["Button", "Captcha", "Dm"];
+
+/// `key` "only" hides the field and "used" rings its card red unless the value at `path` is one of `vals`.
+fn unless(mut v: Value, key: &str, path: &str, vals: &[&str]) -> Value {
+    v[key] = json!({"path": path, "in": vals});
+    v
+}
+
 /// A choice field with its options; "" is the unset option.
 fn choice(group: &str, path: &str, opts: &[&str]) -> Value {
     let mut v = fg(group, path, "choice");
@@ -859,9 +868,14 @@ pub fn schema() -> Vec<Value> {
             ),
             "Captcha",
         ),
-        ti(
-            dv(fg("General", "show_notes", "bool"), true),
-            "Display helpful notes alongside the captcha",
+        unless(
+            ti(
+                dv(fg("General", "show_notes", "bool"), true),
+                "Display helpful notes alongside the captcha",
+            ),
+            "only",
+            "verification.mode",
+            IMAGE_MODES,
         ),
         ti(
             fg("General", "regen_ms", "int"),
@@ -876,9 +890,14 @@ pub fn schema() -> Vec<Value> {
         ),
         ti(fg("General", "channel", "channel"), "Verification channel"),
         ti(fg("General", "roles", "roles"), "Verification roles"),
-        ti(
-            dv(fg("Captcha", "captcha.height", "int"), 100),
-            "Captcha height",
+        unless(
+            ti(
+                dv(fg("Captcha", "captcha.height", "int"), 100),
+                "Captcha height",
+            ),
+            "used",
+            "verification.mode",
+            IMAGE_MODES,
         ),
         ti(
             dv(fg("Captcha", "captcha.width", "int"), 300),

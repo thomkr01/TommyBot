@@ -5,6 +5,7 @@ use serde::Serialize;
 
 /// Administrator, Manage Server, Manage Roles, Manage Channels, Ban, Kick, Manage Webhooks.
 pub const DANGEROUS: u64 = 0x8 | 0x20 | 0x1000_0000 | 0x10 | 0x4 | 0x2 | 0x2000_0000;
+const ADMINISTRATOR: u64 = 0x8;
 /// What @everyone must not have: [`DANGEROUS`] plus Mention @everyone and Manage Messages.
 const EVERYONE_DANGEROUS: u64 = DANGEROUS | (1 << 17) | (1 << 13);
 
@@ -21,6 +22,12 @@ pub struct GuildSafety {
 pub struct Setup {
     pub quarantine_role: Option<u64>,
     pub log_fallback: bool,
+    /// Staff permits (Admins, Moderators) that no role holds.
+    pub roleless_staff: Vec<String>,
+    /// Anything is on an automod whitelist (spam, invites, mentions, @everyone, partner channels).
+    pub whitelisted: bool,
+    /// The bot's own roles.
+    pub bot_roles: Vec<u64>,
 }
 
 /// Ordered from fine to worst.
@@ -163,15 +170,57 @@ pub fn checks(g: &GuildSafety, roles: &[RoleImg], bot_top: i64, setup: &Setup) -
             "Every member, raid accounts too, can ban, manage, mention @everyone or delete messages.".into(),
             strip(g.id),
         );
+    } else if everyone != 0 {
+        row(
+            "everyone_perms",
+            Severity::Warn,
+            "@everyone holds permissions",
+            "Move them to your main member role, so new and unverified accounts start with nothing.".into(),
+            None,
+        );
     } else {
         row(
             "everyone_perms",
             Severity::Ok,
             "@everyone is safe",
-            "Members get no moderation or mass-mention rights by default.".into(),
+            "New accounts get no permissions until a role gives them some.".into(),
             None,
         );
     }
+    // (good, text when good, text when not) for the setup rows below.
+    let pick = |good: bool, yes: &str, no: String| {
+        (
+            if good { Severity::Ok } else { Severity::Warn },
+            if good { yes.into() } else { no },
+        )
+    };
+    let bot = roles
+        .iter()
+        .filter(|r| setup.bot_roles.contains(&r.id))
+        .fold(0, |p, r| p | r.permissions);
+    let (sev, text) = pick(
+        bot == ADMINISTRATOR,
+        "The bot's roles grant Administrator and nothing else.",
+        "Give the bot's role Administrator and nothing else, so its access is one clear switch."
+            .into(),
+    );
+    row("bot_admin_only", sev, "Bot role permissions", text, None);
+    let staff = &setup.roleless_staff;
+    let (sev, text) = pick(
+        staff.is_empty(),
+        "Every staff permit is held by a role.",
+        format!(
+            "No role holds {}, so nobody gets that permit.",
+            staff.join(" or ")
+        ),
+    );
+    row("staff_permits", sev, "Staff permit roles", text, None);
+    let (sev, text) = pick(
+        setup.whitelisted,
+        "Trusted roles, members or channels skip the automod.",
+        "Add trusted roles, members or channels to an automod whitelist so staff are not punished by mistake.".into(),
+    );
+    row("whitelist", sev, "Automod whitelist", text, None);
     let above: Vec<&str> = roles
         .iter()
         .filter(|r| r.position > bot_top && !r.managed && r.id != g.id)
@@ -298,16 +347,23 @@ mod tests {
         notifications: 1,
     };
 
+    fn setup(quarantine_role: Option<u64>, log_fallback: bool) -> Setup {
+        Setup {
+            quarantine_role,
+            log_fallback,
+            roleless_staff: vec![],
+            whitelisted: true,
+            bot_roles: vec![],
+        }
+    }
+
     fn sev<'a>(rows: &'a [Check], id: &str) -> Option<&'a Check> {
         rows.iter().find(|r| r.id == id)
     }
 
     #[test]
     fn server_settings_checks() {
-        let setup = Setup {
-            quarantine_role: None,
-            log_fallback: true,
-        };
+        let setup = setup(None, true);
         let rows = checks(&SAFE, &[], 0, &setup);
         for id in [
             "verification_level",
@@ -352,43 +408,19 @@ mod tests {
             role(4, 1, false, 0x400),
             role(9, 3, false, 0x1),
         ];
-        let rows = checks(
-            &SAFE,
-            &roles,
-            4,
-            &Setup {
-                quarantine_role: Some(9),
-                log_fallback: false,
-            },
-        );
+        let rows = checks(&SAFE, &roles, 4, &setup(Some(9), false));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"role_2") && !ids.contains(&"role_3") && !ids.contains(&"role_4"));
         assert!(ids.contains(&"log_fallback") && ids.contains(&"bot_position"));
         assert_eq!(sev(&rows, "role_2").unwrap().fix, strip(2));
-        let rows = checks(
-            &SAFE,
-            &roles,
-            2,
-            &Setup {
-                quarantine_role: Some(9),
-                log_fallback: true,
-            },
-        );
+        let rows = checks(&SAFE, &roles, 2, &setup(Some(9), true));
         assert!(sev(&rows, "quarantine_above_bot").is_some());
     }
 
     #[test]
     fn everyone_with_mass_mention_is_flagged_and_strippable() {
         let roles = [role(1, 0, false, (1 << 17) | 0x400)];
-        let rows = checks(
-            &SAFE,
-            &roles,
-            4,
-            &Setup {
-                quarantine_role: None,
-                log_fallback: true,
-            },
-        );
+        let rows = checks(&SAFE, &roles, 4, &setup(None, true));
         let row = sev(&rows, "everyone_perms").unwrap();
         assert_eq!(row.severity, Severity::Bad);
         assert_eq!(row.fix, strip(1));
@@ -411,22 +443,58 @@ mod tests {
 
     #[test]
     fn score_is_the_share_of_passing_checks() {
-        let setup = Setup {
-            quarantine_role: None,
-            log_fallback: true,
-        };
+        let setup = setup(None, true);
         let rows = checks(&SAFE, &[], 0, &setup);
-        assert_eq!(rows.len(), 7);
-        assert_eq!(score(&rows), 6 * 100 / 7);
+        // Only the missing quarantine role and the bot role (none here) fail.
+        assert_eq!(rows.len(), 10);
+        assert_eq!(score(&rows), 8 * 100 / 10);
         assert_eq!(score(&[]), 0);
     }
 
     #[test]
-    fn rows_serialize_for_the_dashboard() {
-        let setup = Setup {
-            quarantine_role: None,
-            log_fallback: true,
+    fn setup_rows_follow_permits_whitelist_and_bot_role() {
+        let roles = [role(1, 0, false, 0), role(7, 5, true, ADMINISTRATOR)];
+        let good = Setup {
+            bot_roles: vec![7],
+            ..setup(None, true)
         };
+        let rows = checks(&SAFE, &roles, 5, &good);
+        for id in [
+            "bot_admin_only",
+            "staff_permits",
+            "whitelist",
+            "everyone_perms",
+        ] {
+            assert_eq!(sev(&rows, id).unwrap().severity, Severity::Ok, "{id}");
+        }
+        let roles = [
+            role(1, 0, false, 0x400),
+            role(7, 5, true, ADMINISTRATOR | 0x400),
+        ];
+        let bad = Setup {
+            roleless_staff: vec!["Admins".into(), "Moderators".into()],
+            whitelisted: false,
+            ..good
+        };
+        let rows = checks(&SAFE, &roles, 5, &bad);
+        for id in [
+            "bot_admin_only",
+            "staff_permits",
+            "whitelist",
+            "everyone_perms",
+        ] {
+            assert_eq!(sev(&rows, id).unwrap().severity, Severity::Warn, "{id}");
+        }
+        assert!(sev(&rows, "staff_permits")
+            .unwrap()
+            .detail
+            .contains("Admins or Moderators"));
+        assert_eq!(sev(&rows, "everyone_perms").unwrap().fix, None);
+    }
+
+    #[test]
+    fn rows_serialize_for_the_dashboard() {
+        let setup = setup(None, true);
         let v = serde_json::to_value(checks(&SAFE, &[role(1, 0, false, 0x8)], 0, &setup)).unwrap();
         let everyone = v
             .as_array()

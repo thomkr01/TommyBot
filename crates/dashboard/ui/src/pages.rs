@@ -424,7 +424,10 @@ fn RouteNote(guild: String, customize: bool) -> impl IntoView {
         }
     });
     view! {
-        {move || moved.get().filter(|n| !n.is_empty() && !customize).map(|n| view! { <p class="info">{format!("There are some types that won't be logged here as you have custom logs set below, these types are: [{}]. All other logs (besides modlogs) will still go to this channel.", n.join(", "))}</p> })}
+        {move || moved.get().filter(|n| !n.is_empty() && !customize).map(|n| view! { <details class="card" open=true><summary class="info">"Note"</summary>
+            <p>"These log types have their own channel, so they skip the TommyBot logs channel:"</p>
+            <div class="chips">{n.into_iter().map(|t| view! { <span class="chip blue">{t}</span> }).collect_view()}</div>
+            <p class="muted">"Everything else, except mod logs, still lands in the TommyBot logs channel."</p></details> })}
         {move || moved.get().filter(|n| n.is_empty() && customize).map(|_| view! { <p class="muted">"There are no customizable log channels set, add your own."</p> })}
     }
 }

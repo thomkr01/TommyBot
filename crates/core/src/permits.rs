@@ -79,6 +79,17 @@ fn implied_by(perm: &str) -> &'static [&'static str] {
     }
 }
 
+/// The default staff permits (Admins, Moderators) that exist but no role holds, by name.
+pub async fn roleless_staff(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT name FROM permits p WHERE guild_id = $1 AND name IN ('Admins', 'Moderators')
+         AND NOT EXISTS (SELECT 1 FROM permit_roles r WHERE r.permit_id = p.id) ORDER BY name",
+    )
+    .bind(guild_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// One toggle in the dashboard's permit editor. `flag` entries live in a permit's whitelist, the
 /// rest in its perms. `locked` ones are shown but never stored.
 pub struct PermDef {

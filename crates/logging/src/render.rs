@@ -385,11 +385,16 @@ fn perm_diff(old: Option<&Value>, new: Option<&Value>) -> (String, String) {
         )
     };
     let (old, new) = (bits(old), bits(new));
-    (perm_names(new - old), perm_names(old - new))
+    (
+        perm_names((new - old).bits()),
+        perm_names((old - new).bits()),
+    )
 }
 
-fn perm_names(p: Permissions) -> String {
-    p.iter_names()
+/// Permission bits as "Create Instant Invite, View Channel".
+pub fn perm_names(bits: u64) -> String {
+    Permissions::from_bits_truncate(bits)
+        .iter_names()
         .map(|(n, _)| {
             n.split('_')
                 .map(|w| {

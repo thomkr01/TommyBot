@@ -45,10 +45,15 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let gv = guild.clone();
     let view_it = Callback::new(move |id: i64| { let g = gv.clone(); run_act(async move { api("GET", &format!("/api/guilds/{g}/backups/{id}"), None).await }, msg, need, move |v| {
         let names = |k: &str, f: &dyn Fn(&Value) -> String| v[k].as_array().map(|a| a.iter().map(f).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-        let ch = names("channels", &|c| format!("{}{}", if c["kind"] == 4 { "" } else { "  " }, c["name"].as_str().unwrap_or("")));
+        let none = |v: &Value| v.as_str().filter(|p| !p.is_empty()).unwrap_or("none").to_string();
+        let ch = names("channels", &|c| {
+            let pad = if c["kind"] == 4 { "" } else { "  " };
+            let ows = c["overwrites"].as_array().into_iter().flatten().map(|o| format!("\n{pad}    {}: allow {} / deny {}", o["target"].as_str().unwrap_or(""), none(&o["allow"]), none(&o["deny"]))).collect::<String>();
+            format!("{pad}{}{ows}", c["name"].as_str().unwrap_or(""))
+        });
         let hooks = names("webhooks", &|w| format!("{} in #{}", w["name"].as_str().unwrap_or(""), w["channel"].as_str().unwrap_or("?")));
         let st = &v["settings"];
-        detail.set(Some(format!("General Settings\nName: {}\nVerification level: {}\nContent filter: {}\n\nRoles\n{}\n\nChannels\n{ch}\n\nWebhooks\n{hooks}", v["name"].as_str().unwrap_or(""), st["verification"], st["content_filter"], names("roles", &|r| r["name"].as_str().unwrap_or("").to_string()))));
+        detail.set(Some(format!("General Settings\nName: {}\nVerification level: {}\nContent filter: {}\n\nRoles\n{}\n\nChannels\n{ch}\n\nWebhooks\n{hooks}", v["name"].as_str().unwrap_or(""), st["verification"], st["content_filter"], names("roles", &|r| format!("{}: {}", r["name"].as_str().unwrap_or(""), none(&r["perm_names"]))))));
     }) });
     let apply = Callback::new(move |id: i64| { let g = gl.clone(); preview.set(None); queued(async move { api("POST", &format!("/api/guilds/{g}/backups/{id}/load"), None).await }, msg, need, || ()) });
     let remove = Callback::new(move |id: i64| { if !confirm("Delete this backup for good?") { return } let (g, l) = (gd.clone(), load.clone()); run_act(async move { api("POST", &format!("/api/guilds/{g}/backups/{id}/delete"), None).await }, msg, need, move |_| l()) });

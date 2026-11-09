@@ -11,6 +11,7 @@ mod render;
 use cache::{CachedMessage, MessageCache};
 pub use config::{CustomLog, LogConfig, LogEvent, LogKind};
 pub use embed::Log;
+pub use render::perm_names;
 
 use std::{
     collections::{HashMap, VecDeque},

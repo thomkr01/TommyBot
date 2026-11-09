@@ -77,19 +77,30 @@ pub(crate) async fn roles_and_bot_pos(
     st: &AppState,
     guild: i64,
 ) -> Result<(Vec<Role>, i64), ApiError> {
+    let (roles, mine) = roles_and_mine(st, guild).await?;
+    let bot_pos = top_of(&roles, &mine);
+    Ok((roles, bot_pos))
+}
+
+/// Highest position among the roles with ids in `mine` (0 = @everyone only).
+fn top_of(roles: &[Role], mine: &[String]) -> i64 {
+    roles
+        .iter()
+        .filter(|r| mine.contains(&r.id))
+        .map(|r| r.position)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The server's roles and the ids of the bot's own roles.
+async fn roles_and_mine(st: &AppState, guild: i64) -> Result<(Vec<Role>, Vec<String>), ApiError> {
     let roles = roles_of(st, guild).await?;
     let me = st.discord.call(Method::GET, "/users/@me", None).await?;
     let mine = st
         .discord
         .member_roles(guild, me["id"].as_str().unwrap_or_default())
         .await?;
-    let bot_pos = roles
-        .iter()
-        .filter(|r| mine.contains(&r.id))
-        .map(|r| r.position)
-        .max()
-        .unwrap_or(0);
-    Ok((roles, bot_pos))
+    Ok((roles, mine))
 }
 
 fn img(r: &Role) -> RoleImg {
@@ -108,7 +119,8 @@ fn img(r: &Role) -> RoleImg {
 async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
     let (_, config) = crate::store::current(&st.db, guild).await?;
-    let (roles, bot_pos) = roles_and_bot_pos(&st, guild).await?;
+    let (roles, mine) = roles_and_mine(&st, guild).await?;
+    let bot_pos = top_of(&roles, &mine);
     let g = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}"), None)
@@ -128,6 +140,12 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
         log_fallback: config["logging"]["fallback"]
             .as_str()
             .is_some_and(|f| !f.is_empty()),
+        roleless_staff: tommybot_core::permits::roleless_staff(&st.db, guild).await?,
+        whitelisted: serde_json::from_value::<tommybot_core::sections::WhitelistCfg>(
+            config["whitelist"].clone(),
+        )
+        .is_ok_and(|w| !w.is_empty()),
+        bot_roles: mine.iter().filter_map(|r| r.parse().ok()).collect(),
     };
     let roles: Vec<RoleImg> = roles.iter().map(img).collect();
     Ok(Json(json!(checks(&safety, &roles, bot_pos, &setup))))

@@ -21,6 +21,21 @@ fn set_path(v: &mut Value, p: &str, x: Value) {
     *c = x;
 }
 
+/// A field's `only`/`used` condition ({path, in}): absent, or the value at `path` is one of `in`.
+fn holds(v: &Value, c: &Value) -> bool {
+    c.is_null() || c["in"].as_array().is_some_and(|a| a.contains(&get_path(v, c["path"].as_str().unwrap_or(""))))
+}
+
+/// An appeal question's type name and chip colour.
+fn field_type(f: &Value) -> (&'static str, &'static str) {
+    match (strs(&f["options"]).is_empty(), f["multi"] == true, f["long"] == true) {
+        (false, true, _) => ("Multi choice", "orange"),
+        (false, false, _) => ("Single choice", "blue"),
+        (true, _, true) => ("Textarea", "green"),
+        (true, _, false) => ("Text", ""),
+    }
+}
+
 /// (name, seconds) for the duration unit switcher.
 const UNITS: [(&str, f64); 4] = [("second", 1.0), ("minute", 60.0), ("hour", 3600.0), ("day", 86400.0)];
 
@@ -207,7 +222,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 {move || (0..count()).map(|i| view! { <div class="row">
                     <input prop:value=move || get()[i]["label"].as_str().unwrap_or("").to_string() on:change=move |e| upd(i, "label", json!(event_target_value(&e))) />
                     <Show when=move || get()[i]["required"].as_bool().unwrap_or(true)><b class="err">"*"</b></Show>
-                    <span class="chip blue">{move || if !strs(&get()[i]["options"]).is_empty() { if get()[i]["multi"].as_bool().unwrap_or(false) { "Multi choice" } else { "Single choice" } } else if get()[i]["long"].as_bool().unwrap_or(false) { "Textarea" } else { "Text" }}</span>
+                    {move || { let (label, color) = field_type(&get()[i]); view! { <span class=format!("chip {color}")>{label}</span> } }}
                     <Show when=move || get()[i]["label"] == "Appeal Message"><span class="chip">"default"</span></Show>
                     <label><input type="checkbox" prop:checked=move || get()[i]["long"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "long", json!(event_target_checked(&e))) /> "long"</label>
                     <input aria-label="choices, comma separated" placeholder="choices (comma separated)" prop:value=move || strs(&get()[i]["options"]).join(", ") on:change=move |e| upd(i, "options", json!(event_target_value(&e).split(',').map(str::trim).filter(|o| !o.is_empty()).collect::<Vec<_>>())) />
@@ -217,6 +232,9 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     <label><input type="checkbox" prop:checked=move || get()[i]["required"].as_bool().unwrap_or(true) on:change=move |e| upd(i, "required", json!(event_target_checked(&e))) /> "required"</label>
                     <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
                 </div> }).collect_view()}
+                <details class="card"><summary>"Preview: what members see"</summary>
+                    {move || { let fs = get().as_array().cloned().unwrap_or_default(); let answers = RwSignal::new(vec![String::new(); fs.len()]); crate::appeals::questions(fs, answers) }}
+                </details>
             </div> }.into_any()
         }
         "warn_actions" => {
@@ -543,9 +561,14 @@ pub fn Section(
                     let note = format!("Your whole {sec} is disabled, the settings of this card have no effect.");
                     groups.into_iter().map(|(g, fs)| {
                         let plain = fs.iter().any(|f| f["path"] == switch.as_str());
-                        let ring = move || !plain && off.get();
+                        // A card whose `used` condition fails (e.g. captcha look in website mode) rings red too.
+                        let used: Vec<Value> = fs.iter().map(|f| f["used"].clone()).filter(|c| !c.is_null()).collect();
+                        let unused = move || val.with(|v| !used.iter().all(|c| holds(v, c)));
+                        let ring = Signal::derive(move || (!plain && off.get()) || unused());
                         let note = note.clone();
-                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}<Show when=ring><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{note.clone()}</p></details></Show></div> }
+                        let text = move || if !plain && off.get() { note.clone() } else { "Your current choices do not use this card, so its settings have no effect.".into() };
+                        let fields = fs.into_iter().map(|f| { let only = f["only"].clone(); view! { <Show when=move || val.with(|v| holds(v, &only))><Field f=f.clone() val dc /></Show> } }).collect_view();
+                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{text.clone()}</p></details></Show></div> }
                     }).collect_view()
                 }}
             </div>
