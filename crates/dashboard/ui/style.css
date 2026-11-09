@@ -145,6 +145,7 @@ header details div p { margin:0; padding:8px 12px; }
 button.link.err { color:var(--bad); } button.link.err.on { border:1px solid var(--bad); border-radius:6px; padding:2px 8px; background:color-mix(in srgb, var(--bad) 15%, transparent); }
 /* Wizard: the sub-options of a switch, ringed red with a note while the switch is off. */
 .atit { background:var(--b3); border-radius:6px; padding:8px 12px; margin:8px 0; box-shadow:0 0 0 2px transparent; transition:box-shadow var(--dur) var(--ease); } .atit.off { box-shadow:0 0 0 2px var(--bad); }
+.atit .sw { width:36px; height:20px; } .atit .sw::after { width:14px; height:14px; } .atit .sw:checked::after { transform:translateX(16px); }
 .atit > i { display:block; font-size:16px; font-weight:600; text-transform:uppercase; margin-bottom:4px; }
 .chip.dot::before { content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:#fff; margin-right:6px; vertical-align:middle; }
 /* A field that belongs to a switch slides open under it. */
@@ -153,7 +154,7 @@ button.link.err { color:var(--bad); } button.link.err.on { border:1px solid var(
 .alert { display:flex; gap:12px; align-items:center; background:var(--bad); color:#fff; border-radius:12px; padding:10px 14px; margin:8px 0; } .alert b { font-size:28px; } .alert p { margin:0; }
 .act { display:flex; flex-direction:column; align-items:flex-start; gap:4px; margin-top:8px; }
 /* Wizard previews replay in a loop: each message slides in after the one before it. */
-.preview.loop > * { animation:chat-in 8s var(--quint) calc(var(--i, 0) * 400ms) infinite backwards; }
+.preview.loop > :not(.chg) { animation:chat-in 8s var(--quint) calc(var(--i, 0) * 400ms) infinite backwards; }
 .preview.loop > :nth-child(2) { --i:1; } .preview.loop > :nth-child(3) { --i:2; } .preview.loop > :nth-child(4) { --i:3; } .preview.loop > :nth-child(5) { --i:4; } .preview.loop > :nth-child(6) { --i:5; } .preview.loop > :nth-child(n+7) { --i:6; }
 @keyframes chat-in { 0% { opacity:0; transform:translateX(-100px); } 6%, 100% { opacity:1; transform:none; } }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-delay:0s !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; transition-delay:0s !important; } }
