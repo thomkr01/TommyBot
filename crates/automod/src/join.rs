@@ -667,10 +667,12 @@ pub enum Charset {
     LowerDigits,
     #[serde(rename = "azAZ09")]
     Mixed,
+    #[serde(rename = "az09!$#.:;")]
+    LowerDigitsSymbols,
 }
 
 impl Charset {
-    pub const NAMES: [&str; 4] = ["AZ", "az", "az09", "azAZ09"];
+    pub const NAMES: [&str; 5] = ["AZ", "az", "az09", "azAZ09", "az09!$#.:;"];
 
     pub fn allows(self, c: char) -> bool {
         match self {
@@ -678,6 +680,9 @@ impl Charset {
             Self::Lower => c.is_ascii_lowercase(),
             Self::LowerDigits => c.is_ascii_lowercase() || c.is_ascii_digit(),
             Self::Mixed => c.is_ascii_alphanumeric(),
+            Self::LowerDigitsSymbols => {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || "!$#.:;".contains(c)
+            }
         }
     }
 }
