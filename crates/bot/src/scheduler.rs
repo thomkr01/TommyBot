@@ -104,16 +104,14 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             .fetch_one(&app.pool)
             .await?;
             let code = job.payload["code"].as_str().unwrap_or_default();
-            match crate::invites::raid_url(code).filter(|_| caught > 0) {
+            let url = crate::invites::raid_url(code).filter(|_| caught > 0);
+            let log = crate::joingate::raid_report_log(caught, url.is_some().then_some(code));
+            match url {
                 Some(url) => {
-                    let log = crate::joingate::raid_report_log(caught, Some(code));
                     send_log_link(app, gid.get(), LogKind::JoinRaid, log, (RAID_REPORT, url))
                         .await?
                 }
-                None => {
-                    let log = crate::joingate::raid_report_log(caught, None);
-                    send_log(app, gid.get(), LogKind::JoinRaid, log).await?
-                }
+                None => send_log(app, gid.get(), LogKind::JoinRaid, log).await?,
             }
         }
         "nuke_revert" => {
