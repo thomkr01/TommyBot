@@ -64,7 +64,6 @@ fn opt_label(v: &str) -> String {
         "Dm" => "DMs".into(),
         "Web" => "Website".into(),
         "Button" => "Instant Access".into(),
-        "ThirdParty" => "Third-party captcha".into(),
         "Captcha" => "TommyBot Captcha (Channel)".into(),
         "SimpleCaptcha" => "Simple Captcha (Channel)".into(),
         _ => v.chars().next().map_or(String::new(), |c| c.to_uppercase().chain(v.chars().skip(1)).collect()),

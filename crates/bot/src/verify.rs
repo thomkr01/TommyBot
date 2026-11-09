@@ -81,7 +81,7 @@ fn decide(cfg: &VerificationCfg, raid_active: bool, suspicious: bool, has_role: 
     }
     match effective_mode(&cfg.verify, raid_active) {
         VerifyMode::Button => Step::Grant,
-        VerifyMode::Web | VerifyMode::ThirdParty => Step::Web,
+        VerifyMode::Web => Step::Web,
         VerifyMode::SimpleCaptcha => Step::Simple,
         VerifyMode::Dm => Step::Dm,
         VerifyMode::Captcha => Step::Captcha,
@@ -136,7 +136,7 @@ fn help_steps(v: &VerifyCfg) -> String {
     let mut steps = vec!["Press the **Verify** button.".to_string()];
     steps.extend(match v.mode {
         VerifyMode::Button => vec!["You get access right away.".into()],
-        VerifyMode::Web | VerifyMode::ThirdParty => {
+        VerifyMode::Web => {
             vec!["Open the link and finish the check on the website.".into()]
         }
         VerifyMode::SimpleCaptcha => vec![
@@ -260,7 +260,7 @@ pub async fn web_grant(
 ) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let v = &cfg.verification;
-    if !v.enabled || !matches!(v.verify.mode, VerifyMode::Web | VerifyMode::ThirdParty) {
+    if !v.enabled || v.verify.mode != VerifyMode::Web {
         return Ok(());
     }
     let Ok(member) = app.http.guild_member(gid, user).await else {
@@ -909,12 +909,15 @@ mod tests {
             decide(&VerificationCfg::default(), false, true, false),
             Step::Say(_)
         ));
-        for mode in [VerifyMode::Web, VerifyMode::ThirdParty] {
-            assert_eq!(
-                decide(&cfg(mode, VerifyTarget::Everyone), false, true, false),
-                Step::Web
-            );
-        }
+        assert_eq!(
+            decide(
+                &cfg(VerifyMode::Web, VerifyTarget::Everyone),
+                false,
+                true,
+                false
+            ),
+            Step::Web
+        );
     }
 
     #[test]
