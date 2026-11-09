@@ -1,11 +1,15 @@
 use crate::common::*;
 use crate::form::{name_of, strs, Section};
-use crate::wizard::{Card, ANTINUKE, AUTOMOD, JOINGATE, JOINRAID, MISC, TICKETS, VERIFICATION, WHITELIST};
+use crate::wizard::{
+    Card, ANTINUKE, AUTOMOD, JOINGATE, JOINRAID, MISC, TICKETS, VERIFICATION, WHITELIST,
+};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::{json, Value};
 
 fn s(v: &Value) -> String {
-    v.as_str().map(String::from).unwrap_or_else(|| v.to_string())
+    v.as_str()
+        .map(String::from)
+        .unwrap_or_else(|| v.to_string())
 }
 
 /// Log channels the wizard's Custom choice can add to the essentials: (channel name, label).
@@ -24,18 +28,46 @@ const OPTIONAL_LOGS: [(&str, &str); 10] = [
 
 #[component]
 pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    const STEPS: [&str; 11] = ["Auto Setup", "Misc", "Automod", "Antinuke", "Whitelist", "Join Gate", "Join Raid", "Verification", "Tickets", "Rescue", "Wrap"];
-    const CARDS: [(&str, &[Card]); 8] = [("misc", MISC), ("automod", AUTOMOD), ("antinuke", ANTINUKE), ("whitelist", WHITELIST), ("joingate", JOINGATE), ("joinraid", JOINRAID), ("verification", VERIFICATION), ("tickets", TICKETS)];
+    const STEPS: [&str; 11] = [
+        "Auto Setup",
+        "Misc",
+        "Automod",
+        "Antinuke",
+        "Whitelist",
+        "Join Gate",
+        "Join Raid",
+        "Verification",
+        "Tickets",
+        "Rescue",
+        "Wrap",
+    ];
+    const CARDS: [(&str, &[Card]); 8] = [
+        ("misc", MISC),
+        ("automod", AUTOMOD),
+        ("antinuke", ANTINUKE),
+        ("whitelist", WHITELIST),
+        ("joingate", JOINGATE),
+        ("joinraid", JOINRAID),
+        ("verification", VERIFICATION),
+        ("tickets", TICKETS),
+    ];
     let step = RwSignal::new(0usize);
     // The furthest step reached, kept per server in this browser so the ring keeps its progress.
     let key = format!("wizard:{guild}");
     let store = || web_sys::window().and_then(|w| w.local_storage().ok().flatten());
-    let furthest = RwSignal::new(store().and_then(|s| s.get_item(&key).ok().flatten()).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0));
+    let furthest = RwSignal::new(
+        store()
+            .and_then(|s| s.get_item(&key).ok().flatten())
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0),
+    );
     Effect::new(move |_| {
         let i = step.get();
         if i > furthest.get_untracked() {
             furthest.set(i);
-            if let Some(s) = store() { let _ = s.set_item(&key, &i.to_string()); }
+            if let Some(s) = store() {
+                let _ = s.set_item(&key, &i.to_string());
+            }
         }
     });
     let (msg, need) = (Msg::default(), RwSignal::new(false));
@@ -46,31 +78,68 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let auto = move |logs: Option<Vec<String>>| {
         let (g, g2) = (g.clone(), g.clone());
         msg.ok("Running Auto Setup... this takes a little while on servers with many channels.");
-        run_act(async move {
-            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
-            api("POST", &format!("/api/guilds/{g}/wizard/auto-setup"), Some(json!({"expected_version": c["version"], "logs": logs}))).await
-        }, msg, need, move |v| { let (g, c, failed) = (g2.clone(), v["created"].clone(), v["quarantine_failed"].clone()); spawn_local(async move {
-            let dc = api("GET", &format!("/api/guilds/{g}/discord"), None).await.unwrap_or(Value::Null);
-            let role = |k: &str| name_of(&dc, "roles", c[k].as_str().unwrap_or(""));
-            let logs = strs(&c["logs"]).join(", #");
-            let logs = if logs.is_empty() { "the log channels were already set".into() } else { format!("log channels #{logs} (reports and appeals in a Staff category)") };
-            let member = if c["member_role"].is_string() { format!(", main role {}", role("member_role")) } else { String::new() };
-            let member = if c["staff"] == true { format!("{member}, Admins and Moderators roles with their permits") } else { member };
-            let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
-            msg.ok(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
-        }) });
+        run_act(
+            async move {
+                let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+                api(
+                    "POST",
+                    &format!("/api/guilds/{g}/wizard/auto-setup"),
+                    Some(json!({"expected_version": c["version"], "logs": logs})),
+                )
+                .await
+            },
+            msg,
+            need,
+            move |v| {
+                let (g, c, failed) = (
+                    g2.clone(),
+                    v["created"].clone(),
+                    v["quarantine_failed"].clone(),
+                );
+                spawn_local(async move {
+                    let dc = api("GET", &format!("/api/guilds/{g}/discord"), None)
+                        .await
+                        .unwrap_or(Value::Null);
+                    let role = |k: &str| name_of(&dc, "roles", c[k].as_str().unwrap_or(""));
+                    let logs = strs(&c["logs"]).join(", #");
+                    let logs = if logs.is_empty() {
+                        "the log channels were already set".into()
+                    } else {
+                        format!("log channels #{logs} (reports and appeals in a Staff category)")
+                    };
+                    let member = if c["member_role"].is_string() {
+                        format!(", main role {}", role("member_role"))
+                    } else {
+                        String::new()
+                    };
+                    let member = if c["staff"] == true {
+                        format!("{member}, Admins and Moderators roles with their permits")
+                    } else {
+                        member
+                    };
+                    let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
+                    msg.ok(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
+                })
+            },
+        );
     };
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
     let g_id = guild.clone();
     let g = guild.clone();
     let me = expect_context::<ReadSignal<Option<Value>>>();
-    let support = move || me.get().and_then(|m| m["support_url"].as_str().map(String::from)).unwrap_or_else(|| "https://github.com/thomkr01/TommyBot".into());
+    let support = move || {
+        me.get()
+            .and_then(|m| m["support_url"].as_str().map(String::from))
+            .unwrap_or_else(|| "https://github.com/thomkr01/TommyBot".into())
+    };
     // Same side arrows as the settings cards of steps 1-8.
-        let arrows = move |body: AnyView| view! { <div class="card wiz">
+    let arrows = move |body: AnyView| {
+        view! { <div class="card wiz">
             <button class="nav back" aria-label="previous" disabled=move || step.get() == 0 on:click=move |_| step.update(|i| *i = i.saturating_sub(1))>{crate::icons::icon("page_prev")}</button>
             <div class="wizbody">{body}</div>
             <button class="nav" aria-label="next" on:click=move |_| step.update(|i| *i += 1)>{crate::icons::icon("page_next")}</button>
-        </div> }.into_any();
+        </div> }.into_any()
+    };
     view! {
         <div class="wizbar"><button on:click=move |_| { step.update(|i| *i = (*i + 1).min(STEPS.len() - 1)); scroll_to("wizstep") }>{move || if step.get() == 0 { "Start wizard" } else { "Next step" }}</button><a href=support target="_blank" rel="noopener">"Support"</a></div>
         <div class="card">
@@ -112,9 +181,19 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 
 /// Progress ring: `pct` filled, number in the middle.
 #[component]
-pub fn Ring(pct: Signal<usize>, #[prop(default = None)] color: Option<&'static str>, #[prop(default = false)] small: bool) -> impl IntoView {
+pub fn Ring(
+    pct: Signal<usize>,
+    #[prop(default = None)] color: Option<&'static str>,
+    #[prop(default = false)] small: bool,
+) -> impl IntoView {
     // Without a fixed colour the ring is red under 50, orange under 80 and green above.
-    let c = move || color.unwrap_or(match pct.get() { 0..50 => "var(--bad)", 50..80 => "var(--warn)", _ => "var(--ok)" });
+    let c = move || {
+        color.unwrap_or(match pct.get() {
+            0..50 => "var(--bad)",
+            50..80 => "var(--warn)",
+            _ => "var(--ok)",
+        })
+    };
     view! { <div class="ring" class:small=small style=move || format!("--p:{};--c:{}", pct.get(), c())><b>{move || format!("{}%", pct.get())}</b></div> }
 }
 
@@ -130,7 +209,11 @@ const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
 /// Master switch of a system: reads and writes its `enabled` key.
 #[component]
 fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl IntoView {
-    let (cfg, version, on) = (RwSignal::new(json!({})), RwSignal::new(0i64), RwSignal::new(default));
+    let (cfg, version, on) = (
+        RwSignal::new(json!({})),
+        RwSignal::new(0i64),
+        RwSignal::new(default),
+    );
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Locked while the config loads and while a save runs, so the knob never shows a state the server does not have.
     let busy = RwSignal::new(true);
@@ -139,7 +222,9 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
         if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
             version.set(v["version"].as_i64().unwrap_or(0));
             on.set(v["config"][section]["enabled"].as_bool().unwrap_or(default));
-            if v["config"][section].is_object() { cfg.set(v["config"][section].clone()); }
+            if v["config"][section].is_object() {
+                cfg.set(v["config"][section].clone());
+            }
         }
         busy.set(false);
     });
@@ -150,12 +235,28 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
         let (g, v, value) = (guild.clone(), version.get_untracked(), cfg.get_untracked());
         on.set(x);
         busy.set(true);
-        run_act(async move {
-            let r = api("PUT", &format!("/api/guilds/{g}/config/{section}"), Some(json!({"expected_version": v, "value": value}))).await;
-            if r.is_err() { cfg.set(before); on.set(!x); }
-            busy.set(false);
-            r
-        }, msg, need, move |r| { msg.ok(format!("{section} turned {}", if x { "on" } else { "off" })); version.set(r["version"].as_i64().unwrap_or(0)) });
+        run_act(
+            async move {
+                let r = api(
+                    "PUT",
+                    &format!("/api/guilds/{g}/config/{section}"),
+                    Some(json!({"expected_version": v, "value": value})),
+                )
+                .await;
+                if r.is_err() {
+                    cfg.set(before);
+                    on.set(!x);
+                }
+                busy.set(false);
+                r
+            },
+            msg,
+            need,
+            move |r| {
+                msg.ok(format!("{section} turned {}", if x { "on" } else { "off" }));
+                version.set(r["version"].as_i64().unwrap_or(0))
+            },
+        );
     };
     view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() prop:checked=move || on.get() on:change=change /><Toast msg /> }
 }
@@ -167,16 +268,30 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
     let members = RwSignal::new(Value::Null);
     let g = guild.clone();
-    spawn_local(async move { if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { members.set(d["members"].clone()) } });
-    let g = guild.clone();
-    let load = move || { let g = g.clone(); spawn_local(async move {
-        match api("GET", &format!("/api/guilds/{g}/score"), None).await {
-            Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
-            Err(e) => msg.err(e),
+    spawn_local(async move {
+        if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await {
+            members.set(d["members"].clone())
         }
-    }) };
+    });
+    let g = guild.clone();
+    let load = move || {
+        let g = g.clone();
+        spawn_local(async move {
+            match api("GET", &format!("/api/guilds/{g}/score"), None).await {
+                Ok(v) => rows.set(v.as_array().cloned().unwrap_or_default()),
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     load();
-    let pct = Signal::derive(move || { let r = rows.get(); if r.is_empty() { 0 } else { r.iter().filter(|x| x["severity"] == "ok").count() * 100 / r.len() } });
+    let pct = Signal::derive(move || {
+        let r = rows.get();
+        if r.is_empty() {
+            0
+        } else {
+            r.iter().filter(|x| x["severity"] == "ok").count() * 100 / r.len()
+        }
+    });
     let (id, g2) = (guild.clone(), guild.clone());
     view! {
         <div class="card"><div class="split">
@@ -228,27 +343,68 @@ fn Stat(label: &'static str, value: String) -> impl IntoView {
 
 #[component]
 pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let (actor, hours) = (RwSignal::new(String::new()), RwSignal::new("24".to_string()));
+    let (actor, hours) = (
+        RwSignal::new(String::new()),
+        RwSignal::new("24".to_string()),
+    );
     let rows = RwSignal::new(Vec::<Value>::new());
     let picked = RwSignal::new(Vec::<i64>::new());
     let report = RwSignal::new(String::new());
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = guild.clone();
-    let load = move |_| { let g = g.clone(); spawn_local(async move {
-        let q = format!("/api/guilds/{g}/actions?actor={}&hours={}", actor.get_untracked().trim(), hours.get_untracked().trim());
-        match api("GET", &q, None).await {
-            Ok(v) => { msg.clear(); picked.set(vec![]); rows.set(v.as_array().cloned().unwrap_or_default()) }
-            Err(e) => msg.err(e),
-        }
-    }) };
+    let load = move |_| {
+        let g = g.clone();
+        spawn_local(async move {
+            let q = format!(
+                "/api/guilds/{g}/actions?actor={}&hours={}",
+                actor.get_untracked().trim(),
+                hours.get_untracked().trim()
+            );
+            match api("GET", &q, None).await {
+                Ok(v) => {
+                    msg.clear();
+                    picked.set(vec![]);
+                    rows.set(v.as_array().cloned().unwrap_or_default())
+                }
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     let revert = move |_| {
         let (g, ids) = (guild.clone(), picked.get_untracked());
-        if ids.is_empty() { return msg.err("Select at least one action") }
-        run_act(async move { api("POST", &format!("/api/guilds/{g}/revert"), Some(json!({"ids": ids}))).await }, msg, need, move |v| {
-            let fails: Vec<String> = v["failed"].as_array().map(|a| a.iter().map(|f| format!("{}: {}", s(&f["id"]), s(&f["error"]))).collect()).unwrap_or_default();
-            report.set(format!("Done: {}\nFailed: {}\nSkipped: {}\nRe-invite these users manually: {}", v["done"], fails.join("; "), v["skipped"], v["reinvite"]));
-            msg.clear();
-        });
+        if ids.is_empty() {
+            return msg.err("Select at least one action");
+        }
+        run_act(
+            async move {
+                api(
+                    "POST",
+                    &format!("/api/guilds/{g}/revert"),
+                    Some(json!({"ids": ids})),
+                )
+                .await
+            },
+            msg,
+            need,
+            move |v| {
+                let fails: Vec<String> = v["failed"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .map(|f| format!("{}: {}", s(&f["id"]), s(&f["error"])))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                report.set(format!(
+                    "Done: {}\nFailed: {}\nSkipped: {}\nRe-invite these users manually: {}",
+                    v["done"],
+                    fails.join("; "),
+                    v["skipped"],
+                    v["reinvite"]
+                ));
+                msg.clear();
+            },
+        );
     };
     view! {
         <div class="row">
@@ -289,12 +445,32 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     });
     let g = guild.clone();
     let regen = move |_| {
-        if has_key.get_untracked() && !confirm("Make a new rescue key? The old key and its authenticator code stop working.") { return; }
+        if has_key.get_untracked()
+            && !confirm(
+                "Make a new rescue key? The old key and its authenticator code stop working.",
+            )
+        {
+            return;
+        }
         let g = g.clone();
-        run_act(async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await }, msg, need, move |v| {
-            key.set(s(&v["key"])); has_key.set(true);
-            qr.set(qrcode::QrCode::new(v["uri"].as_str().unwrap_or("")).map(|q| q.render::<qrcode::render::svg::Color>().min_dimensions(200, 200).build()).unwrap_or_default());
-        });
+        run_act(
+            async move { api("POST", &format!("/api/guilds/{g}/rescue/regenerate"), None).await },
+            msg,
+            need,
+            move |v| {
+                key.set(s(&v["key"]));
+                has_key.set(true);
+                qr.set(
+                    qrcode::QrCode::new(v["uri"].as_str().unwrap_or(""))
+                        .map(|q| {
+                            q.render::<qrcode::render::svg::Color>()
+                                .min_dimensions(200, 200)
+                                .build()
+                        })
+                        .unwrap_or_default(),
+                );
+            },
+        );
     };
     view! {
         <div class="card">
@@ -320,14 +496,29 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 pub fn PurgeData(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
     let gid = StoredValue::new(guild);
-    let name = Memo::new(move |_| guilds.get().iter().find(|x| x["id"] == gid.get_value().as_str()).map(|x| s(&x["name"])).unwrap_or_default());
+    let name = Memo::new(move |_| {
+        guilds
+            .get()
+            .iter()
+            .find(|x| x["id"] == gid.get_value().as_str())
+            .map(|x| s(&x["name"]))
+            .unwrap_or_default()
+    });
     let (open, typed) = (RwSignal::new(false), RwSignal::new(String::new()));
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let matches = move || !typed.get().trim().is_empty() && typed.get().trim() == name.get().trim();
     let purge = move |_| {
         let g = gid.get_value();
         open.set(false);
-        run_act(async move { api("POST", &format!("/api/guilds/{g}/purge"), None).await }, msg, need, move |_| { typed.set(String::new()); msg.ok("All stored data for this server was deleted. TommyBot now runs on default settings.") });
+        run_act(
+            async move { api("POST", &format!("/api/guilds/{g}/purge"), None).await },
+            msg,
+            need,
+            move |_| {
+                typed.set(String::new());
+                msg.ok("All stored data for this server was deleted. TommyBot now runs on default settings.")
+            },
+        );
     };
     let r = NodeRef::new();
     focus_on_open(r);
@@ -353,11 +544,21 @@ pub fn PurgeData(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 /// authenticator's 6-digit code. Works from the Servers page, before any server is open.
 #[component]
 pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
-    let (open, guild, secret, code) = (RwSignal::new(false), RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (open, guild, secret, code) = (
+        RwSignal::new(false),
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+    );
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let claim = move |_| {
         let body = json!({"guild_id": guild.get_untracked(), "key": secret.get_untracked().trim(), "code": code.get_untracked().trim()});
-        run_act(async move { api("POST", "/api/rescue/claim", Some(body)).await }, msg, need, move |_| msg.ok("Claimed. Refresh your servers."));
+        run_act(
+            async move { api("POST", "/api/rescue/claim", Some(body)).await },
+            msg,
+            need,
+            move |_| msg.ok("Claimed. Refresh your servers."),
+        );
     };
     view! {
         <button class="link err" class:on=open aria-expanded=move || open.get().to_string() on:click=move |_| open.update(|o| *o = !*o)>"Lost control over TommyBot in a server?"</button>
@@ -375,9 +576,22 @@ pub fn LostControl(enrolled: ReadSignal<bool>) -> impl IntoView {
 
 /// Logging page: TommyBot and Discord tabs, each with essential and customize sub-tabs.
 #[component]
-pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<bool>) -> impl IntoView {
-    let tab = if tab == "discord" { "discord" } else { "tommybot" };
-    let sub = if sub == "customize" { "customize" } else { "essential" };
+pub fn Logging(
+    guild: String,
+    tab: String,
+    sub: String,
+    enrolled: ReadSignal<bool>,
+) -> impl IntoView {
+    let tab = if tab == "discord" {
+        "discord"
+    } else {
+        "tommybot"
+    };
+    let sub = if sub == "customize" {
+        "customize"
+    } else {
+        "essential"
+    };
     let part = format!("{tab}_{sub}");
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Bumped after a setup so the form below reloads the config the setup changed.
@@ -386,11 +600,24 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
     // Optional: private "Logs" and "Staff" categories with a channel per log type that has none yet.
     let setup = move |_| {
         let g = g.clone();
-        run_act(async move {
-            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
-            let all: Vec<&str> = OPTIONAL_LOGS.iter().map(|(n, _)| *n).collect();
-            api("POST", &format!("/api/guilds/{g}/logging/setup"), Some(json!({"expected_version": c["version"], "logs": all}))).await
-        }, msg, need, move |_| { msg.ok("Done"); fresh.update(|n| *n += 1) });
+        run_act(
+            async move {
+                let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+                let all: Vec<&str> = OPTIONAL_LOGS.iter().map(|(n, _)| *n).collect();
+                api(
+                    "POST",
+                    &format!("/api/guilds/{g}/logging/setup"),
+                    Some(json!({"expected_version": c["version"], "logs": all})),
+                )
+                .await
+            },
+            msg,
+            need,
+            move |_| {
+                msg.ok("Done");
+                fresh.update(|n| *n += 1)
+            },
+        );
     };
     view! {
         <div class="row"><button on:click=setup>"Create a channel per log type"</button><Toast msg /></div>
@@ -404,31 +631,36 @@ pub fn Logging(guild: String, tab: String, sub: String, enrolled: ReadSignal<boo
             <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
         </div>
         {move || { fresh.track(); let (g, part) = (guild.clone(), part.clone()); view! {
-            {(tab == "tommybot").then(|| view! { <RouteNote guild=g.clone() customize=sub == "customize" /> })}
+            {(tab == "tommybot" && sub != "customize").then(|| view! { <RouteNote guild=g.clone() /> })}
             <Section guild=g name="logging".to_string() part enrolled />
         } }}
     }
 }
 
-/// Note under TommyBot logs listing the types that have their own channel, and the empty state on
-/// the customize tab.
+/// Note under TommyBot logs listing the types that have their own channel.
 #[component]
-fn RouteNote(guild: String, customize: bool) -> impl IntoView {
+fn RouteNote(guild: String) -> impl IntoView {
     let moved = RwSignal::new(None::<Vec<String>>);
     spawn_local(async move {
         if let Ok(v) = api("GET", &format!("/api/guilds/{guild}/config"), None).await {
-            let routes = v["config"]["logging"]["routes"].as_object().cloned().unwrap_or_default();
-            let mut names: Vec<String> = routes.iter().filter(|(k, r)| *k != "mod_command" && !r.is_null()).map(|(k, _)| k.replace('_', " ")).collect();
+            let routes = v["config"]["logging"]["routes"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let mut names: Vec<String> = routes
+                .iter()
+                .filter(|(k, r)| *k != "mod_command" && !r.is_null())
+                .map(|(k, _)| k.replace('_', " "))
+                .collect();
             names.sort();
             moved.set(Some(names));
         }
     });
     view! {
-        {move || moved.get().filter(|n| !n.is_empty() && !customize).map(|n| view! { <details class="card" open=true><summary class="info">"Note"</summary>
+        {move || moved.get().filter(|n| !n.is_empty()).map(|n| view! { <details class="card" open=true><summary class="info">"Note"</summary>
             <p>"These log types have their own channel, so they skip the TommyBot logs channel:"</p>
             <div class="chips">{n.into_iter().map(|t| view! { <span class="chip blue">{t}</span> }).collect_view()}</div>
             <p class="muted">"Everything else, except mod logs, still lands in the TommyBot logs channel."</p></details> })}
-        {move || moved.get().filter(|n| n.is_empty() && customize).map(|_| view! { <p class="muted">"There are no customizable log channels set, add your own."</p> })}
     }
 }
 
@@ -441,12 +673,31 @@ pub fn Catch(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let g = guild.clone();
     let setup = move |_| {
         let sure = "This creates #do-not-write at the top of the server and turns the catch channel on: anyone without a permit who writes there gets the action below. Continue?";
-        if !web_sys::window().unwrap().confirm_with_message(sure).unwrap_or(false) { return; }
+        if !web_sys::window()
+            .unwrap()
+            .confirm_with_message(sure)
+            .unwrap_or(false)
+        {
+            return;
+        }
         let g = g.clone();
-        run_act(async move {
-            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
-            api("POST", &format!("/api/guilds/{g}/catch/setup"), Some(json!({"expected_version": c["version"]}))).await
-        }, msg, need, move |_| { msg.ok("Done"); fresh.update(|n| *n += 1) });
+        run_act(
+            async move {
+                let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+                api(
+                    "POST",
+                    &format!("/api/guilds/{g}/catch/setup"),
+                    Some(json!({"expected_version": c["version"]})),
+                )
+                .await
+            },
+            msg,
+            need,
+            move |_| {
+                msg.ok("Done");
+                fresh.update(|n| *n += 1)
+            },
+        );
     };
     view! {
         <div class="row"><button on:click=setup>"Set up channel"</button><Toast msg /></div>
@@ -464,10 +715,23 @@ pub fn Tickets(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let g = guild.clone();
     let setup = move |_| {
         let g = g.clone();
-        run_act(async move {
-            let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
-            api("POST", &format!("/api/guilds/{g}/tickets/setup"), Some(json!({"expected_version": c["version"]}))).await
-        }, msg, need, move |_| { msg.ok("Done"); fresh.update(|n| *n += 1) });
+        run_act(
+            async move {
+                let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+                api(
+                    "POST",
+                    &format!("/api/guilds/{g}/tickets/setup"),
+                    Some(json!({"expected_version": c["version"]})),
+                )
+                .await
+            },
+            msg,
+            need,
+            move |_| {
+                msg.ok("Done");
+                fresh.update(|n| *n += 1)
+            },
+        );
     };
     view! {
         <div class="row"><button on:click=setup>"Set up the ticket category and log"</button><Toast msg /></div>

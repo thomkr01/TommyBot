@@ -4,11 +4,27 @@ use leptos::{prelude::*, task::spawn_local};
 use serde_json::Value;
 use std::time::Duration;
 
-const STEPS: [&str; 5] = ["Checking the running version", "Downloading the new version", "Restarting the bot", "Restarting the dashboard", "Checking that everything runs"];
+const STEPS: [&str; 5] = [
+    "Checking the running version",
+    "Downloading the new version",
+    "Restarting the bot",
+    "Restarting the dashboard",
+    "Checking that everything runs",
+];
 
-fn short(v: &Value) -> String { v.as_str().map(|s| s.chars().take(7).collect()).unwrap_or_else(|| "unknown".into()) }
+fn short(v: &Value) -> String {
+    v.as_str()
+        .map(|s| s.chars().take(7).collect())
+        .unwrap_or_else(|| "unknown".into())
+}
 
-fn dur(s: i64) -> String { if s >= 60 { format!("{} min {} s", s / 60, s % 60) } else { format!("{s} s") } }
+fn dur(s: i64) -> String {
+    if s >= 60 {
+        format!("{} min {} s", s / 60, s % 60)
+    } else {
+        format!("{s} s")
+    }
+}
 
 /// Share done (0 to 1) and seconds left, from the per-step estimate and the time spent in the current step.
 fn progress(est: &[i64], step: usize, elapsed: i64) -> (f64, i64) {
@@ -27,26 +43,49 @@ pub fn Update(enrolled: ReadSignal<bool>) -> impl IntoView {
     let loaded_sha = StoredValue::new(None::<Value>);
     let msg = Msg::default();
     let need = RwSignal::new(false);
-    let load = move || spawn_local(async move {
-        match api("GET", "/api/update", None).await {
-            Ok(v) => {
-                if loaded_sha.get_value().is_none() { loaded_sha.set_value(Some(v["current"].clone())) }
-                data.set(v);
-                away.set(false);
+    let load = move || {
+        spawn_local(async move {
+            match api("GET", "/api/update", None).await {
+                Ok(v) => {
+                    if loaded_sha.get_value().is_none() {
+                        loaded_sha.set_value(Some(v["current"].clone()))
+                    }
+                    data.set(v);
+                    away.set(false);
+                }
+                Err(e) if data.get_untracked().is_null() => msg.err(e),
+                Err(_) => away.set(true),
             }
-            Err(e) if data.get_untracked().is_null() => msg.err(e),
-            Err(_) => away.set(true),
+        })
+    };
+    load();
+    let active = move || {
+        matches!(
+            data.get()["run"]["status"].as_str(),
+            Some("queued" | "running")
+        )
+    };
+    let poll = set_interval_with_handle(
+        move || {
+            if active() || away.get_untracked() {
+                load()
+            }
+        },
+        Duration::from_secs(1),
+    );
+    on_cleanup(move || {
+        if let Ok(h) = poll {
+            h.clear()
         }
     });
-    load();
-    let active = move || matches!(data.get()["run"]["status"].as_str(), Some("queued" | "running"));
-    let poll = set_interval_with_handle(move || if active() || away.get_untracked() { load() }, Duration::from_secs(1));
-    on_cleanup(move || if let Ok(h) = poll { h.clear() });
     let start = move |_| run_act(api("POST", "/api/update", None), msg, need, move |_| load());
 
     let head = move || {
         let d = data.get();
-        let (cur, new) = (d["current"].as_str().map(String::from), d["latest"]["sha"].as_str().map(String::from));
+        let (cur, new) = (
+            d["current"].as_str().map(String::from),
+            d["latest"]["sha"].as_str().map(String::from),
+        );
         let fresh = cur.is_some() && cur == new;
         let news = cur.zip(new).filter(|(c, n)| c != n).map(|(c, n)| view! { " " <a href=format!("https://github.com/thomkr01/TommyBot/compare/{c}...{n}") target="_blank" rel="noopener">"See what's new"</a> });
         view! {
@@ -70,21 +109,32 @@ pub fn Update(enrolled: ReadSignal<bool>) -> impl IntoView {
         let d = data.get();
         let r = &d["run"];
         let status = r["status"].as_str()?.to_string();
-        let est: Vec<i64> = d["estimate"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).filter(|e: &Vec<i64>| e.len() == STEPS.len()).unwrap_or_else(|| vec![10; STEPS.len()]);
+        let est: Vec<i64> = d["estimate"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_i64).collect())
+            .filter(|e: &Vec<i64>| e.len() == STEPS.len())
+            .unwrap_or_else(|| vec![10; STEPS.len()]);
         let step = r["step"].as_u64().unwrap_or(0) as usize;
         let live = status == "running";
         let (share, left) = progress(&est, step, r["step_elapsed"].as_i64().unwrap_or(0));
-        let rows = STEPS.iter().enumerate().map(|(i, name)| {
-            let class = match status.as_str() {
-                "done" => "ok",
-                "running" if i == step => "run",
-                "failed" | "rolled_back" if i == step => "err",
-                _ if i < step => "ok",
-                _ => "",
-            };
-            let took = r["step_times"].get(i).and_then(Value::as_i64).map(|s| format!(" · {}", dur(s)));
-            view! { <li class=class>{*name}<span class="muted">{took}</span></li> }
-        }).collect_view();
+        let rows = STEPS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let class = match status.as_str() {
+                    "done" => "ok",
+                    "running" if i == step => "run",
+                    "failed" | "rolled_back" if i == step => "err",
+                    _ if i < step => "ok",
+                    _ => "",
+                };
+                let took = r["step_times"]
+                    .get(i)
+                    .and_then(Value::as_i64)
+                    .map(|s| format!(" · {}", dur(s)));
+                view! { <li class=class>{*name}<span class="muted">{took}</span></li> }
+            })
+            .collect_view();
         let summary = match status.as_str() {
             "queued" => view! { <p class="muted">"Waiting for the updater to pick it up..."</p> }.into_any(),
             "running" => view! {
@@ -100,7 +150,9 @@ pub fn Update(enrolled: ReadSignal<bool>) -> impl IntoView {
             }
             _ => view! { <p class="err">{r["error"].as_str().unwrap_or("The update failed.").to_string()}</p> }.into_any(),
         };
-        Some(view! { <div class="card"><h3>{if live { "Updating" } else { "Last update" }}</h3><ul class="checks">{rows}</ul>{summary}</div> })
+        Some(
+            view! { <div class="card"><h3>{if live { "Updating" } else { "Last update" }}</h3><ul class="checks">{rows}</ul>{summary}</div> },
+        )
     };
 
     view! {

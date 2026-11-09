@@ -7,7 +7,11 @@ fn s(v: &Value) -> String {
 }
 
 /// Filter chips writing into `sig`; every change reloads through `load`.
-fn chips(sig: RwSignal<String>, opts: &'static [(&'static str, &'static str)], load: impl Fn() + Copy + 'static) -> impl IntoView {
+fn chips(
+    sig: RwSignal<String>,
+    opts: &'static [(&'static str, &'static str)],
+    load: impl Fn() + Copy + 'static,
+) -> impl IntoView {
     view! { <div class="chips">{opts.iter().map(|(k, l)| view! { <button class="ghost" class:on=move || sig.get() == *k on:click=move |_| { sig.set((*k).into()); load() }>{*l}</button> }).collect_view()}</div> }
 }
 
@@ -15,7 +19,10 @@ fn chips(sig: RwSignal<String>, opts: &'static [(&'static str, &'static str)], l
 fn fetch(path: String, rows: WriteSignal<Vec<Value>>, msg: Msg, loaded: RwSignal<bool>) {
     spawn_local(async move {
         match api("GET", &path, None).await {
-            Ok(v) => { msg.clear(); rows.set(v.as_array().cloned().unwrap_or_default()) }
+            Ok(v) => {
+                msg.clear();
+                rows.set(v.as_array().cloned().unwrap_or_default())
+            }
             Err(e) => msg.err(e),
         }
         loaded.set(true);
@@ -24,7 +31,12 @@ fn fetch(path: String, rows: WriteSignal<Vec<Value>>, msg: Msg, loaded: RwSignal
 
 /// "Export CSV": loads every page of `list` (a list URL ending in `page=`, so the export keeps the
 /// current filter) and downloads it as `{name}.csv`.
-pub fn export_csv(list: impl Fn() -> String + Copy + 'static, name: &'static str, cols: &'static [&'static str], msg: Msg) -> impl IntoView {
+pub fn export_csv(
+    list: impl Fn() -> String + Copy + 'static,
+    name: &'static str,
+    cols: &'static [&'static str],
+    msg: Msg,
+) -> impl IntoView {
     let go = move |_| {
         let base = list();
         spawn_local(async move {
@@ -35,12 +47,17 @@ pub fn export_csv(list: impl Fn() -> String + Copy + 'static, name: &'static str
                         let page = v.as_array().cloned().unwrap_or_default();
                         let last = page.len() < 50;
                         all.extend(page);
-                        if last { break }
+                        if last {
+                            break;
+                        }
                     }
                     Err(e) => return msg.err(e),
                 }
             }
-            download(&format!("{name}.csv"), &format!("data:text/csv;charset=utf-8,{}", enc(&to_csv(cols, &all))));
+            download(
+                &format!("{name}.csv"),
+                &format!("data:text/csv;charset=utf-8,{}", enc(&to_csv(cols, &all))),
+            );
         });
     };
     view! { <button class="ghost" on:click=go>"Export CSV"</button> }
@@ -49,20 +66,36 @@ pub fn export_csv(list: impl Fn() -> String + Copy + 'static, name: &'static str
 /// Every cell quoted; text starting with = + - @ gets a leading ' so spreadsheets do not run it as a formula.
 fn to_csv(cols: &[&str], rows: &[Value]) -> String {
     let cell = |v: &Value| {
-        let t = match v { Value::String(t) => t.clone(), Value::Null => String::new(), v => v.to_string() };
-        let t = if t.starts_with(['=', '+', '-', '@']) { format!("'{t}") } else { t };
+        let t = match v {
+            Value::String(t) => t.clone(),
+            Value::Null => String::new(),
+            v => v.to_string(),
+        };
+        let t = if t.starts_with(['=', '+', '-', '@']) {
+            format!("'{t}")
+        } else {
+            t
+        };
         format!("\"{}\"", t.replace('"', "\"\""))
     };
     let mut out = cols.join(",") + "\r\n";
     for r in rows {
-        out += &cols.iter().map(|c| cell(&r[*c])).collect::<Vec<_>>().join(",");
+        out += &cols
+            .iter()
+            .map(|c| cell(&r[*c]))
+            .collect::<Vec<_>>()
+            .join(",");
         out += "\r\n";
     }
     out
 }
 
 /// Previous/next buttons for lists the API serves 50 rows a page.
-pub fn pager(page: RwSignal<i64>, count: impl Fn() -> usize + Copy + Send + Sync + 'static, load: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+pub fn pager(
+    page: RwSignal<i64>,
+    count: impl Fn() -> usize + Copy + Send + Sync + 'static,
+    load: impl Fn() + Copy + Send + Sync + 'static,
+) -> impl IntoView {
     let shown = move || page.get() > 0 || count() == 50;
     view! { <Show when=shown><div class="row pager">
         <button class="ghost" aria-label="previous page" disabled=move || page.get() == 0 on:click=move |_| { page.update(|p| *p -= 1); load() }>{crate::icons::icon("page_prev")}</button>
@@ -72,7 +105,11 @@ pub fn pager(page: RwSignal<i64>, count: impl Fn() -> usize + Copy + Send + Sync
 }
 
 /// Looks up member names for `ids` (25 per request, the API's cap); members who left keep their ID.
-fn learn_names(guild: String, mut ids: Vec<String>, names: RwSignal<std::collections::HashMap<String, String>>) {
+fn learn_names(
+    guild: String,
+    mut ids: Vec<String>,
+    names: RwSignal<std::collections::HashMap<String, String>>,
+) {
     ids.sort();
     ids.dedup();
     ids.retain(|i| !i.is_empty() && !names.with_untracked(|n| n.contains_key(i)));
@@ -80,7 +117,14 @@ fn learn_names(guild: String, mut ids: Vec<String>, names: RwSignal<std::collect
         let path = format!("/api/guilds/{guild}/members?ids={}", chunk.join(","));
         spawn_local(async move {
             if let Ok(v) = api("GET", &path, None).await {
-                names.update(|n| n.extend(v.as_array().into_iter().flatten().map(|m| (s(&m["id"]), s(&m["name"])))));
+                names.update(|n| {
+                    n.extend(
+                        v.as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|m| (s(&m["id"]), s(&m["name"]))),
+                    )
+                });
             }
         });
     }
@@ -94,17 +138,52 @@ fn enc(v: &str) -> String {
 pub fn CaseList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let loaded = RwSignal::new(false);
-    let (q, kind, state, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()), Msg::default());
+    let (q, kind, state, msg) = (
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+        Msg::default(),
+    );
     let g = StoredValue::new(guild);
     let page = RwSignal::new(0i64);
-    let list = move || format!("/api/guilds/{}/cases?q={}&kind={}&state={}&page=", g.get_value(), enc(&q.get_untracked()), kind.get_untracked(), state.get_untracked());
-    let load = move || fetch(format!("{}{}", list(), page.get_untracked()), set_rows, msg, loaded);
-    let first = move || { page.set(0); load() };
+    let list = move || {
+        format!(
+            "/api/guilds/{}/cases?q={}&kind={}&state={}&page=",
+            g.get_value(),
+            enc(&q.get_untracked()),
+            kind.get_untracked(),
+            state.get_untracked()
+        )
+    };
+    let load = move || {
+        fetch(
+            format!("{}{}", list(), page.get_untracked()),
+            set_rows,
+            msg,
+            loaded,
+        )
+    };
+    let first = move || {
+        page.set(0);
+        load()
+    };
     load();
     let names = RwSignal::new(std::collections::HashMap::<String, String>::new());
-    Effect::new(move || learn_names(g.get_value(), rows.get().iter().flat_map(|r| [s(&r["user_id"]), s(&r["mod_id"])]).collect(), names));
+    Effect::new(move || {
+        learn_names(
+            g.get_value(),
+            rows.get()
+                .iter()
+                .flat_map(|r| [s(&r["user_id"]), s(&r["mod_id"])])
+                .collect(),
+            names,
+        )
+    });
     // Name with the ID on hover; the bare ID until the name arrives or when the member left.
-    let who = move |id: String| { let tip = id.clone(); view! { <b title=tip>{move || names.with(|n| n.get(&id).cloned()).unwrap_or_else(|| id.clone())}</b> } };
+    let who = move |id: String| {
+        let tip = id.clone();
+        view! { <b title=tip>{move || names.with(|n| n.get(&id).cloned()).unwrap_or_else(|| id.clone())}</b> }
+    };
     let post = move |no: i64, path: &str, body: Value| {
         let url = format!("/api/guilds/{}/cases/{no}{path}", g.get_value());
         spawn_local(async move {
@@ -154,19 +233,47 @@ pub fn CaseList(guild: String) -> impl IntoView {
 pub fn NoteList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let loaded = RwSignal::new(false);
-    let (q, text, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), Msg::default());
+    let (q, text, msg) = (
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+        Msg::default(),
+    );
     let g = StoredValue::new(guild);
     let page = RwSignal::new(0i64);
-    let list = move || format!("/api/guilds/{}/notes?q={}&page=", g.get_value(), enc(&q.get_untracked()));
-    let load = move || fetch(format!("{}{}", list(), page.get_untracked()), set_rows, msg, loaded);
-    let first = move || { page.set(0); load() };
+    let list = move || {
+        format!(
+            "/api/guilds/{}/notes?q={}&page=",
+            g.get_value(),
+            enc(&q.get_untracked())
+        )
+    };
+    let load = move || {
+        fetch(
+            format!("{}{}", list(), page.get_untracked()),
+            set_rows,
+            msg,
+            loaded,
+        )
+    };
+    let first = move || {
+        page.set(0);
+        load()
+    };
     load();
-    let post = move |path: String, body: Value| spawn_local(async move {
-        match api("POST", &format!("/api/guilds/{}/notes{path}", g.get_value()), Some(body)).await {
-            Ok(_) => load(),
-            Err(e) => msg.err(e),
-        }
-    });
+    let post = move |path: String, body: Value| {
+        spawn_local(async move {
+            match api(
+                "POST",
+                &format!("/api/guilds/{}/notes{path}", g.get_value()),
+                Some(body),
+            )
+            .await
+            {
+                Ok(_) => load(),
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     view! {
         <div class="card row">
             <input placeholder="User ID" aria-label="user ID" prop:value=q on:input=move |e| q.set(event_target_value(&e)) on:change=move |_| first() />
@@ -202,16 +309,40 @@ pub fn ReportList(guild: String) -> impl IntoView {
     let (state, msg) = (RwSignal::new("open".to_string()), Msg::default());
     let g = StoredValue::new(guild);
     let page = RwSignal::new(0i64);
-    let list = move || format!("/api/guilds/{}/reports?state={}&page=", g.get_value(), state.get_untracked());
-    let load = move || fetch(format!("{}{}", list(), page.get_untracked()), set_rows, msg, loaded);
-    let first = move || { page.set(0); load() };
+    let list = move || {
+        format!(
+            "/api/guilds/{}/reports?state={}&page=",
+            g.get_value(),
+            state.get_untracked()
+        )
+    };
+    let load = move || {
+        fetch(
+            format!("{}{}", list(), page.get_untracked()),
+            set_rows,
+            msg,
+            loaded,
+        )
+    };
+    let first = move || {
+        page.set(0);
+        load()
+    };
     load();
-    let set_open = move |id: i64, open: bool| spawn_local(async move {
-        match api("POST", &format!("/api/guilds/{}/reports/{id}/status", g.get_value()), Some(json!({"open": open}))).await {
-            Ok(_) => load(),
-            Err(e) => msg.err(e),
-        }
-    });
+    let set_open = move |id: i64, open: bool| {
+        spawn_local(async move {
+            match api(
+                "POST",
+                &format!("/api/guilds/{}/reports/{id}/status", g.get_value()),
+                Some(json!({"open": open})),
+            )
+            .await
+            {
+                Ok(_) => load(),
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     view! {
         <div class="card row">
             {chips(state, &[("open", "Open"), ("dismissed", "Dismissed"), ("actioned", "Actioned"), ("", "All")], first)}
@@ -249,7 +380,12 @@ pub fn RaidLog(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let msg = Msg::default();
     let loaded = RwSignal::new(false);
-    fetch(format!("/api/guilds/{guild}/raid_log"), set_rows, msg, loaded);
+    fetch(
+        format!("/api/guilds/{guild}/raid_log"),
+        set_rows,
+        msg,
+        loaded,
+    );
     view! {
         <Toast msg />
         <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No join raids caught yet."</p></Show>
@@ -265,8 +401,12 @@ pub fn RaidLog(guild: String) -> impl IntoView {
 
 /// One transcript line, `[time] Name (Role): text`, as (time, name, role, text).
 fn log_line(l: &str) -> (&str, &str, &str, &str) {
-    let Some((time, rest)) = l.strip_prefix('[').and_then(|r| r.split_once("] ")) else { return ("", "", "", l) };
-    let Some((who, text)) = rest.split_once(": ") else { return (time, "", "", rest) };
+    let Some((time, rest)) = l.strip_prefix('[').and_then(|r| r.split_once("] ")) else {
+        return ("", "", "", l);
+    };
+    let Some((who, text)) = rest.split_once(": ") else {
+        return (time, "", "", rest);
+    };
     match who.rsplit_once(" (") {
         Some((name, role)) => (time, name, role.trim_end_matches(')'), text),
         None => (time, who, "", text),
@@ -307,7 +447,10 @@ pub fn TicketLog(guild: String, channel: String, message: String) -> impl IntoVi
 mod log_tests {
     #[test]
     fn transcript_lines_split_into_parts() {
-        assert_eq!(super::log_line("[2026-11-03 08:55:29] ann (User): hi: there"), ("2026-11-03 08:55:29", "ann", "User", "hi: there"));
+        assert_eq!(
+            super::log_line("[2026-11-03 08:55:29] ann (User): hi: there"),
+            ("2026-11-03 08:55:29", "ann", "User", "hi: there")
+        );
         assert_eq!(super::log_line("odd"), ("", "", "", "odd"));
     }
 }
@@ -318,7 +461,13 @@ mod tests {
 
     #[test]
     fn csv_quotes_cells_and_defuses_formulas() {
-        let rows = [json!({"a": "say \"hi\"", "b": 3, "c": null}), json!({"a": "=HYPERLINK(1)", "b": true})];
-        assert_eq!(to_csv(&["a", "b", "c"], &rows), "a,b,c\r\n\"say \"\"hi\"\"\",\"3\",\"\"\r\n\"'=HYPERLINK(1)\",\"true\",\"\"\r\n");
+        let rows = [
+            json!({"a": "say \"hi\"", "b": 3, "c": null}),
+            json!({"a": "=HYPERLINK(1)", "b": true}),
+        ];
+        assert_eq!(
+            to_csv(&["a", "b", "c"], &rows),
+            "a,b,c\r\n\"say \"\"hi\"\"\",\"3\",\"\"\r\n\"'=HYPERLINK(1)\",\"true\",\"\"\r\n"
+        );
     }
 }

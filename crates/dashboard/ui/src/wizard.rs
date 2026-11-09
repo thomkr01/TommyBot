@@ -15,8 +15,20 @@ pub struct Card {
     pub action: Option<(&'static str, &'static str)>,
 }
 
-const fn card(title: &'static str, desc: &'static str, fields: &'static [(&'static str, &'static str)], preview: fn(&Value, &Value) -> AnyView) -> Card {
-    Card { title, desc, notes: &[], fields, preview, action: None }
+const fn card(
+    title: &'static str,
+    desc: &'static str,
+    fields: &'static [(&'static str, &'static str)],
+    preview: fn(&Value, &Value) -> AnyView,
+) -> Card {
+    Card {
+        title,
+        desc,
+        notes: &[],
+        fields,
+        preview,
+        action: None,
+    }
 }
 
 use crate::discord::{bot, chat, sample, show, show_msg};
@@ -31,7 +43,10 @@ fn text(t: &str) -> AnyView {
 }
 
 fn on(c: &Value, path: &str, default: bool) -> bool {
-    path.split('.').fold(c, |v, k| &v[k]).as_bool().unwrap_or(default)
+    path.split('.')
+        .fold(c, |v, k| &v[k])
+        .as_bool()
+        .unwrap_or(default)
 }
 
 pub const MISC: &[Card] = &[
@@ -70,26 +85,72 @@ pub const MISC: &[Card] = &[
 ];
 
 pub const AUTOMOD: &[Card] = &[
-    card("Automod status", "Do you want TommyBot to monitor messages?", &[
-        ("automod.enabled", "Enable Automod"),
-        ("automod.filters.invites.enabled", "Moderate invite links posted"),
-        ("automod.filters.nsfw_links.enabled", "Filter out NSFW links"),
-        ("automod.filters.bad_sites.enabled", "Filter out malicious links"),
-        ("automod.filters.scam_links.enabled", "Filter out scam links and login QR codes"),
-    ], |_, _| show("automod_kick")),
-    card("Antispam module", "Do you want TommyBot to also monitor and fight off spam in your server?", &[
-        ("automod.anti_spam", "Enable Anti Spam"),
-        ("automod.filters.mentions.enabled", "Track and stop @mention spam"),
-        ("automod.filters.attachments.enabled", "Track and stop attachment (image, embed, file) spam"),
-        ("automod.filters.similar.enabled", "Monitor repetitive message spam"),
-        ("automod.filters.chars_lower.enabled", "Monitor long messages"),
-        ("automod.filters.emojis.enabled", "Monitor emoji spam"),
-        ("automod.filters.newlines.enabled", "Monitor new lines in messages"),
-        ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
-    ], |_, _| show("automod_timeout")),
-    card("Webhook coverage", "Do you want TommyBot to also monitor webhooks sending messages in your server?", &[("automod.monitor_webhooks", "Monitor unwhitelisted webhooks")], |c, _| {
-        text(if on(c, "automod.monitor_webhooks", true) { "Webhook messages count towards spam like members' messages do." } else { "Webhook messages are ignored." })
-    }),
+    card(
+        "Automod status",
+        "Do you want TommyBot to monitor messages?",
+        &[
+            ("automod.enabled", "Enable Automod"),
+            (
+                "automod.filters.invites.enabled",
+                "Moderate invite links posted",
+            ),
+            (
+                "automod.filters.nsfw_links.enabled",
+                "Filter out NSFW links",
+            ),
+            (
+                "automod.filters.bad_sites.enabled",
+                "Filter out malicious links",
+            ),
+            (
+                "automod.filters.scam_links.enabled",
+                "Filter out scam links and login QR codes",
+            ),
+        ],
+        |_, _| show("automod_kick"),
+    ),
+    card(
+        "Antispam module",
+        "Do you want TommyBot to also monitor and fight off spam in your server?",
+        &[
+            ("automod.anti_spam", "Enable Anti Spam"),
+            (
+                "automod.filters.mentions.enabled",
+                "Track and stop @mention spam",
+            ),
+            (
+                "automod.filters.attachments.enabled",
+                "Track and stop attachment (image, embed, file) spam",
+            ),
+            (
+                "automod.filters.similar.enabled",
+                "Monitor repetitive message spam",
+            ),
+            (
+                "automod.filters.chars_lower.enabled",
+                "Monitor long messages",
+            ),
+            ("automod.filters.emojis.enabled", "Monitor emoji spam"),
+            (
+                "automod.filters.newlines.enabled",
+                "Monitor new lines in messages",
+            ),
+            ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
+        ],
+        |_, _| show("automod_timeout"),
+    ),
+    card(
+        "Webhook coverage",
+        "Do you want TommyBot to also monitor webhooks sending messages in your server?",
+        &[("automod.monitor_webhooks", "Monitor unwhitelisted webhooks")],
+        |c, _| {
+            text(if on(c, "automod.monitor_webhooks", true) {
+                "Webhook messages count towards spam like members' messages do."
+            } else {
+                "Webhook messages are ignored."
+            })
+        },
+    ),
 ];
 
 pub const ANTINUKE: &[Card] = &[
@@ -128,7 +189,13 @@ const STAFF_WL: &str = "ONLY owners and trusted admins are whitelisted automatic
 
 macro_rules! wl {
     ($p:literal) => {
-        &[(concat!("whitelist.", $p, "users"), "Members (IDs)"), (concat!("whitelist.", $p, "roles"), "Roles"), (concat!("whitelist.", $p, "channels"), "Channels"), (concat!("whitelist.", $p, "categories"), "Categories"), (concat!("whitelist.", $p, "webhooks"), "Webhooks (IDs)")]
+        &[
+            (concat!("whitelist.", $p, "users"), "Members (IDs)"),
+            (concat!("whitelist.", $p, "roles"), "Roles"),
+            (concat!("whitelist.", $p, "channels"), "Channels"),
+            (concat!("whitelist.", $p, "categories"), "Categories"),
+            (concat!("whitelist.", $p, "webhooks"), "Webhooks (IDs)"),
+        ]
     };
 }
 
@@ -164,31 +231,48 @@ pub const JOINGATE: &[Card] = &[card("Join Gate status", "If you want to use ins
     ("joingate.username_filter.enabled", "Accounts that have certain names"),
 ], |c, _| text(if on(c, "joingate.enabled", false) { "New members are checked the moment they join." } else { "These don't matter now! Join Gate is off." }))];
 
-pub const JOINRAID: &[Card] = &[card("Anti raid status", "If you want to keep your server safe and secure from bad raids, this is your saviour.", &[
-    ("joinraid.enabled", "Enable Join Raid"),
-    ("joinraid.count", "Joins that count as a raid"),
-    ("joinraid.span_ms", "Within (milliseconds)"),
-    ("joinraid.lock", "Lock when a raid starts"),
-], |_, _| show("raid"))];
+pub const JOINRAID: &[Card] = &[card(
+    "Anti raid status",
+    "If you want to keep your server safe and secure from bad raids, this is your saviour.",
+    &[
+        ("joinraid.enabled", "Enable Join Raid"),
+        ("joinraid.count", "Joins that count as a raid"),
+        ("joinraid.span_ms", "Within (milliseconds)"),
+        ("joinraid.lock", "Lock when a raid starts"),
+    ],
+    |_, _| show("raid"),
+)];
 
 pub const VERIFICATION: &[Card] = &[Card {
     notes: &["Turn it on and save: TommyBot makes the #verify-here channel with its panel."],
     action: Some(("Set up channel", "wizard/verify-channel")),
-    ..card("Verification status", "Do you want to filter in only genuine members? Use the verification and fend off bots!", &[("verification.enabled", "Enable Verification"), ("verification.mode", "Verification mode")], |c, _| {
-        // The panel, then what a member sees after pressing Verify.
-        let (chip, after) = match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
-            "Web" => (Some(("ok", "This is recommended!")), show("verify_web")),
-            "Dm" => {
-                let mut dm = sample("verify_captcha");
-                dm["flags"] = Value::Null;
-                (None, view! { {show("verify_dm")}<p class="muted">"In DMs:"</p>{bot(&dm)} }.into_any())
-            }
-            "Button" => (Some(("warn", "This is very weak!")), show("verify_button")),
-            "SimpleCaptcha" => (None, show("verify_simple")),
-            _ => (None, show("verify_captcha")),
-        };
-        view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after} }.into_any()
-    })
+    ..card(
+        "Verification status",
+        "Do you want to filter in only genuine members? Use the verification and fend off bots!",
+        &[
+            ("verification.enabled", "Enable Verification"),
+            ("verification.mode", "Verification mode"),
+        ],
+        |c, _| {
+            // The panel, then what a member sees after pressing Verify.
+            let (chip, after) = match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
+                "Web" => (Some(("ok", "This is recommended!")), show("verify_web")),
+                "Dm" => {
+                    let mut dm = sample("verify_captcha");
+                    dm["flags"] = Value::Null;
+                    (
+                        None,
+                        view! { {show("verify_dm")}<p class="muted">"In DMs:"</p>{bot(&dm)} }
+                            .into_any(),
+                    )
+                }
+                "Button" => (Some(("warn", "This is very weak!")), show("verify_button")),
+                "SimpleCaptcha" => (None, show("verify_simple")),
+                _ => (None, show("verify_captcha")),
+            };
+            view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after} }.into_any()
+        },
+    )
 }];
 
 /// A sample with `{key}` placeholders filled in; null while the samples load.
@@ -208,13 +292,44 @@ fn fill(m: &Value, with: &[(&str, &str)]) -> Value {
 /// The member's DMs and the staff channel side by side, as the ticket settings make them.
 fn ticket_preview(c: &Value, dc: &Value) -> AnyView {
     let t = &c["tickets"];
-    let anon = if on(c, "tickets.anonymous", false) { "_anon" } else { "" };
-    let tagged = |k: &str| t[k].as_str().unwrap_or("").replace("{username}", "member").replace("{userid}", "1001").replace("{usermention}", "@member");
+    let anon = if on(c, "tickets.anonymous", false) {
+        "_anon"
+    } else {
+        ""
+    };
+    let tagged = |k: &str| {
+        t[k].as_str()
+            .unwrap_or("")
+            .replace("{username}", "member")
+            .replace("{userid}", "1001")
+            .replace("{usermention}", "@member")
+    };
     let (greeting, closing) = (tagged("greeting"), tagged("closing"));
-    let mut pings: Vec<String> = strs(&t["ping_roles"]).iter().map(|r| name_of(dc, "roles", r)).map(|n| if n.starts_with('@') { n } else { format!("@{n}") }).collect();
-    if on(c, "tickets.ping_here", false) { pings.push("@here".into()); }
-    let mut intro = filled(if on(c, "tickets.command_only", false) { "ticket_intro_cmd" } else { "ticket_intro" }, &[("prefix", c["misc"]["prefix"].as_str().unwrap_or("t!"))]);
-    if !intro.is_null() && !pings.is_empty() { intro["content"] = Value::String(pings.join(" ")); }
+    let mut pings: Vec<String> = strs(&t["ping_roles"])
+        .iter()
+        .map(|r| name_of(dc, "roles", r))
+        .map(|n| {
+            if n.starts_with('@') {
+                n
+            } else {
+                format!("@{n}")
+            }
+        })
+        .collect();
+    if on(c, "tickets.ping_here", false) {
+        pings.push("@here".into());
+    }
+    let mut intro = filled(
+        if on(c, "tickets.command_only", false) {
+            "ticket_intro_cmd"
+        } else {
+            "ticket_intro"
+        },
+        &[("prefix", c["misc"]["prefix"].as_str().unwrap_or("t!"))],
+    );
+    if !intro.is_null() && !pings.is_empty() {
+        intro["content"] = Value::String(pings.join(" "));
+    }
     view! {
         <p class="muted">"In the member's DMs:"</p>
         {chat("member", text("Hi, someone in the server keeps sending me scam links."))}
@@ -250,6 +365,9 @@ mod tests {
     fn placeholders_take_text_that_needs_escaping() {
         let m = serde_json::json!({"embeds": [{"description": "Hi {text} via `{prefix}reply`"}]});
         let out = super::fill(&m, &[("text", "say \"hi\"\nnow"), ("prefix", "!")]);
-        assert_eq!(out["embeds"][0]["description"], "Hi say \"hi\"\nnow via `!reply`");
+        assert_eq!(
+            out["embeds"][0]["description"],
+            "Hi say \"hi\"\nnow via `!reply`"
+        );
     }
 }
