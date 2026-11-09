@@ -5,14 +5,20 @@ use serde_json::{json, Value};
 /// Adds or removes `key` in `c.custom[i][field]` (perms / whitelist); keys the catalog doesn't list stay untouched.
 fn toggle(c: &mut Value, i: usize, field: &str, key: &str, on: bool) {
     let list = &mut c["custom"][i][field];
-    if !list.is_array() { *list = json!([]); }
+    if !list.is_array() {
+        *list = json!([]);
+    }
     let a = list.as_array_mut().unwrap();
     a.retain(|x| x != key);
-    if on { a.push(json!(key)); }
+    if on {
+        a.push(json!(key));
+    }
 }
 
 fn has(c: &Value, i: usize, field: &str, key: &str) -> bool {
-    c["custom"][i][field].as_array().is_some_and(|a| a.iter().any(|x| x == key))
+    c["custom"][i][field]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|x| x == key))
 }
 
 #[component]
@@ -34,22 +40,52 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             cfg.set(v["config"]["permits"].clone());
             orig.set(v["config"]["permits"].clone());
         }
-        if let Ok(v) = api("GET", "/api/permit-catalog", None).await { catalog.set(v); }
-        if let Ok(v) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(v); }
+        if let Ok(v) = api("GET", "/api/permit-catalog", None).await {
+            catalog.set(v);
+        }
+        if let Ok(v) = api("GET", &format!("/api/guilds/{g}/discord"), None).await {
+            dc.set(v);
+        }
     });
     let save = move |_| {
         let (g, p, v) = (guild.clone(), cfg.get_untracked(), version.get_untracked());
         orig.set(p.clone());
-        run_save(async move { api("PUT", &format!("/api/guilds/{g}/permits"), Some(json!({"expected_version": v, "value": p}))).await }, version, msg, need);
+        run_save(
+            async move {
+                api(
+                    "PUT",
+                    &format!("/api/guilds/{g}/permits"),
+                    Some(json!({"expected_version": v, "value": p})),
+                )
+                .await
+            },
+            version,
+            msg,
+            need,
+        );
     };
-    let set_field = move |i: usize, field: &'static str, val: String| cfg.update(|c| {
-        c["custom"][i][field] = if field == "rank" { json!(val.parse::<i64>().unwrap_or(0)) } else { json!(val) }
-    });
+    let set_field = move |i: usize, field: &'static str, val: String| {
+        cfg.update(|c| {
+            c["custom"][i][field] = if field == "rank" {
+                json!(val.parse::<i64>().unwrap_or(0))
+            } else {
+                json!(val)
+            }
+        })
+    };
     // Dialog target: -1 Extra Owner, -2 Trusted Admin, 0.. a custom permit.
     let snap = RwSignal::new(json!({}));
     let section = RwSignal::new(None::<String>);
-    let start = move |i: i32| { snap.set(cfg.get_untracked()); tab.set(0); section.set(None); open.set(Some(i)); };
-    let abort = move |_| { cfg.set(snap.get_untracked()); open.set(None); };
+    let start = move |i: i32| {
+        snap.set(cfg.get_untracked());
+        tab.set(0);
+        section.set(None);
+        open.set(Some(i));
+    };
+    let abort = move |_| {
+        cfg.set(snap.get_untracked());
+        open.set(None);
+    };
     let dialog = move |i: i32| {
         let n = i.max(0) as usize;
         let ids = (i < 0).then_some(if i == -1 { "eo" } else { "ta" });
@@ -105,29 +141,34 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             </div>
         </div></div> }
     };
-    let delete = move |i: usize| cfg.update(|c| { c["custom"].as_array_mut().map(|a| a.remove(i)); });
+    let delete = move |i: usize| {
+        cfg.update(|c| {
+            c["custom"].as_array_mut().map(|a| a.remove(i));
+        })
+    };
     // The last dialog stays rendered while it fades out.
-    let del = Memo::new(move |prev: Option<&Option<usize>>| deleting.get().or(prev.copied().flatten()));
+    let del =
+        Memo::new(move |prev: Option<&Option<usize>>| deleting.get().or(prev.copied().flatten()));
     let dlg = Memo::new(move |prev: Option<&Option<i32>>| open.get().or(prev.copied().flatten()));
     view! {
-        <div class="row"><button class="go" title="Create New Permit" aria-label="create new permit" on:click=move |_| { let before = cfg.get_untracked(); cfg.update(|c| { if !c["custom"].is_array() { c["custom"] = json!([]); } c["custom"].as_array_mut().unwrap().push(json!({"name": "New permit", "rank": 0, "perms": [], "roles": [], "whitelist": [], "limits": {}})); }); start(cfg.get_untracked()["custom"].as_array().map_or(0, |a| a.len() as i32 - 1)); snap.set(before) }>"+"</button></div>
-        <table class="permits"><thead><tr><th>"Name"</th><th>"Actions"</th></tr></thead><tbody>
-            <tr><td><b>"Extra Owner"</b>" "<span class="chip">"OWNER"</span>" "<span class="chip">"IMMUNITY"</span></td><td><button class="ghost" title="Edit Permit" on:click=move |_| start(-1)>"Edit"</button></td></tr>
-            <tr><td><b>"Trusted Admin"</b>" "<span class="chip">"IMMUNITY"</span></td><td><button class="ghost" title="Edit Permit" on:click=move |_| start(-2)>"Edit"</button></td></tr>
-            {move || (0..cfg.get()["custom"].as_array().map_or(0, Vec::len)).map(|i| view! {
-                <tr><td>{format!("{} ", cfg.get()["custom"][i]["rank"])}<b>{cfg.get()["custom"][i]["name"].as_str().unwrap_or("").to_string()}</b></td><td>
-                    <button class="danger" title="Delete Permit" on:click=move |_| { deleting.set(Some(i)); }>"Delete"</button>
-                    <button class="ghost" title="Edit Permit" on:click=move |_| start(i as i32)>"Edit"</button></td></tr>
-            }).collect_view()}
-        </tbody></table>
-        <AnimatedShow when=Signal::derive(move || deleting.get().is_some()) hide_class="out" hide_delay=OUT>{move || del.get().map(|n| { let r = NodeRef::new(); focus_on_open(r); view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| dialog_keys(&e, || deleting.set(None))><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get_untracked()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
-            <div class="row"><button class="ghost" on:click=move |_| deleting.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); deleting.set(None) }>"Delete"</button></div></div></div> } })}
-</AnimatedShow>
-        <AnimatedShow when=Signal::derive(move || open.get().is_some()) hide_class="out" hide_delay=OUT>{move || dlg.get().map(|i| dialog(i))}</AnimatedShow>
-        <AnimatedShow when=Signal::derive(move || cfg.get() != orig.get()) hide_class="out" hide_delay=OUT>
-            <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| cfg.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
-        </AnimatedShow>
-        <Toast msg />
-        <StepUp need enrolled />
-    }
+            <div class="row"><button class="go" title="Create New Permit" aria-label="create new permit" on:click=move |_| { let before = cfg.get_untracked(); cfg.update(|c| { if !c["custom"].is_array() { c["custom"] = json!([]); } c["custom"].as_array_mut().unwrap().push(json!({"name": "New permit", "rank": 0, "perms": [], "roles": [], "whitelist": [], "limits": {}})); }); start(cfg.get_untracked()["custom"].as_array().map_or(0, |a| a.len() as i32 - 1)); snap.set(before) }>"+"</button></div>
+            <table class="permits"><thead><tr><th>"Name"</th><th>"Actions"</th></tr></thead><tbody>
+                <tr><td><b>"Extra Owner"</b>" "<span class="chip">"OWNER"</span>" "<span class="chip">"IMMUNITY"</span></td><td><button class="ghost" title="Edit Permit" on:click=move |_| start(-1)>"Edit"</button></td></tr>
+                <tr><td><b>"Trusted Admin"</b>" "<span class="chip">"IMMUNITY"</span></td><td><button class="ghost" title="Edit Permit" on:click=move |_| start(-2)>"Edit"</button></td></tr>
+                {move || (0..cfg.get()["custom"].as_array().map_or(0, Vec::len)).map(|i| view! {
+                    <tr><td>{format!("{} ", cfg.get()["custom"][i]["rank"])}<b>{cfg.get()["custom"][i]["name"].as_str().unwrap_or("").to_string()}</b></td><td>
+                        <button class="danger" title="Delete Permit" on:click=move |_| { deleting.set(Some(i)); }>"Delete"</button>
+                        <button class="ghost" title="Edit Permit" on:click=move |_| start(i as i32)>"Edit"</button></td></tr>
+                }).collect_view()}
+            </tbody></table>
+            <AnimatedShow when=Signal::derive(move || deleting.get().is_some()) hide_class="out" hide_delay=OUT>{move || del.get().map(|n| { let r = NodeRef::new(); focus_on_open(r); view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| dialog_keys(&e, || deleting.set(None))><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get_untracked()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
+                <div class="row"><button class="ghost" on:click=move |_| deleting.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); deleting.set(None) }>"Delete"</button></div></div></div> } })}
+    </AnimatedShow>
+            <AnimatedShow when=Signal::derive(move || open.get().is_some()) hide_class="out" hide_delay=OUT>{move || dlg.get().map(|i| dialog(i))}</AnimatedShow>
+            <AnimatedShow when=Signal::derive(move || cfg.get() != orig.get()) hide_class="out" hide_delay=OUT>
+                <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| cfg.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
+            </AnimatedShow>
+            <Toast msg />
+            <StepUp need enrolled />
+        }
 }
