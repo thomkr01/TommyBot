@@ -1,6 +1,7 @@
 //! The number maps, one row per line. Never renumber a row: people type these numbers.
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
+use tommybot_core::warn::Action as WarnAction;
 use twilight_model::id::{marker::RoleMarker, Id};
 
 use super::{Kind, Module, Row};
@@ -325,14 +326,14 @@ pub(super) static MISC: Module = Module {
         group!("3", "Warn Settings"),
         r!("3a", "Status", "misc.auto_warn_actions", Kind::Bool, |c| on(c.misc.auto_warn_actions)),
         // The panel has one warn action; ours is a list, so the prefix edits its first entry.
-        r!("3b", "Warn Action", "misc.warn_actions.0.action", Kind::Choice(&[("timeout", "\"timeout\""), ("kick", "\"kick\""), ("ban", "\"ban\"")]), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| format!("{:?}", t.action))),
+        r!("3b", "Warn Action", "misc.warn_actions.0.action", Kind::Choice(&[("timeout", "\"timeout\""), ("kick", "\"kick\""), ("ban", "\"ban\"")]), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| match t.action { WarnAction::Timeout { .. } => "Timeout".into(), a => format!("{a:?}") })),
         r!("3c", "Max Warns", "misc.warn_actions.0.points", Kind::Int(1, 1000), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| t.points.to_string())),
         r!("4", "Compact Outputs", "misc.compact_replies", Kind::Bool, |c| on(c.misc.compact_replies)),
         r!("5", "Informing Messages", "misc.delete_replies_secs", Kind::Switch("5", "null"), |c| on(c.misc.delete_replies_secs.is_some())),
         r!("6", "Enforce Quarantine Perms", "misc.enforce_quarantine_perms", Kind::Bool, |c| on(c.misc.enforce_quarantine_perms)),
         r!("7", "Ignore Permit 1 Commands", "misc.ignore_no_permit", Kind::Bool, |c| on(c.misc.ignore_no_permit)),
         r!("8", "Enforce Permits", "misc.enforce_permits", Kind::Bool, |c| on(c.misc.enforce_permits)),
-        r!("9", "Ban Appeal Message", "misc.ban_appeal_message", Kind::Text, |c| c.misc.ban_appeal_message.clone()),
+        r!("9", "Ban Appeal Message", "misc.ban_appeal_message", Kind::Text, |c| Some(c.misc.ban_appeal_message.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| NO.into())),
     ],
 };
 

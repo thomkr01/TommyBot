@@ -229,7 +229,7 @@ fn App() -> impl IntoView {
     window_event_listener(leptos::ev::hashchange, move |_| {
         let next = hash();
         // A new page (server or page part changed) starts at the top; tab switches keep the scroll.
-        if route.get_untracked().get(..2) != next.get(..2) { web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0) }
+        if !route.get_untracked().iter().take(2).eq(next.iter().take(2)) { web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0) }
         set_route.set(next)
     });
     let (me, set_me) = signal(None::<Value>);
