@@ -187,7 +187,7 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
                         )
                     })?;
                     json!(if matches!(kind, Kind::Ms) {
-                        secs * 1000
+                        secs.checked_mul(1000).ok_or_else(bad)?
                     } else {
                         secs
                     })
