@@ -128,62 +128,24 @@ fn UserPick(get: Signal<Value>, set: Callback<Value>) -> impl IntoView {
 /// Customize dialog over a `{key: channel}` object: pick one option (or tick several when `multi`),
 /// then one channel, then Apply. Single-pick options show as cards and leave the dialog once used.
 #[component]
-fn RoutePick(
-    f: Value,
-    get: Signal<Value>,
-    set: Callback<Value>,
-    dc: RwSignal<Value>,
-) -> impl IntoView {
+fn RoutePick(f: Value, get: Signal<Value>, set: Callback<Value>, dc: RwSignal<Value>) -> impl IntoView {
     let multi = f["multi"] == true;
     let head = if multi { "Pick the events" } else { "Add a new logging type" };
     let opts = StoredValue::new(f["options"].as_array().cloned().unwrap_or_default());
-    let (open, picked, channel) = (
-        RwSignal::new(false),
-        RwSignal::new(Vec::<String>::new()),
-        RwSignal::new(String::new()),
-    );
-    // Step two (the channel) is shown once a choice is confirmed.
-    let step2 = RwSignal::new(false);
+    // step2: the channel step, shown once the choice is confirmed.
+    let (open, step2, picked, channel) = (RwSignal::new(false), RwSignal::new(false), RwSignal::new(Vec::<String>::new()), RwSignal::new(String::new()));
     let used = move |k: &str| get.with(|v| v[k].is_string());
-    let free = move || {
-        opts.with_value(|o| {
-            o.iter()
-                .filter(|x| multi || !used(&show(&x["key"])))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-    };
-    let title = move |k: &str| {
-        opts.with_value(|o| {
-            o.iter()
-                .find(|x| x["key"] == k)
-                .map_or_else(|| k.to_string(), |x| show(&x["title"]))
-        })
-    };
-    let close = move || {
-        open.set(false);
-        step2.set(false);
-        picked.set(vec![]);
-        channel.set(String::new())
-    };
+    let free = move || opts.with_value(|o| o.iter().filter(|x| multi || !used(&show(&x["key"]))).cloned().collect::<Vec<_>>());
+    let title = move |k: &str| opts.with_value(|o| o.iter().find(|x| x["key"] == k).map_or_else(|| k.to_string(), |x| show(&x["title"])));
+    let close = move || { open.set(false); step2.set(false); picked.set(vec![]); channel.set(String::new()) };
     let apply = move |_| {
         let mut cur = get.get_untracked();
-        if !cur.is_object() {
-            cur = json!({})
-        }
-        for k in picked.get_untracked() {
-            cur[k.as_str()] = json!(channel.get_untracked())
-        }
+        if !cur.is_object() { cur = json!({}) }
+        for k in picked.get_untracked() { cur[k.as_str()] = json!(channel.get_untracked()) }
         set.run(cur);
         close();
     };
-    let remove = move |k: String| {
-        let mut cur = get.get_untracked();
-        if let Some(o) = cur.as_object_mut() {
-            o.remove(&k);
-        }
-        set.run(cur)
-    };
+    let remove = move |k: String| { let mut cur = get.get_untracked(); if let Some(o) = cur.as_object_mut() { o.remove(&k); } set.run(cur) };
     let r = NodeRef::<leptos::html::Div>::new();
     focus_on_open(r);
     view! { <div style="flex:1">
