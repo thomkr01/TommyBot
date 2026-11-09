@@ -1,13 +1,13 @@
 //! Security score: risky Discord settings a raider or nuker would use. Shared by `/security` and
 //! the dashboard Overview, which runs the `fix` of a row with one click.
-use crate::RoleImg;
+use crate::{ChannelImg, OverwriteImg, RoleImg, CATEGORY};
 use serde::Serialize;
 
-/// Administrator, Manage Server, Manage Roles, Manage Channels, Ban, Kick, Manage Webhooks.
-pub const DANGEROUS: u64 = 0x8 | 0x20 | 0x1000_0000 | 0x10 | 0x4 | 0x2 | 0x2000_0000;
+/// The dangerous list: Administrator, Manage Server/Roles/Channels/Webhooks/Messages, Ban, Kick, Timeout.
+const DANGEROUS: u64 = crate::DANGEROUS_PERMS;
 const ADMINISTRATOR: u64 = 0x8;
-/// What @everyone must not have: [`DANGEROUS`] plus Mention @everyone and Manage Messages.
-const EVERYONE_DANGEROUS: u64 = DANGEROUS | (1 << 17) | (1 << 13);
+/// What @everyone and main roles must not have: [`DANGEROUS`] plus Mention @everyone.
+const EVERYONE_DANGEROUS: u64 = DANGEROUS | (1 << 17);
 
 /// Discord's numbers from the guild object.
 pub struct GuildSafety {
@@ -29,9 +29,12 @@ pub struct Setup {
     /// The bot's own roles.
     pub bot_roles: Vec<u64>,
     pub mod_log: bool,
-    pub main_roles: bool,
     /// (module name, switched on) for the protection modules.
     pub modules: Vec<(&'static str, bool)>,
+    /// Lockdown main roles; their channel overwrites are held to the @everyone rules.
+    pub main_roles: Vec<u64>,
+    /// Members whose own channel overwrites may grant anything: owner, extra owners, the bot.
+    pub trusted: Vec<u64>,
 }
 
 /// Ordered from fine to worst.
@@ -49,6 +52,10 @@ pub struct Fix {
     /// A role id, or `*` for every role [`strip_targets`] picks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role_id: Option<String>,
+    /// With `role_id`: the overwrite on this channel (and its synced children) whose target is
+    /// `role_id`, a role or member id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
     /// A guild setting [`setting_fix`] knows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setting: Option<&'static str>,
@@ -67,6 +74,7 @@ fn strip(role: impl ToString) -> Option<Fix> {
     Some(Fix {
         label: "Strip permissions",
         role_id: Some(role.to_string()),
+        channel_id: None,
         setting: None,
     })
 }
@@ -75,6 +83,7 @@ fn set(setting: &'static str) -> Option<Fix> {
     Some(Fix {
         label: "Fix",
         role_id: None,
+        channel_id: None,
         setting: Some(setting),
     })
 }
@@ -99,6 +108,80 @@ pub fn stripped(role_id: u64, guild: u64, perms: u64) -> u64 {
         }
 }
 
+/// Names of the [`EVERYONE_DANGEROUS`] bits a channel overwrite can hold.
+fn names(bits: u64) -> String {
+    const NAMES: [(u64, &str); 5] = [
+        (0x10, "Manage Channels"),
+        (0x1000_0000, "Manage Permissions"),
+        (0x2000_0000, "Manage Webhooks"),
+        (1 << 13, "Manage Messages"),
+        (1 << 17, "Mention @everyone"),
+    ];
+    NAMES
+        .iter()
+        .filter(|(b, _)| bits & b != 0)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn overwrite_mask(o: &OverwriteImg, guild: u64, setup: &Setup) -> u64 {
+    match (
+        o.is_role,
+        o.target == guild || setup.main_roles.contains(&o.target),
+    ) {
+        (false, _) if setup.trusted.contains(&o.target) => 0,
+        (true, true) => EVERYONE_DANGEROUS,
+        _ => DANGEROUS,
+    }
+}
+
+/// A channel is synced when it has its category's overwrites, in any order.
+fn synced(c: &ChannelImg, cat: &ChannelImg) -> bool {
+    c.overwrites.len() == cat.overwrites.len()
+        && c.overwrites.iter().all(|o| cat.overwrites.contains(o))
+}
+
+/// Children of `cat` that are synced with it, so a category fix keeps them synced.
+pub fn synced_children<'a>(channels: &'a [ChannelImg], cat: &ChannelImg) -> Vec<&'a ChannelImg> {
+    channels
+        .iter()
+        .filter(|c| c.parent == Some(cat.id) && synced(c, cat))
+        .collect()
+}
+
+/// Channel and category overwrites that grant dangerous permissions to anyone but managed
+/// (bot) roles and trusted members. Synced children are left out: their category's row covers
+/// them. Private channels count like any other.
+pub fn overwrite_targets<'a>(
+    channels: &'a [ChannelImg],
+    roles: &[RoleImg],
+    guild: u64,
+    setup: &Setup,
+) -> Vec<(&'a ChannelImg, &'a OverwriteImg)> {
+    let managed = |id| roles.iter().any(|r| r.id == id && r.managed);
+    channels
+        .iter()
+        .filter(|c| {
+            c.parent
+                .and_then(|p| channels.iter().find(|x| x.id == p))
+                .is_none_or(|cat| !synced(c, cat))
+        })
+        .flat_map(|c| c.overwrites.iter().map(move |o| (c, o)))
+        .filter(|(_, o)| {
+            !(o.is_role && managed(o.target)) && o.allow & overwrite_mask(o, guild, setup) != 0
+        })
+        .collect()
+}
+
+/// The overwrite after an overwrite fix: dangerous allows dropped, deny kept.
+pub fn stripped_overwrite(o: &OverwriteImg, guild: u64, setup: &Setup) -> OverwriteImg {
+    OverwriteImg {
+        allow: o.allow & !overwrite_mask(o, guild, setup),
+        ..o.clone()
+    }
+}
+
 /// Roles the bot can safely strip in one go: not managed, not @everyone, below the bot.
 pub fn strip_targets(roles: &[RoleImg], guild: u64, bot_top: i64) -> Vec<&RoleImg> {
     roles
@@ -109,7 +192,13 @@ pub fn strip_targets(roles: &[RoleImg], guild: u64, bot_top: i64) -> Vec<&RoleIm
         .collect()
 }
 
-pub fn checks(g: &GuildSafety, roles: &[RoleImg], bot_top: i64, setup: &Setup) -> Vec<Check> {
+pub fn checks(
+    g: &GuildSafety,
+    roles: &[RoleImg],
+    channels: &[ChannelImg],
+    bot_top: i64,
+    setup: &Setup,
+) -> Vec<Check> {
     let mut out = vec![];
     let mut row = |id: &str, severity, title, detail: String, fix| {
         out.push(Check {
@@ -232,7 +321,7 @@ pub fn checks(g: &GuildSafety, roles: &[RoleImg], bot_top: i64, setup: &Setup) -
     );
     row("mod_log", sev, "Mod log channel", text, None);
     let (sev, text) = pick(
-        setup.main_roles,
+        !setup.main_roles.is_empty(),
         "Lockdown and verification know your member roles.",
         "Set your main member roles so lockdowns and verification work.".into(),
     );
@@ -299,22 +388,59 @@ pub fn checks(g: &GuildSafety, roles: &[RoleImg], bot_top: i64, setup: &Setup) -
             &format!("role_{}", r.id),
             Severity::Bad,
             "Role holds dangerous permissions",
-            format!("{} can administer, ban, kick or manage the server.", r.name),
+            format!(
+                "{} can administer, ban, kick, time out or manage the server.",
+                r.name
+            ),
             strip(r.id),
         );
     }
-    let strippable = strip_targets(roles, g.id, bot_top).len();
+    let overwrites = overwrite_targets(channels, roles, g.id, setup);
+    for (c, o) in &overwrites {
+        let who = if o.target == g.id {
+            "@everyone".into()
+        } else if o.is_role {
+            roles
+                .iter()
+                .find(|r| r.id == o.target)
+                .map_or(format!("role {}", o.target), |r| r.name.clone())
+        } else {
+            format!("member {}", o.target)
+        };
+        let place = match synced_children(channels, c).len() {
+            0 if c.kind == CATEGORY => format!("Category {}", c.name),
+            0 => format!("#{}", c.name),
+            n => format!("Category {} and its {n} synced channel(s)", c.name),
+        };
+        row(
+            &format!("overwrite_{}_{}", c.id, o.target),
+            Severity::Bad,
+            "Channel grants dangerous permissions",
+            format!(
+                "{place} gives {who}: {}.",
+                names(o.allow & overwrite_mask(o, g.id, setup))
+            ),
+            Some(Fix {
+                label: "Strip permissions",
+                role_id: Some(o.target.to_string()),
+                channel_id: Some(c.id.to_string()),
+                setting: None,
+            }),
+        );
+    }
+    let strippable = strip_targets(roles, g.id, bot_top).len() + overwrites.len();
     if strippable > 1 {
         row(
             "roles_bulk",
             Severity::Warn,
-            "Remove dangerous permissions from all roles",
+            "Remove dangerous permissions everywhere",
             format!(
-                "{strippable} roles below the bot can administer, ban, kick or manage the server."
+                "{strippable} roles or channel overwrites can administer, ban, kick, time out or manage the server."
             ),
             Some(Fix {
                 label: "Strip all",
                 role_id: Some("*".into()),
+                channel_id: None,
                 setting: None,
             }),
         );
@@ -401,8 +527,9 @@ mod tests {
             whitelisted: true,
             bot_roles: vec![],
             mod_log: true,
-            main_roles: true,
+            main_roles: vec![99],
             modules: vec![],
+            trusted: vec![],
         }
     }
 
@@ -413,7 +540,7 @@ mod tests {
     #[test]
     fn server_settings_checks() {
         let setup = setup(None, true);
-        let rows = checks(&SAFE, &[], 0, &setup);
+        let rows = checks(&SAFE, &[], &[], 0, &setup);
         for id in [
             "verification_level",
             "content_filter",
@@ -429,7 +556,7 @@ mod tests {
             content_filter: 0,
             notifications: 0,
         };
-        let rows = checks(&risky, &[], 0, &setup);
+        let rows = checks(&risky, &[], &[], 0, &setup);
         for id in [
             "verification_level",
             "content_filter",
@@ -456,20 +583,24 @@ mod tests {
             role(3, 6, true, 0x8),
             role(4, 1, false, 0x400),
             role(9, 3, false, 0x1),
+            role(5, 2, false, 1 << 13),
+            role(6, 2, false, 1 << 40),
         ];
-        let rows = checks(&SAFE, &roles, 4, &setup(Some(9), false));
+        let rows = checks(&SAFE, &roles, &[], 4, &setup(Some(9), false));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"role_2") && !ids.contains(&"role_3") && !ids.contains(&"role_4"));
+        // Manage Messages and Timeout count too.
+        assert!(ids.contains(&"role_5") && ids.contains(&"role_6"));
         assert!(ids.contains(&"log_fallback") && ids.contains(&"bot_position"));
         assert_eq!(sev(&rows, "role_2").unwrap().fix, strip(2));
-        let rows = checks(&SAFE, &roles, 2, &setup(Some(9), true));
+        let rows = checks(&SAFE, &roles, &[], 2, &setup(Some(9), true));
         assert!(sev(&rows, "quarantine_above_bot").is_some());
     }
 
     #[test]
     fn everyone_with_mass_mention_is_flagged_and_strippable() {
         let roles = [role(1, 0, false, (1 << 17) | 0x400)];
-        let rows = checks(&SAFE, &roles, 4, &setup(None, true));
+        let rows = checks(&SAFE, &roles, &[], 4, &setup(None, true));
         let row = sev(&rows, "everyone_perms").unwrap();
         assert_eq!(row.severity, Severity::Bad);
         assert_eq!(row.fix, strip(1));
@@ -493,7 +624,7 @@ mod tests {
     #[test]
     fn score_is_the_share_of_passing_checks() {
         let setup = setup(None, true);
-        let rows = checks(&SAFE, &[], 0, &setup);
+        let rows = checks(&SAFE, &[], &[], 0, &setup);
         // Only the missing quarantine role and the bot role (none here) fail.
         assert_eq!(rows.len(), 13);
         assert_eq!(score(&rows), 11 * 100 / 13);
@@ -507,7 +638,7 @@ mod tests {
                 .map(|i| role(10 + i, 2 + i as i64, true, 0))
                 .collect();
             sev(
-                &checks(&SAFE, &roles, 1, &setup(None, true)),
+                &checks(&SAFE, &roles, &[], 1, &setup(None, true)),
                 "bot_top_eight",
             )
             .unwrap()
@@ -524,7 +655,7 @@ mod tests {
             bot_roles: vec![7],
             ..setup(None, true)
         };
-        let rows = checks(&SAFE, &roles, 5, &good);
+        let rows = checks(&SAFE, &roles, &[], 5, &good);
         for id in [
             "bot_admin_only",
             "staff_permits",
@@ -541,11 +672,11 @@ mod tests {
             roleless_staff: vec!["Admins".into(), "Moderators".into()],
             whitelisted: false,
             mod_log: false,
-            main_roles: false,
+            main_roles: vec![],
             modules: vec![("Join gate", false)],
             ..good
         };
-        let rows = checks(&SAFE, &roles, 5, &bad);
+        let rows = checks(&SAFE, &roles, &[], 5, &bad);
         for id in [
             "bot_admin_only",
             "staff_permits",
@@ -567,7 +698,8 @@ mod tests {
     #[test]
     fn rows_serialize_for_the_dashboard() {
         let setup = setup(None, true);
-        let v = serde_json::to_value(checks(&SAFE, &[role(1, 0, false, 0x8)], 0, &setup)).unwrap();
+        let v =
+            serde_json::to_value(checks(&SAFE, &[role(1, 0, false, 0x8)], &[], 0, &setup)).unwrap();
         let everyone = v
             .as_array()
             .unwrap()
@@ -579,5 +711,92 @@ mod tests {
             everyone["fix"],
             serde_json::json!({"label": "Strip permissions", "role_id": "1"})
         );
+    }
+
+    fn chan(id: u64, kind: u8, parent: Option<u64>, overwrites: Vec<OverwriteImg>) -> ChannelImg {
+        ChannelImg {
+            id,
+            name: format!("c{id}"),
+            kind,
+            parent,
+            position: 0,
+            topic: None,
+            nsfw: false,
+            overwrites,
+        }
+    }
+
+    fn ow(target: u64, is_role: bool, allow: u64) -> OverwriteImg {
+        OverwriteImg {
+            target,
+            is_role,
+            allow,
+            deny: 0x800,
+        }
+    }
+
+    #[test]
+    fn overwrites_on_private_categories_and_channels_are_flagged() {
+        let roles = [
+            role(1, 0, false, 0),
+            role(2, 1, false, 0),
+            role(3, 2, true, 0),
+        ];
+        // Category 10 opens to role 2 with Manage Channels; 11 is synced, 12 has its own overwrites.
+        let private = vec![ow(1, true, 0), ow(2, true, 0x400 | 0x10)];
+        let channels = [
+            chan(10, CATEGORY, None, private.clone()),
+            chan(11, 0, Some(10), private.clone()),
+            chan(
+                12,
+                0,
+                Some(10),
+                vec![ow(1, true, 1 << 17), ow(7, false, 0x2000_0000)],
+            ),
+            chan(
+                13,
+                0,
+                None,
+                vec![
+                    ow(3, true, 0x10),
+                    ow(8, false, 0x10),
+                    ow(2, true, 0x400 | (1 << 17)),
+                ],
+            ),
+        ];
+        let setup = Setup {
+            main_roles: vec![],
+            trusted: vec![8],
+            ..setup(None, true)
+        };
+        let hits: Vec<(u64, u64)> = overwrite_targets(&channels, &roles, 1, &setup)
+            .iter()
+            .map(|(c, o)| (c.id, o.target))
+            .collect();
+        // Synced 11, the managed role 3, trusted member 8 and plain mass mention for role 2 are not hits.
+        assert_eq!(hits, [(10, 2), (12, 1), (12, 7)]);
+        assert_eq!(synced_children(&channels, &channels[0]).len(), 1);
+        let rows = checks(&SAFE, &roles, &channels, 4, &setup);
+        let r = sev(&rows, "overwrite_10_2").unwrap();
+        assert_eq!(r.severity, Severity::Bad);
+        assert!(
+            r.detail.contains("Category c10 and its 1 synced")
+                && r.detail.contains("Manage Channels")
+        );
+        assert_eq!(
+            serde_json::to_value(&r.fix).unwrap(),
+            serde_json::json!({"label": "Strip permissions", "role_id": "2", "channel_id": "10"})
+        );
+        assert!(sev(&rows, "roles_bulk").unwrap().detail.starts_with("3 "));
+        let fixed = stripped_overwrite(&channels[0].overwrites[1], 1, &setup);
+        assert_eq!((fixed.allow, fixed.deny), (0x400, 0x800));
+        // Main roles are held to the @everyone rules.
+        let main = Setup {
+            main_roles: vec![2],
+            ..setup
+        };
+        assert!(overwrite_targets(&channels, &roles, 1, &main)
+            .iter()
+            .any(|(c, o)| (c.id, o.target) == (13, 2)));
     }
 }

@@ -19,7 +19,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tommybot_antinuke::{
-    security::{checks, setting_fix, strip_targets, stripped, GuildSafety, Setup},
+    security::{
+        checks, overwrite_targets, setting_fix, strip_targets, stripped, stripped_overwrite,
+        synced_children, GuildSafety, Setup,
+    },
     Inverse, RoleImg,
 };
 
@@ -50,7 +53,6 @@ pub fn routes() -> Router<AppState> {
 #[derive(Deserialize, Clone)]
 pub(crate) struct Role {
     pub id: String,
-    name: String,
     pub position: i64,
     #[serde(default)]
     pub managed: bool,
@@ -103,75 +105,114 @@ async fn roles_and_mine(st: &AppState, guild: i64) -> Result<(Vec<Role>, Vec<Str
     Ok((roles, mine))
 }
 
-fn img(r: &Role) -> RoleImg {
-    RoleImg {
-        id: r.id.parse().unwrap_or(0),
-        name: r.name.clone(),
-        color: 0,
-        permissions: r.perms(),
-        position: r.position,
-        hoist: false,
-        mentionable: false,
-        managed: r.managed,
-    }
+/// What the security score reads from Discord, fetched once for the check and its fixes.
+struct Live {
+    safety: GuildSafety,
+    setup: Setup,
+    bot_pos: i64,
+    image: tommybot_antinuke::Image,
+    /// Raw role and channel JSON, kept for the backup a fix takes first.
+    roles: Value,
+    channels: Value,
+}
+
+async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Live, ApiError> {
+    let get = |path: String| async move { st.discord.call(Method::GET, &path, None).await };
+    let (g, roles, channels, me) = tokio::try_join!(
+        get(format!("/guilds/{guild}")),
+        get(format!("/guilds/{guild}/roles")),
+        get(format!("/guilds/{guild}/channels")),
+        get("/users/@me".into()),
+    )?;
+    let me = me["id"].as_str().unwrap_or_default();
+    let mine = st.discord.member_roles(guild, me).await?;
+    let image = crate::recovery::live_image(guild, &roles, &channels);
+    let bot_pos = image
+        .roles
+        .iter()
+        .filter(|r| mine.contains(&r.id.to_string()))
+        .map(|r| r.position)
+        .max()
+        .unwrap_or(0);
+    let extra: Vec<i64> =
+        sqlx::query_scalar("select user_id from extra_owners where guild_id = $1")
+            .bind(guild)
+            .fetch_all(&st.db)
+            .await?;
+    let id = |v: &Value| v.as_str().and_then(|x| x.parse::<u64>().ok());
+    let n = |k: &str| g[k].as_u64().unwrap_or(0) as u8;
+    Ok(Live {
+        safety: GuildSafety {
+            id: guild as u64,
+            mfa: n("mfa_level"),
+            verification: n("verification_level"),
+            content_filter: n("explicit_content_filter"),
+            notifications: n("default_message_notifications"),
+        },
+        setup: Setup {
+            quarantine_role: id(&config["antinuke"]["quarantine_role"]),
+            log_fallback: config["logging"]["fallback"]
+                .as_str()
+                .is_some_and(|f| !f.is_empty()),
+            roleless_staff: tommybot_core::permits::roleless_staff(&st.db, guild).await?,
+            whitelisted: serde_json::from_value::<tommybot_core::sections::WhitelistCfg>(
+                config["whitelist"].clone(),
+            )
+            .is_ok_and(|w| !w.is_empty()),
+            bot_roles: mine.iter().filter_map(|r| r.parse().ok()).collect(),
+            mod_log: config["logging"]["routes"]["mod_command"].is_string(),
+            // Every module defaults to off, so a missing switch reads as off.
+            modules: [
+                ("Anti-nuke", "antinuke"),
+                ("Join gate", "joingate"),
+                ("Join raid", "joinraid"),
+                ("Verification", "verification"),
+            ]
+            .map(|(name, k)| (name, config[k]["enabled"] == true))
+            .to_vec(),
+            main_roles: config["lockdown"]["main_roles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(id)
+                .collect(),
+            trusted: extra
+                .into_iter()
+                .map(|u| u as u64)
+                .chain(id(&g["owner_id"]))
+                .chain(me.parse().ok())
+                .collect(),
+        },
+        bot_pos,
+        image,
+        roles,
+        channels,
+    })
 }
 
 async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
     let (_, config) = crate::store::current(&st.db, guild).await?;
-    let (roles, mine) = roles_and_mine(&st, guild).await?;
-    let bot_pos = top_of(&roles, &mine);
-    let g = st
-        .discord
-        .call(Method::GET, &format!("/guilds/{guild}"), None)
-        .await?;
-    let n = |k: &str| g[k].as_u64().unwrap_or(0) as u8;
-    let safety = GuildSafety {
-        id: guild as u64,
-        mfa: n("mfa_level"),
-        verification: n("verification_level"),
-        content_filter: n("explicit_content_filter"),
-        notifications: n("default_message_notifications"),
-    };
-    let setup = Setup {
-        quarantine_role: config["antinuke"]["quarantine_role"]
-            .as_str()
-            .and_then(|q| q.parse().ok()),
-        log_fallback: config["logging"]["fallback"]
-            .as_str()
-            .is_some_and(|f| !f.is_empty()),
-        roleless_staff: tommybot_core::permits::roleless_staff(&st.db, guild).await?,
-        whitelisted: serde_json::from_value::<tommybot_core::sections::WhitelistCfg>(
-            config["whitelist"].clone(),
-        )
-        .is_ok_and(|w| !w.is_empty()),
-        bot_roles: mine.iter().filter_map(|r| r.parse().ok()).collect(),
-        mod_log: config["logging"]["routes"]["mod_command"].is_string(),
-        main_roles: config["lockdown"]["main_roles"]
-            .as_array()
-            .is_some_and(|a| !a.is_empty()),
-        // Every module defaults to off, so a missing switch reads as off.
-        modules: [
-            ("Anti-nuke", "antinuke"),
-            ("Join gate", "joingate"),
-            ("Join raid", "joinraid"),
-            ("Verification", "verification"),
-        ]
-        .map(|(name, k)| (name, config[k]["enabled"] == true))
-        .to_vec(),
-    };
-    let roles: Vec<RoleImg> = roles.iter().map(img).collect();
-    Ok(Json(json!(checks(&safety, &roles, bot_pos, &setup))))
+    let l = live(&st, guild, &config).await?;
+    Ok(Json(json!(checks(
+        &l.safety,
+        &l.image.roles,
+        &l.image.channels,
+        l.bot_pos,
+        &l.setup
+    ))))
 }
 
-/// One of a row's `fix`: a role id (`*` for every strippable role) or a server setting.
+/// One of a row's `fix`: a role id (`*` for every strippable role and overwrite), an overwrite
+/// (`channel_id` + its target in `role_id`), or a server setting.
 #[derive(Deserialize)]
 struct FixBody {
     role_id: Option<String>,
+    channel_id: Option<String>,
     setting: Option<String>,
 }
 
-/// Role strips take a backup first, so Backups can put the old permissions back.
+/// Role and overwrite strips take a backup first, so Backups can put the old permissions back.
 async fn fix(
     State(st): State<AppState>,
     s: Sess,
@@ -202,17 +243,31 @@ async fn fix(
         .await;
         return Ok(Json(json!({"ok": true})));
     }
-    let role_id = b
+    let target = b
         .role_id
         .ok_or_else(|| ApiError::BadRequest("nothing to fix".into()))?;
-    let (roles, bot_pos) = roles_and_bot_pos(&st, guild).await?;
-    let roles: Vec<RoleImg> = roles.iter().map(img).collect();
-    let targets = if role_id == "*" {
-        strip_targets(&roles, guild as u64, bot_pos)
+    let l = live(&st, guild, &c).await?;
+    let (g, roles, channels) = (guild as u64, &l.image.roles, &l.image.channels);
+    let all = target == "*";
+    let flagged = overwrite_targets(channels, roles, g, &l.setup);
+    let overwrites: Vec<_> = flagged
+        .iter()
+        .filter(|(ch, o)| {
+            all || (b.channel_id.as_deref() == Some(&ch.id.to_string())
+                && o.target.to_string() == target)
+        })
+        .collect();
+    let role_targets: Vec<&RoleImg> = if all {
+        strip_targets(roles, g, l.bot_pos)
+    } else if b.channel_id.is_some() {
+        if overwrites.is_empty() {
+            return Err(ApiError::NotFound);
+        }
+        vec![]
     } else {
         let r = roles
             .iter()
-            .find(|r| r.id.to_string() == role_id)
+            .find(|r| r.id.to_string() == target)
             .ok_or(ApiError::NotFound)?;
         if r.managed {
             return Err(ApiError::BadRequest(
@@ -221,48 +276,83 @@ async fn fix(
         }
         vec![r]
     };
-    let channels = st
-        .discord
-        .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
-        .await?;
-    let roles_json = st
-        .discord
-        .call(Method::GET, &format!("/guilds/{guild}/roles"), None)
-        .await?;
     let backup: i64 =
         sqlx::query_scalar("INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id")
             .bind(guild)
             .bind(sqlx::types::Json(crate::recovery::live_image(
                 guild,
-                &roles_json,
-                &channels,
+                &l.roles,
+                &l.channels,
             )))
             .fetch_one(&st.db)
             .await?;
-    for r in &targets {
-        st.discord
+    // Keep going past a failed call (e.g. a private channel the bot cannot see), so everything
+    // that can be fixed is, and the log lists both.
+    let (mut done, mut failed) = (vec![], vec![]);
+    for r in &role_targets {
+        let res = st
+            .discord
             .call(
                 Method::PATCH,
                 &format!("/guilds/{guild}/roles/{}", r.id),
-                Some(
-                    json!({"permissions": stripped(r.id, guild as u64, r.permissions).to_string()}),
-                ),
+                Some(json!({"permissions": stripped(r.id, g, r.permissions).to_string()})),
             )
-            .await?;
+            .await;
+        let line = format!("role `{}`", r.name);
+        match res {
+            Ok(_) => done.push(line),
+            Err(e) => failed.push(format!("{line} ({e})")),
+        }
     }
-    let names: Vec<&str> = targets.iter().map(|r| r.name.as_str()).collect();
-    log_change(
-        &st,
-        guild,
-        &c,
-        format!(
-            "{} (<@{}>) stripped dangerous permissions from role(s) `{}`, backup #{backup}",
-            s.username,
-            s.user_id,
-            names.join("`, `")
-        ),
-    )
-    .await;
+    // A category fix also goes to its synced children, so they stay synced.
+    for (ch, o) in &overwrites {
+        let fixed = stripped_overwrite(o, g, &l.setup);
+        let who = match (o.target == g, o.is_role) {
+            (true, _) => "@everyone".into(),
+            (_, true) => format!("<@&{}>", o.target),
+            _ => format!("<@{}>", o.target),
+        };
+        for id in std::iter::once(ch.id).chain(synced_children(channels, ch).iter().map(|x| x.id)) {
+            let res = st
+                .discord
+                .call(
+                    Method::PUT,
+                    &format!("/channels/{id}/permissions/{}", o.target),
+                    Some(json!({
+                        "type": if o.is_role { 0 } else { 1 },
+                        "allow": fixed.allow.to_string(),
+                        "deny": fixed.deny.to_string(),
+                    })),
+                )
+                .await;
+            let line = format!("<#{id}> for {who}");
+            match res {
+                Ok(_) => done.push(line),
+                Err(e) => failed.push(format!("{line} ({e})")),
+            }
+        }
+    }
+    let mut text = format!(
+        "{} (<@{}>) stripped dangerous permissions from {}, backup #{backup}",
+        s.username,
+        s.user_id,
+        if done.is_empty() {
+            "nothing".into()
+        } else {
+            done.join(", ")
+        }
+    );
+    if !failed.is_empty() {
+        text.push_str(&format!("\nFailed: {}", failed.join(", ")));
+    }
+    log_change(&st, guild, &c, text).await;
+    if !failed.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "Fixed {}, but could not fix: {}. Backup #{backup} holds the state before.",
+            done.len(),
+            failed.join(", ")
+        )));
+    }
     Ok(Json(json!({"ok": true, "backup": backup})))
 }
 

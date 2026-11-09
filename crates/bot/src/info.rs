@@ -319,6 +319,10 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
         content_filter: u8::from(g.explicit_content_filter),
         notifications: u8::from(g.default_message_notifications),
     };
+    let extra: Vec<i64> = sqlx::query_scalar("SELECT user_id FROM extra_owners WHERE guild_id=$1")
+        .bind(gid.get() as i64)
+        .fetch_all(&app.pool)
+        .await?;
     let me = app.http.guild_member(gid, app.me).await?.model().await?;
     let setup = Setup {
         quarantine_role: cfg.antinuke.quarantine_role.map(|r| r.get()),
@@ -330,7 +334,7 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
             .logging
             .routes
             .contains_key(&tommybot_logging::LogKind::ModCommand),
-        main_roles: !cfg.lockdown.main_roles.is_empty(),
+        main_roles: cfg.lockdown.main_roles.iter().map(|r| r.get()).collect(),
         modules: vec![
             ("Anti-nuke", cfg.antinuke.enabled),
             ("Join gate", cfg.joingate.enabled),
@@ -340,10 +344,24 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
             ),
             ("Verification", cfg.verification.enabled),
         ],
+        trusted: extra
+            .into_iter()
+            .map(|u| u as u64)
+            .chain([g.owner_id.get(), app.me.get()])
+            .collect(),
     };
     let bot_top = app.guild_info(gid).await?.bot_top;
+    let channels: Vec<_> = app
+        .http
+        .guild_channels(gid)
+        .await?
+        .models()
+        .await?
+        .into_iter()
+        .map(crate::backup::channel_img)
+        .collect();
     let roles: Vec<_> = g.roles.into_iter().map(crate::backup::role_img).collect();
-    let mut rows = checks(&safety, &roles, bot_top, &setup);
+    let mut rows = checks(&safety, &roles, &channels, bot_top, &setup);
     let points = score(&rows);
     // Worst first; 12 rows with details stay under the embed's 4096 characters.
     rows.sort_by_key(|r| std::cmp::Reverse(r.severity));
