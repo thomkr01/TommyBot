@@ -1,4 +1,4 @@
-//! Web and third-party verification: a member signs in with Discord, passes Cloudflare Turnstile,
+//! Web verification: a member signs in with Discord, passes Cloudflare Turnstile,
 //! and the bot is told (as a `verify_grant` job) to hand out the roles.
 use crate::{auth::Sess, store, ApiError, AppState};
 use axum::{

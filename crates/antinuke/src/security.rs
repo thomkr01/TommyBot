@@ -273,6 +273,22 @@ pub fn checks(g: &GuildSafety, roles: &[RoleImg], bot_top: i64, setup: &Setup) -
             None,
         );
     }
+    // Any role, bot roles included, counts: a raider's bot sitting above ours wins the race.
+    let higher = roles
+        .iter()
+        .filter(|r| r.position > bot_top && r.id != g.id)
+        .count();
+    row(
+        "bot_top_eight",
+        if higher < 8 {
+            Severity::Ok
+        } else {
+            Severity::Warn
+        },
+        "Bot role among the top 8",
+        format!("{higher} roles sit above the bot's highest role."),
+        None,
+    );
     for r in roles.iter().filter(|r| {
         !r.managed
             && r.id != g.id
@@ -479,9 +495,26 @@ mod tests {
         let setup = setup(None, true);
         let rows = checks(&SAFE, &[], 0, &setup);
         // Only the missing quarantine role and the bot role (none here) fail.
-        assert_eq!(rows.len(), 12);
-        assert_eq!(score(&rows), 10 * 100 / 12);
+        assert_eq!(rows.len(), 13);
+        assert_eq!(score(&rows), 11 * 100 / 13);
         assert_eq!(score(&[]), 0);
+    }
+
+    #[test]
+    fn bot_role_must_be_among_the_top_eight() {
+        let at = |above: u64| {
+            let roles: Vec<RoleImg> = (0..above)
+                .map(|i| role(10 + i, 2 + i as i64, true, 0))
+                .collect();
+            sev(
+                &checks(&SAFE, &roles, 1, &setup(None, true)),
+                "bot_top_eight",
+            )
+            .unwrap()
+            .severity
+        };
+        assert_eq!(at(7), Severity::Ok);
+        assert_eq!(at(8), Severity::Warn);
     }
 
     #[test]

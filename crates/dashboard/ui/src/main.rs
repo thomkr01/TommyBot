@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 mod appeals;
 mod channels;
 mod commands;
+mod update;
+mod records;
 mod common;
 mod discord;
 mod embeds;
@@ -13,140 +15,51 @@ mod lockdown;
 mod md;
 mod pages;
 mod permits;
-mod records;
 mod recovery;
 mod search;
-mod update;
 mod wizard;
+use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use appeals::{AppealForm, AppealList, Blacklist};
+use records::{CaseList, NoteList, RaidLog, ReportList, TicketLog};
 use common::*;
 use embeds::Embeds;
 use form::Section;
-use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use permits::Permits;
-use records::{CaseList, NoteList, RaidLog, ReportList, TicketLog};
 /// The server list's empty state; its text is the marker that shows the help card.
 const NO_SERVERS: &str = "No servers";
 
+use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Tickets, Wizard};
+use search::{Search, SearchBox};
+use recovery::{Backups, Panic};
 use channels::ChannelSetup;
 use commands::Commands;
-use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Tickets, Wizard};
-use recovery::{Backups, Panic};
-use search::{Search, SearchBox};
 use update::Update;
 
 /// Sidebar with only with the pages TommyBot has.
-const TOP: &[(&str, &str)] = &[
-    ("wizard", "Wizard"),
-    ("overview", "Overview"),
-    ("misc", "Miscellaneous"),
-    ("permits", "Permits"),
-    ("logging", "Logging"),
-    ("backups", "Backups"),
-    ("channel_setup", "Channel Setup"),
-    ("lockdown", "Lockdown"),
-    ("appeal_list", "Appeals"),
-];
+const TOP: &[(&str, &str)] = &[("wizard", "Wizard"), ("overview", "Overview"), ("misc", "Miscellaneous"), ("permits", "Permits"), ("logging", "Logging"), ("backups", "Backups"), ("channel_setup", "Channel Setup"), ("lockdown", "Lockdown"), ("appeal_list", "Appeals")];
 const NAV: &[(&str, &[(&str, &str)])] = &[
-    (
-        "Auto Mod",
-        &[
-            ("automod", "General"),
-            ("filters", "Filters"),
-            ("discord_automod", "Discord"),
-            ("whitelist", "Whitelist"),
-            ("automod_panic", "Panic Mode"),
-        ],
-    ),
-    (
-        "Anti Nuke",
-        &[
-            ("antinuke", "General"),
-            ("antinuke_filters", "Filters"),
-            ("antinuke_panic", "Panic Mode"),
-        ],
-    ),
-    (
-        "Server Joins",
-        &[
-            ("joingate", "Join Gate"),
-            ("joinraid", "Join Raid"),
-            ("verification", "Verification"),
-        ],
-    ),
-    (
-        "Moderation",
-        &[
-            ("cases", "Cases"),
-            ("notes", "Notes"),
-            ("report_list", "Reports"),
-            ("tickets", "Tickets"),
-            ("catch", "Catch Channel"),
-        ],
-    ),
-    (
-        "Tools",
-        &[
-            ("revert", "Revert Center"),
-            ("history", "History"),
-            ("embeds", "Embed Builder"),
-            ("rescue", "Rescue Key"),
-        ],
-    ),
+    ("Auto Mod", &[("automod", "General"), ("filters", "Filters"), ("discord_automod", "Discord"), ("whitelist", "Whitelist"), ("automod_panic", "Panic Mode")]),
+    ("Anti Nuke", &[("antinuke", "General"), ("antinuke_filters", "Filters"), ("antinuke_panic", "Panic Mode")]),
+    ("Server Joins", &[("joingate", "Join Gate"), ("joinraid", "Join Raid"), ("verification", "Verification")]),
+    ("Moderation", &[("cases", "Cases"), ("notes", "Notes"), ("report_list", "Reports"), ("tickets", "Tickets"), ("catch", "Catch Channel")]),
+    ("Tools", &[("revert", "Revert Center"), ("history", "History"), ("embeds", "Embed Builder"), ("rescue", "Rescue Key")]),
 ];
 /// Groups that start open; the rest stay folded until visited.
 const OPEN_GROUPS: [&str; 4] = ["Auto Mod", "Anti Nuke", "Server Joins", "Moderation"];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
-const APPEAL_TABS: &[(&str, &str)] = &[
-    ("appeal_list", "List"),
-    ("appeals", "Settings"),
-    ("appeal_blacklist", "Blacklist"),
-];
+const APPEAL_TABS: &[(&str, &str)] = &[("appeal_list", "List"), ("appeals", "Settings"), ("appeal_blacklist", "Blacklist")];
 const RAID_TABS: &[(&str, &str)] = &[("joinraid", "Settings"), ("raid_log", "Raid Log")];
 const REPORT_TABS: &[(&str, &str)] = &[("report_list", "List"), ("report_blacklist", "Blacklist")];
-const WL_TABS: &[(&str, &str)] = &[
-    ("whitelist", "Spam"),
-    ("whitelist/invites", "Invite Links"),
-    ("whitelist/mentions", "Mentions"),
-    ("whitelist/everyone", "@everyone"),
-];
-const SPAM_TABS: &[(&str, &str)] = &[
-    ("filters/spam_text", "Text messages"),
-    ("filters/spam_mentions", "Mentions"),
-    ("filters/spam_attach", "Attachments"),
-];
+const WL_TABS: &[(&str, &str)] = &[("whitelist", "Spam"), ("whitelist/invites", "Invite Links"), ("whitelist/mentions", "Mentions"), ("whitelist/everyone", "@everyone")];
+const SPAM_TABS: &[(&str, &str)] = &[("filters/spam_text", "Text messages"), ("filters/spam_mentions", "Mentions"), ("filters/spam_attach", "Attachments")];
 /// (sub page, title, description) for the Filters index.
 const FILTER_PAGES: &[(&str, &str, &str)] = &[
-    (
-        "spam_text",
-        "Anti Spam",
-        "Target message, mention, attachment spam and a lot more.",
-    ),
-    (
-        "invites",
-        "Invite Links",
-        "Target Discord Server invites sent by advertisers.",
-    ),
-    (
-        "malicious",
-        "Malicious Links",
-        "Target phishing/malicious/scam websites sent in your server.",
-    ),
-    (
-        "nsfw",
-        "NSFW Links",
-        "Target NSFW websites posted in SFW channels.",
-    ),
-    (
-        "words",
-        "Word Blacklist",
-        "Target premade profanity words or add your own.",
-    ),
-    (
-        "links",
-        "Link Blacklist",
-        "Target websites found in messages that you manage.",
-    ),
+    ("spam_text", "Anti Spam", "Target message, mention, attachment spam and a lot more."),
+    ("invites", "Invite Links", "Target Discord Server invites sent by advertisers."),
+    ("malicious", "Malicious Links", "Target phishing/malicious/scam websites sent in your server."),
+    ("nsfw", "NSFW Links", "Target NSFW websites posted in SFW channels."),
+    ("words", "Word Blacklist", "Target premade profanity words or add your own."),
+    ("links", "Link Blacklist", "Target websites found in messages that you manage."),
 ];
 
 /// (small label, big title) page header; no title means the server name.
@@ -170,23 +83,12 @@ fn title(p: &str) -> (String, Option<String>) {
         "verification" => two("Verification", "General Settings"),
         "automod_panic" => ("Auto Mod Panic Mode".into(), None),
         "antinuke_panic" => ("Anti Nuke Panic Mode".into(), None),
-        _ => (
-            NAV.iter()
-                .flat_map(|(_, i)| i.iter())
-                .chain(TOP)
-                .find(|(k, _)| *k == p)
-                .map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()),
-            None,
-        ),
+        _ => (NAV.iter().flat_map(|(_, i)| i.iter()).chain(TOP).find(|(k, _)| *k == p).map_or_else(|| p.replace('_', " "), |(_, t)| t.to_string()), None),
     }
 }
 
 #[component]
-fn Tabs(
-    guild: String,
-    items: &'static [(&'static str, &'static str)],
-    active: String,
-) -> impl IntoView {
+fn Tabs(guild: String, items: &'static [(&'static str, &'static str)], active: String) -> impl IntoView {
     view! { <div class="tabs">{items.iter().map(|(p, t)| view! { <a class:on=*p == active href=format!("#/{guild}/{p}")>{*t}</a> }).collect_view()}</div> }
 }
 
@@ -194,34 +96,14 @@ fn Tabs(
 fn Bell(route: ReadSignal<Vec<String>>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let appeals = RwSignal::new(Vec::<Value>::new());
-    let fetch = move || {
-        spawn_local(async move {
-            if let Ok(v) = api("GET", "/api/appeal/notifications", None).await {
-                appeals.set(v.as_array().cloned().unwrap_or_default())
-            }
-        })
-    };
+    let fetch = move || spawn_local(async move { if let Ok(v) = api("GET", "/api/appeal/notifications", None).await { appeals.set(v.as_array().cloned().unwrap_or_default()) } });
     fetch();
-    let guild = move || {
-        route
-            .get_untracked()
-            .first()
-            .cloned()
-            .filter(|g| g.bytes().all(|b| b.is_ascii_digit()))
-    };
+    let guild = move || route.get_untracked().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit()));
     let load = move |_| {
         // Opening the bell shows the verdicts once; the next fetch no longer lists them.
-        if !appeals.get_untracked().is_empty() {
-            spawn_local(async move {
-                let _ = api("POST", "/api/appeal/notifications", None).await;
-            });
-        }
+        if !appeals.get_untracked().is_empty() { spawn_local(async move { let _ = api("POST", "/api/appeal/notifications", None).await; }); }
         let Some(g) = guild() else { return };
-        spawn_local(async move {
-            if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await {
-                rows.set(v.as_array().cloned().unwrap_or_default())
-            }
-        });
+        spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await { rows.set(v.as_array().cloned().unwrap_or_default()) } });
     };
     view! { <details class="ico" on:toggle=load><summary aria-label="notifications">{icons::icon("bell")}{move || (!appeals.get().is_empty()).then(|| format!(" {}", appeals.get().len()))}</summary><div>
         {move || appeals.get().into_iter().map(|a| view! { <a href=format!("#/appeal/{}", a["guild"].as_str().unwrap_or(""))>{format!("Your {} appeal #{} was {}", a["kind"].as_str().unwrap_or(""), a["id"], if a["status"] == "accepted" { "approved" } else { "denied" })}</a> }).collect_view()}
@@ -232,31 +114,14 @@ fn Bell(route: ReadSignal<Vec<String>>) -> impl IntoView {
 }
 
 fn toggle_theme() {
-    let Some(root) = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.document_element())
-    else {
-        return;
-    };
-    let next = if root.get_attribute("data-theme").as_deref() == Some("light") {
-        "dark"
-    } else {
-        "light"
-    };
+    let Some(root) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) else { return };
+    let next = if root.get_attribute("data-theme").as_deref() == Some("light") { "dark" } else { "light" };
     let _ = root.set_attribute("data-theme", next);
 }
 
 pub(crate) fn hash() -> Vec<String> {
-    let h = web_sys::window()
-        .unwrap()
-        .location()
-        .hash()
-        .unwrap_or_default();
-    h.trim_start_matches('#')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect()
+    let h = web_sys::window().unwrap().location().hash().unwrap_or_default();
+    h.trim_start_matches('#').split('/').filter(|s| !s.is_empty()).map(String::from).collect()
 }
 
 #[component]
@@ -267,94 +132,48 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let load = {
         let g = guild.clone();
-        move || {
-            let g = g.clone();
-            spawn_local(async move {
-                if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await {
-                    version.set(v[0]["version"].as_i64().unwrap_or(0));
-                    set_rows.set(v.as_array().cloned().unwrap_or_default());
-                }
-            })
-        }
+        move || { let g = g.clone(); spawn_local(async move {
+            if let Ok(v) = api("GET", &format!("/api/guilds/{g}/history"), None).await {
+                version.set(v[0]["version"].as_i64().unwrap_or(0));
+                set_rows.set(v.as_array().cloned().unwrap_or_default());
+            }
+        }) }
     };
     load();
     // Import is previewed first: the server answers with the diff and the ids it will clear.
     let preview = RwSignal::new(None::<(Value, Value)>);
-    let shown = Memo::new(move |prev: Option<&Option<(Value, Value)>>| {
-        preview.get().or(prev.cloned().flatten())
-    });
-    let export = {
-        let g = guild.clone();
-        move |_| {
-            let g = g.clone();
-            spawn_local(async move {
-                match api("GET", &format!("/api/guilds/{g}/config"), None).await {
-                    Ok(v) => download(
-                        &format!("tommybot-settings-{g}.json"),
-                        &format!(
-                            "data:application/json;charset=utf-8,{}",
-                            js_sys::encode_uri_component(
-                                &serde_json::to_string_pretty(
-                                    &json!({"version": v["version"], "config": v["config"]})
-                                )
-                                .unwrap_or_default()
-                            )
-                        ),
-                    ),
-                    Err(e) => msg.err(e),
-                }
-            })
-        }
-    };
-    let send = {
-        let g = guild.clone();
-        move |cfg: Value, apply: bool| {
-            let g = g.clone();
-            async move {
-                api("POST", &format!("/api/guilds/{g}/import"), Some(json!({"expected_version": version.get_untracked(), "config": cfg, "apply": apply}))).await
-            }
-        }
-    };
-    let import = {
+    let shown = Memo::new(move |prev: Option<&Option<(Value, Value)>>| preview.get().or(prev.cloned().flatten()));
+    let export = { let g = guild.clone(); move |_| { let g = g.clone(); spawn_local(async move {
+        match api("GET", &format!("/api/guilds/{g}/config"), None).await {
+            Ok(v) => download(&format!("tommybot-settings-{g}.json"), &format!("data:application/json;charset=utf-8,{}",
+                js_sys::encode_uri_component(&serde_json::to_string_pretty(&json!({"version": v["version"], "config": v["config"]})).unwrap_or_default()))),
+            Err(e) => msg.err(e),
+        }}) } };
+    let send = { let g = guild.clone(); move |cfg: Value, apply: bool| { let g = g.clone(); async move {
+        api("POST", &format!("/api/guilds/{g}/import"), Some(json!({"expected_version": version.get_untracked(), "config": cfg, "apply": apply}))).await
+    } } };
+    let import = { let send = send.clone(); move |e: leptos::ev::Event| {
+        let input = event_target::<web_sys::HtmlInputElement>(&e);
+        let Some(file) = input.files().and_then(|l| l.get(0)) else { return };
+        input.set_value("");
         let send = send.clone();
-        move |e: leptos::ev::Event| {
-            let input = event_target::<web_sys::HtmlInputElement>(&e);
-            let Some(file) = input.files().and_then(|l| l.get(0)) else {
-                return;
-            };
-            input.set_value("");
-            let send = send.clone();
-            spawn_local(async move {
-                let text = wasm_bindgen_futures::JsFuture::from(file.text())
-                    .await
-                    .ok()
-                    .and_then(|t| t.as_string())
-                    .unwrap_or_default();
-                let Ok(f) = serde_json::from_str::<Value>(&text) else {
-                    return msg.err("This file is not valid JSON");
-                };
-                let cfg = f["config"].clone();
-                run_act(send(cfg.clone(), false), msg, need, move |p| {
-                    preview.set(Some((cfg, p)))
-                });
-            });
-        }
-    };
-    let apply = {
+        spawn_local(async move {
+            let text = wasm_bindgen_futures::JsFuture::from(file.text()).await.ok().and_then(|t| t.as_string()).unwrap_or_default();
+            let Ok(f) = serde_json::from_str::<Value>(&text) else { return msg.err("This file is not valid JSON") };
+            let cfg = f["config"].clone();
+            run_act(send(cfg.clone(), false), msg, need, move |p| preview.set(Some((cfg, p))));
+        });
+    } };
+    let apply = { let load = load.clone(); move |_| {
+        let Some((cfg, _)) = preview.get_untracked() else { return };
+        preview.set(None);
         let load = load.clone();
-        move |_| {
-            let Some((cfg, _)) = preview.get_untracked() else {
-                return;
-            };
-            preview.set(None);
-            let load = load.clone();
-            run_act(send(cfg, true), msg, need, move |v| {
-                load();
-                let cleared = csv(&v["cleared"]);
-                msg.ok(if cleared.is_empty() { format!("Imported as version {}", v["version"]) } else { format!("Imported as version {}. Set these again, their ids were cleared: {cleared}", v["version"]) });
-            });
-        }
-    };
+        run_change(send(cfg, true), msg, need, move |v| {
+            load();
+            let cleared = csv(&v["cleared"]);
+            msg.ok(if cleared.is_empty() { format!("Imported as version {}", v["version"]) } else { format!("Imported as version {}. Set these again, their ids were cleared: {cleared}", v["version"]) });
+        });
+    } };
     let file = NodeRef::<leptos::html::Input>::new();
     let (g1, g2) = (guild.clone(), guild);
     view! {
@@ -410,9 +229,7 @@ fn App() -> impl IntoView {
     window_event_listener(leptos::ev::hashchange, move |_| {
         let next = hash();
         // A new page (server or page part changed) starts at the top; tab switches keep the scroll.
-        if !route.get_untracked().iter().take(2).eq(next.iter().take(2)) {
-            web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0)
-        }
+        if !route.get_untracked().iter().take(2).eq(next.iter().take(2)) { web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0) }
         set_route.set(next)
     });
     let (me, set_me) = signal(None::<Value>);
@@ -420,41 +237,19 @@ fn App() -> impl IntoView {
     let (guilds, set_guilds) = signal(Vec::<Value>::new());
     provide_context(guilds);
     provide_context(me);
-    let search = Search {
-        q: RwSignal::new(String::new()),
-        index: RwSignal::new(vec![]),
-    };
+    let search = Search { q: RwSignal::new(String::new()), index: RwSignal::new(vec![]) };
     provide_context(search);
-    let pages = StoredValue::new(
-        TOP.iter()
-            .chain(NAV.iter().flat_map(|(_, i)| i.iter()))
-            .copied()
-            .collect::<Vec<_>>(),
-    );
-    let guild = Signal::derive(move || {
-        route
-            .get()
-            .first()
-            .cloned()
-            .filter(|g| g.bytes().all(|b| b.is_ascii_digit()))
-    });
+    let pages = StoredValue::new(TOP.iter().chain(NAV.iter().flat_map(|(_, i)| i.iter())).copied().collect::<Vec<_>>());
+    let guild = Signal::derive(move || route.get().first().cloned().filter(|g| g.bytes().all(|b| b.is_ascii_digit())));
     let (nav_open, set_nav_open) = signal(false);
-    window_event_listener(leptos::ev::keydown, move |e| {
-        if e.key() == "Escape" {
-            set_nav_open.set(false)
-        }
-    });
+    window_event_listener(leptos::ev::keydown, move |e| if e.key() == "Escape" { set_nav_open.set(false) });
     let (filter, set_filter) = signal(String::new());
     let (guilds_note, set_guilds_note) = signal(String::from("Loading servers..."));
     let load_guilds = move || async move {
         match api("GET", "/api/guilds", None).await {
             Ok(g) => {
                 let list = g.as_array().cloned().unwrap_or_default();
-                set_guilds_note.set(if list.is_empty() {
-                    NO_SERVERS.into()
-                } else {
-                    String::new()
-                });
+                set_guilds_note.set(if list.is_empty() { NO_SERVERS.into() } else { String::new() });
                 set_guilds.set(list);
             }
             Err(e) => set_guilds_note.set(format!("Could not load servers: {e}")),
@@ -589,10 +384,7 @@ fn App() -> impl IntoView {
 fn main() {
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
-        if let Some(body) = web_sys::window()
-            .and_then(|w| w.document())
-            .and_then(|d| d.body())
-        {
+        if let Some(body) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.body()) {
             let _ = body.insert_adjacent_text("beforeend", &format!("Dashboard crashed: {info}"));
         }
     }));

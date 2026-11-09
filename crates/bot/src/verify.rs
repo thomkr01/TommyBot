@@ -1,5 +1,5 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
-//! Web and third-party modes hand the member to the dashboard's /verify page, which queues a `verify_grant` job.
+//! Web mode hands the member to the dashboard's /verify page, which queues a `verify_grant` job.
 use anyhow::Result;
 use captcha::{
     filters::{Dots, Noise, Wave},

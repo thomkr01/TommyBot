@@ -10,50 +10,29 @@ fn s(v: &Value) -> String {
 #[component]
 pub fn AppealList(guild: String) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
-    let (kind, q, msg) = (
-        RwSignal::new(String::new()),
-        RwSignal::new(String::new()),
-        Msg::default(),
-    );
+    let (kind, q, msg) = (RwSignal::new(String::new()), RwSignal::new(String::new()), Msg::default());
     let loaded = RwSignal::new(false);
     let (g, page) = (StoredValue::new(guild), RwSignal::new(0i64));
-    let list = move || {
-        format!(
-            "/api/guilds/{}/appeals?kind={}&q={}&page=",
-            g.get_value(),
-            kind.get_untracked(),
-            js_sys::encode_uri_component(&q.get_untracked())
-        )
-    };
-    let load = move || {
-        spawn_local(async move {
-            let path = format!("{}{}", list(), page.get_untracked());
-            match api("GET", &path, None).await {
-                Ok(v) => {
-                    msg.clear();
-                    set_rows.set(v.as_array().cloned().unwrap_or_default())
-                }
-                Err(e) => msg.err(e),
-            }
-            loaded.set(true);
-        })
-    };
-    let first = move || {
-        page.set(0);
-        load()
-    };
+    let list = move || format!("/api/guilds/{}/appeals?kind={}&q={}&page=", g.get_value(), kind.get_untracked(), js_sys::encode_uri_component(&q.get_untracked()));
+    let load = move || spawn_local(async move {
+        let path = format!("{}{}", list(), page.get_untracked());
+        match api("GET", &path, None).await {
+            Ok(v) => { msg.clear(); set_rows.set(v.as_array().cloned().unwrap_or_default()) }
+            Err(e) => msg.err(e),
+        }
+        loaded.set(true);
+    });
+    let first = move || { page.set(0); load() };
     load();
     let reply = RwSignal::new(String::new());
-    let decide = move |id: i64, accept: bool, blacklist: bool, dismiss: bool| {
-        spawn_local(async move {
-            let path = format!("/api/guilds/{}/appeals/{id}/decide", g.get_value());
-            let body = json!({"accept": accept, "blacklist": blacklist, "dismiss": dismiss, "reply": reply.get_untracked()});
-            match api("POST", &path, Some(body)).await {
-                Ok(_) => load(),
-                Err(e) => msg.err(e),
-            }
-        })
-    };
+    let decide = move |id: i64, accept: bool, blacklist: bool, dismiss: bool| spawn_local(async move {
+        let path = format!("/api/guilds/{}/appeals/{id}/decide", g.get_value());
+        let body = json!({"accept": accept, "blacklist": blacklist, "dismiss": dismiss, "reply": reply.get_untracked()});
+        match api("POST", &path, Some(body)).await {
+            Ok(_) => load(),
+            Err(e) => msg.err(e),
+        }
+    });
     view! {
         <div class="card row">
             <div class="chips">
@@ -90,48 +69,25 @@ pub fn AppealList(guild: String) -> impl IntoView {
 
 /// Blocklist of one feature (`base` is "appeals" or "reports"); only appeals can purge it.
 #[component]
-pub fn Blacklist(
-    guild: String,
-    base: &'static str,
-    #[prop(optional)] purge: bool,
-) -> impl IntoView {
+pub fn Blacklist(guild: String, base: &'static str, #[prop(optional)] purge: bool) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let (user, msg) = (RwSignal::new(String::new()), Msg::default());
     let loaded = RwSignal::new(false);
     let g = StoredValue::new(guild);
-    let load = move || {
-        spawn_local(async move {
-            match api(
-                "GET",
-                &format!("/api/guilds/{}/{base}/blacklist", g.get_value()),
-                None,
-            )
-            .await
-            {
-                Ok(v) => set_rows.set(v.as_array().cloned().unwrap_or_default()),
-                Err(e) => msg.err(e),
-            }
-            loaded.set(true);
-        })
-    };
+    let load = move || spawn_local(async move {
+        match api("GET", &format!("/api/guilds/{}/{base}/blacklist", g.get_value()), None).await {
+            Ok(v) => set_rows.set(v.as_array().cloned().unwrap_or_default()),
+            Err(e) => msg.err(e),
+        }
+        loaded.set(true);
+    });
     load();
-    let post = move |path: String, body: Option<Value>| {
-        spawn_local(async move {
-            match api(
-                "POST",
-                &format!("/api/guilds/{}/{base}/blacklist{path}", g.get_value()),
-                body,
-            )
-            .await
-            {
-                Ok(_) => {
-                    msg.clear();
-                    load()
-                }
-                Err(e) => msg.err(e),
-            }
-        })
-    };
+    let post = move |path: String, body: Option<Value>| spawn_local(async move {
+        match api("POST", &format!("/api/guilds/{}/{base}/blacklist{path}", g.get_value()), body).await {
+            Ok(_) => { msg.clear(); load() }
+            Err(e) => msg.err(e),
+        }
+    });
     view! {
         <div class="card row">
             <input placeholder="User ID" aria-label="user ID" prop:value=user on:input=move |e| user.set(event_target_value(&e)) />
@@ -154,65 +110,33 @@ pub fn Blacklist(
 #[component]
 pub fn AppealForm(guild: String) -> impl IntoView {
     let info = RwSignal::new(Value::Null);
-    let (answers, msg, done) = (
-        RwSignal::new(Vec::<String>::new()),
-        Msg::default(),
-        RwSignal::new(false),
-    );
+    let (answers, msg, done) = (RwSignal::new(Vec::<String>::new()), Msg::default(), RwSignal::new(false));
     let g = StoredValue::new(guild);
     let mine = RwSignal::new(Vec::<Value>::new());
-    let load_mine = move || {
-        spawn_local(async move {
-            if let Ok(v) = api("GET", &format!("/api/appeal/{}/mine", g.get_value()), None).await {
-                mine.set(v.as_array().cloned().unwrap_or_default());
-            }
-        })
-    };
-    load_mine();
-    let withdraw = move |_| {
-        spawn_local(async move {
-            match api(
-                "POST",
-                &format!("/api/appeal/{}/withdraw", g.get_value()),
-                None,
-            )
-            .await
-            {
-                Ok(_) => load_mine(),
-                Err(e) => msg.err(e),
-            }
-        })
-    };
-    spawn_local(async move {
-        match api("GET", &format!("/api/appeal/{}", g.get_value()), None).await {
-            Ok(v) => {
-                answers.set(vec![
-                    String::new();
-                    v["fields"].as_array().map_or(0, Vec::len)
-                ]);
-                info.set(v)
-            }
-            Err(e) => msg.err(if e == "not found" {
-                "Appeals are not enabled in this server.".into()
-            } else {
-                e
-            }),
+    let load_mine = move || spawn_local(async move {
+        if let Ok(v) = api("GET", &format!("/api/appeal/{}/mine", g.get_value()), None).await {
+            mine.set(v.as_array().cloned().unwrap_or_default());
         }
     });
-    let submit = move |_| {
-        spawn_local(async move {
-            match api(
-                "POST",
-                &format!("/api/appeal/{}", g.get_value()),
-                Some(json!({"answers": answers.get_untracked()})),
-            )
-            .await
-            {
-                Ok(_) => done.set(true),
-                Err(e) => msg.err(e),
-            }
-        })
-    };
+    load_mine();
+    let withdraw = move |_| spawn_local(async move {
+        match api("POST", &format!("/api/appeal/{}/withdraw", g.get_value()), None).await {
+            Ok(_) => load_mine(),
+            Err(e) => msg.err(e),
+        }
+    });
+    spawn_local(async move {
+        match api("GET", &format!("/api/appeal/{}", g.get_value()), None).await {
+            Ok(v) => { answers.set(vec![String::new(); v["fields"].as_array().map_or(0, Vec::len)]); info.set(v) }
+            Err(e) => msg.err(if e == "not found" { "Appeals are not enabled in this server.".into() } else { e }),
+        }
+    });
+    let submit = move |_| spawn_local(async move {
+        match api("POST", &format!("/api/appeal/{}", g.get_value()), Some(json!({"answers": answers.get_untracked()}))).await {
+            Ok(_) => done.set(true),
+            Err(e) => msg.err(e),
+        }
+    });
     view! {
         <div class="head"><h1>"Appeal"</h1></div>
         <Toast msg />

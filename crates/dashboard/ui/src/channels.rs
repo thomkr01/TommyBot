@@ -4,14 +4,7 @@ use leptos::prelude::*;
 use serde_json::Value;
 
 fn lines(v: &Value, key: &str) -> Vec<String> {
-    v[key]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|l| l.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
+    v[key].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default()
 }
 
 /// Role profiles plus the preview and apply of their channel overwrites (preview uses the saved profiles).
@@ -20,52 +13,11 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
     let preview = RwSignal::new(None::<Vec<String>>);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let (gp, ga) = (guild.clone(), guild.clone());
-    let show = move |_| {
-        let g = gp.clone();
-        msg.clear();
-        run_act(
-            async move {
-                api(
-                    "GET",
-                    &format!("/api/guilds/{g}/channel-setup/preview"),
-                    None,
-                )
-                .await
-            },
-            msg,
-            need,
-            move |v| preview.set(Some(lines(&v, "lines"))),
-        )
-    };
-    let apply = Callback::new(move |_: ()| {
-        let g = ga.clone();
-        preview.set(None);
-        run_act(
-            async move {
-                api(
-                    "POST",
-                    &format!("/api/guilds/{g}/channel-setup/apply"),
-                    None,
-                )
-                .await
-            },
-            msg,
-            need,
-            move |v| {
-                let failed = lines(&v, "failed");
-                msg.ok(format!(
-                    "Applied {} overwrite(s), backup #{} taken first (Backups can revert it).{}",
-                    v["applied"],
-                    v["backup"],
-                    if failed.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" Failed:\n{}", failed.join("\n"))
-                    }
-                ));
-            },
-        )
-    });
+    let show = move |_| { let g = gp.clone(); msg.clear(); run_act(async move { api("GET", &format!("/api/guilds/{g}/channel-setup/preview"), None).await }, msg, need, move |v| preview.set(Some(lines(&v, "lines")))) };
+    let apply = Callback::new(move |_: ()| { let g = ga.clone(); preview.set(None); run_act(async move { api("POST", &format!("/api/guilds/{g}/channel-setup/apply"), None).await }, msg, need, move |v| {
+        let failed = lines(&v, "failed");
+        msg.ok(format!("Applied {} overwrite(s), backup #{} taken first (Backups can revert it).{}", v["applied"], v["backup"], if failed.is_empty() { String::new() } else { format!(" Failed:\n{}", failed.join("\n")) }));
+    }) });
     view! {
         <Section guild=guild.clone() name="channel_profiles".to_string() enrolled />
         <div class="card">
