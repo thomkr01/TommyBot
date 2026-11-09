@@ -516,8 +516,9 @@ pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
                 rand::random_range(0..ch) as i64,
             );
             let r = rand::random_range(2..=4i64);
-            for (px, py) in (x - r..=x + r).flat_map(|px| (y - r..=y + r).map(move |py| (px, py))) {
-                let inside = (px - x).pow(2) + (py - y).pow(2) <= r * r;
+            // Same dot shape as the old library: floor(distance) <= r, right and bottom edge open.
+            for (px, py) in (x - r..x + r).flat_map(|px| (y - r..y + r).map(move |py| (px, py))) {
+                let inside = (px - x).pow(2) + (py - y).pow(2) < (r + 1).pow(2);
                 if inside && (0..cw as i64).contains(&px) && (0..ch as i64).contains(&py) {
                     all.put_pixel(px as u32, py as u32, Luma([0]));
                 }
@@ -525,7 +526,11 @@ pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
         }
     }
     // Faint background letters: a second code that is never the answer.
-    let every: Vec<char> = GLYPHS.keys().copied().collect();
+    let every: Vec<char> = GLYPHS
+        .keys()
+        .copied()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     let bg = draw(&random_chars(&every, 5), cw, ch);
     let code: String = code.into_iter().collect();
     let (font, decoy) = (rgb(&c.font_color), rgb(&c.decoy_color));
