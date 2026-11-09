@@ -30,8 +30,12 @@ fn route(section: &str, page: Option<&str>) -> String {
 fn one_typo(a: &str, b: &str) -> bool {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    if s == l { return true; }
-    if l.len() - s.len() > 1 { return false; }
+    if s == l {
+        return true;
+    }
+    if l.len() - s.len() > 1 {
+        return false;
+    }
     let i = s.iter().zip(&l).take_while(|(x, y)| x == y).count();
     // Past the first difference the rest must match after one substitution, insertion or deletion.
     s[i..] == l[i + 1..] || (s.len() == l.len() && s.get(i + 1..) == l.get(i + 1..))
@@ -41,56 +45,100 @@ fn one_typo(a: &str, b: &str) -> bool {
 pub fn score(text: &str, q: &str) -> u32 {
     let t = text.to_lowercase();
     let words = || t.split(|c: char| !c.is_alphanumeric());
-    if q.is_empty() { 0 }
-    else if t == q { 100 }
-    else if t.starts_with(q) { 80 }
-    else if words().any(|w| w.starts_with(q)) { 60 }
-    else if t.contains(q) { 40 }
-    else if q.len() >= 4 && words().any(|w| one_typo(w, q)) { 20 }
-    else { 0 }
+    if q.is_empty() {
+        0
+    } else if t == q {
+        100
+    } else if t.starts_with(q) {
+        80
+    } else if words().any(|w| w.starts_with(q)) {
+        60
+    } else if t.contains(q) {
+        40
+    } else if q.len() >= 4 && words().any(|w| one_typo(w, q)) {
+        20
+    } else {
+        0
+    }
 }
 
 /// A field's rank: its label counts most, then its card, then its help; several words must all hit.
 pub fn field_score(f: &Value, q: &str) -> u32 {
     let q = q.trim().to_lowercase();
     let s = |k: &str| f[k].as_str().unwrap_or("");
-    let title = if s("title").is_empty() { s("label") } else { s("title") };
-    let best = score(title, &q).max(score(s("group"), &q) / 2).max(score(s("help"), &q) / 4);
-    if best > 0 || !q.contains(' ') { return best; }
+    let title = if s("title").is_empty() {
+        s("label")
+    } else {
+        s("title")
+    };
+    let best = score(title, &q)
+        .max(score(s("group"), &q) / 2)
+        .max(score(s("help"), &q) / 4);
+    if best > 0 || !q.contains(' ') {
+        return best;
+    }
     let all = format!("{title} {} {}", s("group"), s("help"));
-    if q.split_whitespace().all(|w| score(&all, w) > 0) { 30 } else { 0 }
+    if q.split_whitespace().all(|w| score(&all, w) > 0) {
+        30
+    } else {
+        0
+    }
 }
 
 /// Route -> number of hits, for the sidebar.
 pub fn counts(s: Search) -> std::collections::HashMap<String, usize> {
     let q = s.q.get();
     let mut c = std::collections::HashMap::new();
-    if q.trim().is_empty() { return c; }
+    if q.trim().is_empty() {
+        return c;
+    }
     for (r, f) in s.index.get().iter().filter(|(_, f)| f["page"] != "nav") {
-        if field_score(f, &q) > 0 { *c.entry(r.clone()).or_insert(0) += 1; }
+        if field_score(f, &q) > 0 {
+            *c.entry(r.clone()).or_insert(0) += 1;
+        }
     }
     c
 }
 
 /// The header box: `/` or Ctrl+K focuses it, Escape clears it.
 #[component]
-pub fn SearchBox(guild: Signal<Option<String>>, pages: Vec<(&'static str, &'static str)>) -> impl IntoView {
+pub fn SearchBox(
+    guild: Signal<Option<String>>,
+    pages: Vec<(&'static str, &'static str)>,
+) -> impl IntoView {
     let s = expect_context::<Search>();
     let open = RwSignal::new(false);
     let input = NodeRef::<html::Input>::new();
     window_event_listener(leptos::ev::keydown, move |e| {
-        let typing = e.target().and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(t).ok()).is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"));
+        let typing = e
+            .target()
+            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(t).ok())
+            .is_some_and(|el| matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"));
         if (e.key() == "/" && !typing) || (e.key() == "k" && (e.ctrl_key() || e.meta_key())) {
             e.prevent_default();
-            if let Some(i) = input.get() { let _ = i.focus(); }
+            if let Some(i) = input.get() {
+                let _ = i.focus();
+            }
         }
     });
     let load = move || {
-        let Some(g) = guild.get_untracked() else { return };
-        if !s.index.get_untracked().is_empty() { return; }
+        let Some(g) = guild.get_untracked() else {
+            return;
+        };
+        if !s.index.get_untracked().is_empty() {
+            return;
+        }
         let pages = pages.clone();
         spawn_local(async move {
-            let mut idx: Vec<(String, Value)> = pages.iter().map(|(r, t)| (r.to_string(), serde_json::json!({"title": t, "group": "Page", "page": "nav"}))).collect();
+            let mut idx: Vec<(String, Value)> = pages
+                .iter()
+                .map(|(r, t)| {
+                    (
+                        r.to_string(),
+                        serde_json::json!({"title": t, "group": "Page", "page": "nav"}),
+                    )
+                })
+                .collect();
             if let Ok(v) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
                 for sec in v.as_array().into_iter().flatten() {
                     let name = sec["name"].as_str().unwrap_or("");
@@ -106,7 +154,12 @@ pub fn SearchBox(guild: Signal<Option<String>>, pages: Vec<(&'static str, &'stat
     };
     let hits = move || {
         let q = s.q.get();
-        let mut v: Vec<(u32, String, Value)> = s.index.get().into_iter().filter_map(|(r, f)| Some((field_score(&f, &q), r, f)).filter(|h| h.0 > 0)).collect();
+        let mut v: Vec<(u32, String, Value)> = s
+            .index
+            .get()
+            .into_iter()
+            .filter_map(|(r, f)| Some((field_score(&f, &q), r, f)).filter(|h| h.0 > 0))
+            .collect();
         v.sort_by_key(|b| std::cmp::Reverse(b.0));
         v.truncate(8);
         v
@@ -153,7 +206,10 @@ mod tests {
 
     #[test]
     fn routes_match_the_router() {
-        assert_eq!(route("logging", Some("tommybot_essential")), "logging/tommybot/essential");
+        assert_eq!(
+            route("logging", Some("tommybot_essential")),
+            "logging/tommybot/essential"
+        );
         assert_eq!(route("automod", Some("spam_text")), "filters/spam_text");
         assert_eq!(route("automod", None), "automod");
         assert_eq!(route("panic", None), "antinuke_panic");

@@ -4,7 +4,12 @@ use serde_json::{json, Value};
 
 /// A number segment indexes an array (`custom.0.roles`).
 fn get_path(v: &Value, p: &str) -> Value {
-    p.split('.').fold(v, |c, k| match (c, k.parse::<usize>()) { (Value::Array(a), Ok(i)) => a.get(i).unwrap_or(&Value::Null), _ => &c[k] }).clone()
+    p.split('.')
+        .fold(v, |c, k| match (c, k.parse::<usize>()) {
+            (Value::Array(a), Ok(i)) => a.get(i).unwrap_or(&Value::Null),
+            _ => &c[k],
+        })
+        .clone()
 }
 
 /// Writes `x` at the dotted path, creating (or replacing non-object) intermediate objects.
@@ -12,9 +17,14 @@ fn set_path(v: &mut Value, p: &str, x: Value) {
     let mut c = v;
     for k in p.split('.') {
         if let (Some(a), Ok(i)) = (c.as_array().map(Vec::len), k.parse::<usize>()) {
-            if i < a { c = &mut c[i]; continue; }
+            if i < a {
+                c = &mut c[i];
+                continue;
+            }
         }
-        if !c.is_object() { *c = json!({}); }
+        if !c.is_object() {
+            *c = json!({});
+        }
         let Some(o) = c.as_object_mut() else { return };
         c = o.entry(k).or_insert(Value::Null);
     }
@@ -22,23 +32,70 @@ fn set_path(v: &mut Value, p: &str, x: Value) {
 }
 
 /// (name, seconds) for the duration unit switcher.
-const UNITS: [(&str, f64); 4] = [("second", 1.0), ("minute", 60.0), ("hour", 3600.0), ("day", 86400.0)];
+const UNITS: [(&str, f64); 4] = [
+    ("second", 1.0),
+    ("minute", 60.0),
+    ("hour", 3600.0),
+    ("day", 86400.0),
+];
+
+/// `3 hour(s)`: a duration in its largest whole unit.
+fn span(ms: f64) -> String {
+    let secs = ms / 1000.0;
+    let u = best_unit(secs);
+    format!("{} {}(s)", secs / UNITS[u].1, UNITS[u].0)
+}
+
+/// The Join Raid page's one-line reading of its trigger settings; unset values use the bot's defaults.
+fn raid_summary(cfg: &Value) -> String {
+    let at = |k: &str| get_path(cfg, &format!("joinraid.{k}"));
+    let num = |k: &str, d: f64| at(k).as_f64().unwrap_or(d);
+    let verb = match at("action").as_str().unwrap_or("Ban") {
+        "Log" => "logging",
+        "Warn" => "warning",
+        "Timeout" => "timing out",
+        "Kick" => "kicking",
+        _ => "banning",
+    };
+    format!(
+        "If {} flagged accounts join within {}, TommyBot will start {verb} flagged accounts for {}.",
+        num("count", 10.0),
+        span(num("span_ms", 3.0 * 3_600_000.0)),
+        span(num("active_ms", 1_800_000.0)),
+    )
+}
 
 fn best_unit(secs: f64) -> usize {
-    UNITS.iter().rposition(|(_, m)| secs >= *m && secs % *m == 0.0).unwrap_or(0)
+    UNITS
+        .iter()
+        .rposition(|(_, m)| secs >= *m && secs % *m == 0.0)
+        .unwrap_or(0)
 }
 
 pub fn strs(v: &Value) -> Vec<String> {
-    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn show(v: &Value) -> String {
-    match v { Value::Null => String::new(), Value::String(s) => s.clone(), o => o.to_string() }
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        o => o.to_string(),
+    }
 }
 
 /// Display name for a channel/role id (falls back to the id).
 pub fn name_of(dc: &Value, key: &str, id: &str) -> String {
-    items(dc, key).into_iter().find(|(i, _)| i == id).map_or_else(|| id.to_string(), |(_, l)| l)
+    items(dc, key)
+        .into_iter()
+        .find(|(i, _)| i == id)
+        .map_or_else(|| id.to_string(), |(_, l)| l)
 }
 
 /// Wording for the stored option values; anything else just gets a capital letter.
@@ -52,7 +109,9 @@ fn opt_label(v: &str) -> String {
         "ThirdParty" => "Third-party captcha".into(),
         "Captcha" => "TommyBot Captcha (Channel)".into(),
         "SimpleCaptcha" => "Simple Captcha (Channel)".into(),
-        _ => v.chars().next().map_or(String::new(), |c| c.to_uppercase().chain(v.chars().skip(1)).collect()),
+        _ => v.chars().next().map_or(String::new(), |c| {
+            c.to_uppercase().chain(v.chars().skip(1)).collect()
+        }),
     }
 }
 
@@ -71,16 +130,35 @@ fn action_desc(a: &str) -> &'static str {
 /// (anti-nuke action, verb, things, per-second noun) for the limit sentences.
 const NUKE_WORDS: [(&str, &str, &str, &str); 7] = [
     ("Ban", "kick/ban", "members", "removal"),
-    ("RoleCreate", "create", "roles", "creation"), ("RoleDelete", "delete", "roles", "deletion"),
-    ("ChannelCreate", "create", "channels", "creation"), ("ChannelDelete", "delete", "channels", "deletion"),
-    ("WebhookCreate", "create", "webhooks", "creation"), ("WebhookDelete", "delete", "webhooks", "deletion"),
+    ("RoleCreate", "create", "roles", "creation"),
+    ("RoleDelete", "delete", "roles", "deletion"),
+    ("ChannelCreate", "create", "channels", "creation"),
+    ("ChannelDelete", "delete", "channels", "deletion"),
+    ("WebhookCreate", "create", "webhooks", "creation"),
+    ("WebhookDelete", "delete", "webhooks", "deletion"),
 ];
 
 /// (id, label) pairs from `/discord` for `key`: "channels" (no categories), "categories" or "roles".
 fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
-    let (list, pre) = match key { "roles" => ("roles", "@"), "categories" => ("channels", ""), _ => ("channels", "#") };
-    dc[list].as_array().map(|a| a.iter().filter(|x| list == "roles" || (x["kind"] == "category") == (key == "categories"))
-        .map(|x| (x["id"].as_str().unwrap_or("").to_string(), format!("{pre}{}", x["name"].as_str().unwrap_or("?")))).collect()).unwrap_or_default()
+    let (list, pre) = match key {
+        "roles" => ("roles", "@"),
+        "categories" => ("channels", ""),
+        _ => ("channels", "#"),
+    };
+    dc[list]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|x| list == "roles" || (x["kind"] == "category") == (key == "categories"))
+                .map(|x| {
+                    (
+                        x["id"].as_str().unwrap_or("").to_string(),
+                        format!("{pre}{}", x["name"].as_str().unwrap_or("?")),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Member select: chips of the picked users, a search box that also takes a pasted ID.
@@ -89,17 +167,65 @@ fn UserPick(get: Signal<Value>, set: Callback<Value>) -> impl IntoView {
     let g = StoredValue::new(crate::hash().into_iter().next().unwrap_or_default());
     let names = RwSignal::new(std::collections::HashMap::<String, String>::new());
     let found = RwSignal::new(Vec::<(String, String)>::new());
-    let learn = move |v: &Value| { let l: Vec<(String, String)> = v.as_array().into_iter().flatten().map(|m| (show(&m["id"]), show(&m["name"]))).collect(); names.update(|n| n.extend(l.clone())); l };
+    let learn = move |v: &Value| {
+        let l: Vec<(String, String)> = v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| (show(&m["id"]), show(&m["name"])))
+            .collect();
+        names.update(|n| n.extend(l.clone()));
+        l
+    };
     let ids = strs(&get.get_untracked());
     if !ids.is_empty() {
-        spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{}/members?ids={}", g.get_value(), ids.join(",")), None).await { learn(&v); } });
+        spawn_local(async move {
+            if let Ok(v) = api(
+                "GET",
+                &format!(
+                    "/api/guilds/{}/members?ids={}",
+                    g.get_value(),
+                    ids.join(",")
+                ),
+                None,
+            )
+            .await
+            {
+                learn(&v);
+            }
+        });
     }
-    let add = move |id: String| { let mut cur = strs(&get.get_untracked()); if !cur.contains(&id) { cur.push(id); } set.run(json!(cur)); found.set(vec![]); };
+    let add = move |id: String| {
+        let mut cur = strs(&get.get_untracked());
+        if !cur.contains(&id) {
+            cur.push(id);
+        }
+        set.run(json!(cur));
+        found.set(vec![]);
+    };
     let search = move |q: String| {
         let q = q.trim().to_string();
-        if q.len() >= 17 && q.bytes().all(|b| b.is_ascii_digit()) { return add(q); }
-        if q.is_empty() { return found.set(vec![]); }
-        spawn_local(async move { if let Ok(v) = api("GET", &format!("/api/guilds/{}/members?q={}", g.get_value(), js_sys::encode_uri_component(&q)), None).await { found.set(learn(&v)); } });
+        if q.len() >= 17 && q.bytes().all(|b| b.is_ascii_digit()) {
+            return add(q);
+        }
+        if q.is_empty() {
+            return found.set(vec![]);
+        }
+        spawn_local(async move {
+            if let Ok(v) = api(
+                "GET",
+                &format!(
+                    "/api/guilds/{}/members?q={}",
+                    g.get_value(),
+                    js_sys::encode_uri_component(&q)
+                ),
+                None,
+            )
+            .await
+            {
+                found.set(learn(&v));
+            }
+        });
     };
     view! { <div class="pick">
         {move || strs(&get.get()).into_iter().map(|id| {
@@ -117,7 +243,14 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
     let kind = f["kind"].as_str().unwrap_or("text").to_string();
     let p = StoredValue::new(path.clone());
     let default = StoredValue::new(f["default"].clone());
-    let get = move || { let v = get_path(&val.get(), &p.get_value()); if v.is_null() { default.get_value() } else { v } };
+    let get = move || {
+        let v = get_path(&val.get(), &p.get_value());
+        if v.is_null() {
+            default.get_value()
+        } else {
+            v
+        }
+    };
     let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
     let tail = path.rsplit('.').next().unwrap_or("").to_string();
     let dur = kind == "int" && (tail.ends_with("_secs") || tail.ends_with("_ms"));
@@ -344,7 +477,9 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         }
         _ => view! { <input prop:value=move || show(&get()) on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) } /> }.into_any(),
     };
-    let help = f["help"].as_str().map(|h| view! { <span class="muted">{h.to_string()}</span> });
+    let help = f["help"]
+        .as_str()
+        .map(|h| view! { <span class="muted">{h.to_string()}</span> });
     let helper = f["helper"].is_object().then(|| {
         let h = f["helper"].clone();
         // Heat weights live at `<section>.heat.<w>`; max and decay are their siblings, the strike duration their cousin.
@@ -371,16 +506,20 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         let a = a.as_str().unwrap_or("");
         format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "strike system" } else { a }, action_desc(a))
     }}</span> });
-    let label = f["title"].as_str().map_or_else(|| tail.replace('_', " "), String::from);
+    let raid = (path == "joinraid.active_ms")
+        .then(|| view! { <b class="muted">{move || raid_summary(&val.get())}</b> });
+    let label = f["title"]
+        .as_str()
+        .map_or_else(|| tail.replace('_', " "), String::from);
     // The group's name labels the control inside, whatever kind it is.
-    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}</div> }
+    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
 }
 
 /// Raw JSON of one section of the config in `val`.
 fn raw_editor(val: RwSignal<Value>, name: String, msg: Msg) -> impl IntoView {
     let n = StoredValue::new(name);
     view! { <textarea prop:value=move || serde_json::to_string_pretty(&val.get()[n.get_value()]).unwrap_or_default()
-        on:change=move |e| { match serde_json::from_str::<Value>(&event_target_value(&e)) { Ok(v) => val.update(|c| c[n.get_value()] = v), Err(_) => msg.err("Not valid JSON") } }></textarea> }
+    on:change=move |e| { match serde_json::from_str::<Value>(&event_target_value(&e)) { Ok(v) => val.update(|c| c[n.get_value()] = v), Err(_) => msg.err("Not valid JSON") } }></textarea> }
 }
 
 /// Schema-driven form for the sections the backend describes; raw JSON stays available underneath.
@@ -392,9 +531,11 @@ pub fn Section(
     #[prop(into, default = String::new())] part: String,
     enrolled: ReadSignal<bool>,
     /// Wizard mode: these cards one at a time instead of the grouped form.
-    #[prop(optional)] cards: Option<&'static [crate::wizard::Card]>,
+    #[prop(optional)]
+    cards: Option<&'static [crate::wizard::Card]>,
     /// Called by the forward arrow on the last card.
-    #[prop(optional)] next: Option<Callback<()>>,
+    #[prop(optional)]
+    next: Option<Callback<()>>,
 ) -> impl IntoView {
     // The whole config, so fields of other sections share one form and one save.
     let val = RwSignal::new(json!({}));
@@ -410,8 +551,14 @@ pub fn Section(
         match api("GET", &format!("/api/guilds/{g}/config"), None).await {
             Ok(v) => {
                 version.set(v["version"].as_i64().unwrap_or(0));
-                let mut c = if v["config"].is_object() { v["config"].clone() } else { json!({}) };
-                if !c[&n].is_object() { c[&n] = json!({}); }
+                let mut c = if v["config"].is_object() {
+                    v["config"].clone()
+                } else {
+                    json!({})
+                };
+                if !c[&n].is_object() {
+                    c[&n] = json!({});
+                }
                 val.set(c);
                 orig.set(val.get_untracked());
             }
@@ -419,23 +566,51 @@ pub fn Section(
         }
         // Missing schema/discord data degrades to the raw editor.
         if let Ok(s) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
-            if let Some(sec) = s.as_array().and_then(|a| a.iter().find(|x| x["name"] == n.as_str())) {
+            if let Some(sec) = s
+                .as_array()
+                .and_then(|a| a.iter().find(|x| x["name"] == n.as_str()))
+            {
                 // `part` picks the dashboard pages of the section: "" all fields, else a comma list where "general" means the fields without a page.
-                let keep = |f: &Value| part.is_empty() || part.split(',').any(|p| if p == "general" { f["page"].is_null() } else { f["page"] == p });
-                fields.set(sec["fields"].as_array().into_iter().flatten().filter(|f| keep(f)).map(|f| {
-                    let mut f = f.clone();
-                    f["path"] = json!(format!("{}.{}", f["section"].as_str().unwrap_or(&n), f["path"].as_str().unwrap_or("")));
-                    f
-                }).collect());
+                let keep = |f: &Value| {
+                    part.is_empty()
+                        || part.split(',').any(|p| {
+                            if p == "general" {
+                                f["page"].is_null()
+                            } else {
+                                f["page"] == p
+                            }
+                        })
+                };
+                fields.set(
+                    sec["fields"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|f| keep(f))
+                        .map(|f| {
+                            let mut f = f.clone();
+                            f["path"] = json!(format!(
+                                "{}.{}",
+                                f["section"].as_str().unwrap_or(&n),
+                                f["path"].as_str().unwrap_or("")
+                            ));
+                            f
+                        })
+                        .collect(),
+                );
                 // Unset values take their defaults, so changing one and back leaves nothing to save.
                 let mut c = val.get_untracked();
                 for f in fields.get_untracked() {
                     let p = f["path"].as_str().unwrap_or("");
-                    if !f["default"].is_null() && get_path(&c, p).is_null() { set_path(&mut c, p, f["default"].clone()) }
+                    if !f["default"].is_null() && get_path(&c, p).is_null() {
+                        set_path(&mut c, p, f["default"].clone())
+                    }
                 }
                 orig.set(c.clone());
                 val.set(c);
-                if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await { dc.set(d); }
+                if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await {
+                    dc.set(d);
+                }
             }
         }
         loaded.set(true);
@@ -443,9 +618,16 @@ pub fn Section(
     let n = StoredValue::new(name);
     let reload = {
         let g = guild.clone();
-        move |v: i64| { let g = g.clone(); version.set(v); spawn_local(async move {
-            if let Ok(c) = api("GET", &format!("/api/guilds/{g}/config"), None).await { val.set(c["config"].clone()); orig.set(c["config"].clone()); }
-        }) }
+        move |v: i64| {
+            let g = g.clone();
+            version.set(v);
+            spawn_local(async move {
+                if let Ok(c) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
+                    val.set(c["config"].clone());
+                    orig.set(c["config"].clone());
+                }
+            })
+        }
     };
     let at = RwSignal::new(0usize);
     let act = {
@@ -453,7 +635,22 @@ pub fn Section(
         let reload = reload.clone();
         move |path: &'static str| {
             let (g, v, reload) = (g.clone(), version.get_untracked(), reload.clone());
-            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.ok("Done"); reload(r["version"].as_i64().unwrap_or(0)) });
+            run_act(
+                async move {
+                    api(
+                        "POST",
+                        &format!("/api/guilds/{g}/{path}"),
+                        Some(json!({"expected_version": v})),
+                    )
+                    .await
+                },
+                msg,
+                need,
+                move |r| {
+                    msg.ok("Done");
+                    reload(r["version"].as_i64().unwrap_or(0))
+                },
+            );
         }
     };
     let card_view = cards.map(|cs| {
@@ -497,30 +694,50 @@ pub fn Section(
         let (g, cur, before) = (guild.clone(), val.get_untracked(), orig.get_untracked());
         orig.set(cur.clone());
         let mut names = vec![n.get_value()];
-        names.extend(fields.get_untracked().iter().filter_map(|f| f["section"].as_str().map(String::from)));
+        names.extend(
+            fields
+                .get_untracked()
+                .iter()
+                .filter_map(|f| f["section"].as_str().map(String::from)),
+        );
         names.sort();
         names.dedup();
         // A wizard card whose switch was just turned on runs its setup (channel, category) right after.
-        let setup = cards.and_then(|cs| cs.get(at.get_untracked())).and_then(|c| {
-            let switch = c.fields.first()?.0;
-            (get_path(&cur, switch) == json!(true) && get_path(&before, switch) != json!(true)).then_some(c.action?.1)
-        });
+        let setup = cards
+            .and_then(|cs| cs.get(at.get_untracked()))
+            .and_then(|c| {
+                let switch = c.fields.first()?.0;
+                (get_path(&cur, switch) == json!(true) && get_path(&before, switch) != json!(true))
+                    .then_some(c.action?.1)
+            });
         let act = act.clone();
-        run_act(async move {
-            let mut last = json!({"version": version.get_untracked()});
-            for s in names.iter().filter(|s| cur[s.as_str()] != before[s.as_str()]) {
-                let body = json!({"expected_version": last["version"], "value": cur[s.as_str()]});
-                last = api("PUT", &format!("/api/guilds/{g}/config/{s}"), Some(body)).await?;
-            }
-            Ok(last)
-        }, msg, need, move |v| {
-            version.set(v["version"].as_i64().unwrap_or(0));
-            msg.ok(format!("Saved as version {}", version.get_untracked()));
-            if let Some(path) = setup { act(path) }
-        });
+        run_act(
+            async move {
+                let mut last = json!({"version": version.get_untracked()});
+                for s in names
+                    .iter()
+                    .filter(|s| cur[s.as_str()] != before[s.as_str()])
+                {
+                    let body =
+                        json!({"expected_version": last["version"], "value": cur[s.as_str()]});
+                    last = api("PUT", &format!("/api/guilds/{g}/config/{s}"), Some(body)).await?;
+                }
+                Ok(last)
+            },
+            msg,
+            need,
+            move |v| {
+                version.set(v["version"].as_i64().unwrap_or(0));
+                msg.ok(format!("Saved as version {}", version.get_untracked()));
+                if let Some(path) = setup {
+                    act(path)
+                }
+            },
+        );
     };
     // Read per card, not in the grouping closure: rebuilding the cards on every switch flip cut the knob's animation.
-    let off = Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));
+    let off =
+        Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));
     view! {
         {card_view}
         <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| if loaded.get() { raw_editor(val, n.get_value(), msg).into_any() } else { view! { <p class="muted">"Loading..."</p> }.into_any() })>
@@ -558,5 +775,18 @@ pub fn Section(
         </AnimatedShow>
         <Toast msg />
         <StepUp need enrolled />
+    }
+}
+
+#[cfg(test)]
+mod raid_tests {
+    #[test]
+    fn raid_summary_reads_the_settings() {
+        assert_eq!(
+            super::raid_summary(&serde_json::json!({})),
+            "If 10 flagged accounts join within 3 hour(s), TommyBot will start banning flagged accounts for 30 minute(s)."
+        );
+        let c = serde_json::json!({"joinraid": {"count": 5, "span_ms": 600_000, "action": "Kick", "active_ms": 86_400_000}});
+        assert_eq!(super::raid_summary(&c), "If 5 flagged accounts join within 10 minute(s), TommyBot will start kicking flagged accounts for 1 day(s).");
     }
 }
