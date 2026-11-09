@@ -723,7 +723,7 @@ async fn send_reply(
     Ok(sent)
 }
 
-/// `t!backups take|load ID|delete ID|clear` and its aliases.
+/// `t!backups ID|take|load ID|delete ID|clear` and its aliases.
 async fn backup_prefix(
     app: &App,
     msg: &MessageCreate,
@@ -751,11 +751,12 @@ async fn backup_prefix(
             confirm: msg.content.contains("?confirm"),
         },
         ("delete", Some(id)) => BackupCmd::Delete { id },
+        (key, None) if key != "load" && key != "delete" => BackupCmd::Info { id: key.into() },
         _ => {
             return say(
                 app,
                 msg,
-                "Usage: `backups [take | load ID | delete ID | clear]`",
+                "Usage: `backups [ID | take | load ID | delete ID | clear]`",
             )
             .await
         }
@@ -764,7 +765,7 @@ async fn backup_prefix(
     say(app, msg, &text).await
 }
 
-/// `/backups create|list|load|delete|purge` and `t!backups take|load|delete|clear`. `load`
+/// `/backups create|list|load|delete|purge` and `t!backups ID|take|load|delete|clear`. `load`
 /// previews unless `confirm` is set.
 pub async fn backup_cmd(
     app: &App,
@@ -797,6 +798,7 @@ pub async fn backup_cmd(
                     .join("\n")
             }
         }
+        BackupCmd::Info { id } => backup::info(app, gid, &id).await?,
         BackupCmd::Load { id, confirm } => backup::load(app, gid, &id, confirm).await?,
         BackupCmd::Delete { id } => match backup::delete(app, gid, Some(&id)).await? {
             true => format!("Deleted backup `{id}`"),

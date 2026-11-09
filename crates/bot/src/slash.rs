@@ -64,6 +64,10 @@ pub enum Cmd {
 pub enum BackupCmd {
     Create,
     List,
+    /// What one backup holds (`t!backups ID`).
+    Info {
+        id: String,
+    },
     Load {
         id: String,
         confirm: bool,

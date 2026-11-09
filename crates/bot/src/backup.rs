@@ -24,6 +24,7 @@ use twilight_model::{
 
 use crate::app::App;
 use tommybot_core::sections::BackupsCfg;
+use tommybot_logging::embed::{NO, YES};
 
 /// How often the auto-backup loop looks at each guild; the guild's own interval decides.
 const TICK: Duration = Duration::from_secs(600);
@@ -146,7 +147,7 @@ pub async fn track_created(app: &App, gid: Id<GuildMarker>, action: Action, id: 
 pub async fn save(app: &App, gid: Id<GuildMarker>, by: Option<u64>) -> Result<String> {
     let cfg = app.cfg(gid.get()).await?.backups.clone();
     if !cfg.enabled {
-        anyhow::bail!("Backups are turned off for this server");
+        anyhow::bail!("Backups are turned off for this server. Turn on Backups status on the dashboard first.");
     }
     let image = snapshot(&app.http, gid).await?;
     let (code,): (String,) = sqlx::query_as(
@@ -223,6 +224,36 @@ pub async fn list(
     .bind(gid.get() as i64)
     .fetch_all(&app.pool)
     .await?)
+}
+
+/// `t!backups ID`: who took the backup, when, and what it holds.
+pub async fn info(app: &App, gid: Id<GuildMarker>, id: &str) -> Result<String> {
+    let id = id.trim_start_matches('#').to_lowercase();
+    let row: Option<(String, i64, Option<i64>, Json<Image>)> = sqlx::query_as(
+        "SELECT code, EXTRACT(EPOCH FROM created_at)::BIGINT, created_by, image FROM backups \
+         WHERE guild_id = $1 AND (code = $2 OR id::text = $2)",
+    )
+    .bind(gid.get() as i64)
+    .bind(&id)
+    .fetch_optional(&app.pool)
+    .await?;
+    let Some((code, at, by, Json(img))) = row else {
+        return Ok(format!("No backup `{id}`"));
+    };
+    Ok(info_text(&code, at, by, &img))
+}
+
+fn info_text(code: &str, at: i64, by: Option<i64>, img: &Image) -> String {
+    let by = by.map_or("TommyBot".into(), |u| format!("<@{u}>"));
+    let cats = img.channels.iter().filter(|c| c.kind == CATEGORY).count();
+    let mark = |b: bool| if b { YES } else { NO };
+    format!(
+        "**Backup `{code}`**\nTaken by {by} <t:{at}:R>\nRoles: {} · Channels: {} · Categories: {cats} · Webhooks: {} · Server settings: {}",
+        img.roles.len(),
+        img.channels.len() - cats,
+        img.webhooks.as_ref().map_or(0, Vec::len),
+        mark(img.settings.is_some()),
+    )
 }
 
 /// Deletes the backup with this code (or numeric dashboard id); `None` deletes all of them.
@@ -663,5 +694,29 @@ mod tests {
         assert_eq!(p.roles.len(), 2);
         assert!(matches!(p.roles[0], Change::Update { .. }));
         assert!(p.channels.is_empty());
+    }
+
+    #[test]
+    fn info_counts_categories_apart() {
+        let ch = |id, kind| ChannelImg {
+            id,
+            name: "c".into(),
+            kind,
+            parent: None,
+            position: 0,
+            topic: None,
+            nsfw: false,
+            overwrites: vec![],
+        };
+        let img = Image {
+            channels: vec![ch(1, 4), ch(2, 0), ch(3, 2)],
+            webhooks: Some(vec![]),
+            ..Default::default()
+        };
+        let t = info_text("abc123", 10, None, &img);
+        assert!(t.contains("Backup `abc123`") && t.contains("Taken by TommyBot <t:10:R>"));
+        assert!(
+            t.contains("Roles: 0 · Channels: 2 · Categories: 1 · Webhooks: 0 · Server settings: ")
+        );
     }
 }

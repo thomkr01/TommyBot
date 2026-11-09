@@ -200,7 +200,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             view! { <div class="pick">
                 <div class="row">
                     <Show when=move || count() < 6>
-                        <button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"label": "New question", "long": false, "required": true})); set(json!(cur)) }>"Add new field"</button>
+                        <button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"label": "New question", "long": true, "required": false, "min": 4, "max": 500})); set(json!(cur)) }>"Add new field"</button>
                     </Show>
                     <button class="danger" on:click=move |_| set(json!([]))>"Delete all fields"</button>
                 </div>

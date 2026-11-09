@@ -569,6 +569,42 @@ mod tests {
     }
 
     #[test]
+    fn unlock_gives_a_member_role_every_bit_back() {
+        // Mention @everyone, Set Voice Channel Status, Create Polls and Use External Apps on top
+        // of the usual member permissions: all of them must survive a lock and unlock.
+        let member = SEND_MESSAGES
+            | VOICE
+            | VIEW_CHANNEL
+            | 1
+            | (1 << 17)
+            | (1 << 48)
+            | (1 << 49)
+            | (1 << 50);
+        for kind in [LockKind::Server, LockKind::Blind, LockKind::All] {
+            let p = plan(&kind, G, &[10], &[role(10, member, 1)], 5, true);
+            // The lock must really take Create Polls and Use External Apps, so their return is tested.
+            let taken = |r: &[(u64, u64)]| r.iter().find(|x| x.0 == 10).map_or(member, |x| x.1);
+            let locked: Vec<(u64, u64)> = p
+                .ops
+                .iter()
+                .filter_map(|o| match o {
+                    Op::SetRolePerms { role, perms } => Some((*role, *perms)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(taken(&locked) & ((1 << 49) | (1 << 50)), 0, "{kind:?}");
+            assert_eq!(
+                unlock_ops(&p.snapshot, &locked),
+                vec![Op::SetRolePerms {
+                    role: 10,
+                    perms: member
+                }],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn all_combines_without_double_snapshotting() {
         let p = plan(&LockKind::All, G, &[11], &roles(), 5, false);
         // role 11 is both a main role and dangerous: snapshotted once, with the original perms

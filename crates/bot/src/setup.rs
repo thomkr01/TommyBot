@@ -25,8 +25,7 @@ use crate::{
     settings::{apply, save, Edit},
 };
 
-/// Quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
-const QUARANTINE_DENY: u64 = 1_051_712;
+use tommybot_core::sections::QUARANTINE_DENY;
 
 /// `misc.enforce_quarantine_perms`: puts the quarantine overwrite back on a channel that lacks it.
 pub async fn enforce_quarantine(app: &App, c: &Channel) -> Result<()> {
@@ -262,5 +261,18 @@ mod tests {
         assert!(t.contains("▶ Checking TommyBot's role position"));
         assert!(text(3, Some("boom")).contains(&format!("{NO} Ensuring Quarantine Role")));
         assert!(text(9, None).contains("good to go"));
+    }
+
+    #[test]
+    fn quarantine_denies_access_invites_and_threads() {
+        let p = Permissions::VIEW_CHANNEL
+            | Permissions::SEND_MESSAGES
+            | Permissions::ADD_REACTIONS
+            | Permissions::CONNECT
+            | Permissions::CREATE_INVITE
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | Permissions::CREATE_PUBLIC_THREADS
+            | Permissions::CREATE_PRIVATE_THREADS;
+        assert_eq!(p.bits(), QUARANTINE_DENY);
     }
 }

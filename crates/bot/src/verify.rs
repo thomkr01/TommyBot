@@ -459,6 +459,12 @@ pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let size = c.font_size.clamp(30, 60);
     let (cw, ch) = ((w * 40 / size).min(300), (h * 40 / size).min(200));
     let mut cap = Captcha::new();
+    let chars: Vec<char> = cap
+        .supported_chars()
+        .into_iter()
+        .filter(|&ch| c.charset.allows(ch))
+        .collect();
+    cap.set_chars(&chars);
     cap.add_chars(c.length.clamp(3, 7));
     if c.trace {
         cap.apply_filter(Wave::new(2.0, 8.0));
@@ -883,6 +889,19 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_charset_draws_only_its_characters() {
+        for name in tommybot_automod::join::Charset::NAMES {
+            let charset = serde_json::from_value(serde_json::json!(name)).unwrap();
+            let (code, png) = new_captcha(&CaptchaCfg {
+                charset,
+                ..Default::default()
+            });
+            assert!(!png.is_empty() && code.len() == 6, "{name}");
+            assert!(code.chars().all(|c| charset.allows(c)), "{name}: {code}");
         }
     }
 
