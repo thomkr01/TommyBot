@@ -28,6 +28,10 @@ pub struct Setup {
     pub whitelisted: bool,
     /// The bot's own roles.
     pub bot_roles: Vec<u64>,
+    pub mod_log: bool,
+    pub main_roles: bool,
+    /// (module name, switched on) for the protection modules.
+    pub modules: Vec<(&'static str, bool)>,
 }
 
 /// Ordered from fine to worst.
@@ -221,6 +225,32 @@ pub fn checks(g: &GuildSafety, roles: &[RoleImg], bot_top: i64, setup: &Setup) -
         "Add trusted roles, members or channels to an automod whitelist so staff are not punished by mistake.".into(),
     );
     row("whitelist", sev, "Automod whitelist", text, None);
+    let (sev, text) = pick(
+        setup.mod_log,
+        "Staff actions are recorded as cases in the mod log channel.",
+        "Pick a mod log channel so staff actions are recorded.".into(),
+    );
+    row("mod_log", sev, "Mod log channel", text, None);
+    let (sev, text) = pick(
+        setup.main_roles,
+        "Lockdown and verification know your member roles.",
+        "Set your main member roles so lockdowns and verification work.".into(),
+    );
+    row("main_roles", sev, "Main roles", text, None);
+    for (name, on) in &setup.modules {
+        let (sev, text) = pick(
+            *on,
+            "Switched on.",
+            format!("{name} is off, so it does not protect the server."),
+        );
+        row(
+            &format!("module_{}", name.to_lowercase().replace(' ', "_")),
+            sev,
+            *name,
+            text,
+            None,
+        );
+    }
     let above: Vec<&str> = roles
         .iter()
         .filter(|r| r.position > bot_top && !r.managed && r.id != g.id)
@@ -354,6 +384,9 @@ mod tests {
             roleless_staff: vec![],
             whitelisted: true,
             bot_roles: vec![],
+            mod_log: true,
+            main_roles: true,
+            modules: vec![],
         }
     }
 
@@ -446,8 +479,8 @@ mod tests {
         let setup = setup(None, true);
         let rows = checks(&SAFE, &[], 0, &setup);
         // Only the missing quarantine role and the bot role (none here) fail.
-        assert_eq!(rows.len(), 10);
-        assert_eq!(score(&rows), 8 * 100 / 10);
+        assert_eq!(rows.len(), 12);
+        assert_eq!(score(&rows), 10 * 100 / 12);
         assert_eq!(score(&[]), 0);
     }
 
@@ -474,6 +507,9 @@ mod tests {
         let bad = Setup {
             roleless_staff: vec!["Admins".into(), "Moderators".into()],
             whitelisted: false,
+            mod_log: false,
+            main_roles: false,
+            modules: vec![("Join gate", false)],
             ..good
         };
         let rows = checks(&SAFE, &roles, 5, &bad);
@@ -482,6 +518,9 @@ mod tests {
             "staff_permits",
             "whitelist",
             "everyone_perms",
+            "mod_log",
+            "main_roles",
+            "module_join_gate",
         ] {
             assert_eq!(sev(&rows, id).unwrap().severity, Severity::Warn, "{id}");
         }

@@ -146,6 +146,19 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
         )
         .is_ok_and(|w| !w.is_empty()),
         bot_roles: mine.iter().filter_map(|r| r.parse().ok()).collect(),
+        mod_log: config["logging"]["routes"]["mod_command"].is_string(),
+        main_roles: config["lockdown"]["main_roles"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        // Every module defaults to off, so a missing switch reads as off.
+        modules: [
+            ("Anti-nuke", "antinuke"),
+            ("Join gate", "joingate"),
+            ("Join raid", "joinraid"),
+            ("Verification", "verification"),
+        ]
+        .map(|(name, k)| (name, config[k]["enabled"] == true))
+        .to_vec(),
     };
     let roles: Vec<RoleImg> = roles.iter().map(img).collect();
     Ok(Json(json!(checks(&safety, &roles, bot_pos, &setup))))
