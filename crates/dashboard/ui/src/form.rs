@@ -453,7 +453,10 @@ pub fn Section(
         let reload = reload.clone();
         move |path: &'static str| {
             let (g, v, reload) = (g.clone(), version.get_untracked(), reload.clone());
-            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| { msg.ok("Done"); reload(r["version"].as_i64().unwrap_or(0)) });
+            run_act(async move { api("POST", &format!("/api/guilds/{g}/{path}"), Some(json!({"expected_version": v}))).await }, msg, need, move |r| {
+                match r["warning"].as_str() { Some(w) => msg.err(w), None => msg.ok("Done") }
+                reload(r["version"].as_i64().unwrap_or(0))
+            });
         }
     };
     let card_view = cards.map(|cs| {
@@ -479,14 +482,29 @@ pub fn Section(
                 {move || { let c = &cs[at.get()]; let all = fields.get();
                     let fs: Vec<Value> = c.fields.iter().filter_map(|(p, l)| all.iter().find(|f| f["path"] == *p).map(|f| { let mut f = f.clone(); if !l.is_empty() { f["title"] = json!(l); } f })).collect();
                     let act = act.clone();
+                    let is_on = move |p: &'static str| Memo::new(move |_| val.with(|v| get_path(v, p) == json!(true)));
+                    // A field tied to a switch slides open while it is on; `inert` keeps the closed one out of tab order.
+                    let field = move |f: Value| match c.when.iter().find(|(p, _)| f["path"] == *p) {
+                        Some(&(_, sw)) => { let open = is_on(sw); view! { <div class="cond" class:open=open prop:inert=move || !open.get()><div><div class="pan"><Field f val dc /></div></div></div> }.into_any() }
+                        None => view! { <Field f val dc /> }.into_any(),
+                    };
                     // Placeholder rows hold the card's height until the schema arrives.
-                    let fs = if all.is_empty() { view! { <div class="skel"></div><div class="skel"></div> }.into_any() } else { fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view().into_any() };
+                    let fs = if all.is_empty() { view! { <div class="skel"></div><div class="skel"></div> }.into_any() } else if c.boxed && fs.len() > 1 {
+                        let off = Memo::new(move |_| !is_on(c.fields[0].0).get());
+                        let mut fs = fs.into_iter();
+                        let first = fs.next().map(field);
+                        view! { {first}<div class="atit" class:off=off><i>"While you are at it:"</i>{fs.map(field).collect_view()}</div>
+                            <Show when=move || off.get()><span class="chip bad dot">"These don't matter now!"</span></Show> }.into_any()
+                    } else { fs.into_iter().map(field).collect_view().into_any() };
+                    let dirty = move || val.get() != orig.get();
                     view! { <div class="enter">
                         <h2>{c.title}</h2><p class="muted">{c.desc}</p>
+                        {c.alert.map(|t| view! { <div class="alert" role="alert"><b>"!"</b><p>{t}</p></div> })}
                         {c.notes.iter().map(|t| view! { <p class="note">{*t}</p> }).collect_view()}
                         <div class="split"><div>{fs}
-                            {c.action.map(|(label, path)| view! { <button class="go" disabled=move || val.get() != orig.get() on:click=move |_| act(path)>{label}</button> })}</div>
-                            <div class="preview" node_ref=pv>{move || (cs[at.get_untracked()].preview)(&val.get(), &dc.get())}</div></div>
+                            {c.action.map(|(label, path)| view! { <div class="act"><button class="go" disabled=dirty on:click=move |_| act(path)>{label}</button>
+                                <Show when=dirty><span class="chip orange">"Save your changes first"</span></Show></div> })}</div>
+                            <div class="preview loop" node_ref=pv>{move || (cs[at.get_untracked()].preview)(&val.get(), &dc.get())}</div></div>
                     </div> } }}
                 <p class="muted">{move || format!("{} / {}", at.get() + 1, cs.len())}</p>
             </div>

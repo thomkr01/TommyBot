@@ -734,6 +734,13 @@ pub fn schema() -> Vec<Value> {
             whitelist.push(if tab.is_empty() { v } else { pg(v, tab) });
         }
     }
+    // The wizard's whitelist step also holds these anti-nuke lists; page "wizard" keeps them off the whitelist tabs.
+    for (path, kind, title) in [
+        ("ticket_categories", "categories", "Categories"),
+        ("quarantine_whitelist", "users", "Users"),
+    ] {
+        whitelist.push(sx("antinuke", pg(ti(f(path, kind), title), "wizard")));
+    }
     let misc = vec![
         ti(dv(fg("General", "prefix", "text"), "t!"), "Prefix"),
         ti(dv(fg("General", "use_slash", "bool"), true), "Use slash commands"),
@@ -847,12 +854,12 @@ pub fn schema() -> Vec<Value> {
                     "General",
                     "mode",
                     &[
-                        "Button",
                         "Captcha",
-                        "SimpleCaptcha",
-                        "Dm",
                         "Web",
                         "ThirdParty",
+                        "Dm",
+                        "SimpleCaptcha",
+                        "Button",
                     ],
                 ),
                 "Verification mode",

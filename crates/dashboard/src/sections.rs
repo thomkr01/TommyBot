@@ -68,8 +68,14 @@ async fn discord_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
             None,
         )
         .await?;
+    // The wizard's score checks the bot's own roles.
+    let bot_roles = st
+        .discord
+        .member_roles(guild, &st.discord.client_id)
+        .await
+        .unwrap_or_default();
     Ok(Json(
-        json!({"channels": channels, "roles": roles, "members": info["approximate_member_count"]}),
+        json!({"channels": channels, "roles": roles, "members": info["approximate_member_count"], "bot_roles": bot_roles}),
     ))
 }
 
@@ -302,8 +308,17 @@ async fn verify_channel(
             Some(json!({"embeds": [embed], "components": [buttons]})),
         )
         .await?;
-    Ok(Json(json!({"version": version, "channel": channel})))
+    // The channel stays, but nobody can pass until there is a role to hand out.
+    let warning = config["verification"]["roles"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+        .then_some(NO_VERIFY_ROLE);
+    Ok(Json(
+        json!({"version": version, "channel": channel, "warning": warning}),
+    ))
 }
+
+const NO_VERIFY_ROLE: &str = "The verification channel is ready, but members cannot pass yet: there is no role to give them. Pick a main role under Misc and the verification roles under Verification, then save.";
 
 const CATCH_WARNING: &str =
     "Do not write here. Writing = instant ban. Account hacked? Change your password.";

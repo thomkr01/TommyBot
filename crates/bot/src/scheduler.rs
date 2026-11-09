@@ -7,7 +7,6 @@ use std::{
 };
 use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
-use tommybot_logging::emoji::ARROW;
 use tommybot_logging::{
     embed::{DONE, RED, YES},
     Log, LogKind,
@@ -18,7 +17,9 @@ use crate::{
     app::App,
     backup, commands,
     events::{send_log, send_log_link},
-    http_err, lockdown, metrics, panic, verify,
+    http_err,
+    joingate::RAID_REPORT,
+    lockdown, metrics, panic, verify,
 };
 
 fn user(payload: &Value) -> Result<Id<UserMarker>> {
@@ -102,23 +103,17 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             .bind(job.payload["started_ms"].as_i64().unwrap_or(0))
             .fetch_one(&app.pool)
             .await?;
-            let mut log = Log::new("🕵 Join Raid Report!", DONE).text(&format!(
-                "{YES} `{caught}` users have been caught by the join raid."
-            ));
             let code = job.payload["code"].as_str().unwrap_or_default();
             match crate::invites::raid_url(code).filter(|_| caught > 0) {
                 Some(url) => {
-                    log = log.text(&format!("{ARROW} `{code}`"));
-                    send_log_link(
-                        app,
-                        gid.get(),
-                        LogKind::JoinRaid,
-                        log,
-                        ("Full Raid Report ↗", url),
-                    )
-                    .await?
+                    let log = crate::joingate::raid_report_log(caught, Some(code));
+                    send_log_link(app, gid.get(), LogKind::JoinRaid, log, (RAID_REPORT, url))
+                        .await?
                 }
-                None => send_log(app, gid.get(), LogKind::JoinRaid, log).await?,
+                None => {
+                    let log = crate::joingate::raid_report_log(caught, None);
+                    send_log(app, gid.get(), LogKind::JoinRaid, log).await?
+                }
             }
         }
         "nuke_revert" => {
