@@ -523,7 +523,7 @@ pub fn Section(
             (get_path(&cur, switch) == json!(true) && get_path(&before, switch) != json!(true)).then_some(c.action?.1)
         });
         let act = act.clone();
-        run_act(async move {
+        run_change(async move {
             let mut last = json!({"version": version.get_untracked()});
             for s in names.iter().filter(|s| cur[s.as_str()] != before[s.as_str()]) {
                 let body = json!({"expected_version": last["version"], "value": cur[s.as_str()]});

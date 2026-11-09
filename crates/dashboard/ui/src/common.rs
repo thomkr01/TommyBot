@@ -104,22 +104,31 @@ pub fn Head(guild: String, page: String, #[prop(optional)] big: Option<String>) 
 
 /// Runs a request, routing `step_up_required` to the prompt and other errors to `msg`.
 pub fn run_act(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, msg: Msg, need: RwSignal<bool>, ok: impl FnOnce(Value) + 'static) {
+    run(fut, msg, need, ok, false)
+}
+
+/// [`run_act`] for a settings save: a refused save (an invalid choice) stays up until it is fixed.
+pub fn run_change(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, msg: Msg, need: RwSignal<bool>, ok: impl FnOnce(Value) + 'static) {
+    run(fut, msg, need, ok, true)
+}
+
+fn run(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, msg: Msg, need: RwSignal<bool>, ok: impl FnOnce(Value) + 'static, stay: bool) {
     spawn_local(async move {
         match fut.await {
             Ok(v) => ok(v),
             Err(e) if e == "step_up_required" => need.set(true),
-            Err(e) => msg.err(e),
+            Err(e) => { msg.err(e); msg.stay.set(stay) }
         }
     });
 }
 
-/// A toast's text and whether it reports a failure.
+/// A toast's text, whether it reports a failure, and whether it stays until clicked or replaced.
 #[derive(Clone, Copy, Default)]
-pub struct Msg { text: RwSignal<String>, bad: RwSignal<bool> }
+pub struct Msg { text: RwSignal<String>, bad: RwSignal<bool>, stay: RwSignal<bool> }
 
 impl Msg {
-    pub fn ok(self, t: impl Into<String>) { self.bad.set(false); self.text.set(t.into()) }
-    pub fn err(self, e: impl Into<String>) { self.bad.set(true); self.text.set(e.into()) }
+    pub fn ok(self, t: impl Into<String>) { self.bad.set(false); self.stay.set(false); self.text.set(t.into()) }
+    pub fn err(self, e: impl Into<String>) { self.bad.set(true); self.stay.set(false); self.text.set(e.into()) }
     pub fn clear(self) { self.text.set(String::new()) }
     pub fn get(self) -> String { self.text.get() }
 }
@@ -138,14 +147,14 @@ pub fn Toast(msg: Msg) -> impl IntoView {
         if msg.get().is_empty() { return }
         shown.set(shown.get() + 1);
         let (mine, shown) = (shown.get(), shown.clone());
-        set_timeout(move || if shown.get() == mine { msg.clear() }, TOAST_LIFE);
+        set_timeout(move || if shown.get() == mine && !msg.stay.get_untracked() { msg.clear() }, TOAST_LIFE);
     });
-    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}{move || (!msg.get().is_empty()).then(|| view! { <span class="life"></span> })}</p></AnimatedShow> }
+    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}{move || (!msg.get().is_empty() && !msg.stay.get()).then(|| view! { <span class="life"></span> })}</p></AnimatedShow> }
 }
 
 /// Runs a save, recording the new version.
 pub fn run_save(fut: impl std::future::Future<Output = Result<Value, String>> + 'static, version: RwSignal<i64>, msg: Msg, need: RwSignal<bool>) {
-    run_act(fut, msg, need, move |v| { version.set(v["version"].as_i64().unwrap_or(0)); msg.ok(format!("Saved as version {}", version.get_untracked())); });
+    run_change(fut, msg, need, move |v| { version.set(v["version"].as_i64().unwrap_or(0)); msg.ok(format!("Saved as version {}", version.get_untracked())); });
 }
 
 fn focusables(root: &web_sys::Element) -> Vec<web_sys::HtmlElement> {
