@@ -87,7 +87,7 @@ pub struct GateCfg {
     pub no_avatar: GateFilter,
     pub account_age: GateFilter,
     pub min_age_days: u32,
-    /// Minimum age in ms (`jg 3c 3d`, minutes to days); wins over `min_age_days`.
+    /// Minimum age in ms (`jg 3c`, seconds to days); wins over `min_age_days`.
     pub min_age_override_ms: Option<i64>,
     /// Tell a punished member the minimum age in the DM (`jg 3d`).
     pub expose_min_age: bool,
