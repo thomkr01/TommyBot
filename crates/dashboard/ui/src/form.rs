@@ -39,6 +39,32 @@ const UNITS: [(&str, f64); 4] = [
     ("day", 86400.0),
 ];
 
+/// `3 hour(s)`: a duration in its largest whole unit.
+fn span(ms: f64) -> String {
+    let secs = ms / 1000.0;
+    let u = best_unit(secs);
+    format!("{} {}(s)", secs / UNITS[u].1, UNITS[u].0)
+}
+
+/// The Join Raid page's one-line reading of its trigger settings; unset values use the bot's defaults.
+fn raid_summary(cfg: &Value) -> String {
+    let at = |k: &str| get_path(cfg, &format!("joinraid.{k}"));
+    let num = |k: &str, d: f64| at(k).as_f64().unwrap_or(d);
+    let verb = match at("action").as_str().unwrap_or("Ban") {
+        "Log" => "logging",
+        "Warn" => "warning",
+        "Timeout" => "timing out",
+        "Kick" => "kicking",
+        _ => "banning",
+    };
+    format!(
+        "If {} flagged accounts join within {}, TommyBot will start {verb} flagged accounts for {}.",
+        num("count", 10.0),
+        span(num("span_ms", 3.0 * 3_600_000.0)),
+        span(num("active_ms", 1_800_000.0)),
+    )
+}
+
 fn best_unit(secs: f64) -> usize {
     UNITS
         .iter()
@@ -307,7 +333,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             view! { <div class="pick">
                 <div class="row">
                     <Show when=move || count() < 6>
-                        <button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"label": "New question", "long": false, "required": true})); set(json!(cur)) }>"Add new field"</button>
+                        <button on:click=move |_| { let mut cur = get().as_array().cloned().unwrap_or_default(); cur.push(json!({"label": "New question", "long": true, "required": false, "min": 4, "max": 500})); set(json!(cur)) }>"Add new field"</button>
                     </Show>
                     <button class="danger" on:click=move |_| set(json!([]))>"Delete all fields"</button>
                 </div>
@@ -480,11 +506,13 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         let a = a.as_str().unwrap_or("");
         format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "strike system" } else { a }, action_desc(a))
     }}</span> });
+    let raid = (path == "joinraid.active_ms")
+        .then(|| view! { <b class="muted">{move || raid_summary(&val.get())}</b> });
     let label = f["title"]
         .as_str()
         .map_or_else(|| tail.replace('_', " "), String::from);
     // The group's name labels the control inside, whatever kind it is.
-    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}</div> }
+    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
 }
 
 /// Raw JSON of one section of the config in `val`.
@@ -798,5 +826,18 @@ pub fn Section(
         </AnimatedShow>
         <Toast msg />
         <StepUp need enrolled />
+    }
+}
+
+#[cfg(test)]
+mod raid_tests {
+    #[test]
+    fn raid_summary_reads_the_settings() {
+        assert_eq!(
+            super::raid_summary(&serde_json::json!({})),
+            "If 10 flagged accounts join within 3 hour(s), TommyBot will start banning flagged accounts for 30 minute(s)."
+        );
+        let c = serde_json::json!({"joinraid": {"count": 5, "span_ms": 600_000, "action": "Kick", "active_ms": 86_400_000}});
+        assert_eq!(super::raid_summary(&c), "If 5 flagged accounts join within 10 minute(s), TommyBot will start kicking flagged accounts for 1 day(s).");
     }
 }

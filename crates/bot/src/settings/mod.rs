@@ -84,6 +84,12 @@ pub enum Op {
 const USAGE: &str =
     "Usage: `VALUE ?set N`, `N ?on`, `N ?off`, `OBJECT ?add N` or `OBJECT ?remove N`";
 
+/// A lone sub-row letter typed apart from its number, or nothing.
+fn letter(t: Option<&&str>) -> String {
+    t.filter(|t| t.len() == 1 && t.chars().all(|c| c.is_ascii_alphabetic()))
+        .map_or(String::new(), |t| t.to_lowercase())
+}
+
 /// Everything after the module name.
 pub fn parse_op(args: &str) -> Result<Op, &'static str> {
     let toks: Vec<&str> = args.split_whitespace().collect();
@@ -101,11 +107,21 @@ pub fn parse_op(args: &str) -> Result<Op, &'static str> {
     let value = toks[..at].join(" ");
     match flag.as_str() {
         "?on" | "?off" => {
-            let code = toks[..at].last().ok_or(USAGE)?.to_lowercase();
+            // `1 ?off a` names row 1a too.
+            let code = format!(
+                "{}{}",
+                toks[..at].last().ok_or(USAGE)?.to_lowercase(),
+                letter(toks.get(at + 1))
+            );
             Ok(Op::Toggle(code, flag == "?on"))
         }
         "?set" | "?add" | "?remove" => {
-            let code = toks.get(at + 1).ok_or(USAGE)?.to_lowercase();
+            // `6 ?set 1 b` names row 1b too.
+            let code = format!(
+                "{}{}",
+                toks.get(at + 1).ok_or(USAGE)?.to_lowercase(),
+                letter(toks.get(at + 2))
+            );
             if value.is_empty() {
                 return Err(USAGE);
             }
@@ -855,6 +871,8 @@ mod tests {
             Ok(Op::Remove("8".into(), "<#1>".into()))
         );
         assert!(parse_op("?set 3").is_err());
+        assert_eq!(parse_op("1 ?off a"), Ok(Op::Toggle("1a".into(), false)));
+        assert_eq!(parse_op("6 ?set 1 B"), Ok(Op::Set("1b".into(), "6".into())));
         assert!(parse_op("?on").is_err());
         assert!(parse_op("x ?what 3").is_err());
     }
@@ -943,6 +961,37 @@ mod tests {
             edit_for(r, &Op::Set("4".into(), "8%".into()), &[], None).unwrap(),
         );
         assert_eq!((r.get)(&GuildCfg::parse(&doc)), "8% per second");
+    }
+
+    #[test]
+    fn ancaps_shows_defaults_and_edits_one_card() {
+        let mut doc = json!({});
+        let cfg = GuildCfg::parse(&doc);
+        assert_eq!((row(&CAPS, "1b").get)(&cfg), "5");
+        assert_eq!((row(&CAPS, "4d").get)(&cfg), "16%");
+        let r = row(&CAPS, "1b");
+        apply(
+            &mut doc,
+            r.path,
+            edit_for(r, &Op::Set("1b".into(), "6".into()), &[], None).unwrap(),
+        );
+        assert!(edit_for(r, &Op::Set("1b".into(), "1".into()), &[], None).is_err());
+        let r = row(&CAPS, "1a");
+        apply(
+            &mut doc,
+            r.path,
+            edit_for(r, &Op::Toggle("1a".into(), false), &[], None).unwrap(),
+        );
+        let cfg = GuildCfg::parse(&doc);
+        assert_eq!(
+            ((row(&CAPS, "1a").get)(&cfg), (row(&CAPS, "1b").get)(&cfg)),
+            ("Disabled".into(), "6".into())
+        );
+        assert!(cfg
+            .antinuke
+            .limit(tommybot_antinuke::Action::Kick)
+            .is_none());
+        assert_eq!((row(&CAPS, "1c").get)(&cfg), "15");
     }
 
     #[test]

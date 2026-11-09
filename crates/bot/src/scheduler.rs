@@ -64,6 +64,15 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 panic::start(app, gid, &cfg).await?;
             }
         }
+        "lock_update" => {
+            let text = job.payload["text"]
+                .as_str()
+                .context("job payload has no text")?;
+            let by = job.payload["by"]
+                .as_u64()
+                .context("job payload has no by")?;
+            crate::lockdown::dashboard_update(app, gid, by, text).await?;
+        }
         "backup_create" => {
             let id = backup::save(app, gid, job.payload["by"].as_u64()).await?;
             send_log(

@@ -1,11 +1,7 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
 //! Web and third-party modes hand the member to the dashboard's /verify page, which queues a `verify_grant` job.
 use anyhow::Result;
-use captcha::{
-    filters::{Dots, Noise, Wave},
-    Captcha, Geometry,
-};
-use image::{Rgb, RgbImage};
+use image::{GrayImage, Luma, Rgb, RgbImage};
 use serde::Deserialize;
 use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
@@ -439,47 +435,104 @@ fn rgb(hex: &str) -> Option<Rgb<u8>> {
     Some(Rgb([(n >> 16) as u8, (n >> 8) as u8, n as u8]))
 }
 
-/// The code and its PNG. Sync so the non-Send generator never crosses an await.
-/// The `w` x `h` box centered on the text, kept inside the crate's 400x300 canvas. The crate's own
-/// `Captcha::view` underflows (and panics) when the random text lands near the left or top edge.
-fn crop(a: Geometry, w: u32, h: u32) -> Geometry {
-    let left = ((a.left + a.right) / 2).saturating_sub(w / 2).min(400 - w);
-    let top = ((a.top + a.bottom) / 2).saturating_sub(h / 2).min(300 - h);
-    Geometry::new(left, left + w, top, top + h)
+/// Captcha glyphs as rows of `#` (ink) and `.`: the captcha crate's MIT-licensed font (1-9, A-Z without
+/// I L O, a-z without o) plus `! $ # . : ;` drawn from DejaVu Sans Bold. Each cell keeps its own size.
+static GLYPHS: std::sync::LazyLock<std::collections::BTreeMap<char, Vec<String>>> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../assets/captcha_glyphs.json")).expect("captcha glyphs")
+    });
+
+/// Picks `n` random glyphs from `pool`.
+fn random_chars(pool: &[char], n: u32) -> Vec<char> {
+    (0..n)
+        .map(|_| pool[rand::random_range(0..pool.len())])
+        .collect()
 }
 
-fn view(cap: &mut Captcha, w: u32, h: u32) {
-    cap.extract(crop(cap.text_area(), w, h));
+/// Writes `chars` left to right as black ink, each centered vertically, the row centered on a white `w` x `h` mask.
+fn draw(chars: &[char], w: u32, h: u32) -> GrayImage {
+    let mut img = GrayImage::from_pixel(w, h, Luma([255]));
+    let glyphs: Vec<&Vec<String>> = chars.iter().map(|c| &GLYPHS[c]).collect();
+    let total: i64 = glyphs.iter().map(|g| g[0].len() as i64).sum();
+    let mut x = (w as i64 - total) / 2;
+    for g in glyphs {
+        let top = (h as i64 - g.len() as i64) / 2;
+        for (dy, row) in g.iter().enumerate() {
+            for (dx, b) in row.bytes().enumerate() {
+                let (px, py) = (x + dx as i64, top + dy as i64);
+                if b == b'#' && (0..w as i64).contains(&px) && (0..h as i64).contains(&py) {
+                    img.put_pixel(px as u32, py as u32, Luma([0]));
+                }
+            }
+        }
+        x += g[0].len() as i64;
+    }
+    img
 }
 
+/// Shifts each column up or down along two sine periods across the width, `amp` px high.
+fn wave(img: &GrayImage, amp: f64) -> GrayImage {
+    let (w, h) = img.dimensions();
+    let mut out = GrayImage::from_pixel(w, h, Luma([255]));
+    for x in 0..w {
+        let f = (x as f64 * 4.0 * std::f64::consts::PI / w as f64).sin() * amp;
+        for y in 0..h {
+            let ny = y as i64 - f as i64;
+            if (0..h as i64).contains(&ny) {
+                out.put_pixel(x, ny as u32, *img.get_pixel(x, y));
+            }
+        }
+    }
+    out
+}
+
+/// The code and its PNG.
 pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let (w, h) = (c.width.clamp(150, 300), c.height.clamp(60, 200));
-    // The library draws 40 px text on a fixed 400x300 canvas: crop a smaller or larger box and scale it to
-    // w x h. These bounds keep the crop inside the canvas and the text mostly inside the crop.
+    // Glyphs are about 40 px tall: draw on a box scaled by 40 / font size, then resize it to w x h.
     let size = c.font_size.clamp(30, 60);
     let (cw, ch) = ((w * 40 / size).min(300), (h * 40 / size).min(200));
-    let mut cap = Captcha::new();
-    cap.add_chars(c.length.clamp(3, 7));
+    let pool: Vec<char> = GLYPHS
+        .keys()
+        .copied()
+        .filter(|&x| c.charset.allows(x))
+        .collect();
+    let code = random_chars(&pool, c.length.clamp(3, 7));
+    let mut text = draw(&code, cw, ch);
     if c.trace {
-        cap.apply_filter(Wave::new(2.0, 8.0));
+        text = wave(&text, 8.0);
     }
-    view(&mut cap, cw, ch);
-    // The text alone, so the decoys added next can be told apart and colored separately.
-    let text = cap.as_png();
+    // The text alone stays in `text`, so the decoys added to `all` can be colored separately.
+    let mut all = text.clone();
     if c.mixed {
-        cap.apply_filter(Noise::new(0.3));
+        for p in all.pixels_mut().filter(|_| rand::random::<f32>() <= 0.3) {
+            *p = Luma([0]);
+        }
     }
     if c.spread {
-        cap.apply_filter(Dots::new(12).min_radius(2).max_radius(4));
+        for _ in 0..12 {
+            let (x, y) = (
+                rand::random_range(0..cw) as i64,
+                rand::random_range(0..ch) as i64,
+            );
+            let r = rand::random_range(2..=4i64);
+            // Same dot shape as the old library: floor(distance) <= r, right and bottom edge open.
+            for (px, py) in (x - r..x + r).flat_map(|px| (y - r..y + r).map(move |py| (px, py))) {
+                let inside = (px - x).pow(2) + (py - y).pow(2) < (r + 1).pow(2);
+                if inside && (0..cw as i64).contains(&px) && (0..ch as i64).contains(&py) {
+                    all.put_pixel(px as u32, py as u32, Luma([0]));
+                }
+            }
+        }
     }
-    let load = |png: Option<Vec<u8>>| Some(image::load_from_memory(&png?).ok()?.into_luma8());
     // Faint background letters: a second code that is never the answer.
-    let mut bg = Captcha::new();
-    view(bg.add_chars(5), cw, ch);
-    let (Some(text), Some(all), Some(bg)) = (load(text), load(cap.as_png()), load(bg.as_png()))
-    else {
-        return (cap.chars_as_string(), vec![]);
-    };
+    let every: Vec<char> = GLYPHS
+        .keys()
+        .copied()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let bg = draw(&random_chars(&every, 5), cw, ch);
+    let code: String = code.into_iter().collect();
     let (font, decoy) = (rgb(&c.font_color), rgb(&c.decoy_color));
     let custom = |c: Option<Rgb<u8>>| c.filter(|c| c.0 != [0, 0, 0]);
     // Each character slot gets its own green or yellow unless the settings name a color.
@@ -543,10 +596,7 @@ pub(crate) fn new_captcha(c: &CaptchaCfg) -> (String, Vec<u8>) {
     let img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
     let mut png = std::io::Cursor::new(vec![]);
     let ok = img.write_to(&mut png, image::ImageFormat::Png).is_ok();
-    (
-        cap.chars_as_string(),
-        if ok { png.into_inner() } else { vec![] },
-    )
+    (code, if ok { png.into_inner() } else { vec![] })
 }
 
 /// A sum a member types; no image, so screen readers and slow connections cope. Returns (question, answer).
@@ -887,6 +937,20 @@ mod tests {
     }
 
     #[test]
+    fn every_charset_draws_only_its_characters() {
+        for name in tommybot_automod::join::Charset::NAMES {
+            let charset = serde_json::from_value(serde_json::json!(name)).unwrap();
+            let (code, png) = new_captcha(&CaptchaCfg {
+                charset,
+                ..Default::default()
+            });
+            assert!(!png.is_empty() && code.len() == 6, "{name}");
+            assert!(code.chars().all(|c| charset.allows(c)), "{name}: {code}");
+        }
+        assert!("!$#.:;".chars().all(|c| GLYPHS.contains_key(&c)));
+    }
+
+    #[test]
     fn click_outcomes() {
         let c = cfg(VerifyMode::Button, VerifyTarget::Everyone);
         assert_eq!(decide(&c, false, false, false), Step::Grant);
@@ -915,16 +979,6 @@ mod tests {
                 Step::Web
             );
         }
-    }
-
-    #[test]
-    fn crop_stays_on_the_canvas_when_text_is_near_an_edge() {
-        let c = crop(Geometry::new(10, 30, 5, 20), 300, 200);
-        assert_eq!((c.left, c.right, c.top, c.bottom), (0, 300, 0, 200));
-        let c = crop(Geometry::new(380, 399, 280, 299), 300, 200);
-        assert_eq!((c.left, c.right, c.top, c.bottom), (100, 400, 100, 300));
-        let c = crop(Geometry::new(150, 250, 100, 200), 100, 60);
-        assert_eq!((c.left, c.right, c.top, c.bottom), (150, 250, 120, 180));
     }
 
     #[test]

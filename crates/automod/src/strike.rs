@@ -55,13 +55,25 @@ pub struct StrikeAction {
     pub reset_heat: bool,
 }
 
-pub fn strike(s: &mut StrikeState, cfg: &StrikeCfg, now: i64) -> StrikeAction {
-    let expired = if s.last_cap_duration_ms > 0 {
+fn expired(s: &StrikeState, cfg: &StrikeCfg, now: i64) -> bool {
+    if s.last_cap_duration_ms > 0 {
         now > s.cap_end_ms + cfg.reoffend_window_ms
     } else {
         now - s.last_strike_ms > cfg.strike_expiry_ms
-    };
-    if expired {
+    }
+}
+
+/// Strikes that still count towards the cap at `now`.
+pub fn active(s: &StrikeState, cfg: &StrikeCfg, now: i64) -> u32 {
+    if expired(s, cfg, now) {
+        0
+    } else {
+        s.strikes
+    }
+}
+
+pub fn strike(s: &mut StrikeState, cfg: &StrikeCfg, now: i64) -> StrikeAction {
+    if expired(s, cfg, now) {
         *s = StrikeState::default();
     }
     s.strikes += 1;
