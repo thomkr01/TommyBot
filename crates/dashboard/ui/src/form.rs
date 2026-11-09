@@ -459,6 +459,17 @@ pub fn Section(
             });
         }
     };
+    for &(src, dst) in cards.into_iter().flatten().flat_map(|c| c.links) {
+        let x = Memo::new(move |_| val.with(|v| get_path(v, src)));
+        Effect::new(move |_| {
+            let x = x.get();
+            if !loaded.get_untracked() { return }
+            // Back to the saved value: the follower goes back to its saved value too.
+            let o = orig.get_untracked();
+            let y = if x == get_path(&o, src) { get_path(&o, dst) } else { x };
+            if val.with_untracked(|v| get_path(v, dst) != y) { val.update(|v| set_path(v, dst, y)) }
+        });
+    }
     let card_view = cards.map(|cs| {
         let pv = NodeRef::<leptos::html::Div>::new();
         // (card, texts of its preview): a new card starts over, so only a settings change flashes.

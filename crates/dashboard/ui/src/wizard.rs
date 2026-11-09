@@ -19,10 +19,12 @@ pub struct Card {
     pub when: &'static [(&'static str, &'static str)],
     /// A red warning box under the description.
     pub alert: Option<&'static str>,
+    /// (field, follower): changing the field sets the follower to the same value.
+    pub links: &'static [(&'static str, &'static str)],
 }
 
 const fn card(title: &'static str, desc: &'static str, fields: &'static [(&'static str, &'static str)], preview: fn(&Value, &Value) -> AnyView) -> Card {
-    Card { title, desc, notes: &[], fields, preview, action: None, boxed: false, when: &[], alert: None }
+    Card { title, desc, notes: &[], fields, preview, action: None, boxed: false, when: &[], alert: None, links: &[] }
 }
 
 const fn boxed(c: Card) -> Card {
@@ -87,7 +89,10 @@ pub const AUTOMOD: &[Card] = &[
         ("automod.filters.bad_sites.enabled", "Filter out malicious links"),
         ("automod.filters.scam_links.enabled", "Filter out scam links and login QR codes"),
     ], |_, _| show("automod_kick"))),
-    boxed(card("Antispam module", "Do you want TommyBot to also monitor and fight off spam in your server?", &[
+    Card {
+    // One switch for long messages, as both character filters (lowercase and uppercase).
+    links: &[("automod.filters.chars_lower.enabled", "automod.filters.chars_upper.enabled")],
+    ..boxed(card("Antispam module", "Do you want TommyBot to also monitor and fight off spam in your server?", &[
         ("automod.anti_spam", "Enable Anti Spam"),
         ("automod.filters.mentions.enabled", "Track and stop @mention spam"),
         ("automod.filters.attachments.enabled", "Track and stop attachment (image, embed, file) spam"),
@@ -96,7 +101,8 @@ pub const AUTOMOD: &[Card] = &[
         ("automod.filters.emojis.enabled", "Monitor emoji spam"),
         ("automod.filters.newlines.enabled", "Monitor new lines in messages"),
         ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
-    ], |_, _| show("automod_timeout"))),
+    ], |_, _| show("automod_timeout")))
+    },
     card("Webhook coverage", "Do you want TommyBot to also monitor webhooks sending messages in your server?", &[("automod.monitor_webhooks", "Monitor unwhitelisted webhooks")], |c, _| {
         text(if on(c, "automod.monitor_webhooks", true) { "Webhook messages count towards spam like members' messages do." } else { "Webhook messages are ignored." })
     }),
