@@ -132,8 +132,7 @@ const TOAST_LIFE: Duration = Duration::from_secs(3);
 #[component]
 pub fn Toast(msg: Msg) -> impl IntoView {
     let text = Memo::new(move |prev: Option<&String>| { let m = msg.get(); if m.is_empty() { prev.cloned().unwrap_or_default() } else { m } });
-    // Each new message restarts the timer; a stale timer sees a newer number and leaves it alone.
-    // A plain cell, not a StoredValue: the timer may fire after the toast is gone.
+    // Each message restarts the timer; a plain cell (not StoredValue) since it may fire after unmount.
     let shown = std::rc::Rc::new(std::cell::Cell::new(0u32));
     Effect::new(move || {
         if msg.get().is_empty() { return }
