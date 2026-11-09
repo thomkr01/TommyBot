@@ -13,10 +13,38 @@ pub struct Card {
     pub preview: fn(&Value, &Value) -> AnyView,
     /// A button that POSTs `/api/guilds/{id}/<path>` with the config version: (label, path).
     pub action: Option<(&'static str, &'static str)>,
+    /// The fields after the first sit in a "While you are at it" box that rings red while the first (the switch) is off.
+    pub boxed: bool,
+    /// (field, switch): the field slides open only while that switch is on.
+    pub when: &'static [(&'static str, &'static str)],
+    /// A red warning box under the description.
+    pub alert: Option<&'static str>,
+    /// (field, follower): changing the field sets the follower to the same value.
+    pub links: &'static [(&'static str, &'static str)],
 }
 
-const fn card(title: &'static str, desc: &'static str, fields: &'static [(&'static str, &'static str)], preview: fn(&Value, &Value) -> AnyView) -> Card {
-    Card { title, desc, notes: &[], fields, preview, action: None }
+const fn card(
+    title: &'static str,
+    desc: &'static str,
+    fields: &'static [(&'static str, &'static str)],
+    preview: fn(&Value, &Value) -> AnyView,
+) -> Card {
+    Card {
+        title,
+        desc,
+        notes: &[],
+        fields,
+        preview,
+        action: None,
+        boxed: false,
+        when: &[],
+        alert: None,
+        links: &[],
+    }
+}
+
+const fn boxed(c: Card) -> Card {
+    Card { boxed: true, ..c }
 }
 
 use crate::discord::{bot, chat, sample, show, show_msg};
@@ -31,7 +59,10 @@ fn text(t: &str) -> AnyView {
 }
 
 fn on(c: &Value, path: &str, default: bool) -> bool {
-    path.split('.').fold(c, |v, k| &v[k]).as_bool().unwrap_or(default)
+    path.split('.')
+        .fold(c, |v, k| &v[k])
+        .as_bool()
+        .unwrap_or(default)
 }
 
 pub const MISC: &[Card] = &[
@@ -70,56 +101,105 @@ pub const MISC: &[Card] = &[
 ];
 
 pub const AUTOMOD: &[Card] = &[
-    card("Automod status", "Do you want TommyBot to monitor messages?", &[
-        ("automod.enabled", "Enable Automod"),
-        ("automod.filters.invites.enabled", "Moderate invite links posted"),
-        ("automod.filters.nsfw_links.enabled", "Filter out NSFW links"),
-        ("automod.filters.bad_sites.enabled", "Filter out malicious links"),
-        ("automod.filters.scam_links.enabled", "Filter out scam links and login QR codes"),
-    ], |_, _| show("automod_kick")),
-    card("Antispam module", "Do you want TommyBot to also monitor and fight off spam in your server?", &[
-        ("automod.anti_spam", "Enable Anti Spam"),
-        ("automod.filters.mentions.enabled", "Track and stop @mention spam"),
-        ("automod.filters.attachments.enabled", "Track and stop attachment (image, embed, file) spam"),
-        ("automod.filters.similar.enabled", "Monitor repetitive message spam"),
-        ("automod.filters.chars_lower.enabled", "Monitor long messages"),
-        ("automod.filters.emojis.enabled", "Monitor emoji spam"),
-        ("automod.filters.newlines.enabled", "Monitor new lines in messages"),
-        ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
-    ], |_, _| show("automod_timeout")),
-    card("Webhook coverage", "Do you want TommyBot to also monitor webhooks sending messages in your server?", &[("automod.monitor_webhooks", "Monitor unwhitelisted webhooks")], |c, _| {
-        text(if on(c, "automod.monitor_webhooks", true) { "Webhook messages count towards spam like members' messages do." } else { "Webhook messages are ignored." })
-    }),
+    boxed(card(
+        "Automod status",
+        "Do you want TommyBot to monitor messages?",
+        &[
+            ("automod.enabled", "Enable Automod"),
+            (
+                "automod.filters.invites.enabled",
+                "Moderate invite links posted",
+            ),
+            (
+                "automod.filters.nsfw_links.enabled",
+                "Filter out NSFW links",
+            ),
+            (
+                "automod.filters.bad_sites.enabled",
+                "Filter out malicious links",
+            ),
+            (
+                "automod.filters.scam_links.enabled",
+                "Filter out scam links and login QR codes",
+            ),
+        ],
+        |_, _| show("automod_kick"),
+    )),
+    Card {
+        // One switch for long messages, as both character filters (lowercase and uppercase).
+        links: &[(
+            "automod.filters.chars_lower.enabled",
+            "automod.filters.chars_upper.enabled",
+        )],
+        ..boxed(card(
+            "Antispam module",
+            "Do you want TommyBot to also monitor and fight off spam in your server?",
+            &[
+                ("automod.anti_spam", "Enable Anti Spam"),
+                (
+                    "automod.filters.mentions.enabled",
+                    "Track and stop @mention spam",
+                ),
+                (
+                    "automod.filters.attachments.enabled",
+                    "Track and stop attachment (image, embed, file) spam",
+                ),
+                (
+                    "automod.filters.similar.enabled",
+                    "Monitor repetitive message spam",
+                ),
+                (
+                    "automod.filters.chars_lower.enabled",
+                    "Monitor long messages",
+                ),
+                ("automod.filters.emojis.enabled", "Monitor emoji spam"),
+                (
+                    "automod.filters.newlines.enabled",
+                    "Monitor new lines in messages",
+                ),
+                ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
+            ],
+            |_, _| show("automod_timeout"),
+        ))
+    },
+    card(
+        "Webhook coverage",
+        "Do you want TommyBot to also monitor webhooks sending messages in your server?",
+        &[("automod.monitor_webhooks", "Monitor unwhitelisted webhooks")],
+        |c, _| {
+            text(if on(c, "automod.monitor_webhooks", true) {
+                "Webhook messages count towards spam like members' messages do."
+            } else {
+                "Webhook messages are ignored."
+            })
+        },
+    ),
 ];
 
 pub const ANTINUKE: &[Card] = &[
-    card("Antinuke status", "Do you want TommyBot to watch your staff members and stop anyone nuking the server?", &[
+    boxed(card("Antinuke status", "Do you want TommyBot to monitor moderation actions made by your staff members?", &[
         ("antinuke.enabled", "Enable Antinuke"),
-        ("antinuke.prune", "Detect and react to member prunes"),
-        ("antinuke.vanity_guard", "Guard the server's vanity url"),
-    ], |_, _| show("nuke_quarantined")),
+        ("antinuke.limits.Ban.enabled", "Monitor kicks and bans"),
+        ("antinuke.limits.RoleCreate.enabled", "Monitor role creations"),
+        ("antinuke.limits.RoleDelete.enabled", "Monitor role deletions"),
+        ("antinuke.limits.ChannelCreate.enabled", "Monitor channel creations"),
+        ("antinuke.limits.ChannelDelete.enabled", "Monitor channel deletions"),
+        ("antinuke.limits.WebhookCreate.enabled", "Monitor webhook creations"),
+        ("antinuke.limits.WebhookDelete.enabled", "Monitor webhook deletions"),
+    ], |_, _| show("nuke_quarantined"))),
     Card {
         notes: &["Leave the role empty and Auto Setup makes @Quarantine for you (old Quarantine roles are deleted). Pick a role and Auto Setup removes all of its permissions and denies it in every channel and category."],
-        ..card("Auto quarantine", "Quarantine anyone who gives dangerous permissions without being allowed to.", &[
-        ("antinuke.auto_quarantine", "Use the auto quarantine"),
+        ..boxed(card("Quarantine", "Do you want the quarantine system that keeps your server safe from being destroyed?", &[
+        ("antinuke.auto_quarantine", "Use the auto quarantine module"),
+        ("antinuke.strict_mode", "Punish unauthorized admins giving dangerous permissions to any role"),
+        ("antinuke.strict_member_roles", "Punish unauthorized admins giving dangerous permissions to other members"),
+        ("antinuke.monitor_public_roles", "Protect @everyone and the main roles from getting dangerous permissions"),
+        ("antinuke.vanity_guard", "Guard the server's vanity url"),
         ("antinuke.quarantine_role", "Quarantine role"),
-        ("antinuke.strict_mode", ""),
-        ("antinuke.monitor_public_roles", ""),
-        ("antinuke.monitor_channel_perms", ""),
     ], |c, dc| view! {
         <p>{format!("Quarantined members only keep {}.", name_of(dc, "roles", c["antinuke"]["quarantine_role"].as_str().unwrap_or("the quarantine role")))}</p>
         {show(if on(c, "antinuke.auto_quarantine", true) { "nuke_quarantined" } else { "nuke_no_quarantine" })}
-    }.into_any())
-    },
-    Card {
-        notes: &[
-            "ONLY owners and trusted admins are whitelisted automatically.",
-            "This whitelist lets a member or bot edit the roles of someone in Quarantine. It does not stop them getting quarantined, that is Immunity in Permits.",
-            "Autorole bots can be added here.",
-        ],
-        ..card("Quarantine whitelist", "Pick the users that can touch quarantined members and bots.", &[("antinuke.quarantine_whitelist", "Users (IDs)")], |_, _| {
-            text("Timeout, kick, ban and role changes on a quarantined member are blocked for everyone else.")
-        })
+    }.into_any()))
     },
 ];
 
@@ -128,7 +208,13 @@ const STAFF_WL: &str = "ONLY owners and trusted admins are whitelisted automatic
 
 macro_rules! wl {
     ($p:literal) => {
-        &[(concat!("whitelist.", $p, "users"), "Members (IDs)"), (concat!("whitelist.", $p, "roles"), "Roles"), (concat!("whitelist.", $p, "channels"), "Channels"), (concat!("whitelist.", $p, "categories"), "Categories"), (concat!("whitelist.", $p, "webhooks"), "Webhooks (IDs)")]
+        &[
+            (concat!("whitelist.", $p, "users"), "Members (IDs)"),
+            (concat!("whitelist.", $p, "roles"), "Roles"),
+            (concat!("whitelist.", $p, "channels"), "Channels"),
+            (concat!("whitelist.", $p, "categories"), "Categories"),
+            (concat!("whitelist.", $p, "webhooks"), "Webhooks (IDs)"),
+        ]
     };
 }
 
@@ -151,44 +237,82 @@ pub const WHITELIST: &[Card] = &[
         notes: &[STAFF_WL, "This whitelist is related to @everyone and main role mentions only."],
         ..card("@everyone whitelist", "Pick the users, roles, channels, categories and webhooks you want to whitelist when it comes to sending @everyone mentions (or main roles).", wl!("everyone."), |_, _| chat("member", text("@everyone you suck!")))
     },
+    Card {
+        notes: &["ONLY owners and trusted admins are whitelisted automatically.", "This whitelist covers the channels made under the categories picked below."],
+        ..card("Channel creation whitelist (ticket bots)", "Pick the categories where channel creations are absolutely fine, this is useful if you have a tickets bot.", &[("antinuke.ticket_categories", "Categories")], |c, dc| {
+            let cats: Vec<String> = strs(&c["antinuke"]["ticket_categories"]).iter().map(|id| name_of(dc, "categories", id)).collect();
+            text(&if cats.is_empty() { "Every channel creation counts towards the antinuke limits.".to_string() } else { format!("Channels made or deleted under {} never count.", cats.join(", ")) })
+        })
+    },
+    Card {
+        notes: &[
+            "ONLY owners and trusted admins are whitelisted automatically.",
+            "This whitelist lets a member or bot edit the roles of someone in Quarantine. It does not stop them getting quarantined, that is Immunity in Permits.",
+            "Autorole bots can be added here.",
+        ],
+        ..card("Quarantine whitelist", "Pick the users that can touch quarantined members and bots.", &[("antinuke.quarantine_whitelist", "Users")], |_, _| {
+            text("Timeout, kick, ban and role changes on a quarantined member are blocked for everyone else.")
+        })
+    },
 ];
 
-pub const JOINGATE: &[Card] = &[card("Join Gate status", "If you want to use instant detection filters for new members joining your server, this is the module to tweak.", &[
+pub const JOINGATE: &[Card] = &[Card {
+    when: &[("joingate.min_age_override_ms", "joingate.account_age.enabled"), ("joingate.username_strict", "joingate.username_filter.enabled"), ("joingate.username_terms", "joingate.username_filter.enabled")],
+    ..boxed(card("Join Gate status", "If you want to use instant detection filters for new members joining your server, this is the module to tweak.", &[
     ("joingate.enabled", "Enable Join Gate"),
     ("joingate.unauthorized_bot.enabled", "Bots added by unauthorized members"),
     ("joingate.account_age.enabled", "Accounts younger than the minimum age"),
+    ("joingate.min_age_override_ms", "Minimum account age"),
     ("joingate.no_avatar.enabled", "Accounts that have no profile picture"),
     ("joingate.unverified_bot.enabled", "Discord unverified bots added by anyone"),
     ("joingate.invite_in_name.enabled", "Accounts with invite links in usernames"),
     ("joingate.suspicious.enabled", "Accounts TommyBot deems suspicious"),
     ("joingate.username_filter.enabled", "Accounts that have certain names"),
-], |c, _| text(if on(c, "joingate.enabled", false) { "New members are checked the moment they join." } else { "These don't matter now! Join Gate is off." }))];
+    ("joingate.username_strict", "Strict words"),
+    ("joingate.username_terms", "Wildcard words"),
+], |c, _| text(if on(c, "joingate.enabled", false) { "New members are checked the moment they join." } else { "Join Gate is off." })))
+}];
 
-pub const JOINRAID: &[Card] = &[card("Anti raid status", "If you want to keep your server safe and secure from bad raids, this is your saviour.", &[
+pub const JOINRAID: &[Card] = &[Card {
+    alert: Some("Anti raid is more than one switch! Fine-tune it after the wizard on the Join Raid page in the menu on the left."),
+    ..boxed(card("Anti raid status", "If you want to keep your server safe and secure from bad raids, this is your saviour.", &[
     ("joinraid.enabled", "Enable Join Raid"),
     ("joinraid.count", "Joins that count as a raid"),
     ("joinraid.span_ms", "Within (milliseconds)"),
     ("joinraid.lock", "Lock when a raid starts"),
-], |_, _| show("raid"))];
+], |_, _| view! { {show("raid")}{show("raid_report")} }.into_any()))
+}];
 
 pub const VERIFICATION: &[Card] = &[Card {
     notes: &["Turn it on and save: TommyBot makes the #verify-here channel with its panel."],
     action: Some(("Set up channel", "wizard/verify-channel")),
-    ..card("Verification status", "Do you want to filter in only genuine members? Use the verification and fend off bots!", &[("verification.enabled", "Enable Verification"), ("verification.mode", "Verification mode")], |c, _| {
-        // The panel, then what a member sees after pressing Verify.
-        let (chip, after) = match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
-            "Web" => (Some(("ok", "This is recommended!")), show("verify_web")),
-            "Dm" => {
-                let mut dm = sample("verify_captcha");
-                dm["flags"] = Value::Null;
-                (None, view! { {show("verify_dm")}<p class="muted">"In DMs:"</p>{bot(&dm)} }.into_any())
-            }
-            "Button" => (Some(("warn", "This is very weak!")), show("verify_button")),
-            "SimpleCaptcha" => (None, show("verify_simple")),
-            _ => (None, show("verify_captcha")),
-        };
-        view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after} }.into_any()
-    })
+    ..card(
+        "Verification status",
+        "Do you want to filter in only genuine members? Use the verification and fend off bots!",
+        &[
+            ("verification.enabled", "Enable Verification"),
+            ("verification.mode", "Verification mode"),
+        ],
+        |c, _| {
+            // The panel, then what a member sees after pressing Verify.
+            let (chip, after) = match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
+                "Web" => (Some(("ok", "This is recommended!")), show("verify_web")),
+                "Dm" => {
+                    let mut dm = sample("verify_captcha");
+                    dm["flags"] = Value::Null;
+                    (
+                        None,
+                        view! { {show("verify_dm")}<p class="muted">"In DMs:"</p>{bot(&dm)} }
+                            .into_any(),
+                    )
+                }
+                "Button" => (None, show("verify_button")),
+                "SimpleCaptcha" => (Some(("bad", "This is very weak!")), show("verify_simple")),
+                _ => (None, show("verify_captcha")),
+            };
+            view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after} }.into_any()
+        },
+    )
 }];
 
 /// A sample with `{key}` placeholders filled in; null while the samples load.
@@ -208,13 +332,44 @@ fn fill(m: &Value, with: &[(&str, &str)]) -> Value {
 /// The member's DMs and the staff channel side by side, as the ticket settings make them.
 fn ticket_preview(c: &Value, dc: &Value) -> AnyView {
     let t = &c["tickets"];
-    let anon = if on(c, "tickets.anonymous", false) { "_anon" } else { "" };
-    let tagged = |k: &str| t[k].as_str().unwrap_or("").replace("{username}", "member").replace("{userid}", "1001").replace("{usermention}", "@member");
+    let anon = if on(c, "tickets.anonymous", false) {
+        "_anon"
+    } else {
+        ""
+    };
+    let tagged = |k: &str| {
+        t[k].as_str()
+            .unwrap_or("")
+            .replace("{username}", "member")
+            .replace("{userid}", "1001")
+            .replace("{usermention}", "@member")
+    };
     let (greeting, closing) = (tagged("greeting"), tagged("closing"));
-    let mut pings: Vec<String> = strs(&t["ping_roles"]).iter().map(|r| name_of(dc, "roles", r)).map(|n| if n.starts_with('@') { n } else { format!("@{n}") }).collect();
-    if on(c, "tickets.ping_here", false) { pings.push("@here".into()); }
-    let mut intro = filled(if on(c, "tickets.command_only", false) { "ticket_intro_cmd" } else { "ticket_intro" }, &[("prefix", c["misc"]["prefix"].as_str().unwrap_or("t!"))]);
-    if !intro.is_null() && !pings.is_empty() { intro["content"] = Value::String(pings.join(" ")); }
+    let mut pings: Vec<String> = strs(&t["ping_roles"])
+        .iter()
+        .map(|r| name_of(dc, "roles", r))
+        .map(|n| {
+            if n.starts_with('@') {
+                n
+            } else {
+                format!("@{n}")
+            }
+        })
+        .collect();
+    if on(c, "tickets.ping_here", false) {
+        pings.push("@here".into());
+    }
+    let mut intro = filled(
+        if on(c, "tickets.command_only", false) {
+            "ticket_intro_cmd"
+        } else {
+            "ticket_intro"
+        },
+        &[("prefix", c["misc"]["prefix"].as_str().unwrap_or("t!"))],
+    );
+    if !intro.is_null() && !pings.is_empty() {
+        intro["content"] = Value::String(pings.join(" "));
+    }
     view! {
         <p class="muted">"In the member's DMs:"</p>
         {chat("member", text("Hi, someone in the server keeps sending me scam links."))}
@@ -231,7 +386,7 @@ fn ticket_preview(c: &Value, dc: &Value) -> AnyView {
 
 pub const TICKETS: &[Card] = &[Card {
     notes: &["Members open a ticket by sending TommyBot a DM. Turn it on and save: TommyBot makes the Tickets category and #ticket-logs for you."],
-    ..card("Tickets status", "Do you want members to reach your staff by sending TommyBot a DM?", &[
+    ..boxed(card("Tickets status", "Do you want members to reach your staff by sending TommyBot a DM?", &[
         ("tickets.enabled", "Enable Tickets"),
         ("tickets.category", ""),
         ("tickets.log_channel", ""),
@@ -241,15 +396,111 @@ pub const TICKETS: &[Card] = &[Card {
         ("tickets.closing", ""),
         ("tickets.anonymous", ""),
         ("tickets.command_only", ""),
-    ], ticket_preview)
+    ], ticket_preview))
 }];
+
+/// Setup score in percent: 17 points over the steps, as the wizard ring shows it.
+/// `c` is the config, `dc` the server's roles with `bot_roles`, `guild` the id of @everyone.
+pub fn score(c: &Value, dc: &Value, guild: &str) -> usize {
+    let set = |v: &Value| {
+        v.as_str().is_some_and(|s| !s.is_empty()) || v.as_array().is_some_and(|a| !a.is_empty())
+    };
+    let on = |p: &str| on(c, p, false);
+    // Admins/Moderators permits only count once they have a role.
+    let permits = !c["permits"]["custom"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|p| matches!(p["name"].as_str(), Some("Admins" | "Moderators")) && !set(&p["roles"]));
+    let wl = &c["whitelist"];
+    let whitelisted = [wl, &wl["invites"], &wl["mentions"], &wl["everyone"]]
+        .iter()
+        .any(|w| {
+            ["users", "roles", "channels", "categories", "webhooks"]
+                .iter()
+                .any(|k| set(&w[*k]))
+        });
+    let roles = dc["roles"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mine: Vec<&str> = dc["bot_roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain([guild])
+        .collect();
+    let perms = roles
+        .iter()
+        .filter(|r| r["id"].as_str().is_some_and(|id| mine.contains(&id)))
+        .filter_map(|r| r["permissions"].as_str()?.parse::<u64>().ok())
+        .fold(0, |a, p| a | p);
+    let pos = |r: &Value| r["position"].as_i64().unwrap_or(0);
+    let top = roles
+        .iter()
+        .filter(|r| {
+            r["id"]
+                .as_str()
+                .is_some_and(|id| id != guild && mine.contains(&id))
+        })
+        .map(pos)
+        .max();
+    // The bot's highest role is among the server's top 8 roles.
+    let high = top.is_some_and(|t| roles.iter().filter(|r| pos(r) > t).count() < 8);
+    let points = [
+        2,
+        set(&c["logging"]["fallback"]) as usize,
+        set(&c["logging"]["routes"]["mod_command"]) as usize,
+        set(&c["lockdown"]["main_roles"]) as usize,
+        permits as usize,
+        4,
+        whitelisted as usize,
+        on("antinuke.enabled") as usize,
+        on("joingate.enabled") as usize,
+        on("joinraid.enabled") as usize,
+        on("verification.enabled") as usize,
+        // Administrator alone (bit 3), counting @everyone's permissions too.
+        (perms == 8) as usize,
+        high as usize,
+    ];
+    (points.iter().sum::<usize>() * 100 + 17 / 2) / 17
+}
 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn score_counts_the_seventeen_points() {
+        use serde_json::json;
+        let empty = json!({});
+        // The six free points, and the permits point: no Admins/Moderators permit lacks a role.
+        assert_eq!(super::score(&empty, &empty, "1"), 41);
+        let c = json!({
+            "logging": {"fallback": "5", "routes": {"mod_command": "6"}},
+            "lockdown": {"main_roles": ["7"]},
+            "permits": {"custom": [{"name": "Admins", "roles": ["8"]}]},
+            "whitelist": {"mentions": {"users": ["9"]}},
+            "antinuke": {"enabled": true}, "joingate": {"enabled": true}, "joinraid": {"enabled": true}, "verification": {"enabled": true},
+        });
+        let dc = json!({"bot_roles": ["2"], "roles": [
+            {"id": "1", "position": 0, "permissions": "0"},
+            {"id": "2", "position": 3, "permissions": "8"},
+        ]});
+        assert_eq!(super::score(&c, &dc, "1"), 100);
+        // @everyone with permissions of its own, and a permit without a role.
+        let dc = json!({"bot_roles": ["2"], "roles": [{"id": "1", "position": 0, "permissions": "1024"}, {"id": "2", "position": 3, "permissions": "8"}]});
+        let mut c2 = c.clone();
+        c2["permits"]["custom"][0]["roles"] = json!([]);
+        assert_eq!(super::score(&c2, &dc, "1"), 88);
+    }
+
+    #[test]
     fn placeholders_take_text_that_needs_escaping() {
         let m = serde_json::json!({"embeds": [{"description": "Hi {text} via `{prefix}reply`"}]});
         let out = super::fill(&m, &[("text", "say \"hi\"\nnow"), ("prefix", "!")]);
-        assert_eq!(out["embeds"][0]["description"], "Hi say \"hi\"\nnow via `!reply`");
+        assert_eq!(
+            out["embeds"][0]["description"],
+            "Hi say \"hi\"\nnow via `!reply`"
+        );
     }
 }

@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 #[serde(default)]
 pub struct HeatCfg {
     pub max: f64,
-    /// Fraction of total heat lost per second (0.05 = 5%/s, default).
+    /// Fraction of total heat lost per second (0.08 = 8%/s, default).
     pub decay_per_sec: f64,
     pub base: f64,
     pub per_char: f64,
@@ -47,7 +47,7 @@ impl Default for HeatCfg {
     fn default() -> Self {
         Self {
             max: 100.0,
-            decay_per_sec: 0.05,
+            decay_per_sec: 0.08,
             base: 15.0,
             // Long messages heat through per_upper/per_lower alone, as the reference defaults do.
             per_char: 0.0,
@@ -460,7 +460,7 @@ mod tests {
             value: 100.0,
             ..Default::default()
         };
-        assert!((s.decayed(2000, &cfg) - 90.25).abs() < 1e-9);
+        assert!((s.decayed(2000, &cfg) - 84.64).abs() < 1e-9);
         assert_eq!(s.decayed(-5, &cfg), 100.0);
     }
 

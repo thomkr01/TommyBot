@@ -1,8 +1,8 @@
 use crate::common::*;
 use crate::form::{Field, Section};
 use leptos::{prelude::*, task::spawn_local};
-use wasm_bindgen::JsCast;
 use serde_json::{json, Value};
+use wasm_bindgen::JsCast;
 
 fn s(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
@@ -11,17 +11,38 @@ fn s(v: &Value) -> String {
 fn later(ms: i32, f: impl Fn() + 'static) {
     let cb = wasm_bindgen::closure::Closure::<dyn Fn()>::new(f);
     if let Some(w) = web_sys::window() {
-        let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), ms);
+        let _ = w
+            .set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), ms);
     }
     cb.forget();
 }
 
 type Covers = fn(&Value) -> bool;
 const LOCKS: [(&str, &str, &str, Covers); 4] = [
-    ("Server Channels", "Members can no longer send messages in any channel.", "server", |l| l["channels"] == true),
-    ("Server Roles", "Every role below the bot loses its dangerous permissions.", "role", |l| l["roles"] == true),
-    ("Kick New Members", "New members are kicked on join and invites are paused.", "kick", |l| l["join"] == "Kick"),
-    ("Ban New Members", "New members are banned on join.", "ban", |l| l["join"] == "Ban"),
+    (
+        "Server Channels",
+        "Members can no longer send messages in any channel.",
+        "server",
+        |l| l["channels"] == true,
+    ),
+    (
+        "Server Roles",
+        "Every role below the bot loses its dangerous permissions.",
+        "role",
+        |l| l["roles"] == true,
+    ),
+    (
+        "Kick New Members",
+        "New members are kicked on join and invites are paused.",
+        "kick",
+        |l| l["join"] == "Kick",
+    ),
+    (
+        "Ban New Members",
+        "New members are banned on join.",
+        "ban",
+        |l| l["join"] == "Ban",
+    ),
 ];
 
 #[component]
@@ -32,27 +53,68 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
     let channel = RwSignal::new(String::new());
     let chans = RwSignal::new(Vec::<Value>::new());
     let g = StoredValue::new(guild);
-    let load = move || spawn_local(async move {
-        match api("GET", &format!("/api/guilds/{}/lockdown", g.get_value()), None).await {
-            Ok(v) => status.set(v),
-            Err(e) => msg.err(e),
-        }
-    });
+    let load = move || {
+        spawn_local(async move {
+            match api(
+                "GET",
+                &format!("/api/guilds/{}/lockdown", g.get_value()),
+                None,
+            )
+            .await
+            {
+                Ok(v) => status.set(v),
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     load();
     spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{}/lockdown/channels", g.get_value()), None).await { chans.set(v.as_array().cloned().unwrap_or_default()); }
-    });
-    let act = move |path: &'static str, body: Value| spawn_local(async move {
-        match api("POST", &format!("/api/guilds/{}/lockdown/{path}", g.get_value()), Some(body)).await {
-            Ok(_) => { msg.ok("Sent. It takes effect within a few seconds."); later(6000, load); }
-            Err(e) => msg.err(e),
+        if let Ok(v) = api(
+            "GET",
+            &format!("/api/guilds/{}/lockdown/channels", g.get_value()),
+            None,
+        )
+        .await
+        {
+            chans.set(v.as_array().cloned().unwrap_or_default());
         }
     });
-    let lock = move |kind: &'static str, channel: Option<String>| act("lock", json!({"kind": kind, "channel": channel, "duration_s": (secs.get_untracked() > 0).then(|| secs.get_untracked())}));
+    let act = move |path: &'static str, body: Value| {
+        spawn_local(async move {
+            match api(
+                "POST",
+                &format!("/api/guilds/{}/lockdown/{path}", g.get_value()),
+                Some(body),
+            )
+            .await
+            {
+                Ok(_) => {
+                    msg.ok("Sent. It takes effect within a few seconds.");
+                    later(6000, load);
+                }
+                Err(e) => msg.err(e),
+            }
+        })
+    };
+    let lock = move |kind: &'static str, channel: Option<String>| {
+        act(
+            "lock",
+            json!({"kind": kind, "channel": channel, "duration_s": (secs.get_untracked() > 0).then(|| secs.get_untracked())}),
+        )
+    };
     // Every active lock; kinds are independent, but only one of them may be a join lock.
-    let locks = move || status.get()["locks"].as_array().cloned().unwrap_or_default();
+    let locks = move || {
+        status.get()["locks"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
     let join_locked = move || locks().iter().any(|l| !l["join"].is_null());
-    let (hide, note, update) = (RwSignal::new(false), RwSignal::new(false), RwSignal::new(String::new()));
+    let (hide, note, update) = (
+        RwSignal::new(false),
+        RwSignal::new(false),
+        RwSignal::new(String::new()),
+    );
     view! {
         <div class="stack narrow">
         <div class="card row">
@@ -121,14 +183,36 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
     let problems = RwSignal::new(None::<Vec<Value>>);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = StoredValue::new(guild.clone());
-    let check = move || spawn_local(async move {
-        match api("GET", &format!("/api/guilds/{}/lockdown/check", g.get_value()), None).await {
-            Ok(v) => problems.set(v.as_array().cloned()),
-            Err(e) => msg.err(e),
-        }
-    });
+    let check = move || {
+        spawn_local(async move {
+            match api(
+                "GET",
+                &format!("/api/guilds/{}/lockdown/check", g.get_value()),
+                None,
+            )
+            .await
+            {
+                Ok(v) => problems.set(v.as_array().cloned()),
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     check();
-    let fix = move || run_act(async move { api("POST", &format!("/api/guilds/{}/lockdown/fix", g.get_value()), None).await }, msg, need, move |_| check());
+    let fix = move || {
+        run_act(
+            async move {
+                api(
+                    "POST",
+                    &format!("/api/guilds/{}/lockdown/fix", g.get_value()),
+                    None,
+                )
+                .await
+            },
+            msg,
+            need,
+            move |_| check(),
+        )
+    };
     view! {
         <div class="card">
             <div class="row"><h2>"Compatibility check"</h2>
@@ -146,14 +230,33 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
 }
 
 const RULE_KINDS: [(&str, &str, &str); 4] = [
-    ("Block Mention Spam", "mention", "Blocks messages that mention too many members or roles."),
-    ("Block Commonly Flagged Words", "preset", "Discord's profanity, sexual content and slurs lists."),
-    ("Block Suspected Spam Content", "spam", "Blocks messages Discord thinks are spam."),
-    ("Block Custom Words", "keyword", "Blocks the words you list."),
+    (
+        "Block Mention Spam",
+        "mention",
+        "Blocks messages that mention too many members or roles.",
+    ),
+    (
+        "Block Commonly Flagged Words",
+        "preset",
+        "Discord's profanity, sexual content and slurs lists.",
+    ),
+    (
+        "Block Suspected Spam Content",
+        "spam",
+        "Blocks messages Discord thinks are spam.",
+    ),
+    (
+        "Block Custom Words",
+        "keyword",
+        "Blocks the words you list.",
+    ),
 ];
 
 const BOT_ACTIONS: [(&str, &str); 6] = [
-    ("report", "Report the message flagged by Discord for moderators to take action."),
+    (
+        "report",
+        "Report the message flagged by Discord for moderators to take action.",
+    ),
     ("warn", "Warn the member."),
     ("timeout", "Time the member out."),
     ("kick", "Kick the member."),
@@ -167,7 +270,12 @@ fn blank_rule(name: &str, trigger: &str) -> Value {
 }
 
 #[component]
-fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>, done: impl Fn() + Clone + 'static) -> impl IntoView {
+fn RuleEditor(
+    guild: String,
+    rule: RwSignal<Option<Value>>,
+    dc: RwSignal<Value>,
+    done: impl Fn() + Clone + 'static,
+) -> impl IntoView {
     let val = RwSignal::new(rule.get_untracked().unwrap_or_default());
     let msg = Msg::default();
     let id = val.get_untracked()["id"].as_str().map(String::from);
@@ -177,13 +285,31 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
     let save = {
         let done = done.clone();
         move |_| {
-            let (g, body, id, done) = (guild.clone(), val.get_untracked(), id.clone(), done.clone());
+            let (g, body, id, done) =
+                (guild.clone(), val.get_untracked(), id.clone(), done.clone());
             spawn_local(async move {
                 let r = match id {
-                    Some(id) => api("PUT", &format!("/api/guilds/{g}/discord-rules/{id}"), Some(body)).await,
-                    None => api("POST", &format!("/api/guilds/{g}/discord-rules"), Some(body)).await,
+                    Some(id) => {
+                        api(
+                            "PUT",
+                            &format!("/api/guilds/{g}/discord-rules/{id}"),
+                            Some(body),
+                        )
+                        .await
+                    }
+                    None => {
+                        api(
+                            "POST",
+                            &format!("/api/guilds/{g}/discord-rules"),
+                            Some(body),
+                        )
+                        .await
+                    }
                 };
-                match r { Ok(_) => done(), Err(e) => msg.err(e) }
+                match r {
+                    Ok(_) => done(),
+                    Err(e) => msg.err(e),
+                }
             });
         }
     };
@@ -237,26 +363,57 @@ fn RuleEditor(guild: String, rule: RwSignal<Option<Value>>, dc: RwSignal<Value>,
 #[component]
 pub fn DiscordRules(guild: String) -> impl IntoView {
     let rules = RwSignal::new(Vec::<Value>::new());
-    let (msg, dc, editing) = (Msg::default(), RwSignal::new(json!({})), RwSignal::new(None::<Value>));
+    let (msg, dc, editing) = (
+        Msg::default(),
+        RwSignal::new(json!({})),
+        RwSignal::new(None::<Value>),
+    );
     let (picking, loaded) = (RwSignal::new(false), RwSignal::new(false));
     let g = StoredValue::new(guild);
-    let load = move || spawn_local(async move {
-        match api("GET", &format!("/api/guilds/{}/discord-rules", g.get_value()), None).await {
-            Ok(v) => { rules.set(v.as_array().cloned().unwrap_or_default()); msg.clear(); }
-            Err(e) => msg.err(e),
-        }
-        loaded.set(true);
-    });
+    let load = move || {
+        spawn_local(async move {
+            match api(
+                "GET",
+                &format!("/api/guilds/{}/discord-rules", g.get_value()),
+                None,
+            )
+            .await
+            {
+                Ok(v) => {
+                    rules.set(v.as_array().cloned().unwrap_or_default());
+                    msg.clear();
+                }
+                Err(e) => msg.err(e),
+            }
+            loaded.set(true);
+        })
+    };
     load();
     spawn_local(async move {
-        if let Ok(d) = api("GET", &format!("/api/guilds/{}/discord", g.get_value()), None).await { dc.set(d); }
-    });
-    let call = move |method: &'static str, path: String, body: Option<Value>| spawn_local(async move {
-        match api(method, &format!("/api/guilds/{}/discord-rules{path}", g.get_value()), body).await {
-            Ok(_) => load(),
-            Err(e) => msg.err(e),
+        if let Ok(d) = api(
+            "GET",
+            &format!("/api/guilds/{}/discord", g.get_value()),
+            None,
+        )
+        .await
+        {
+            dc.set(d);
         }
     });
+    let call = move |method: &'static str, path: String, body: Option<Value>| {
+        spawn_local(async move {
+            match api(
+                method,
+                &format!("/api/guilds/{}/discord-rules{path}", g.get_value()),
+                body,
+            )
+            .await
+            {
+                Ok(_) => load(),
+                Err(e) => msg.err(e),
+            }
+        })
+    };
     view! {
         <div class="card"><h2>"Discord built-in AutoMod"</h2><span class="muted">"TommyBot AutoMod Integration"</span></div>
         <div class="card row">

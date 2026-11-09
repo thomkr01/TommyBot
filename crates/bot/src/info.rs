@@ -105,10 +105,10 @@ pub(crate) async fn user_info(
     }
     let young = now_secs() - created < cfg.joingate.min_age_ms() / 1000;
     let suspicious = format!(
-        "{} No Avatar\n{} Account Younger Than {}d",
+        "{} No Avatar\n{} Account Younger Than {}",
         yes(user.avatar.is_none()),
         yes(young),
-        cfg.joingate.min_age_days
+        tommybot_logging::embed::duration(cfg.joingate.min_age_ms() / 1000)
     );
     let points = cases::warn_points(&app.pool, gid.get() as i64, uid.get() as i64).await?;
     let wl = &cfg.whitelist;
@@ -130,6 +130,46 @@ pub(crate) async fn user_info(
         .filter_map(|r| info.role_perms.get(r))
         .fold(0, |a, p| a | p);
     let level = app.level(gid, info.owner, uid).await?;
+    let now = now_secs() * 1000;
+    let st = tommybot_automod::store::load_strikes(&app.pool, gid.get(), uid.get()).await?;
+    let strikes = tommybot_automod::strike::active(&st, &cfg.automod.strike, now);
+    let heat = app
+        .heat
+        .lock()
+        .unwrap()
+        .get(&(gid.get(), uid.get()))
+        .map_or(0.0, |(h, _)| h.decayed(now, &cfg.automod.heat));
+    let roles = app.http.roles(gid).await?.models().await?;
+    let color = roles
+        .iter()
+        .filter(|r| m.roles.contains(&r.id) && r.colors.primary_color != 0)
+        .max_by_key(|r| r.position)
+        .map_or(0, |r| r.colors.primary_color);
+    let badges: Vec<String> = user
+        .public_flags
+        .map(|f| f.iter_names().map(|(n, _)| title_case(n)).collect())
+        .unwrap_or_default();
+    // Listing webhooks needs Manage Webhooks; without it the field just shows none.
+    let webhooks: Vec<String> = match crate::http_err::best_effort(
+        app.http.guild_webhooks(gid).await,
+        "list webhooks for info",
+    ) {
+        Some(r) => r
+            .models()
+            .await?
+            .into_iter()
+            .filter(|w| w.user.as_ref().is_some_and(|u| u.id == uid))
+            .filter_map(|w| w.name)
+            .collect(),
+        None => vec![],
+    };
+    let list = |v: Vec<String>| {
+        if v.is_empty() {
+            NO.to_string()
+        } else {
+            v.join(", ")
+        }
+    };
     let accessories = format!(
         "{} Avatar Decoration\n{} Banner\n{} Nitro\n{} Server Avatar",
         yes(user.avatar_decoration_data.is_some()),
@@ -137,13 +177,39 @@ pub(crate) async fn user_info(
         yes(user.premium_type.is_some_and(|t| t != PremiumType::None)),
         yes(m.avatar.is_some())
     );
+    e = e
+        .line("Color", &format!("`#{color:06x}`"))
+        .line("Badges", &list(badges));
     Ok(e.inline("Suspicious Status:", &suspicious)
         .inline("Whitelist:", &whitelists)
         .inline("Warn Points:", &format!("`{points}`"))
+        .inline("Active Strikes:", &format!("`{strikes}`"))
+        .inline(
+            "Current Heat:",
+            &format!("`{:.0}%`", heat / cfg.automod.heat.max.max(1.0) * 100.0),
+        )
         .inline("Dangerous Permissions:", &dangerous(perms))
         .inline("TommyBot Permissions:", &level_name(&level))
         .inline("Account Accessories:", &accessories)
+        .inline(
+            "Roles:",
+            &list(m.roles.iter().map(|r| format!("<@&{r}>")).collect()),
+        )
+        .inline("Webhooks:", &list(webhooks))
         .build())
+}
+
+/// `HYPESQUAD_ONLINE_HOUSE_1` -> `Hypesquad Online House 1`.
+fn title_case(flag: &str) -> String {
+    flag.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| {
+                f.to_string() + c.as_str().to_lowercase().as_str()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) async fn role_info(app: &App, gid: Id<GuildMarker>, rid: u64) -> Result<Option<Embed>> {
@@ -316,6 +382,15 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn badge_names_read_as_words() {
+        assert_eq!(
+            title_case("HYPESQUAD_ONLINE_HOUSE_1"),
+            "Hypesquad Online House 1"
+        );
+        assert_eq!(title_case("VERIFIED_BOT"), "Verified Bot");
+    }
 
     #[test]
     fn dangerous_names() {

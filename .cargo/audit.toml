@@ -1,4 +1,7 @@
 [advisories]
 # rsa is only in Cargo.lock through sqlx's MySQL driver, which TommyBot never builds
 # (`cargo tree -i rsa` is empty). No fixed rsa version exists.
-ignore = ["RUSTSEC-2023-0071"]
+# libsqlite3-sys is only in Cargo.lock through sqlx's SQLite driver, which TommyBot never builds
+# either (`cargo tree -i libsqlite3-sys --target all` is empty). sqlx 0.9 allows at most 0.37 and
+# the fix is 0.39: drop this once sqlx ships it.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]

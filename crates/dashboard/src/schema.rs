@@ -3,9 +3,10 @@ use serde_json::{json, Value};
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::{
     heat::HeatCfg,
-    join::{Action as GateAction, Filter as GateFilter},
+    join::{Action as GateAction, Charset, Filter as GateFilter, GateCfg},
     strike::StrikeCfg,
 };
+use tommybot_core::sections::FILTERS_OFF_BY_DEFAULT;
 use tommybot_logging::LogEvent;
 
 const LOG_KINDS: &[&str] = &[
@@ -387,7 +388,7 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Auto timeouts", "strike.multiply", "bool"), false), "Multiply timeouts"),
         ti(dv(fg("Auto timeouts", "strike.multiplier_pct", "int"), 200), "Multiplier percentage"),
         ti(dv(fg("Heat settings", "heat.max", "float"), 100.0), "Max heat"),
-        ti(dv(fg("Heat settings", "heat.decay_per_sec", "pct"), 0.05), "Heat degradation (every second)"),
+        ti(dv(fg("Heat settings", "heat.decay_per_sec", "pct"), HeatCfg::default().decay_per_sec), "Heat degradation (every second)"),
         dv(fg("Heat settings", "heat.webhook_multiplier", "float"), 1.5),
         hp(
             ti(dv(fg("Heat settings", "strike.reset_heat_on_timeout", "bool"), false), "Set current heat to 0 after punishment"),
@@ -426,7 +427,7 @@ pub fn schema() -> Vec<Value> {
             pg(
                 dv(
                     ti(fg(title, &format!("filters.{k}.enabled"), "bool"), use_it),
-                    true,
+                    !FILTERS_OFF_BY_DEFAULT.contains(k),
                 ),
                 page,
             ),
@@ -657,16 +658,21 @@ pub fn schema() -> Vec<Value> {
         ]);
     }
     gate.extend([
+        {
+            // One duration with a unit; an unset value shows the days setting it replaces.
+            let days = GateCfg::default().min_age_days;
+            let mut v = ti(
+                dv(
+                    fg("Account age", "min_age_override_ms", "int"),
+                    i64::from(days) * 86_400_000,
+                ),
+                "Minimum account age",
+            );
+            v["fallback"] = json!({"path": "min_age_days", "scale": 86_400_000});
+            v
+        },
         ti(
-            dv(fg("Account age", "min_age_days", "int"), 7),
-            "Minimum account age",
-        ),
-        ti(
-            fg("Account age", "min_age_override_ms", "int"),
-            "Minimum account age in milliseconds (minutes to days, empty uses the days above)",
-        ),
-        ti(
-            fg("Account age", "expose_min_age", "bool"),
+            dv(fg("Account age", "expose_min_age", "bool"), true),
             "Tell punished members the minimum age in the DM",
         ),
         ti(
@@ -686,12 +692,12 @@ pub fn schema() -> Vec<Value> {
         fg("General", "enabled", "bool"),
         ti(dv(f("count", "int"), 10), "Minimum trigger (accounts)"),
         ti(
-            dv(f("span_ms", "int"), 600_000),
+            dv(f("span_ms", "int"), 3 * 3_600_000),
             "Join history (milliseconds)",
         ),
         f("suspicious_only", "bool"),
         ti(
-            dv(f("active_ms", "int"), 600_000),
+            dv(f("active_ms", "int"), 1_800_000),
             "Trigger duration (milliseconds)",
         ),
         f("string_patterns", "list"),
@@ -725,7 +731,7 @@ pub fn schema() -> Vec<Value> {
                 "action",
                 &["Log", "Warn", "Timeout", "Kick", "Ban"],
             ),
-            "Kick",
+            "Ban",
         ),
         choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
         fg("Response", "warned_roles", "roles"),
@@ -760,8 +766,11 @@ pub fn schema() -> Vec<Value> {
         fg("Response", "whitelisted_categories", "categories"),
     ];
     let mut backups = vec![
-        dv(f("enabled", "bool"), true),
-        f("auto", "bool"),
+        ti(
+            dv(f("enabled", "bool"), false),
+            "Backups status: allow backups to be made manually and automatically",
+        ),
+        ti(dv(f("auto", "bool"), true), "Automatic backups"),
         dv(f("max_images", "int"), 10),
         dv(f("interval_hours", "int"), 3),
     ];
@@ -792,6 +801,13 @@ pub fn schema() -> Vec<Value> {
             let v = ti(fg(card, &format!("{prefix}{key}"), kind), card);
             whitelist.push(if tab.is_empty() { v } else { pg(v, tab) });
         }
+    }
+    // The wizard's whitelist step also holds these anti-nuke lists; page "wizard" keeps them off the whitelist tabs.
+    for (path, kind, title) in [
+        ("ticket_categories", "categories", "Categories"),
+        ("quarantine_whitelist", "users", "Users"),
+    ] {
+        whitelist.push(sx("antinuke", pg(ti(f(path, kind), title), "wizard")));
     }
     let misc = vec![
         ti(dv(fg("General", "prefix", "text"), "t!"), "Prefix"),
@@ -852,7 +868,7 @@ pub fn schema() -> Vec<Value> {
             "0 means 28 days",
         ),
         ti(dv(fg("Moderation commands", "ban_purge_days", "int"), 7), "Days purged on bans"),
-        ti(fg("Moderation commands", "remove_main_roles_on_timeout", "bool"), "Remove the main roles from the target on timeout"),
+        ti(dv(fg("Moderation commands", "remove_main_roles_on_timeout", "bool"), true), "Remove the main roles from the target on timeout"),
         ti(dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true), "Display the reason behind the auto punishment in the message TommyBot sends"),
         ti(fg("Auto moderation", "purge_last_100", "bool"), "Always purge the messages sent by the punished member found in the recent 100 messages"),
         ti(fg("Auto moderation", "staff_only_permitted", "bool"), "Consider only owners, trusted admins and any member with the flags (IMMUNITY|AUTOMOD IMMUNITY) to be considered staff members. Punish anyone else triggering the auto mod"),
@@ -905,7 +921,7 @@ pub fn schema() -> Vec<Value> {
                 choice(
                     "General",
                     "mode",
-                    &["Button", "Captcha", "SimpleCaptcha", "Dm", "Web"],
+                    &["Captcha", "Web", "Dm", "SimpleCaptcha", "Button"],
                 ),
                 "Verification mode",
             ),
@@ -951,12 +967,16 @@ pub fn schema() -> Vec<Value> {
             "Font size",
         ),
         ti(
-            dv(fg("Captcha", "captcha.font_color", "color"), "#000000"),
+            dv(fg("Captcha", "captcha.font_color", "color"), "#32cf7e"),
             "Font color",
         ),
         ti(
             dv(fg("Captcha", "captcha.length", "int"), 6),
             "Captcha answer length",
+        ),
+        ti(
+            dv(choice("Captcha", "captcha.charset", &Charset::NAMES), "AZ"),
+            "Captcha characters",
         ),
         ti(
             dv(fg("Captcha", "captcha.trace", "bool"), true),
@@ -971,7 +991,7 @@ pub fn schema() -> Vec<Value> {
             "Show small spread-around dots to trick scripts",
         ),
         ti(
-            dv(fg("Captcha", "captcha.decoy_color", "color"), "#000000"),
+            dv(fg("Captcha", "captcha.decoy_color", "color"), "#646566"),
             "Decoy color",
         ),
     ];

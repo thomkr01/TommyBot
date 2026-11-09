@@ -151,6 +151,20 @@ pub(crate) fn raid_trigger_log(
     log
 }
 
+/// The report when a join raid ends; `code` names the raid when the full report has a link.
+pub(crate) fn raid_report_log(caught: i64, code: Option<&str>) -> Log {
+    let log = Log::new("🕵 Join Raid Report!", DONE).text(&format!(
+        "{YES} `{caught}` users have been caught by the join raid."
+    ));
+    match code {
+        Some(code) => log.text(&format!("{ARROW} `{code}`")),
+        None => log,
+    }
+}
+
+/// The link button under a raid report.
+pub(crate) const RAID_REPORT: &str = "Full Raid Report ↗";
+
 async fn join_raid(
     app: &App,
     cfg: &GuildCfg,

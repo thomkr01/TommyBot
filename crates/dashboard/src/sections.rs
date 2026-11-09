@@ -68,8 +68,14 @@ async fn discord_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
             None,
         )
         .await?;
+    // The wizard's score checks the bot's own roles.
+    let bot_roles = st
+        .discord
+        .member_roles(guild, &st.discord.client_id)
+        .await
+        .unwrap_or_default();
     Ok(Json(
-        json!({"channels": channels, "roles": roles, "members": info["approximate_member_count"]}),
+        json!({"channels": channels, "roles": roles, "members": info["approximate_member_count"], "bot_roles": bot_roles}),
     ))
 }
 
@@ -182,9 +188,6 @@ const STAFF: [(&str, i32, &[&str], &[&str]); 2] = [
     ),
 ];
 
-/// Quarantine overwrite: no View Channel, Send Messages, Add Reactions or Connect.
-const QUARANTINE_DENY: &str = "1051712";
-
 async fn auto_setup(
     State(st): State<AppState>,
     s: Sess,
@@ -261,11 +264,12 @@ async fn verify_channel(
         json!({"id": guild.to_string(), "type": 0, "allow": "66560", "deny": "2048"}),
         json!({"id": st.discord.client_id, "type": 1, "allow": "19456"}),
     ];
-    for r in config["verification"]["roles"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
+    // The bot falls back to the main roles when no verification roles are set.
+    let roles = |s: &str, k: &str| config[s][k].as_array().filter(|a| !a.is_empty()).cloned();
+    let given = roles("verification", "roles")
+        .or_else(|| roles("lockdown", "main_roles"))
+        .unwrap_or_default();
+    for r in &given {
         overwrites.push(json!({"id": r, "type": 0, "deny": "1024"}));
     }
     let existing = own(&config["verification"]["channel"]);
@@ -302,8 +306,14 @@ async fn verify_channel(
             Some(json!({"embeds": [embed], "components": [buttons]})),
         )
         .await?;
-    Ok(Json(json!({"version": version, "channel": channel})))
+    // The channel stays, but nobody can pass until there is a role to hand out.
+    let warning = given.is_empty().then_some(NO_VERIFY_ROLE);
+    Ok(Json(
+        json!({"version": version, "channel": channel, "warning": warning}),
+    ))
 }
+
+const NO_VERIFY_ROLE: &str = "The verification channel is ready, but members cannot pass yet: there is no role to give them. Pick a main role under Misc or the verification roles under Verification, then save.";
 
 const CATCH_WARNING: &str =
     "Do not write here. Writing = instant ban. Account hacked? Change your password.";
@@ -658,7 +668,7 @@ async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<us
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
         .await
         .ok()?;
-    let body = json!({"type": 0, "deny": QUARANTINE_DENY});
+    let body = json!({"type": 0, "deny": tommybot_core::sections::QUARANTINE_DENY.to_string()});
     let mut failed = 0;
     for id in channels.as_array()?.iter().filter_map(|c| c["id"].as_str()) {
         let path = format!("/channels/{id}/permissions/{role}");

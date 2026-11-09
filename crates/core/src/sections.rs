@@ -192,18 +192,25 @@ impl Default for FilterCfg {
     }
 }
 
-/// Per-filter switches (Filters page). Filters default on, as the global weights always applied.
+/// Per-filter switches (Filters page). Defaults in `FILTERS_OFF_BY_DEFAULT`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct FiltersCfg {
     pub regular: FilterCfg,
     pub similar: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub emojis: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub newlines: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub chars_upper: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub chars_lower: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub zalgo: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub suspicion: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub inactive_channel: FilterCfg,
     /// Messages after a quiet spell that count as the inactive-channel burst.
     pub inactive_messages: u32,
@@ -223,15 +230,20 @@ pub struct FiltersCfg {
     pub files: FilterCfg,
     pub attach_links: FilterCfg,
     pub stickers: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub invites: FilterCfg,
     /// Phishing and scam sites.
+    #[serde(deserialize_with = "off_filter")]
     pub bad_sites: FilterCfg,
     /// Fake Nitro and Steam links.
+    #[serde(deserialize_with = "off_filter")]
     pub scam_links: FilterCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub nsfw_links: FilterCfg,
     /// Follow link shorteners before checking.
     pub nsfw_crawl_shorteners: bool,
     pub words: WordsCfg,
+    #[serde(deserialize_with = "off_filter")]
     pub links: FilterCfg,
     /// Domains for the link blacklist.
     pub blacklisted_domains: Vec<String>,
@@ -240,16 +252,20 @@ pub struct FiltersCfg {
 impl Default for FiltersCfg {
     fn default() -> Self {
         let on = FilterCfg::default;
+        let off = || FilterCfg {
+            enabled: false,
+            ..FilterCfg::default()
+        };
         Self {
             regular: on(),
             similar: on(),
-            emojis: on(),
-            newlines: on(),
-            chars_upper: on(),
-            chars_lower: on(),
-            zalgo: on(),
-            suspicion: on(),
-            inactive_channel: on(),
+            emojis: off(),
+            newlines: off(),
+            chars_upper: off(),
+            chars_lower: off(),
+            zalgo: off(),
+            suspicion: off(),
+            inactive_channel: off(),
             inactive_messages: 10,
             inactive_hours: 1,
             mentions: on(),
@@ -263,21 +279,49 @@ impl Default for FiltersCfg {
             files: on(),
             attach_links: on(),
             stickers: on(),
-            invites: on(),
-            bad_sites: on(),
-            scam_links: on(),
-            nsfw_links: on(),
+            invites: off(),
+            bad_sites: off(),
+            scam_links: off(),
+            nsfw_links: off(),
             nsfw_crawl_shorteners: false,
             words: WordsCfg::default(),
-            links: on(),
+            links: off(),
             blacklisted_domains: vec![],
         }
     }
 }
 
+/// A filter that starts off: a stored object without `enabled` (say only an action) stays off.
+fn off_filter<'de, D: serde::Deserializer<'de>>(d: D) -> Result<FilterCfg, D::Error> {
+    let mut v = serde_json::Value::deserialize(d)?;
+    if let Some(o) = v.as_object_mut() {
+        o.entry("enabled").or_insert(false.into());
+    }
+    serde_json::from_value(v).map_err(serde::de::Error::custom)
+}
+
+/// The filters `FiltersCfg::default` starts off (config keys, `words.filter` for the word blacklist),
+/// for the dashboard's defaults. A test keeps the two in step.
+pub const FILTERS_OFF_BY_DEFAULT: &[&str] = &[
+    "emojis",
+    "newlines",
+    "chars_upper",
+    "chars_lower",
+    "zalgo",
+    "suspicion",
+    "inactive_channel",
+    "invites",
+    "bad_sites",
+    "scam_links",
+    "nsfw_links",
+    "words.filter",
+    "links",
+];
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct WordsCfg {
+    #[serde(deserialize_with = "off_filter")]
     pub filter: FilterCfg,
     /// Matched as whole words.
     pub strict: Vec<String>,
@@ -295,8 +339,9 @@ pub struct WordsCfg {
 impl Default for WordsCfg {
     fn default() -> Self {
         Self {
-            // Word blacklist warns by default.
+            // Word blacklist starts off and warns.
             filter: FilterCfg {
+                enabled: false,
                 action: Some(FilterAction::Warn),
                 ..FilterCfg::default()
             },
@@ -582,7 +627,7 @@ impl Default for MiscCfg {
             warn_base_points: 5,
             auto_warn_actions: true,
             warn_actions: vec![],
-            remove_main_roles_on_timeout: false,
+            remove_main_roles_on_timeout: true,
         }
     }
 }
@@ -649,7 +694,11 @@ impl Default for PanicCfg {
     }
 }
 
-/// Server backups: the 3-hour auto backup is off until a guild turns it on. The rest are the
+/// Quarantine role overwrite in every channel: denies View Channel, Send Messages, Add Reactions,
+/// Connect, Create Invite, Send Messages in Threads and Create Public/Private Threads.
+pub const QUARANTINE_DENY: u64 = 377_958_173_761;
+
+/// Server backups: off until a guild turns on `enabled`; then the 3-hour auto backup runs. The rest are the
 /// restore filters (`anr`), used by anti-nuke reverts and panic mode, never by `/backup load`.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -672,10 +721,10 @@ pub struct BackupsCfg {
 impl Default for BackupsCfg {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             max_images: 10,
             interval_hours: 3,
-            auto: false,
+            auto: true,
             restore: true,
             restore_roles: true,
             delete_roles: true,
@@ -716,7 +765,7 @@ pub struct CatchCfg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn regex_words_match_and_bad_ones_are_refused() {
@@ -746,10 +795,46 @@ mod tests {
     }
 
     #[test]
-    fn backups_are_manual_until_saved_on() {
-        assert!(!BackupsCfg::default().auto);
-        let on: BackupsCfg = serde_json::from_value(json!({"auto": true})).unwrap();
-        assert!(on.auto);
+    fn off_filters_stay_off_until_enabled() {
+        let get = |f: &FiltersCfg, k: &str| match k {
+            "emojis" => f.emojis.enabled,
+            "newlines" => f.newlines.enabled,
+            "chars_upper" => f.chars_upper.enabled,
+            "chars_lower" => f.chars_lower.enabled,
+            "zalgo" => f.zalgo.enabled,
+            "suspicion" => f.suspicion.enabled,
+            "inactive_channel" => f.inactive_channel.enabled,
+            "invites" => f.invites.enabled,
+            "bad_sites" => f.bad_sites.enabled,
+            "scam_links" => f.scam_links.enabled,
+            "nsfw_links" => f.nsfw_links.enabled,
+            "words.filter" => f.words.filter.enabled,
+            "links" => f.links.enabled,
+            _ => unreachable!("{k}"),
+        };
+        for k in FILTERS_OFF_BY_DEFAULT {
+            let at = |v: Value| match k.split_once('.') {
+                Some((a, b)) => json!({a: {b: v}}),
+                None => json!({*k: v}),
+            };
+            assert!(!get(&FiltersCfg::default(), k), "{k}");
+            let partial: FiltersCfg = serde_json::from_value(at(json!({"action": "ban"}))).unwrap();
+            assert!(!get(&partial, k), "{k}");
+            let on: FiltersCfg = serde_json::from_value(at(json!({"enabled": true}))).unwrap();
+            assert!(get(&on, k), "{k}");
+        }
+        let d = FiltersCfg::default();
+        assert!(
+            d.regular.enabled && d.similar.enabled && d.mentions.enabled && d.attachments.enabled
+        );
+    }
+
+    #[test]
+    fn backups_are_off_until_saved_on() {
+        let d = BackupsCfg::default();
+        assert!(!d.enabled && d.auto);
+        let on: BackupsCfg = serde_json::from_value(json!({"enabled": true})).unwrap();
+        assert!(on.enabled && on.auto);
     }
 
     #[test]

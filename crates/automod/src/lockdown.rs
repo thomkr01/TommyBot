@@ -6,21 +6,26 @@ use serde::{Deserialize, Serialize};
 pub const VIEW_CHANNEL: u64 = 1 << 10;
 pub const SEND_MESSAGES: u64 = 1 << 11;
 const CONNECT: u64 = 1 << 20;
-/// What a channel lock takes from main roles: writing in channels and threads, new threads,
-/// reactions, polls and external apps.
-pub const SILENCE: u64 = SEND_MESSAGES
+/// Writing in channels and threads, new threads, reactions, polls and external apps: what the
+/// troubleshooter looks for on other roles and channel overwrites.
+const WRITE: u64 = SEND_MESSAGES
     | SEND_IN_THREADS
     | PUBLIC_THREADS
     | PRIVATE_THREADS
     | REACTIONS
     | POLLS
     | EXTERNAL_APPS;
+/// What a channel lock takes from main roles: writing, plus mentioning @everyone and setting voice
+/// channel status.
+pub const SILENCE: u64 = WRITE | MENTION_EVERYONE | VOICE_STATUS;
 const SEND_IN_THREADS: u64 = 1 << 38;
 const PUBLIC_THREADS: u64 = 1 << 35;
 const PRIVATE_THREADS: u64 = 1 << 36;
 const REACTIONS: u64 = 1 << 6;
 const POLLS: u64 = 1 << 49;
 const EXTERNAL_APPS: u64 = 1 << 50;
+const MENTION_EVERYONE: u64 = 1 << 17;
+const VOICE_STATUS: u64 = 1 << 48;
 /// Taken too when the voice option is on: connect, speak, soundboard, stream.
 pub const VOICE: u64 = CONNECT | (1 << 21) | (1 << 42) | (1 << 9);
 /// Perms stripped by role lock: admin, kick, ban, manage channels/guild/messages/roles/webhooks/
@@ -339,18 +344,18 @@ pub fn tshoot(
                 ),
                 fix: None,
             });
-        } else if r.perms & SILENCE != 0 {
+        } else if r.perms & WRITE != 0 {
             let fixable = r.position < bot_position;
             out.push(Problem {
                 id: format!("bypass_{}", r.id),
                 text: format!(
                     "<@&{}> has some permissions that need to be removed. [{}]",
                     r.id,
-                    perm_names(r.perms & (SILENCE | VIEW_CHANNEL | CONNECT)),
+                    perm_names(r.perms & (WRITE | VIEW_CHANNEL | CONNECT)),
                 ),
                 fix: fixable.then_some(Fix::SetRolePerms {
                     role: r.id,
-                    perms: r.perms & !SILENCE,
+                    perms: r.perms & !WRITE,
                 }),
             });
         }
@@ -358,20 +363,20 @@ pub fn tshoot(
     // An explicit allow on a main role beats the stripped role perm, so the lock would not hold there.
     for o in overwrites
         .iter()
-        .filter(|o| main.contains(&o.role) && o.allow & SILENCE != 0)
+        .filter(|o| main.contains(&o.role) && o.allow & WRITE != 0)
     {
         out.push(Problem {
             id: format!("overwrite_{}_{}", o.channel, o.role),
             text: format!(
                 "Channel <#{}> explicitly allows {} for <@&{}>, so a lock does not apply there.",
                 o.channel,
-                perm_names(o.allow & SILENCE),
+                perm_names(o.allow & WRITE),
                 o.role
             ),
             fix: Some(Fix::SetOverwrite(Overwrite {
                 channel: o.channel,
                 role: o.role,
-                allow: o.allow & !SILENCE,
+                allow: o.allow & !WRITE,
                 deny: o.deny,
             })),
         });
@@ -380,8 +385,10 @@ pub fn tshoot(
 }
 
 fn perm_names(bits: u64) -> String {
-    const NAMES: [(u64, &str); 9] = [
+    const NAMES: [(u64, &str); 11] = [
         (SEND_MESSAGES, "Send Messages"),
+        (MENTION_EVERYONE, "Mention @everyone"),
+        (VOICE_STATUS, "Set Voice Channel Status"),
         (SEND_IN_THREADS, "Send Messages in Threads"),
         (PUBLIC_THREADS, "Create Public Threads"),
         (PRIVATE_THREADS, "Create Private Threads"),
@@ -566,6 +573,46 @@ mod tests {
             }]
         );
         assert_eq!(p.snapshot.role_perms, vec![(11, (1 << 2) | VIEW_CHANNEL)]);
+    }
+
+    #[test]
+    fn unlock_gives_a_member_role_every_bit_back() {
+        // Mention @everyone, Set Voice Channel Status, Create Polls and Use External Apps on top
+        // of the usual member permissions: all of them must survive a lock and unlock.
+        let member = SEND_MESSAGES
+            | VOICE
+            | VIEW_CHANNEL
+            | 1
+            | (1 << 17)
+            | (1 << 48)
+            | (1 << 49)
+            | (1 << 50);
+        for kind in [LockKind::Server, LockKind::Blind, LockKind::All] {
+            let p = plan(&kind, G, &[10], &[role(10, member, 1)], 5, true);
+            // The lock must really take all four, so their return is tested.
+            let taken = |r: &[(u64, u64)]| r.iter().find(|x| x.0 == 10).map_or(member, |x| x.1);
+            let locked: Vec<(u64, u64)> = p
+                .ops
+                .iter()
+                .filter_map(|o| match o {
+                    Op::SetRolePerms { role, perms } => Some((*role, *perms)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                taken(&locked) & ((1 << 17) | (1 << 48) | (1 << 49) | (1 << 50)),
+                0,
+                "{kind:?}"
+            );
+            assert_eq!(
+                unlock_ops(&p.snapshot, &locked),
+                vec![Op::SetRolePerms {
+                    role: 10,
+                    perms: member
+                }],
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

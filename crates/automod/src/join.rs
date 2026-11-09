@@ -87,7 +87,7 @@ pub struct GateCfg {
     pub no_avatar: GateFilter,
     pub account_age: GateFilter,
     pub min_age_days: u32,
-    /// Minimum age in ms (`jg 3c 3d`, minutes to days); wins over `min_age_days`.
+    /// Minimum age in ms (`jg 3c`, seconds to days); wins over `min_age_days`.
     pub min_age_override_ms: Option<i64>,
     /// Tell a punished member the minimum age in the DM (`jg 3d`).
     pub expose_min_age: bool,
@@ -161,9 +161,9 @@ impl Default for GateCfg {
             dm_punished: false,
             no_avatar: GateFilter::default(),
             account_age: GateFilter::default(),
-            min_age_days: 7,
+            min_age_days: 5,
             min_age_override_ms: None,
-            expose_min_age: false,
+            expose_min_age: true,
             unauthorized_bot: GateFilter::default(),
             unverified_bot: GateFilter::default(),
             invite_in_name: GateFilter::default(),
@@ -381,7 +381,7 @@ impl Default for RaidCfg {
         Self {
             enabled: false,
             count: 10,
-            span_ms: 10 * 60_000,
+            span_ms: 3 * 60 * 60_000,
             suspicious_only: false,
             active_ms: 30 * 60_000,
             string_patterns: vec![],
@@ -650,6 +650,40 @@ pub struct CaptchaCfg {
     pub spread: bool,
     /// `#rrggbb` of the noise and dots.
     pub decoy_color: String,
+    /// Which characters the answer uses.
+    pub charset: Charset,
+}
+
+/// Captcha answer characters, stored as the names the dashboard shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Charset {
+    #[default]
+    #[serde(rename = "AZ")]
+    Upper,
+    #[serde(rename = "az")]
+    Lower,
+    #[serde(rename = "az09")]
+    LowerDigits,
+    #[serde(rename = "azAZ09")]
+    Mixed,
+    #[serde(rename = "az09!$#.:;")]
+    LowerDigitsSymbols,
+}
+
+impl Charset {
+    pub const NAMES: [&str; 5] = ["AZ", "az", "az09", "azAZ09", "az09!$#.:;"];
+
+    pub fn allows(self, c: char) -> bool {
+        match self {
+            Self::Upper => c.is_ascii_uppercase(),
+            Self::Lower => c.is_ascii_lowercase(),
+            Self::LowerDigits => c.is_ascii_lowercase() || c.is_ascii_digit(),
+            Self::Mixed => c.is_ascii_alphanumeric(),
+            Self::LowerDigitsSymbols => {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || "!$#.:;".contains(c)
+            }
+        }
+    }
 }
 
 impl Default for CaptchaCfg {
@@ -658,12 +692,13 @@ impl Default for CaptchaCfg {
             width: 300,
             height: 100,
             font_size: 40,
-            font_color: "#000000".into(),
+            font_color: "#32cf7e".into(),
             length: 6,
             trace: true,
             mixed: true,
             spread: true,
-            decoy_color: "#000000".into(),
+            decoy_color: "#646566".into(),
+            charset: Charset::Upper,
         }
     }
 }

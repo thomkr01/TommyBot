@@ -3,11 +3,20 @@ use crate::common::{api, Head};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::Value;
 
-fn s(v: &Value) -> String { v.as_str().unwrap_or("").to_string() }
+fn s(v: &Value) -> String {
+    v.as_str().unwrap_or("").to_string()
+}
 
 /// Whether command `c` matches the lowercase filter `q` by name, alias, description or usage.
 fn hit(c: &Value, q: &str) -> bool {
-    let all = format!("{} {} {} {}", s(&c["name"]), c["aliases"], s(&c["what"]), s(&c["usage"])).to_lowercase();
+    let all = format!(
+        "{} {} {} {}",
+        s(&c["name"]),
+        c["aliases"],
+        s(&c["what"]),
+        s(&c["usage"])
+    )
+    .to_lowercase();
     q.split_whitespace().all(|w| all.contains(w))
 }
 
@@ -15,16 +24,35 @@ fn hit(c: &Value, q: &str) -> bool {
 pub fn Commands() -> impl IntoView {
     let data = RwSignal::new(Value::Null);
     let (q, set_q) = signal(String::new());
-    spawn_local(async move { if let Ok(v) = api("GET", "/api/commands", None).await { data.set(v) } });
+    spawn_local(async move {
+        if let Ok(v) = api("GET", "/api/commands", None).await {
+            data.set(v)
+        }
+    });
     let list = move || {
         let d = data.get();
         let pfx = s(&d["prefix"]);
         let q = q.get().to_lowercase();
-        let cmds: Vec<Value> = d["commands"].as_array().into_iter().flatten().filter(|c| hit(c, &q)).cloned().collect();
+        let cmds: Vec<Value> = d["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| hit(c, &q))
+            .cloned()
+            .collect();
         let mut cats: Vec<String> = vec![];
-        for c in &cmds { let k = s(&c["category"]); if !cats.contains(&k) { cats.push(k) } }
-        if d["commands"].is_null() { return view! { <p class="muted">"The bot has not published its commands yet: start it once."</p> }.into_any() }
-        if cmds.is_empty() { return view! { <p class="muted">"No command matches."</p> }.into_any() }
+        for c in &cmds {
+            let k = s(&c["category"]);
+            if !cats.contains(&k) {
+                cats.push(k)
+            }
+        }
+        if d["commands"].is_null() {
+            return view! { <p class="muted">"The bot has not published its commands yet: start it once."</p> }.into_any();
+        }
+        if cmds.is_empty() {
+            return view! { <p class="muted">"No command matches."</p> }.into_any();
+        }
         cats.into_iter().map(|cat| {
             let rows = cmds.iter().filter(|c| s(&c["category"]) == cat).map(|c| {
                 let p = pfx.clone();
@@ -45,8 +73,24 @@ pub fn Commands() -> impl IntoView {
             view! { <h3>{cat}</h3>{rows} }
         }).collect_view().into_any()
     };
-    let apps = move || data.get()["apps"].as_array().cloned().unwrap_or_default().into_iter().map(|a| view! { <li><code>{s(&a["name"])}</code>" "{s(&a["what"])}</li> }).collect_view();
-    let vars = move || data.get()["variables"].as_array().cloned().unwrap_or_default().into_iter().map(|v| view! { <li><code>{s(&v[0])}</code>" "{s(&v[1])}</li> }).collect_view();
+    let apps = move || {
+        data.get()["apps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| view! { <li><code>{s(&a["name"])}</code>" "{s(&a["what"])}</li> })
+            .collect_view()
+    };
+    let vars = move || {
+        data.get()["variables"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| view! { <li><code>{s(&v[0])}</code>" "{s(&v[1])}</li> })
+            .collect_view()
+    };
     view! {
         <Head guild=String::new() page="TommyBot".into() big="Commands".into() />
         <div class="stack cmds">
