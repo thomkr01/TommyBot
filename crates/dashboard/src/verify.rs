@@ -1,4 +1,4 @@
-//! Web and third-party verification: a member signs in with Discord, passes Cloudflare Turnstile,
+//! Web verification: a member signs in with Discord, passes Cloudflare Turnstile,
 //! and the bot is told (as a `verify_grant` job) to hand out the roles.
 use crate::{auth::Sess, store, ApiError, AppState};
 use axum::{
@@ -21,8 +21,7 @@ fn keys() -> Option<(String, String)> {
 
 fn gate(cfg: &Value, have_keys: bool) -> Result<bool, &'static str> {
     let v = &cfg["verification"];
-    let third = v["mode"] == "ThirdParty";
-    if v["enabled"] != true || !(third || v["mode"] == "Web") {
+    if v["enabled"] != true || v["mode"] != "Web" {
         return Err("Web verification is not turned on for this server.");
     }
     if v["roles"].as_array().is_none_or(|r| r.is_empty()) {
@@ -178,8 +177,7 @@ mod tests {
         let cfg = |mode, roles: Value| json!({"verification": {"enabled": true, "mode": mode, "roles": roles}});
         assert!(gate(&cfg("Web", json!(["1"])), false).is_err());
         assert_eq!(gate(&cfg("Web", json!(["1"])), true), Ok(true));
-        assert!(gate(&cfg("ThirdParty", json!(["1"])), false).is_err());
-        assert_eq!(gate(&cfg("ThirdParty", json!(["1"])), true), Ok(true));
+        assert!(gate(&cfg("ThirdParty", json!(["1"])), true).is_err());
         assert!(gate(&cfg("Captcha", json!(["1"])), true).is_err());
         assert!(gate(&cfg("Web", json!([])), true).is_err());
         assert!(gate(&json!({}), true).is_err());

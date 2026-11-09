@@ -582,7 +582,6 @@ pub enum VerifyMode {
     SimpleCaptcha,
     Dm,
     Web,
-    ThirdParty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

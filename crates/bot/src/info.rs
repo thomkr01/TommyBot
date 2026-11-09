@@ -319,9 +319,27 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
         content_filter: u8::from(g.explicit_content_filter),
         notifications: u8::from(g.default_message_notifications),
     };
+    let me = app.http.guild_member(gid, app.me).await?.model().await?;
     let setup = Setup {
         quarantine_role: cfg.antinuke.quarantine_role.map(|r| r.get()),
         log_fallback: cfg.logging.fallback.is_some(),
+        roleless_staff: tommybot_core::permits::roleless_staff(&app.pool, gid.get() as i64).await?,
+        whitelisted: !cfg.whitelist.is_empty(),
+        bot_roles: me.roles.iter().map(|r| r.get()).collect(),
+        mod_log: cfg
+            .logging
+            .routes
+            .contains_key(&tommybot_logging::LogKind::ModCommand),
+        main_roles: !cfg.lockdown.main_roles.is_empty(),
+        modules: vec![
+            ("Anti-nuke", cfg.antinuke.enabled),
+            ("Join gate", cfg.joingate.enabled),
+            (
+                "Join raid",
+                cfg.joinraid.as_ref().is_some_and(|r| r.enabled),
+            ),
+            ("Verification", cfg.verification.enabled),
+        ],
     };
     let bot_top = app.guild_info(gid).await?.bot_top;
     let roles: Vec<_> = g.roles.into_iter().map(crate::backup::role_img).collect();

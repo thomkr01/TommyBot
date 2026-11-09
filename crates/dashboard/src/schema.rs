@@ -74,6 +74,37 @@ fn sx(section: &str, mut v: Value) -> Value {
     v
 }
 
+/// Verification modes that use the captcha card (Instant Access only during a join raid, so it rings red).
+const IMAGE_MODES: &[&str] = &["Captcha", "Dm"];
+/// Verification modes that show the helpful-notes switch (hidden for Website and Instant Access).
+const NOTE_MODES: &[&str] = &["Captcha", "Dm", "SimpleCaptcha"];
+
+/// `key` "only" hides the field and "used" rings its card red unless the value at `path` is one of `vals`.
+fn unless(mut v: Value, key: &str, path: &str, vals: &[&str]) -> Value {
+    v[key] = json!({"path": path, "in": vals});
+    v
+}
+
+/// Log types as one channel picker each (true) or as cards added through a Customize dialog (false).
+const LOG_TYPE_PICKERS: bool = false;
+
+/// "auto_mod" -> "Auto Mod".
+fn title_case(k: &str) -> String {
+    k.split('_')
+        .map(|w| w[..1].to_uppercase() + &w[1..])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A Customize dialog writing `{key: channel}` into the object at `path`: pick one option (or tick
+/// several when `multi`), then one channel.
+fn route_pick(group: &str, path: &str, opts: Vec<Value>, multi: bool) -> Value {
+    let mut v = fg(group, path, "route_pick");
+    v["options"] = json!(opts);
+    v["multi"] = json!(multi);
+    v
+}
+
 /// A choice field with its options; "" is the unset option.
 fn choice(group: &str, path: &str, opts: &[&str]) -> Value {
     let mut v = fg(group, path, "choice");
@@ -212,7 +243,7 @@ pub fn schema() -> Vec<Value> {
             "tommybot_customize",
         ),
     ];
-    log.extend(LOG_KINDS.iter().filter(|k| **k != "mod_command").map(|k| {
+    let kinds = LOG_KINDS.iter().filter(|k| **k != "mod_command").map(|k| {
         let help = match *k {
             "report" => "Message reports by your members will go to this channel where you and your moderators can interact and deal with them.",
             "auto_mod" => "All automod actions from TommyBot will be sent to this channel.",
@@ -225,11 +256,39 @@ pub fn schema() -> Vec<Value> {
             "voice" => "Voice joins, leaves and moves. Only logged once you pick a channel here.",
             _ => "Logs of this type will go to this channel instead of the TommyBot logs channel.",
         };
-        pg(
-            hp(fg("Log types", &format!("routes.{k}"), "channel"), help),
+        (*k, help)
+    });
+    if LOG_TYPE_PICKERS {
+        log.extend(kinds.map(|(k, help)| {
+            pg(
+                hp(fg("Log types", &format!("routes.{k}"), "channel"), help),
+                "tommybot_customize",
+            )
+        }));
+    } else {
+        let opts: Vec<Value> = kinds
+            .map(|(k, help)| json!({"key": k, "title": title_case(k), "help": help}))
+            .collect();
+        log.push(pg(
+            ti(
+                route_pick("Log types", "routes", opts, false),
+                "Custom log channels",
+            ),
             "tommybot_customize",
-        )
-    }));
+        ));
+    }
+    let events: Vec<Value> = LogEvent::ALL
+        .iter()
+        .filter_map(|e| serde_json::to_value(e).ok()?.as_str().map(String::from))
+        .map(|k| json!({"key": k, "title": title_case(&k)}))
+        .collect();
+    log.push(pg(
+        ti(
+            route_pick("Customize", "events", events, true),
+            "Send several events to one channel",
+        ),
+        "discord_essential",
+    ));
     log.extend(LogEvent::ALL.iter().map(|e| {
         let name = serde_json::to_value(e).unwrap_or(Value::Null);
         let key = name.as_str().unwrap_or_default();
@@ -862,22 +921,20 @@ pub fn schema() -> Vec<Value> {
                 choice(
                     "General",
                     "mode",
-                    &[
-                        "Captcha",
-                        "Web",
-                        "ThirdParty",
-                        "Dm",
-                        "SimpleCaptcha",
-                        "Button",
-                    ],
+                    &["Captcha", "Web", "Dm", "SimpleCaptcha", "Button"],
                 ),
                 "Verification mode",
             ),
             "Captcha",
         ),
-        ti(
-            dv(fg("General", "show_notes", "bool"), true),
-            "Display helpful notes alongside the captcha",
+        unless(
+            ti(
+                dv(fg("General", "show_notes", "bool"), true),
+                "Display helpful notes alongside the captcha",
+            ),
+            "only",
+            "verification.mode",
+            NOTE_MODES,
         ),
         ti(
             fg("General", "regen_ms", "int"),
@@ -892,9 +949,14 @@ pub fn schema() -> Vec<Value> {
         ),
         ti(fg("General", "channel", "channel"), "Verification channel"),
         ti(fg("General", "roles", "roles"), "Verification roles"),
-        ti(
-            dv(fg("Captcha", "captcha.height", "int"), 100),
-            "Captcha height",
+        unless(
+            ti(
+                dv(fg("Captcha", "captcha.height", "int"), 100),
+                "Captcha height",
+            ),
+            "used",
+            "verification.mode",
+            IMAGE_MODES,
         ),
         ti(
             dv(fg("Captcha", "captcha.width", "int"), 300),
@@ -1086,6 +1148,11 @@ pub fn ids(section: &str, v: &Value) -> (Vec<String>, Vec<String>) {
                 "channel" | "channels" | "category" | "categories" => flat(at, &mut ch),
                 "role" | "roles" => flat(at, &mut ro),
                 "customs" => items().for_each(|c| flat(&c["channel"], &mut ch)),
+                "route_pick" => at
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .for_each(|(_, c)| flat(c, &mut ch)),
                 "profiles" => items().for_each(|p| {
                     flat(&p["roles"], &mut ro);
                     for k in ["channels", "categories", "exclude"] {
@@ -1162,6 +1229,7 @@ mod tests {
                     "channel" | "role" | "category" => json!("1"),
                     "form" => json!([{"label": "x"}]),
                     "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
+                    "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
                     "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
                     "snippets" => json!([{"name": "x", "content": "y"}]),
                     "profiles" => {

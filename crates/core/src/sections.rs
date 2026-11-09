@@ -413,7 +413,25 @@ pub struct WhitelistList {
     pub webhooks: Vec<Id<WebhookMarker>>,
 }
 
+impl WhitelistCfg {
+    /// Nothing is whitelisted from the automod (spam, invites, mentions, @everyone, partner channels).
+    pub fn is_empty(&self) -> bool {
+        [&self.spam, &self.invites, &self.mentions, &self.everyone]
+            .iter()
+            .all(|l| l.is_empty())
+            && self.partner_channels.is_empty()
+    }
+}
+
 impl WhitelistList {
+    fn is_empty(&self) -> bool {
+        self.users.is_empty()
+            && self.roles.is_empty()
+            && self.channels.is_empty()
+            && self.categories.is_empty()
+            && self.webhooks.is_empty()
+    }
+
     /// A message whose author, member roles, channel, category or webhook is listed.
     pub fn covers(
         &self,

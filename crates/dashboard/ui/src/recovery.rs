@@ -96,12 +96,28 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                         .map(|a| a.iter().map(f).collect::<Vec<_>>().join("\n"))
                         .unwrap_or_default()
                 };
+                let none = |v: &Value| {
+                    v.as_str()
+                        .filter(|p| !p.is_empty())
+                        .unwrap_or("none")
+                        .to_string()
+                };
                 let ch = names("channels", &|c| {
-                    format!(
-                        "{}{}",
-                        if c["kind"] == 4 { "" } else { "  " },
-                        c["name"].as_str().unwrap_or("")
-                    )
+                    let pad = if c["kind"] == 4 { "" } else { "  " };
+                    let ows = c["overwrites"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|o| {
+                            format!(
+                                "\n{pad}    {}: allow {} / deny {}",
+                                o["target"].as_str().unwrap_or(""),
+                                none(&o["allow"]),
+                                none(&o["deny"])
+                            )
+                        })
+                        .collect::<String>();
+                    format!("{pad}{}{ows}", c["name"].as_str().unwrap_or(""))
                 });
                 let hooks = names("webhooks", &|w| {
                     format!(
@@ -111,7 +127,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     )
                 });
                 let st = &v["settings"];
-                detail.set(Some(format!("General Settings\nName: {}\nVerification level: {}\nContent filter: {}\n\nRoles\n{}\n\nChannels\n{ch}\n\nWebhooks\n{hooks}", v["name"].as_str().unwrap_or(""), st["verification"], st["content_filter"], names("roles", &|r| r["name"].as_str().unwrap_or("").to_string()))));
+                detail.set(Some(format!("General Settings\nName: {}\nVerification level: {}\nContent filter: {}\n\nRoles\n{}\n\nChannels\n{ch}\n\nWebhooks\n{hooks}", v["name"].as_str().unwrap_or(""), st["verification"], st["content_filter"], names("roles", &|r| format!("{}: {}", r["name"].as_str().unwrap_or(""), none(&r["perm_names"]))))));
             },
         )
     });

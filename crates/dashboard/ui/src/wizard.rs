@@ -296,7 +296,7 @@ pub const VERIFICATION: &[Card] = &[Card {
         |c, _| {
             // The panel, then what a member sees after pressing Verify.
             let (chip, after) = match c["verification"]["mode"].as_str().unwrap_or("Captcha") {
-                "Web" | "ThirdParty" => (Some(("ok", "This is recommended!")), show("verify_web")),
+                "Web" => (Some(("ok", "This is recommended!")), show("verify_web")),
                 "Dm" => {
                     let mut dm = sample("verify_captcha");
                     dm["flags"] = Value::Null;

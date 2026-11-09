@@ -233,27 +233,32 @@ pub fn AppealForm(guild: String) -> impl IntoView {
                     if i["blacklisted"] == true { return view! { <p>"You can no longer appeal in this server."</p> }.into_any(); }
                     if i["kind"].is_null() { return view! { <p>"You are not banned or timed out in this server."</p> }.into_any(); }
                     view! { <div class="card">
-                        {i["fields"].as_array().cloned().unwrap_or_default().into_iter().enumerate().map(|(n, f)| {
-                            let on = move |e| answers.update(|a| a[n] = event_target_value(&e));
-                            let opts: Vec<String> = f["options"].as_array().map(|o| o.iter().map(s).collect()).unwrap_or_default();
-                            let max = f["max"].as_u64().unwrap_or(1000).to_string();
-                            let input = if opts.is_empty() {
-                                if f["long"] == true { view! { <textarea class="short" aria-label=s(&f["label"]) maxlength=max on:input=on></textarea> }.into_any() } else { view! { <input aria-label=s(&f["label"]) maxlength=max on:input=on /> }.into_any() }
-                            } else if f["multi"] == true {
-                                view! { <div class="pick" role="group" aria-label=s(&f["label"])>{opts.into_iter().map(|o| { let o2 = o.clone(); view! { <label><input type="checkbox" on:change=move |e| answers.update(|a| {
-                                    let mut picked: Vec<String> = a[n].lines().filter(|l| *l != o2).map(String::from).collect();
-                                    if event_target_checked(&e) { picked.push(o2.clone()) }
-                                    a[n] = picked.join("\n");
-                                }) /> {o}</label> } }).collect_view()}</div> }.into_any()
-                            } else {
-                                view! { <select aria-label=s(&f["label"]) on:change=on><option value="">"Choose"</option>{opts.into_iter().map(|o| { let v = o.clone(); view! { <option value=v>{o}</option> } }).collect_view()}</select> }.into_any()
-                            };
-                            view! { <div class="row"><label>{s(&f["label"])}</label>{input}</div> }
-                        }).collect_view()}
+                        {questions(i["fields"].as_array().cloned().unwrap_or_default(), answers)}
                         <button on:click=submit>"Send appeal"</button>
                     </div> }.into_any()
                 }}
             </Show>
         }><p>"Your appeal was sent. Staff will review it."</p></Show>
     }
+}
+
+/// The appeal questions as inputs writing into `answers` (one entry per field); also the settings preview.
+pub fn questions(fields: Vec<Value>, answers: RwSignal<Vec<String>>) -> impl IntoView {
+    fields.into_iter().enumerate().map(|(n, f)| {
+        let on = move |e| answers.update(|a| a[n] = event_target_value(&e));
+        let opts: Vec<String> = f["options"].as_array().map(|o| o.iter().map(s).collect()).unwrap_or_default();
+        let max = f["max"].as_u64().unwrap_or(1000).to_string();
+        let input = if opts.is_empty() {
+            if f["long"] == true { view! { <textarea class="short" aria-label=s(&f["label"]) maxlength=max on:input=on></textarea> }.into_any() } else { view! { <input aria-label=s(&f["label"]) maxlength=max on:input=on /> }.into_any() }
+        } else if f["multi"] == true {
+            view! { <div class="pick" role="group" aria-label=s(&f["label"])>{opts.into_iter().map(|o| { let o2 = o.clone(); view! { <label><input type="checkbox" on:change=move |e| answers.update(|a| {
+                let mut picked: Vec<String> = a[n].lines().filter(|l| *l != o2).map(String::from).collect();
+                if event_target_checked(&e) { picked.push(o2.clone()) }
+                a[n] = picked.join("\n");
+            }) /> {o}</label> } }).collect_view()}</div> }.into_any()
+        } else {
+            view! { <select aria-label=s(&f["label"]) on:change=on><option value="">"Choose"</option>{opts.into_iter().map(|o| { let v = o.clone(); view! { <option value=v>{o}</option> } }).collect_view()}</select> }.into_any()
+        };
+        view! { <div class="row"><label>{s(&f["label"])}</label>{input}</div> }
+    }).collect_view()
 }

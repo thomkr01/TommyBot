@@ -31,6 +31,28 @@ fn set_path(v: &mut Value, p: &str, x: Value) {
     *c = x;
 }
 
+/// A field's `only`/`used` condition ({path, in}): absent, or the value at `path` is one of `in`.
+fn holds(v: &Value, c: &Value) -> bool {
+    c.is_null()
+        || c["in"]
+            .as_array()
+            .is_some_and(|a| a.contains(&get_path(v, c["path"].as_str().unwrap_or(""))))
+}
+
+/// An appeal question's type name and chip colour.
+fn field_type(f: &Value) -> (&'static str, &'static str) {
+    match (
+        strs(&f["options"]).is_empty(),
+        f["multi"] == true,
+        f["long"] == true,
+    ) {
+        (false, true, _) => ("Multi choice", "orange"),
+        (false, false, _) => ("Single choice", "blue"),
+        (true, _, true) => ("Textarea", "green"),
+        (true, _, false) => ("Text", ""),
+    }
+}
+
 /// (name, seconds) for the duration unit switcher.
 const UNITS: [(&str, f64); 4] = [
     ("second", 1.0),
@@ -106,7 +128,6 @@ fn opt_label(v: &str) -> String {
         "Dm" => "DMs".into(),
         "Web" => "Website".into(),
         "Button" => "Instant Access".into(),
-        "ThirdParty" => "Third-party captcha".into(),
         "Captcha" => "TommyBot Captcha (Channel)".into(),
         "SimpleCaptcha" => "Simple Captcha (Channel)".into(),
         _ => v.chars().next().map_or(String::new(), |c| {
@@ -237,6 +258,109 @@ fn UserPick(get: Signal<Value>, set: Callback<Value>) -> impl IntoView {
     </div> }
 }
 
+/// Customize dialog over a `{key: channel}` object: pick one option (or tick several when `multi`),
+/// then one channel, then Apply. Single-pick options show as cards and leave the dialog once used.
+#[component]
+fn RoutePick(
+    f: Value,
+    get: Signal<Value>,
+    set: Callback<Value>,
+    dc: RwSignal<Value>,
+) -> impl IntoView {
+    let multi = f["multi"] == true;
+    let head = if multi {
+        "Pick the events"
+    } else {
+        "Add a new logging type"
+    };
+    let opts = StoredValue::new(f["options"].as_array().cloned().unwrap_or_default());
+    // step2: the channel step, shown once the choice is confirmed.
+    let (open, step2, picked, channel) = (
+        RwSignal::new(false),
+        RwSignal::new(false),
+        RwSignal::new(Vec::<String>::new()),
+        RwSignal::new(String::new()),
+    );
+    let used = move |k: &str| get.with(|v| v[k].is_string());
+    let free = move || {
+        opts.with_value(|o| {
+            o.iter()
+                .filter(|x| multi || !used(&show(&x["key"])))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+    let title = move |k: &str| {
+        opts.with_value(|o| {
+            o.iter()
+                .find(|x| x["key"] == k)
+                .map_or_else(|| k.to_string(), |x| show(&x["title"]))
+        })
+    };
+    let close = move || {
+        open.set(false);
+        step2.set(false);
+        picked.set(vec![]);
+        channel.set(String::new())
+    };
+    let apply = move |_| {
+        let mut cur = get.get_untracked();
+        if !cur.is_object() {
+            cur = json!({})
+        }
+        for k in picked.get_untracked() {
+            cur[k.as_str()] = json!(channel.get_untracked())
+        }
+        set.run(cur);
+        close();
+    };
+    let remove = move |k: String| {
+        let mut cur = get.get_untracked();
+        if let Some(o) = cur.as_object_mut() {
+            o.remove(&k);
+        }
+        set.run(cur)
+    };
+    let r = NodeRef::<leptos::html::Div>::new();
+    focus_on_open(r);
+    view! { <div style="flex:1">
+        {(!multi).then(|| view! { <div class="cards">{move || opts.get_value().into_iter().filter(|x| used(&show(&x["key"]))).map(|x| {
+            let k = show(&x["key"]);
+            let k2 = k.clone();
+            view! { <div class="card"><div class="row"><b>{show(&x["title"])}</b><span class="sp"></span><button class="link err" aria-label="remove" on:click=move |_| remove(k2.clone())>"×"</button></div>
+                <p class="muted">{show(&x["help"])}</p><span class="chip">{move || name_of(&dc.get(), "channels", &show(&get.get()[k.as_str()]))}</span></div> }
+        }).collect_view()}</div> })}
+        {move || (!multi && free().len() == opts.with_value(Vec::len)).then(|| view! { <p class="muted">"No custom log channels yet. Add your own with Customize."</p> })}
+        <button class="go" disabled=move || free().is_empty() on:click=move |_| open.set(true)>"Customize"</button>
+        <Show when=move || open.get()>
+            <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label=head on:keydown=move |e| dialog_keys(&e, close)><div class="card">
+                <Show when=move || !step2.get() fallback=move || view! {
+                    <span class="back" role="button" tabindex="0" on:click=move |_| step2.set(false)>"‹ Go back"</span>
+                    <b>{move || picked.get().iter().map(|k| title(k)).collect::<Vec<_>>().join(", ")}</b>
+                    <div class="row"><label>"Pick a channel"</label><select aria-label="channel" on:change=move |e| channel.set(event_target_value(&e))>
+                        <option value="" selected=move || channel.get().is_empty()>"choose a channel"</option>
+                        {move || items(&dc.get(), "channels").into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || channel.get() == id>{l}</option> }).collect_view()}
+                    </select></div>
+                    <div class="row"><button class="ghost" on:click=move |_| close()>"Abort"</button><button disabled=move || channel.get().is_empty() on:click=apply>"Apply"</button></div>
+                }>
+                    <b>{head}</b>
+                    <div class="pick" style="max-height:50vh;flex-direction:column;flex-wrap:nowrap">{move || free().into_iter().map(|x| {
+                        let k = show(&x["key"]);
+                        let (k2, k3) = (k.clone(), k.clone());
+                        if multi {
+                            view! { <label><input type="checkbox" prop:checked=move || picked.get().contains(&k) on:change=move |e| picked.update(|p| { p.retain(|x| *x != k2); if event_target_checked(&e) { p.push(k2.clone()) } }) />" "{show(&x["title"])}</label> }.into_any()
+                        } else {
+                            view! { <button class="ghost menu" on:click=move |_| { picked.set(vec![k3.clone()]); step2.set(true) }><b>{show(&x["title"])}</b><br /><span class="muted">{show(&x["help"])}</span></button> }.into_any()
+                        }
+                    }).collect_view()}</div>
+                    <div class="row"><button class="ghost" on:click=move |_| close()>"Abort"</button>
+                        {multi.then(|| view! { <span class="muted">{move || format!("{} selected", picked.get().len())}</span><button disabled=move || picked.get().is_empty() on:click=move |_| step2.set(true)>"Select channel"</button> })}</div>
+                </Show>
+            </div></div>
+        </Show>
+    </div> }
+}
+
 #[component]
 pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoView {
     let path = f["path"].as_str().unwrap_or("").to_string();
@@ -340,7 +464,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 {move || (0..count()).map(|i| view! { <div class="row">
                     <input prop:value=move || get()[i]["label"].as_str().unwrap_or("").to_string() on:change=move |e| upd(i, "label", json!(event_target_value(&e))) />
                     <Show when=move || get()[i]["required"].as_bool().unwrap_or(true)><b class="err">"*"</b></Show>
-                    <span class="chip blue">{move || if !strs(&get()[i]["options"]).is_empty() { if get()[i]["multi"].as_bool().unwrap_or(false) { "Multi choice" } else { "Single choice" } } else if get()[i]["long"].as_bool().unwrap_or(false) { "Textarea" } else { "Text" }}</span>
+                    {move || { let (label, color) = field_type(&get()[i]); view! { <span class=format!("chip {color}")>{label}</span> } }}
                     <Show when=move || get()[i]["label"] == "Appeal Message"><span class="chip">"default"</span></Show>
                     <label><input type="checkbox" prop:checked=move || get()[i]["long"].as_bool().unwrap_or(false) on:change=move |e| upd(i, "long", json!(event_target_checked(&e))) /> "long"</label>
                     <input aria-label="choices, comma separated" placeholder="choices (comma separated)" prop:value=move || strs(&get()[i]["options"]).join(", ") on:change=move |e| upd(i, "options", json!(event_target_value(&e).split(',').map(str::trim).filter(|o| !o.is_empty()).collect::<Vec<_>>())) />
@@ -350,6 +474,9 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     <label><input type="checkbox" prop:checked=move || get()[i]["required"].as_bool().unwrap_or(true) on:change=move |e| upd(i, "required", json!(event_target_checked(&e))) /> "required"</label>
                     <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
                 </div> }).collect_view()}
+                <details class="card"><summary>"Preview: what members see"</summary>
+                    {move || { let fs = get().as_array().cloned().unwrap_or_default(); let answers = RwSignal::new(vec![String::new(); fs.len()]); crate::appeals::questions(fs, answers) }}
+                </details>
             </div> }.into_any()
         }
         "warn_actions" => {
@@ -455,12 +582,18 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         }
         "channel" | "role" => {
             let key = match kind.as_str() { "channel" => "channels", "category" => "categories", _ => "roles" };
-            view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
+            // A log route/event entry is unset by dropping its key: the bot cannot parse a null channel there.
+            let entry = path.rsplit_once('.').filter(|(m, _)| m.ends_with(".routes") || m.ends_with(".events")).map(|(m, k)| (m.to_string(), k.to_string()));
+            view! { <select on:change=move |e| { let s = event_target_value(&e); match (&entry, s.is_empty()) {
+                (Some((m, k)), true) => val.update(|v| { let mut o = get_path(v, m); if let Some(o) = o.as_object_mut() { o.remove(k); } set_path(v, m, o) }),
+                _ => set(if s.is_empty() { Value::Null } else { json!(s) }),
+            } }>
                 <option value="" selected=move || get().is_null()>"none"</option>
                 {move || items(&dc.get(), key).into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || get().as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
             </select> }.into_any()
         }
         "users" => view! { <UserPick get=Signal::derive(get) set=Callback::new(set) /> }.into_any(),
+        "route_pick" => view! { <RoutePick f=f.clone() get=Signal::derive(get) set=Callback::new(set) dc /> }.into_any(),
         "channels" | "categories" | "roles" => {
             let key = StoredValue::new(kind.clone());
             view! { <div class="pick">
@@ -762,7 +895,7 @@ pub fn Section(
                     .then_some(c.action?.1)
             });
         let act = act.clone();
-        run_act(
+        run_change(
             async move {
                 let mut last = json!({"version": version.get_untracked()});
                 for s in names
@@ -811,9 +944,14 @@ pub fn Section(
                     let note = format!("Your whole {sec} is disabled, the settings of this card have no effect.");
                     groups.into_iter().map(|(g, fs)| {
                         let plain = fs.iter().any(|f| f["path"] == switch.as_str());
-                        let ring = move || !plain && off.get();
+                        // A card whose `used` condition fails (e.g. captcha look in website mode) rings red too.
+                        let used: Vec<Value> = fs.iter().map(|f| f["used"].clone()).filter(|c| !c.is_null()).collect();
+                        let unused = move || val.with(|v| !used.iter().all(|c| holds(v, c)));
+                        let ring = Signal::derive(move || (!plain && off.get()) || unused());
                         let note = note.clone();
-                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fs.into_iter().map(|f| view! { <Field f val dc /> }).collect_view()}<Show when=ring><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{note.clone()}</p></details></Show></div> }
+                        let text = move || if !plain && off.get() { note.clone() } else { "Your current choices do not use this card, so its settings have no effect.".into() };
+                        let fields = fs.into_iter().map(|f| { let only = f["only"].clone(); view! { <Show when=move || val.with(|v| holds(v, &only))><Field f=f.clone() val dc /></Show> } }).collect_view();
+                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{text.clone()}</p></details></Show></div> }
                     }).collect_view()
                 }}
             </div>

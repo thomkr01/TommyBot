@@ -348,7 +348,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             };
             preview.set(None);
             let load = load.clone();
-            run_act(send(cfg, true), msg, need, move |v| {
+            run_change(send(cfg, true), msg, need, move |v| {
                 load();
                 let cleared = csv(&v["cleared"]);
                 msg.ok(if cleared.is_empty() { format!("Imported as version {}", v["version"]) } else { format!("Imported as version {}. Set these again, their ids were cleared: {cleared}", v["version"]) });
@@ -407,7 +407,14 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 #[component]
 fn App() -> impl IntoView {
     let (route, set_route) = signal(hash());
-    window_event_listener(leptos::ev::hashchange, move |_| set_route.set(hash()));
+    window_event_listener(leptos::ev::hashchange, move |_| {
+        let next = hash();
+        // A new page (server or page part changed) starts at the top; tab switches keep the scroll.
+        if !route.get_untracked().iter().take(2).eq(next.iter().take(2)) {
+            web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0)
+        }
+        set_route.set(next)
+    });
     let (me, set_me) = signal(None::<Value>);
     let (enrolled, set_enrolled) = signal(false);
     let (guilds, set_guilds) = signal(Vec::<Value>::new());

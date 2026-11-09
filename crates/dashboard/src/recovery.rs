@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use tommybot_antinuke::{describe, plan, ChannelImg, Image, OverwriteImg, RoleImg};
 use tommybot_core::{jobs, sections::BackupsCfg};
+use tommybot_logging::perm_names;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -107,8 +108,12 @@ async fn detail(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i6
     Ok(Json(json!({
         "name": img.name,
         "settings": img.settings,
-        "roles": img.roles.iter().map(|r| json!({"name": r.name, "color": r.color, "permissions": r.permissions.to_string()})).collect::<Vec<_>>(),
-        "channels": channels.iter().map(|c| json!({"name": c.name, "kind": c.kind, "parent": name(c.parent), "overwrites": c.overwrites.len()})).collect::<Vec<_>>(),
+        "roles": img.roles.iter().map(|r| json!({"name": r.name, "color": r.color, "permissions": r.permissions.to_string(), "perm_names": perm_names(r.permissions)})).collect::<Vec<_>>(),
+        "channels": channels.iter().map(|c| json!({"name": c.name, "kind": c.kind, "parent": name(c.parent), "overwrites": c.overwrites.iter().map(|o| json!({
+            "target": if o.is_role { img.roles.iter().find(|r| r.id == o.target).map_or_else(|| format!("role {}", o.target), |r| format!("@{}", r.name.trim_start_matches('@'))) } else { format!("member {}", o.target) },
+            "allow": perm_names(o.allow),
+            "deny": perm_names(o.deny),
+        })).collect::<Vec<_>>()})).collect::<Vec<_>>(),
         "webhooks": img.webhooks.iter().flatten().map(|w| json!({"name": w.name, "channel": name(Some(w.channel))})).collect::<Vec<_>>(),
     })))
 }

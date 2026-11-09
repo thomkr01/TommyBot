@@ -633,16 +633,15 @@ pub fn Logging(
             <a class:on=sub == "customize" href=format!("#/{guild}/logging/{tab}/customize")>"customize"</a>
         </div>
         {move || { fresh.track(); let (g, part) = (guild.clone(), part.clone()); view! {
-            {(tab == "tommybot").then(|| view! { <RouteNote guild=g.clone() customize=sub == "customize" /> })}
+            {(tab == "tommybot" && sub != "customize").then(|| view! { <RouteNote guild=g.clone() /> })}
             <Section guild=g name="logging".to_string() part enrolled />
         } }}
     }
 }
 
-/// Note under TommyBot logs listing the types that have their own channel, and the empty state on
-/// the customize tab.
+/// Note under TommyBot logs listing the types that have their own channel.
 #[component]
-fn RouteNote(guild: String, customize: bool) -> impl IntoView {
+fn RouteNote(guild: String) -> impl IntoView {
     let moved = RwSignal::new(None::<Vec<String>>);
     spawn_local(async move {
         if let Ok(v) = api("GET", &format!("/api/guilds/{guild}/config"), None).await {
@@ -660,8 +659,10 @@ fn RouteNote(guild: String, customize: bool) -> impl IntoView {
         }
     });
     view! {
-        {move || moved.get().filter(|n| !n.is_empty() && !customize).map(|n| view! { <p class="info">{format!("There are some types that won't be logged here as you have custom logs set below, these types are: [{}]. All other logs (besides modlogs) will still go to this channel.", n.join(", "))}</p> })}
-        {move || moved.get().filter(|n| n.is_empty() && customize).map(|_| view! { <p class="muted">"There are no customizable log channels set, add your own."</p> })}
+        {move || moved.get().filter(|n| !n.is_empty()).map(|n| view! { <details class="card" open=true><summary class="info">"Note"</summary>
+            <p>"These log types have their own channel, so they skip the TommyBot logs channel:"</p>
+            <div class="chips">{n.into_iter().map(|t| view! { <span class="chip blue">{t}</span> }).collect_view()}</div>
+            <p class="muted">"Everything else, except mod logs, still lands in the TommyBot logs channel."</p></details> })}
     }
 }
 
