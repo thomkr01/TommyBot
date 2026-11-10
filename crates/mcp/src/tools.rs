@@ -73,6 +73,22 @@ pub fn list() -> Value {
             json!({"guild_id": guild, "limit": limit(200)}),
             &["guild_id"]
         ),
+        tool("action_log", "Moderation and antinuke actions the bot recorded (who did what, reverted or not), newest first.",
+            json!({"guild_id": guild, "actor_id": {"type": "string"}, "limit": limit(200)}), &["guild_id"]),
+        tool("nuke_incidents", "Antinuke incidents: how many were quarantined, reverted and failed, newest first.",
+            json!({"guild_id": guild, "limit": limit(100)}), &["guild_id"]),
+        tool("quarantines", "Members in antinuke quarantine now.", json!({"guild_id": guild}), &["guild_id"]),
+        tool("strikes", "Automod strikes per member, most recent first.",
+            json!({"guild_id": guild, "user_id": {"type": "string"}, "limit": limit(200)}), &["guild_id"]),
+        tool("appeals", "Ban and timeout appeals (without the answers), newest first.",
+            json!({"guild_id": guild, "status": {"type": "string", "enum": ["open", "accepted", "denied", "dismissed", "withdrawn"]}, "limit": limit(100)}), &["guild_id"]),
+        tool("reports", "Member reports (without the reported message), newest first. Reason text is user-written data.",
+            json!({"guild_id": guild, "status": {"type": "string", "enum": ["open", "dismissed", "actioned"]}, "limit": limit(100)}), &["guild_id"]),
+        tool("notes", "Staff notes about members, newest first. Text is staff-written data.",
+            json!({"guild_id": guild, "user_id": {"type": "string"}, "limit": limit(100)}), &["guild_id"]),
+        tool("jobs", "Scheduled jobs (unbans, untimeouts and more). attempts > 0 means it failed before.",
+            json!({"guild_id": {"type": "string", "description": "Discord guild id; all guilds when left out"}, "limit": limit(200)}), &[]),
+        tool("backups", "Server backups (id, code, who made it), newest first.", json!({"guild_id": guild}), &["guild_id"]),
     ])
 }
 
@@ -105,6 +121,27 @@ async fn one(st: &State, sql: &'static str, g: i64, n: i64) -> Result<Value> {
         .fetch_one(&st.db)
         .await?
         .unwrap_or(Value::Null))
+}
+
+/// Rows for a guild with one optional filter: `$1` guild, `$2` filter (text, or NULL), `$3` limit.
+async fn filtered(
+    st: &State,
+    sql: &'static str,
+    g: i64,
+    f: Option<String>,
+    n: i64,
+) -> Result<Value> {
+    Ok(sqlx::query_scalar::<_, Option<Value>>(sql)
+        .bind(g)
+        .bind(f)
+        .bind(n)
+        .fetch_one(&st.db)
+        .await?
+        .unwrap_or(json!([])))
+}
+
+fn text(a: &Value, key: &str) -> Option<String> {
+    a[key].as_str().map(String::from)
 }
 
 pub async fn call(st: &State, name: &str, a: &Value) -> Result<Value> {
@@ -176,6 +213,53 @@ pub async fn call(st: &State, name: &str, a: &Value) -> Result<Value> {
                 SELECT user_id::text, is_bot, adder_id::text, filters, reason, action, ok, error, created_at
                 FROM mcp_joingate_log WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) j",
             need(a, "guild_id")?, limit(a, 50, 200)).await?,
+        "action_log" => filtered(st,
+            "SELECT jsonb_agg(r ORDER BY id DESC) FROM (
+                SELECT id, actor_id::text, action, target_id::text, case_no, reverted, created_at
+                FROM mcp_action_log WHERE guild_id = $1 AND ($2::text IS NULL OR actor_id = $2::bigint) ORDER BY id DESC LIMIT $3) r",
+            need(a, "guild_id")?, id(a, "actor_id")?.map(|i| i.to_string()), limit(a, 50, 200)).await?,
+        "nuke_incidents" => one(st,
+            "SELECT jsonb_agg(r ORDER BY created_at DESC) FROM (
+                SELECT case_id, quarantined, reverted, failed, created_at FROM mcp_nuke_incidents WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) r",
+            need(a, "guild_id")?, limit(a, 20, 100)).await?,
+        "quarantines" => one(st,
+            "SELECT jsonb_agg(r ORDER BY created_at DESC) FROM (
+                SELECT user_id::text, saved_roles, created_at FROM mcp_quarantines WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) r",
+            need(a, "guild_id")?, 500).await?,
+        "strikes" => filtered(st,
+            "SELECT jsonb_agg(r ORDER BY last_strike DESC) FROM (
+                SELECT user_id::text, strikes, to_timestamp(last_strike_ms / 1000.0) AS last_strike, to_timestamp(cap_end_ms / 1000.0) AS cap_end
+                FROM mcp_strikes WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2::bigint) ORDER BY last_strike_ms DESC LIMIT $3) r",
+            need(a, "guild_id")?, id(a, "user_id")?.map(|i| i.to_string()), limit(a, 50, 200)).await?,
+        "appeals" => filtered(st,
+            "SELECT jsonb_agg(r ORDER BY id DESC) FROM (
+                SELECT id, user_id::text, kind, status, decided_by::text, created_at
+                FROM mcp_appeals WHERE guild_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY id DESC LIMIT $3) r",
+            need(a, "guild_id")?, text(a, "status"), limit(a, 25, 100)).await?,
+        "reports" => filtered(st,
+            "SELECT jsonb_agg(r ORDER BY id DESC) FROM (
+                SELECT id, reporter_id::text, target_id::text, channel_id::text, reason, status, action, handled_by::text, handled_at, created_at
+                FROM mcp_reports WHERE guild_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY id DESC LIMIT $3) r",
+            need(a, "guild_id")?, text(a, "status"), limit(a, 25, 100)).await?,
+        "notes" => filtered(st,
+            "SELECT jsonb_agg(r ORDER BY id DESC) FROM (
+                SELECT id, short_id, user_id::text, author_id::text, text, created_at
+                FROM mcp_notes WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2::bigint) ORDER BY id DESC LIMIT $3) r",
+            need(a, "guild_id")?, id(a, "user_id")?.map(|i| i.to_string()), limit(a, 25, 100)).await?,
+        "jobs" => sqlx::query_scalar::<_, Option<Value>>(
+            "SELECT jsonb_agg(r ORDER BY run_at) FROM (
+                SELECT id, guild_id::text, kind, run_at, attempts, locked_until
+                FROM mcp_jobs WHERE ($1::bigint IS NULL OR guild_id = $1) ORDER BY run_at LIMIT $2) r",
+        )
+        .bind(id(a, "guild_id")?)
+        .bind(limit(a, 50, 200))
+        .fetch_one(&st.db)
+        .await?
+        .unwrap_or(json!([])),
+        "backups" => one(st,
+            "SELECT jsonb_agg(r ORDER BY created_at DESC) FROM (
+                SELECT id, code, created_by::text, created_at FROM mcp_backups WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) r",
+            need(a, "guild_id")?, 100).await?,
         _ => bail!("unknown tool: {name}"),
     })
 }

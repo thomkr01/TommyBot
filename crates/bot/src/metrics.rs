@@ -63,6 +63,25 @@ async fn snapshot(app: &App) -> String {
     ])
 }
 
+/// One log line every 10 minutes with the counters, so the log shows the bot is alive and how it is doing.
+pub async fn heartbeat() {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+    tick.tick().await; // the first tick is immediate; the startup line covers that moment
+    loop {
+        tick.tick().await;
+        tracing::info!(
+            uptime_s = now_secs() as u64 - STARTED.load(Relaxed),
+            latency_ms = LATENCY_MS.load(Relaxed),
+            events = EVENTS.load(Relaxed),
+            event_errors = EVENT_ERRORS.load(Relaxed),
+            gateway_errors = GATEWAY_ERRORS.load(Relaxed),
+            jobs_done = JOBS_DONE.load(Relaxed),
+            jobs_failed = JOBS_FAILED.load(Relaxed),
+            "alive"
+        );
+    }
+}
+
 /// Answers every request on the port with the metrics, whatever the path.
 pub async fn serve(app: Arc<App>, addr: String) -> Result<()> {
     let l = TcpListener::bind(&addr).await?;

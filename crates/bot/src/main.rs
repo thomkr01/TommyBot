@@ -60,6 +60,8 @@ async fn main() -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
     let http = twilight_http::Client::new(cfg.discord_token.clone());
     let me = http.current_user().await?.model().await?.id;
+    let version = std::env::var("TOMMYBOT_SHA").unwrap_or_else(|_| "dev".into());
+    tracing::info!(%version, bot = %me, "starting");
     if let Err(e) = load_emojis(&http).await {
         tracing::warn!(?e, "custom emojis not loaded, using Unicode fallbacks");
     }
@@ -79,6 +81,10 @@ async fn main() -> Result<()> {
             // Without the listener, saved config only applies after a restart, so it never gives up.
             loop {
                 if let Err(e) = app.clone().listen_config().await {
+                    // The pool closes at shutdown; that ends the listener, it is not an error.
+                    if app.pool.is_closed() {
+                        break;
+                    }
                     tracing::error!(?e, "config listener stopped, retrying");
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -99,6 +105,7 @@ async fn main() -> Result<()> {
     });
     metrics::STARTED.store(app::now_secs() as u64, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(scheduler::run(app.clone()));
+    tokio::spawn(metrics::heartbeat());
     tokio::spawn({
         let app = app.clone();
         async move {

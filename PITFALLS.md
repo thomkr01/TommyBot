@@ -117,6 +117,10 @@ sqlx stores a checksum, so editing an applied migration breaks every existing da
 **A default change must not overwrite user choices.** (#133, migration 2200)
 *Avoid:* a migration that changes a default only moves rows that still hold the old default (600 → 60) and leaves other values alone. Test it from an empty DB and from the old schema with data.
 
+**A new migration file was not picked up.** (MCP views, migration 2800)
+`sqlx::migrate!` embeds the migrations at compile time, and adding a file does not make cargo rebuild `tommybot-core`. Tests then failed with "relation mcp_... does not exist".
+*Avoid:* after adding a migration, `touch crates/core/src/db.rs` before testing. CI builds clean and is not affected.
+
 **Parallel worktrees shared one target and one DB.** (11-01)
 Cargo mixed crates from different worktrees, and one branch's migration broke the others' tests. Four targets (about 7 GB each) filled the disk.
 *Avoid:* one `CARGO_TARGET_DIR` and one database per worktree (`su postgres -c "createdb X"`; `createdb -h localhost` hangs on a password prompt). Delete finished targets.
