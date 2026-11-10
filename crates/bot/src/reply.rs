@@ -155,7 +155,11 @@ pub fn details(
     let dm = ("DM-Members", dm_flag(done));
     match kind {
         "ban" | "softban" => vec![
-            ("Duration", dur()),
+            // A softban unbans at once, so a typed duration does nothing.
+            (
+                "Duration",
+                if kind == "softban" { on(false) } else { dur() },
+            ),
             ("Soft Ban", on(kind == "softban")),
             ("Hack Ban", on(flags.hack)),
             dm,
@@ -620,7 +624,7 @@ mod tests {
         assert_eq!(
             flags("softban", f, Some(86_400), &none),
             [
-                ("Duration", "`1d` ✅".to_string()),
+                ("Duration", "❎".to_string()),
                 ("Soft Ban", "✅".into()),
                 ("Hack Ban", "✅".into()),
                 ("DM-Members", "❎".into())

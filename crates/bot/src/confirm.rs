@@ -273,7 +273,8 @@ pub async fn stash_confirm(app: &App, nonce: u64, job: Pending) -> Result<(Embed
     .bind(nonce as i64)
     .bind(job.gid.get() as i64)
     .bind(serde_json::to_value(&job.action)?)
-    .bind(CONFIRM_TTL.as_secs_f64())
+    // A minute past expiry, so `run_expire` still finds the row and closes the question.
+    .bind(CONFIRM_TTL.as_secs_f64() + 60.0)
     .execute(&app.pool)
     .await?;
     Ok((job.question(), row))
@@ -389,6 +390,7 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
         }),
     };
     const EXPIRED: &str = "This confirmation expired, type the command again.";
+    let mut expired = false;
     let taken = if !may_answer(i.author_id().map(Id::get), actor) {
         Err("Only the moderator who ran this command can answer.")
     } else {
@@ -406,11 +408,28 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
                 Id::new(actor),
                 serde_json::from_value(action)?,
             )),
-            _ => Err(EXPIRED),
+            _ => {
+                expired = true;
+                Err(EXPIRED)
+            }
         }
     };
     let job = match taken {
         Ok(j) => j,
+        // The moderator answered too late: close the question for everyone.
+        Err(_) if expired => {
+            let r = InteractionResponse {
+                kind: InteractionResponseType::UpdateMessage,
+                data: Some(InteractionResponseData {
+                    content: Some(TIMED_OUT.into()),
+                    embeds: Some(vec![]),
+                    components: Some(vec![]),
+                    ..Default::default()
+                }),
+            };
+            client.create_response(i.id, &i.token, &r).await?;
+            return Ok(true);
+        }
         Err(e) => {
             let r = respond(
                 InteractionResponseType::ChannelMessageWithSource,

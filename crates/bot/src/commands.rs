@@ -198,7 +198,9 @@ pub async fn apply_dm(
         moderator: (!cfg.misc.hide_staff_in_dms).then_some(actor_id),
         appeal,
     };
-    let dm = reply::wants_dm(flags.dm, &cfg.misc).then(|| reply::tell(app, gid, target, notice));
+    // A hackban targets ids that left the server: a DM per raid id would only cost DM_WAIT each.
+    let dm = (reply::wants_dm(flags.dm, &cfg.misc) && !flags.hack)
+        .then(|| reply::tell(app, gid, target, notice));
     let audit = audit_reason(reason, actor_id);
     let act = async {
         anyhow::Ok(match kind {
@@ -243,7 +245,19 @@ pub async fn apply_dm(
     };
     // The DM goes first: a kicked or banned member can't be reached afterwards.
     let (told, acted) = reply::dm_and_act(reply::dm_first(dm_kind), dm, act).await;
-    let (inverse, points) = acted?;
+    let (inverse, points) = match acted {
+        Ok(a) => a,
+        // Keep the DM outcome: the member may already have been told.
+        Err(e) => {
+            tracing::warn!(?e, "mod command failed");
+            let why = crate::http_err::why(&e);
+            let text = format!("Failed to {perm} <@{t}>: {why}");
+            return Ok(Applied {
+                dm: told,
+                ..refused(text)
+            });
+        }
+    };
     let case_no = cases::create(
         &app.pool,
         cases::NewCase {
@@ -295,15 +309,19 @@ async fn kick_filtered(
     flags: Flags,
 ) -> Result<Option<&'static str>> {
     if flags.no_avatar {
-        let m = crate::http_err::member(&app.http, gid, target).await?;
-        if m.is_some_and(|m| m.avatar.is_some() || m.user.avatar.is_some()) {
-            return Ok(Some(
-                "they have an avatar (`?na` kicks only members without one)",
-            ));
+        match crate::http_err::member(&app.http, gid, target).await? {
+            None => return Ok(Some("they are not in the server")),
+            Some(m) if m.avatar.is_some() || m.user.avatar.is_some() => {
+                return Ok(Some(
+                    "they have an avatar (`?na` kicks only members without one)",
+                ))
+            }
+            Some(_) => {}
         }
     }
     if flags.voice {
-        // Discord answers 404 when the member is in no voice channel.
+        // Discord answers 404 when the member is in no voice channel; other errors skip them too,
+        // since a kick that may not match the filter is worse than one left out.
         let in_voice = app.http.user_voice_state(gid, target).await.is_ok();
         if !in_voice {
             return Ok(Some(
@@ -618,23 +636,29 @@ pub(crate) async fn apply_warn_actions(
     };
     let why = format!("Reached {} warn points", t.points);
     let (kind, secs) = match t.action {
-        warn::Action::Ban => {
-            app.http.create_ban(g, u).reason(&why).await?;
-            ("ban", None)
-        }
-        warn::Action::Kick => {
-            app.http.remove_guild_member(g, u).reason(&why).await?;
-            ("kick", None)
-        }
-        warn::Action::Timeout { secs } => {
-            let secs = match secs {
-                0 => misc.timeout_secs() as i64,
-                s => s,
-            };
-            timeout(&app.http, g, u, secs, &why).await?;
-            ("timeout", Some(secs))
-        }
+        warn::Action::Ban => ("ban", None),
+        warn::Action::Kick => ("kick", None),
+        warn::Action::Timeout { secs: 0 } => ("timeout", Some(misc.timeout_secs() as i64)),
+        warn::Action::Timeout { secs } => ("timeout", Some(secs)),
     };
+    let notice = reply::Notice {
+        kind,
+        reason: Some(&why),
+        duration_s: secs,
+        moderator: (!misc.hide_staff_in_dms).then_some(app.me.cast()),
+        appeal: None,
+    };
+    let dm = reply::wants_dm(false, misc).then(|| reply::tell(app, g, u, notice));
+    let act = async {
+        match secs {
+            Some(s) => timeout(&app.http, g, u, s, &why).await?,
+            None if kind == "ban" => drop(app.http.create_ban(g, u).reason(&why).await?),
+            None => drop(app.http.remove_guild_member(g, u).reason(&why).await?),
+        }
+        anyhow::Ok(())
+    };
+    // Same rule as a typed punishment: tell the member first.
+    reply::dm_and_act(true, dm, act).await.1?;
     let case_no = cases::create(
         &app.pool,
         cases::NewCase {

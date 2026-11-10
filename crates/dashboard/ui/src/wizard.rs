@@ -78,6 +78,12 @@ pub const MISC: &[Card] = &[
     card("Compact mode", "Do you want TommyBot's messages to have a compact style?", &[("misc.compact_replies", "Minify TommyBot's message replies")], |c, _| {
         show(if on(c, "misc.compact_replies", false) { "ban_compact" } else { "ban_result" })
     }),
+    card("Confirmation", "Should TommyBot ask Yes or No before punishing a member typed as an ID or a name?", &[("misc.confirm", "Ask for a Yes/No confirmation")], |c, _| {
+        if on(c, "misc.confirm", true) { show("confirm_question") } else { view! { <p>"Commands run at once."</p> }.into_any() }
+    }),
+    card("Punishment DMs", "Should TommyBot DM members when they are punished or when a punishment is removed?", &[("misc.always_dm", "DM punished members")], |c, _| {
+        if on(c, "misc.always_dm", true) { show("dm_ban") } else { view! { <p>"Only commands with ?dm send a DM."</p> }.into_any() }
+    }),
     Card {
         notes: &["If you want TommyBot to make the log channel for you, leave it empty and run Auto Setup."],
         ..card("Logging channel", "Where do you want TommyBot to log its actions?", &[("logging.fallback", "Logs channel")], |c, dc| {
