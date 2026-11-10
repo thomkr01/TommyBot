@@ -3,7 +3,11 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 use tommybot_antinuke::Inverse;
-use tommybot_core::{cases, permits};
+use tommybot_core::{
+    cases,
+    notes::{self, NoteAction, NoteLog},
+    permits,
+};
 use tommybot_logging::{
     embed::{self, ORANGE},
     Log, LogKind,
@@ -177,6 +181,18 @@ impl ModCmd {
             self,
             Self::Purge { .. } | Self::Hackban { .. } | Self::NoteSweep { .. }
         )
+    }
+
+    /// Whether to wait for a Confirm click: a sweep of every note in the server always asks,
+    /// other destructive commands only while `misc.confirm` is on.
+    pub fn asks_confirm(&self, confirm_on: bool) -> bool {
+        matches!(
+            self,
+            Self::NoteSweep {
+                user: None,
+                by: None
+            }
+        ) || (confirm_on && self.destructive())
     }
 
     /// Completes "Really ...?" for the confirm prompt.
@@ -459,7 +475,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             return commands::say(app, msg, &text).await;
         }
     };
-    if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
+    if cmd.asks_confirm(app.cfg(gid.get()).await?.misc.confirm) {
         let action = Action::Ext {
             cmd,
             channel: msg.channel_id,
@@ -608,6 +624,17 @@ pub async fn run(
                 .bind(&text)
                 .fetch_one(&app.pool)
                 .await?;
+                let log = NoteLog {
+                    action: NoteAction::Add,
+                    id: Some(id.clone()),
+                    user: Some(user),
+                    by: actor_id.get(),
+                    text: Some(text.clone()),
+                    ..NoteLog::default()
+                };
+                crate::modview::send_note_log(app, gid.get(), &log)
+                    .await
+                    .ok();
                 return Ok(crate::modview::note_text(&id, user, actor_id.get(), &text));
             }
             ModCmd::NoteModify { id, text } => {
@@ -616,35 +643,52 @@ pub async fn run(
                         "A note must be {NOTE_MIN} to {NOTE_MAX} characters long"
                     ));
                 }
-                let n = sqlx::query("UPDATE notes SET text=$3 WHERE guild_id=$1 AND short_id=$2")
-                    .bind(g)
-                    .bind(&id)
-                    .bind(text)
-                    .execute(&app.pool)
-                    .await?
-                    .rows_affected();
-                return Ok(match n {
-                    0 => format!("No note `{id}`"),
-                    _ => format!("Note `{id}` updated"),
-                });
+                let actor = actor_id.get();
+                let Some((user, old)) = notes::edit(&app.pool, g, &id, &text, actor as i64).await?
+                else {
+                    return Ok(format!("No note `{id}`"));
+                };
+                let log = NoteLog {
+                    action: NoteAction::Modify,
+                    id: Some(id.clone()),
+                    user: Some(user as u64),
+                    by: actor,
+                    text: Some(text),
+                    old: Some(old),
+                    ..NoteLog::default()
+                };
+                crate::modview::send_note_log(app, gid.get(), &log)
+                    .await
+                    .ok();
+                return Ok(format!("Note `{id}` updated"));
             }
             ModCmd::NoteList { user, id, by } => {
                 return crate::modview::view_notes(app, g, user, id, by).await
             }
             ModCmd::NoteRemove { id, user } => {
-                let n = sqlx::query(
-                    "DELETE FROM notes WHERE guild_id=$1 AND short_id=$2 AND ($3::bigint IS NULL OR user_id=$3)",
+                let gone: Option<(i64, String)> = sqlx::query_as(
+                    "DELETE FROM notes WHERE guild_id=$1 AND short_id=$2 AND ($3::bigint IS NULL OR user_id=$3) RETURNING user_id, text",
                 )
                 .bind(g)
                 .bind(&id)
                 .bind(user.map(|u| u as i64))
-                    .execute(&app.pool)
-                    .await?
-                    .rows_affected();
-                return Ok(match n {
-                    0 => format!("No note `{id}`"),
-                    _ => format!("Removed note `{id}`"),
-                });
+                .fetch_optional(&app.pool)
+                .await?;
+                let Some((user, text)) = gone else {
+                    return Ok(format!("No note `{id}`"));
+                };
+                let log = NoteLog {
+                    action: NoteAction::Remove,
+                    id: Some(id.clone()),
+                    user: Some(user as u64),
+                    by: actor_id.get(),
+                    text: Some(text),
+                    ..NoteLog::default()
+                };
+                crate::modview::send_note_log(app, gid.get(), &log)
+                    .await
+                    .ok();
+                return Ok(format!("Removed note `{id}`"));
             }
             ModCmd::NoteSweep { user, by } => {
                 let n = sqlx::query(
@@ -656,6 +700,17 @@ pub async fn run(
                 .execute(&app.pool)
                 .await?
                 .rows_affected();
+                let log = NoteLog {
+                    action: NoteAction::Sweep,
+                    user,
+                    author: by,
+                    by: actor_id.get(),
+                    count: Some(n),
+                    ..NoteLog::default()
+                };
+                crate::modview::send_note_log(app, gid.get(), &log)
+                    .await
+                    .ok();
                 return Ok(format!("Removed {n} notes"));
             }
             ModCmd::CasesEdit { case, reason } => {

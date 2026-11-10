@@ -58,6 +58,20 @@ fs.mkdirSync(out, { recursive: true });
   await page.waitForSelector('text=Embed edited.', { timeout: 5000 }).catch(() => failed.push('embeds: edit failed'));
   const sent = await (await fetch('http://127.0.0.1:9100/sent')).json();
   if (!sent.some((m) => /\/messages\/1$/.test(m.path) && m.body.includes('Hello'))) failed.push('embeds: no edit reached Discord');
+  // Notes: an edit keeps the created time and shows up in the note's history.
+  await page.goto(`${base}/${links[0].replace(/^(#\/\d+\/).*/, '$1notes')}`);
+  await page.fill('input[aria-label="user ID"]', '42');
+  const tag = Date.now();
+  await page.fill('input[aria-label="new note"]', `first note ${tag}`);
+  await page.click('text=Add note');
+  // Newest note first; earlier runs may have left notes behind.
+  const card = page.locator('.card:has(input[aria-label="note text"])').first();
+  await page.waitForSelector(`input[aria-label="note text"] >> nth=0`, { timeout: 5000 }).catch(() => failed.push('notes: added note not listed'));
+  await card.locator('input[aria-label="note text"]').fill(`edited note ${tag}`);
+  await card.locator('button', { hasText: 'Save' }).click();
+  await card.locator('summary', { hasText: 'History (1)' }).click({ timeout: 5000 }).catch(() => failed.push('notes: no history after edit'));
+  if (!(await card.locator('li', { hasText: `first note ${tag} → edited note ${tag}` }).count())) failed.push('notes: history misses the change');
+  await page.screenshot({ path: `${out}/notes_history.png` });
   // Update page: the mock user owns the app; no updater runs here, so the page says how to start it.
   await page.goto(`${base}/#/update`);
   await page.waitForSelector('text=The updater is not running', { timeout: 5000 }).catch(() => failed.push('update: no updater notice'));

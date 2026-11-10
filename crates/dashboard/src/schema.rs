@@ -6,7 +6,7 @@ use tommybot_automod::{
     join::{Action as GateAction, Charset, Filter as GateFilter, GateCfg},
     strike::StrikeCfg,
 };
-use tommybot_core::sections::FILTERS_OFF_BY_DEFAULT;
+use tommybot_core::{limits, sections::FILTERS_OFF_BY_DEFAULT};
 use tommybot_logging::LogEvent;
 
 const LOG_KINDS: &[&str] = &[
@@ -1116,7 +1116,17 @@ pub fn schema() -> Vec<Value> {
         ),
     ]
     .into_iter()
-    .map(|(n, t, fields)| json!({"name": n, "title": t, "fields": fields}))
+    .map(|(n, t, mut fields)| {
+        // The form keeps numbers inside the same ranges `api::validate` enforces.
+        for v in &mut fields {
+            let sec = v["section"].as_str().unwrap_or(n).to_string();
+            if let Some((lo, hi)) = v["path"].as_str().and_then(|p| limits::for_path(&sec, p)) {
+                v["min"] = json!(lo);
+                v["max"] = json!(hi);
+            }
+        }
+        json!({"name": n, "title": t, "fields": fields})
+    })
     .collect()
 }
 
@@ -1172,6 +1182,33 @@ mod tests {
     use crate::api;
 
     #[test]
+    fn limited_numbers_carry_their_range() {
+        let all = schema();
+        let field = |sec: &str, path: &str| {
+            all.iter()
+                .find(|s| s["name"] == sec)
+                .and_then(|s| {
+                    s["fields"]
+                        .as_array()?
+                        .iter()
+                        .find(|f| f["path"] == path)
+                        .cloned()
+                })
+                .unwrap()
+        };
+        let hour = field("antinuke", "limits.Ban.per_hour");
+        assert_eq!((&hour["min"], &hour["max"]), (&json!(2), &json!(500)));
+        let heat = field("antinuke", "limits.Unban.heat");
+        assert_eq!((&heat["min"], &heat["max"]), (&json!(1), &json!(100)));
+        let age = field("joingate", "min_age_override_ms");
+        assert_eq!(
+            (&age["min"], &age["max"]),
+            (&json!(5_000), &json!(8_640_000_000_i64))
+        );
+        assert!(field("antinuke", "enabled")["min"].is_null());
+    }
+
+    #[test]
     fn gate_actions_show_defaults() {
         let gate = schema()
             .into_iter()
@@ -1215,7 +1252,7 @@ mod tests {
             for fd in sec["fields"].as_array().unwrap() {
                 let sample = match fd["kind"].as_str().unwrap() {
                     "bool" => json!(true),
-                    "int" => json!(5),
+                    "int" => fd.get("min").cloned().unwrap_or(json!(5)),
                     "float" | "pct" => json!(0.5),
                     "text" | "color" => json!("x"),
                     "list" => json!(["1"]),
