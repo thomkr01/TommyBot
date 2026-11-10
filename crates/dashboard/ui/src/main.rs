@@ -443,6 +443,32 @@ fn App() -> impl IntoView {
             .cloned()
             .filter(|g| g.bytes().all(|b| b.is_ascii_digit()))
     });
+    // The server the user last opened, so pages without a server (Update, Commands) can mark it in the menu.
+    let storage = || web_sys::window().and_then(|w| w.local_storage().ok().flatten());
+    let (last, set_last) = signal(storage().and_then(|s| s.get_item("last_guild").ok().flatten()));
+    Effect::new(move |_| {
+        if let Some(g) = guild.get() {
+            if let Some(s) = storage() {
+                let _ = s.set_item("last_guild", &g);
+            }
+            set_last.set(Some(g));
+        }
+    });
+    let server_list = move || {
+        let cur = last.get();
+        view! {
+            <a href="#/">"Servers"</a>
+            {guilds.get().into_iter().map(|x| {
+                let id = x["id"].as_str().unwrap_or("").to_string();
+                let name = x["name"].as_str().unwrap_or("").to_string();
+                let icon = match x["icon"].as_str() {
+                    Some(i) => view! { <img src=format!("https://cdn.discordapp.com/icons/{id}/{i}.png?size=64") alt="" /> }.into_any(),
+                    None => view! { <i>{name.chars().next().unwrap_or('?').to_string()}</i> }.into_any(),
+                };
+                view! { <a class="gl" class:on=cur.as_deref() == Some(id.as_str()) href=format!("#/{id}/overview")>{icon}<span>{name}</span></a> }
+            }).collect_view()}
+        }
+    };
     let (nav_open, set_nav_open) = signal(false);
     window_event_listener(leptos::ev::keydown, move |e| {
         if e.key() == "Escape" {
@@ -491,8 +517,8 @@ fn App() -> impl IntoView {
                 <Show when=move || nav_open.get()><div class="scrim" on:click=move |_| set_nav_open.set(false)></div></Show>
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
-                        None => view! { <a href="#/">"Servers"</a> }.into_any(),
-                        Some(a) if a == "commands" || a == "update" => view! { <a href="#/">"Servers"</a> }.into_any(),
+                        None => server_list().into_any(),
+                        Some(a) if a == "commands" || a == "update" => server_list().into_any(),
                         Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
