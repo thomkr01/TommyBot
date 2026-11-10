@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
 const DAY_MS: i64 = 86_400_000;
+/// Allowed minimum account age (`jg 3c` and the dashboard): 5 seconds to 100 days, in ms.
+pub const MIN_AGE_MS: (i64, i64) = (5_000, 100 * DAY_MS);
 const HOUR_MS: i64 = 3_600_000;
 
 pub fn account_created_ms(user_id: u64) -> i64 {
@@ -179,9 +181,11 @@ impl Default for GateCfg {
 
 impl GateCfg {
     /// The configured minimum account age; also the "young account" limit of Suspicious while the age filter is off.
+    /// Values saved before the limits existed are pulled inside [`MIN_AGE_MS`].
     pub fn min_age_ms(&self) -> i64 {
         self.min_age_override_ms
             .unwrap_or(i64::from(self.min_age_days) * DAY_MS)
+            .clamp(MIN_AGE_MS.0, MIN_AGE_MS.1)
     }
 
     /// `names` holds one name per line (username, display name, nickname).

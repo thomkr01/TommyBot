@@ -81,6 +81,23 @@ impl Default for LimitCfg {
     }
 }
 
+impl LimitCfg {
+    /// Minute cap, hour cap and heat % of card `a`, unset ones taking the defaults. Values saved
+    /// before the limits existed are pulled inside them, and a saved heat of 0 means the default.
+    pub fn values(&self, a: NukeAction) -> Option<(u32, u32, u32)> {
+        use crate::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE};
+        let fit = |v: Option<u32>, (lo, hi): (i64, i64)| v.map(|v| v.clamp(lo as u32, hi as u32));
+        let d = a.default_limit();
+        Some((
+            fit(self.per_minute, NUKE_MINUTE).or(d.map(|d| d.0))?,
+            fit(self.per_hour, NUKE_HOUR).or(d.map(|d| d.1))?,
+            fit(self.heat.filter(|h| *h > 0), NUKE_HEAT)
+                .or(d.map(|d| d.2))
+                .unwrap_or(0),
+        ))
+    }
+}
+
 impl AntinukeCfg {
     /// The watched limit and heat % of `a`, None when it is not watched.
     pub fn limit(&self, a: NukeAction) -> Option<(Limit, u32)> {
@@ -90,13 +107,8 @@ impl AntinukeCfg {
             return None;
         }
         let c = self.limits.get(&a.card()).copied().unwrap_or_default();
-        let d = a.default_limit();
-        let limit = Limit {
-            per_minute: c.per_minute.or(d.map(|d| d.0))?,
-            per_hour: c.per_hour.or(d.map(|d| d.1))?,
-        };
-        let heat = c.heat.or(d.map(|d| d.2)).unwrap_or(0);
-        c.enabled.then_some((limit, heat))
+        let (per_minute, per_hour, heat) = c.values(a)?;
+        c.enabled.then_some((Limit { per_minute, per_hour }, heat))
     }
 
     pub fn watched(&self) -> HashMap<NukeAction, Limit> {
@@ -775,6 +787,23 @@ mod tests {
         assert_eq!(w.regex.hits("hello"), 0);
         assert_eq!(WordsCfg::default().regex.hits("anything"), 0);
         assert!(serde_json::from_value::<WordsCfg>(json!({"regex": ["(unclosed"]})).is_err());
+    }
+
+    #[test]
+    fn saved_caps_outside_the_limits_are_pulled_inside() {
+        let c: AntinukeCfg = serde_json::from_value(
+            json!({"limits": {"Ban": {"per_minute": 99, "per_hour": 1000, "heat": 0}}}),
+        )
+        .unwrap();
+        let (l, heat) = c.limit(NukeAction::Ban).unwrap();
+        assert_eq!((l.per_minute, l.per_hour, heat), (50, 500, 20));
+        let c: AntinukeCfg =
+            serde_json::from_value(json!({"limits": {"Ban": {"per_hour": 1, "heat": 101}}})).unwrap();
+        let (l, heat) = c.limit(NukeAction::Kick).unwrap();
+        assert_eq!((l.per_minute, l.per_hour, heat), (5, 2, 100));
+        // Prune is no card: its built-in 1/1 stays.
+        let c: AntinukeCfg = serde_json::from_value(json!({"prune": true})).unwrap();
+        assert_eq!(c.limit(NukeAction::Prune).unwrap().0.per_minute, 1);
     }
 
     #[test]

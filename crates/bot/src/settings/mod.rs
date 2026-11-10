@@ -32,6 +32,8 @@ pub enum Kind {
     Num(f64),
     Secs,
     Ms,
+    /// Minimum account age in ms: a bare whole number is days, else a duration (`12h`), within `MIN_AGE_MS`.
+    Age,
     Text,
     /// Typed word -> stored JSON.
     Choice(&'static [(&'static str, &'static str)]),
@@ -207,6 +209,23 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
                     } else {
                         secs
                     })
+                }
+                Kind::Age => {
+                    let (lo, hi) = tommybot_core::limits::MIN_AGE_MS;
+                    let secs = match v.parse::<i64>() {
+                        Ok(days) => days.checked_mul(86_400),
+                        Err(_) if v.contains(['.', ',']) => {
+                            return Err(format!("{}. Give a whole number.", bad()))
+                        }
+                        Err(_) => duration::parse(v),
+                    };
+                    let ms = secs.and_then(|s| s.checked_mul(1000)).ok_or_else(|| {
+                        format!("{}. Give days, or a number with a unit, like `12h` or `30m`.", bad())
+                    })?;
+                    if !(lo..=hi).contains(&ms) {
+                        return Err(format!("{label} ranges from 5 seconds to 100 days"));
+                    }
+                    json!(ms)
                 }
                 Kind::Text if !v.is_empty() && v.len() <= 32 => json!(v),
                 Kind::Choice(opts) => {
@@ -598,6 +617,27 @@ pub(crate) async fn send(
     Ok(())
 }
 
+/// The reply to a code the module has no row for, naming the cards or letters that exist.
+fn no_such_row(m: &Module, code: &str) -> String {
+    let card = code.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let letters: Vec<&str> = m
+        .rows
+        .iter()
+        .filter_map(|r| r.code.strip_prefix(card))
+        .filter(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphabetic()))
+        .collect();
+    if let (Some(first), Some(last)) = (letters.first(), letters.last()) {
+        return format!("Card {card} has options {first} to {last}");
+    }
+    let last = m
+        .rows
+        .iter()
+        .filter_map(|r| r.code.parse::<u32>().ok())
+        .max()
+        .unwrap_or(1);
+    format!("`{code}` is not an option. Options available are [1 to {last}].")
+}
+
 /// Handles `t!<module> ...`; false when `rest` is not a settings command.
 pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool> {
     let Some(gid) = msg.guild_id else {
@@ -670,14 +710,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         (f, _) => f,
     };
     let Some(row) = found else {
-        send(
-            app,
-            msg,
-            &format!("{} has no setting `{code}`", m.title.trim_end_matches(':')),
-            None,
-            vec![],
-        )
-        .await?;
+        send(app, msg, &no_such_row(m, &code), None, vec![]).await?;
         return Ok(true);
     };
     if matches!(row.kind, Kind::Users) {
@@ -906,7 +939,7 @@ mod tests {
                     Kind::Bool | Kind::Switch(..) => Op::Toggle(r.code.into(), true),
                     Kind::Int(min, _) => Op::Set(r.code.into(), min.to_string()),
                     Kind::Num(_) => Op::Set(r.code.into(), "50".into()),
-                    Kind::Secs | Kind::Ms => Op::Set(r.code.into(), "10m".into()),
+                    Kind::Secs | Kind::Ms | Kind::Age => Op::Set(r.code.into(), "10m".into()),
                     Kind::Text => Op::Set(r.code.into(), "t!".into()),
                     Kind::Choice(o) => Op::Set(r.code.into(), o[o.len() - 1].0.into()),
                     Kind::Role | Kind::Channel | Kind::Roles | Kind::Channels => {
@@ -935,8 +968,8 @@ mod tests {
             edit_for(r, &Op::Set("3c".into(), "15d".into()), &[], None).unwrap(),
         );
         assert_eq!(GuildCfg::parse(&doc).joingate.min_age_ms(), 15 * 86_400_000);
-        let err = edit_for(r, &Op::Set("3c".into(), "15".into()), &[], None).unwrap_err();
-        assert!(err.contains("`15d`"), "{err}");
+        let err = edit_for(r, &Op::Set("3c".into(), "15x".into()), &[], None).unwrap_err();
+        assert!(err.contains("`12h`"), "{err}");
         assert!(edit_for(r, &Op::Toggle("3c".into(), true), &[], None).is_err());
 
         let r = row(&STATICS, "5");
@@ -961,6 +994,63 @@ mod tests {
             edit_for(r, &Op::Set("4".into(), "8%".into()), &[], None).unwrap(),
         );
         assert_eq!((r.get)(&GuildCfg::parse(&doc)), "8% per second");
+    }
+
+    #[test]
+    fn caps_and_min_age_keep_to_their_ranges() {
+        let set = |m: &'static Module, code: &str, v: &str| {
+            edit_for(row(m, code), &Op::Set(code.into(), v.into()), &[], None)
+        };
+        assert_eq!(
+            set(&CAPS, "1c", "501"),
+            Err("[1C] Hour Cap must be between 2 and 500".into())
+        );
+        assert!(set(&CAPS, "1c", "1").is_err());
+        assert_eq!(set(&CAPS, "1c", "500"), Ok(Edit::Put(json!(500))));
+        assert_eq!(
+            set(&CAPS, "1d", "0"),
+            Err("[1D] Heat % must be between 1 and 100".into())
+        );
+        assert!(set(&CAPS, "1d", "101").is_err());
+        assert_eq!(set(&CAPS, "1d", "1"), Ok(Edit::Put(json!(1))));
+        let age = |v| set(&JOINGATE, "3c", v);
+        assert_eq!(age("3"), Ok(Edit::Put(json!(3 * 86_400_000_i64))));
+        assert_eq!(age("12h"), Ok(Edit::Put(json!(12 * 3_600_000_i64))));
+        assert_eq!(age("5s"), Ok(Edit::Put(json!(5_000))));
+        assert_eq!(age("100d"), Ok(Edit::Put(json!(8_640_000_000_i64))));
+        let range = Err("[3C] Minimum Age ranges from 5 seconds to 100 days".to_string());
+        for bad in ["0", "-1", "101d", "101", "4s"] {
+            assert_eq!(age(bad), range, "{bad}");
+        }
+        assert!(age("1.5").unwrap_err().contains("whole number"));
+        assert!(age("soon").is_err());
+        // A stored age outside the range reads as the nearest limit.
+        let cfg = GuildCfg::parse(&json!({"joingate": {"min_age_override_ms": 0}}));
+        assert_eq!((row(&JOINGATE, "3c").get)(&cfg), "5s");
+    }
+
+    #[test]
+    fn unknown_codes_name_the_options() {
+        assert_eq!(
+            no_such_row(&CAPS, "51b"),
+            "`51b` is not an option. Options available are [1 to 7]."
+        );
+        assert_eq!(
+            no_such_row(&CAPS, "8b"),
+            "`8b` is not an option. Options available are [1 to 7]."
+        );
+        assert_eq!(no_such_row(&CAPS, "5z"), "Card 5 has options a to d");
+        let last = JOINGATE
+            .rows
+            .iter()
+            .filter_map(|r| r.code.parse::<u32>().ok())
+            .max()
+            .unwrap();
+        assert!(last > 1);
+        assert_eq!(
+            no_such_row(&JOINGATE, "99"),
+            format!("`99` is not an option. Options available are [1 to {last}].")
+        );
     }
 
     #[test]

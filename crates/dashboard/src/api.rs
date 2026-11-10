@@ -645,6 +645,7 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
             }
         }
     }
+    tommybot_core::limits::check(section, v).map_err(ApiError::BadRequest)?;
     if section == "misc" && v["warn_actions"].as_array().is_some_and(|a| a.len() > 5) {
         return Err(ApiError::BadRequest("at most 5 warn actions".into()));
     }
@@ -699,6 +700,17 @@ fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
 mod logging_validate_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn saving_refuses_numbers_outside_their_range() {
+        let nuke = |k: &str, n: i64| json!({"limits": {"Ban": {k: n}}});
+        assert!(validate("antinuke", &nuke("per_hour", 500)).is_ok());
+        assert!(validate("antinuke", &nuke("per_hour", 501)).is_err());
+        assert!(validate("antinuke", &nuke("heat", 0)).is_err());
+        assert!(validate("joingate", &json!({"min_age_override_ms": 4_999})).is_err());
+        assert!(validate("joingate", &json!({"min_age_override_ms": 8_640_000_001_i64})).is_err());
+        assert!(validate("joingate", &json!({"min_age_override_ms": 5_000})).is_ok());
+    }
 
     #[test]
     fn rollback_needs_the_bar_of_every_changed_section() {
