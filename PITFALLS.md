@@ -106,6 +106,14 @@ Duration parsing sliced off the last character by byte and panicked on input lik
 The prefix panels, the dashboard and the save path each had their own bounds, and an out-of-range value was changed silently.
 *Avoid:* all bounds live in `core::limits` and are used everywhere. A value out of range is refused with a message.
 
+**A URL checked by prefix lets look-alike hosts through.** (MCP security review, 2026-11-10)
+The MCP OAuth registration took any `https://` redirect and checked localhost with `starts_with("http://localhost")`, which `http://localhost.evil.com` also passes. A stranger could register their own site, send the owner a login link and get the code, and with it a token for everything the MCP reads.
+*Avoid:* parse the URL (`reqwest::Url`) and compare scheme and host exactly against an allow list. OAuth redirects go only to known clients (claude.ai) or the owner's own computer.
+
+**A refresh token that issues a fresh one with a full lifetime never expires.** (MCP security review, 2026-11-10)
+Each MCP refresh gave a new 30-day refresh token, so a stolen one could be renewed forever and only rotating `MCP_OAUTH_SECRET` stopped it.
+*Avoid:* carry the login time (`auth`) through every refresh and cap the new token at login time plus the limit.
+
 ## 5. Database and migrations
 
 **Two PRs used the same migration number.** (#64/#65)
