@@ -205,10 +205,10 @@ fn a_server_wide_note_sweep_always_asks() {
 #[test]
 fn note_logs_show_the_change() {
     use crate::modview::note_log;
-    use tommybot_core::notes::NoteLog;
+    use tommybot_core::notes::{NoteAction, NoteLog};
     let text = |n: &NoteLog| serde_json::to_string(&note_log(n).build()).unwrap();
     let modify = NoteLog {
-        action: "modify".into(),
+        action: NoteAction::Modify,
         id: Some("1d300v".into()),
         user: Some(7),
         by: 8,
@@ -223,7 +223,7 @@ fn note_logs_show_the_change() {
         "{t}"
     );
     let sweep = NoteLog {
-        action: "sweep".into(),
+        action: NoteAction::Sweep,
         by: 8,
         count: Some(3),
         ..NoteLog::default()

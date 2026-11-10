@@ -1,7 +1,7 @@
 //! Read-only helpers of the `modcmds` commands: case and note listings and nickname cleanup.
 use anyhow::Result;
 
-use tommybot_core::notes::NoteLog;
+use tommybot_core::notes::{NoteAction, NoteLog};
 use tommybot_logging::{
     embed::{self, Log, BLUE, GREEN, ORANGE, RED},
     LogKind,
@@ -14,11 +14,11 @@ const PER_PAGE: usize = 10;
 
 /// The private mod-log entry for a note change (command or dashboard).
 pub(crate) fn note_log(n: &NoteLog) -> Log {
-    let (title, color) = match n.action.as_str() {
-        "add" => ("Note Added", GREEN),
-        "modify" => ("Note Modified", ORANGE),
-        "remove" => ("Note Removed", RED),
-        _ => ("Notes Swept", RED),
+    let (title, color) = match n.action {
+        NoteAction::Add => ("Note Added", GREEN),
+        NoteAction::Modify => ("Note Modified", ORANGE),
+        NoteAction::Remove => ("Note Removed", RED),
+        NoteAction::Sweep => ("Notes Swept", RED),
     };
     let mut log = Log::new(title, color);
     if let Some(id) = &n.id {
@@ -31,7 +31,7 @@ pub(crate) fn note_log(n: &NoteLog) -> Log {
         log = log.user("Written By", a);
     }
     log = log.user("Moderator", n.by);
-    if n.action == "sweep" && n.user.is_none() && n.author.is_none() {
+    if n.action == NoteAction::Sweep && n.user.is_none() && n.author.is_none() {
         log = log.line("Scope", "Whole server");
     }
     if let Some(c) = n.count {

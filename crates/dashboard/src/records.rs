@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tommybot_core::{
     jobs,
-    notes::{self, NoteLog},
+    notes::{self, NoteAction, NoteLog},
 };
 
 type Res = Result<Json<Value>, ApiError>;
@@ -313,7 +313,7 @@ async fn note_add(
     .fetch_one(&st.db)
     .await?;
     let log = NoteLog {
-        action: "add".into(),
+        action: NoteAction::Add,
         id: Some(id),
         user: Some(user as u64),
         by: s.user_id as u64,
@@ -336,7 +336,7 @@ async fn note_edit(
         .await?
         .ok_or(ApiError::NotFound)?;
     let log = NoteLog {
-        action: "modify".into(),
+        action: NoteAction::Modify,
         id: Some(id),
         user: Some(user as u64),
         by: s.user_id as u64,
@@ -363,7 +363,7 @@ async fn note_delete(
     .await?;
     if let Some((user, text)) = gone {
         let log = NoteLog {
-            action: "remove".into(),
+            action: NoteAction::Remove,
             id: Some(id),
             user: Some(user as u64),
             by: s.user_id as u64,
@@ -397,7 +397,7 @@ async fn note_sweep(
     .await?
     .rows_affected();
     let log = NoteLog {
-        action: "sweep".into(),
+        action: NoteAction::Sweep,
         user: user.map(|u| u as u64),
         by: s.user_id as u64,
         count: Some(n),

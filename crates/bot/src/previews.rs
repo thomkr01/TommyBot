@@ -168,7 +168,7 @@ fn messages() -> Value {
         "verify_simple": challenge(&verify::new_sum().0, false),
         "verify_dm": reply_text("Check your DMs for the challenge."),
         "note_modified": log(crate::modview::note_log(&tommybot_core::notes::NoteLog {
-            action: "modify".into(),
+            action: tommybot_core::notes::NoteAction::Modify,
             id: Some("1d300v".into()),
             user: Some(MEMBER),
             by: YOU,

@@ -2,12 +2,21 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteAction {
+    #[default]
+    Add,
+    Modify,
+    Remove,
+    Sweep,
+}
+
 /// What changed; the payload of the `note_log` job, also built by the bot's note commands.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NoteLog {
-    /// "add", "modify", "remove" or "sweep".
-    pub action: String,
+    pub action: NoteAction,
     pub id: Option<String>,
     /// The member the note is about (for a sweep: the member filter).
     pub user: Option<u64>,

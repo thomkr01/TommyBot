@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use tommybot_antinuke::Inverse;
 use tommybot_core::{
     cases,
-    notes::{self, NoteLog},
+    notes::{self, NoteAction, NoteLog},
     permits,
 };
 use tommybot_logging::{
@@ -625,7 +625,7 @@ pub async fn run(
                 .fetch_one(&app.pool)
                 .await?;
                 let log = NoteLog {
-                    action: "add".into(),
+                    action: NoteAction::Add,
                     id: Some(id.clone()),
                     user: Some(user),
                     by: actor_id.get(),
@@ -649,7 +649,7 @@ pub async fn run(
                     return Ok(format!("No note `{id}`"));
                 };
                 let log = NoteLog {
-                    action: "modify".into(),
+                    action: NoteAction::Modify,
                     id: Some(id.clone()),
                     user: Some(user as u64),
                     by: actor,
@@ -678,7 +678,7 @@ pub async fn run(
                     return Ok(format!("No note `{id}`"));
                 };
                 let log = NoteLog {
-                    action: "remove".into(),
+                    action: NoteAction::Remove,
                     id: Some(id.clone()),
                     user: Some(user as u64),
                     by: actor_id.get(),
@@ -701,7 +701,7 @@ pub async fn run(
                 .await?
                 .rows_affected();
                 let log = NoteLog {
-                    action: "sweep".into(),
+                    action: NoteAction::Sweep,
                     user,
                     author: by,
                     by: actor_id.get(),
