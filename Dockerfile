@@ -45,7 +45,7 @@ CMD ["tommybot-mcp"]
 
 # Carries out updates started from the dashboard; see scripts/updater.sh.
 # psql from the Postgres image, the Docker CLI and compose plugin from Docker's: no package installs.
-FROM postgres:16-alpine AS updater
+FROM postgres:18-alpine AS updater
 COPY --from=docker:28-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker:28-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY scripts/updater.sh /usr/local/bin/updater
