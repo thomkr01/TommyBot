@@ -374,7 +374,7 @@ async fn send_dm(app: &App, user: Id<UserMarker>, text: &str, embeds: &[Embed]) 
 /// the log channel. At most one DM per server per 10 minutes: a nuke that trips panic mode is one alert.
 pub async fn alert_owner(app: &App, gid: Id<GuildMarker>, what: &str) {
     static LAST: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
-    if !alert_due(&mut LAST.lock().unwrap(), gid.get(), now_secs()) {
+    if !alert_due(&mut LAST.lock().unwrap(), gid.get(), now_secs(), 600) {
         return;
     }
     let info = match app.guild_info(gid).await {
@@ -393,11 +393,22 @@ pub async fn alert_owner(app: &App, gid: Id<GuildMarker>, what: &str) {
     dm(app, info.owner, &text).await;
 }
 
-fn alert_due(last: &mut BTreeMap<u64, i64>, guild: u64, now: i64) -> bool {
-    if last.get(&guild).is_some_and(|t| now - t < 600) {
+/// DMs the server owner right away, without [`alert_owner`]'s 10-minute limit.
+pub async fn dm_owner(app: &App, gid: Id<GuildMarker>, text: &str) {
+    match app.guild_info(gid).await {
+        Ok(i) => {
+            dm(app, i.owner, text).await;
+        }
+        Err(e) => tracing::warn!(?e, "owner DM: guild lookup failed"),
+    }
+}
+
+/// Whether `key` (a guild or channel) is due another alert, at most one per `every` seconds.
+pub(crate) fn alert_due(last: &mut BTreeMap<u64, i64>, key: u64, now: i64, every: i64) -> bool {
+    if last.get(&key).is_some_and(|t| now - t < every) {
         return false;
     }
-    last.insert(guild, now);
+    last.insert(key, now);
     true
 }
 
@@ -848,9 +859,9 @@ mod tests {
     #[test]
     fn owner_alert_waits_ten_minutes_per_server() {
         let mut last = BTreeMap::new();
-        assert!(alert_due(&mut last, 1, 1000));
-        assert!(!alert_due(&mut last, 1, 1599));
-        assert!(alert_due(&mut last, 2, 1599));
-        assert!(alert_due(&mut last, 1, 1600));
+        assert!(alert_due(&mut last, 1, 1000, 600));
+        assert!(!alert_due(&mut last, 1, 1599, 600));
+        assert!(alert_due(&mut last, 2, 1599, 600));
+        assert!(alert_due(&mut last, 1, 1600, 600));
     }
 }

@@ -202,6 +202,19 @@ fn messages() -> Value {
         (1_234_567_890_789, "free nitro 3"),
     ];
     let code = "Ab3dE9fGh1_0123456789";
+    let help_cfg = verify::VerificationCfg {
+        roles: vec![Id::new(3001)],
+        verify: tommybot_automod::join::VerifyCfg {
+            on_fail: tommybot_automod::join::FailAction::Kick,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let gate_bot = joingate::Detail {
+        filters: &["No Avatar", "Suspicious Account"],
+        is_bot: true,
+        adder: Some(YOU),
+    };
     let (panel, buttons) = verify_panel(SERVER);
     let answer = verify::row(verify::button("Answer", &format!("{}1", verify::ENTER)));
     let captcha = format!(
@@ -223,7 +236,7 @@ fn messages() -> Value {
         ))
     };
     let mut all = json!({
-        "names": {"users": {MEMBER.to_string(): "member", YOU.to_string(): "you", ROGUE.to_string(): "rogue-admin"}, "channels": {GENERAL.to_string(): "general"}},
+        "names": {"users": {MEMBER.to_string(): "member", YOU.to_string(): "you", ROGUE.to_string(): "rogue-admin"}, "channels": {GENERAL.to_string(): "general"}, "roles": {"3001": "Member"}},
         "ban_result": json!({"embeds": reply::result_embeds("ban", &[full], (Flags::default(), None), Some("toxic"), YOU)}),
         "ban_compact": {"content": reply::summary("ban", true, &[compact], Some("toxic"), YOU)},
         "automod_warn": log(automod::filter_log("member", FilterAction::Warn, "Use of blacklisted words", (GENERAL, "you all suck"), MEMBER)),
@@ -258,6 +271,9 @@ fn messages() -> Value {
             old: Some("Asked staff for the raid list".into()),
             ..Default::default()
         })),
+        "verify_help": interaction(verify::embed_reply(verify::help_embed(&help_cfg))),
+        "verify_deleted": log(verify::deleted::deleted_log("The verification channel #verify-here was deleted by <@1003>. TommyBot made a new one: <#2001>. <@1003> is trusted, so only this message was sent. If they delete it again, they will be quarantined.")),
+        "joingate_kick": log(joingate::gate_log(ROGUE, Action::Kick, "join gate", gate_bot, None)),
     });
     for (k, v) in tickets() {
         all[k] = v;

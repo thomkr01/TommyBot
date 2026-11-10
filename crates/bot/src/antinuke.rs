@@ -419,6 +419,16 @@ pub(crate) async fn quarantine(
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
 ) -> Result<()> {
+    quarantine_because(app, gid, user, None).await
+}
+
+/// [`quarantine`] with an audit log reason.
+pub(crate) async fn quarantine_because(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    reason: Option<&str>,
+) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let member = app.http.guild_member(gid, user).await?.model().await?;
     // Read before the row is written, so a failed read leaves no quarantine row behind.
@@ -444,7 +454,12 @@ pub(crate) async fn quarantine(
         .await?
         .rows_affected()
         == 1;
-    if let Err(e) = app.http.update_guild_member(gid, user).roles(&roles).await {
+    let update = app.http.update_guild_member(gid, user).roles(&roles);
+    let update = match reason {
+        Some(r) => update.reason(r),
+        None => update,
+    };
+    if let Err(e) = update.await {
         // Role too low or permission missing: they are not quarantined, so no row may say so.
         if fresh {
             sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2")

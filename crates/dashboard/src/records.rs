@@ -41,6 +41,7 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{g}/cases/{{no}}"), post(case_edit))
         .route(&format!("{g}/cases/{{no}}/delete"), post(case_delete))
         .route(&format!("{g}/raid_log"), get(raid_log))
+        .route(&format!("{g}/joingate_log"), get(joingate_log))
         .route(&format!("{g}/notes"), get(notes).post(note_add))
         .route(&format!("{g}/notes/sweep"), post(note_sweep))
         .route(&format!("{g}/notes/{{id}}"), post(note_edit))
@@ -97,6 +98,48 @@ async fn raid_log(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -
         accounts.push(json!({"user_id": user, "name": name, "at": at}));
     }
     Ok(Json(json!(raids)))
+}
+
+#[derive(Deserialize)]
+struct Page {
+    #[serde(default)]
+    page: i64,
+}
+
+/// Join Gate punishments, newest first: what matched, the bot and who added it, and Discord's refusal.
+async fn joingate_log(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Query(p): Query<Page>,
+) -> Res {
+    api::staff(&st, &s, guild, &["cases"]).await?;
+    type Row = (
+        String,
+        bool,
+        Option<String>,
+        Value,
+        String,
+        String,
+        bool,
+        Option<String>,
+        At,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "select user_id::text, is_bot, adder_id::text, filters, reason, action, ok, error, created_at
+         from joingate_actions where guild_id = $1 order by id desc limit 50 offset $2",
+    )
+    .bind(guild)
+    .bind(offset(p.page))
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(json!(rows
+        .into_iter()
+        .map(|(user, bot, adder, filters, reason, action, ok, error, at)| json!({
+            "user_id": user, "is_bot": bot, "adder_id": adder, "filters": filters, "reason": reason,
+            "action": action, "ok": ok, "error": error, "at": at
+        }))
+        .collect::<Vec<_>>())))
 }
 
 fn esc(s: &str) -> String {

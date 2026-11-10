@@ -21,6 +21,8 @@ fs.mkdirSync(out, { recursive: true });
   await page.screenshot({ path: `${out}/servers.png` });
   await page.locator('.card').first().click();
   await page.waitForSelector('nav a, .side a, aside a', { timeout: 15000 });
+  // the sidebar's server links render after the header's
+  await page.waitForFunction(() => document.querySelectorAll('a[href^="#/"]').length > 10, null, { timeout: 15000 });
 
   const links = [...new Set(await page.$$eval('a[href^="#/"]', (as) => as.map((a) => a.getAttribute('href'))))]
     .filter((h) => /^#\/\d+\//.test(h));
@@ -72,6 +74,21 @@ fs.mkdirSync(out, { recursive: true });
   await card.locator('summary', { hasText: 'History (1)' }).click({ timeout: 5000 }).catch(() => failed.push('notes: no history after edit'));
   if (!(await card.locator('li', { hasText: `first note ${tag} → edited note ${tag}` }).count())) failed.push('notes: history misses the change');
   await page.screenshot({ path: `${out}/notes_history.png` });
+  // Log setup reuses the public "Logs" category and makes it private (hides it from @everyone).
+  const gid = links[0].match(/^#\/(\d+)\//)[1];
+  // Setup is a sensitive action; mark the session as stepped up instead of driving TOTP.
+  require('child_process').execSync(`psql "${process.env.DATABASE_URL}" -qc "update dash_session set step_up_until = now() + interval '1 hour'"`);
+  const setup = await page.evaluate(async (g) => {
+    const csrf = (await (await fetch('/api/me')).json()).csrf;
+    const { version } = await (await fetch(`/api/guilds/${g}/config`)).json();
+    const r = await fetch(`/api/guilds/${g}/logging/setup`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
+      body: JSON.stringify({ expected_version: version }),
+    });
+    return `${r.status} ${await r.text()}`;
+  }, gid);
+  const after = await (await fetch('http://127.0.0.1:9100/sent')).json();
+  if (!after.some((m) => m.path === `/channels/300000000000000002/permissions/${gid}`)) failed.push(`log setup: public Logs category not made private (${setup})`);
   // Update page: the mock user owns the app; no updater runs here, so the page says how to start it.
   await page.goto(`${base}/#/update`);
   await page.waitForSelector('text=The updater is not running', { timeout: 5000 }).catch(() => failed.push('update: no updater notice'));

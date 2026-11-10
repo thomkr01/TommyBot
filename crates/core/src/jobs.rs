@@ -89,6 +89,40 @@ pub async fn finish(pool: &PgPool, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// The pending, unclaimed `kind` job for `user` (payload `user`) as (id, run_at secs, payload).
+pub async fn of_user(
+    pool: &PgPool,
+    guild: i64,
+    kind: &str,
+    user: u64,
+) -> Result<Option<(i64, i64, Value)>> {
+    Ok(sqlx::query_as(
+        "SELECT id, extract(epoch from run_at)::bigint, payload FROM scheduled_jobs
+         WHERE guild_id = $1 AND kind = $2 AND payload->>'user' = $3
+           AND (locked_until IS NULL OR locked_until < now())
+         ORDER BY run_at LIMIT 1",
+    )
+    .bind(guild)
+    .bind(kind)
+    .bind(user.to_string())
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Moves a pending job to a new time and payload.
+pub async fn reschedule(pool: &PgPool, id: i64, run_at_secs: i64, payload: Value) -> Result<()> {
+    sqlx::query(
+        "UPDATE scheduled_jobs SET run_at = to_timestamp($2::float8), payload = $3
+         WHERE id = $1 AND (locked_until IS NULL OR locked_until < now())",
+    )
+    .bind(id)
+    .bind(run_at_secs as f64)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Pending jobs of one kind as (guild, payload), for rebuilding in-memory state at boot.
 pub async fn pending(pool: &PgPool, kind: &str) -> Result<Vec<(i64, Value)>> {
     Ok(
@@ -226,6 +260,27 @@ mod tests {
             ["unban"]
         );
         clean(pool, gid).await;
+    }
+
+    /// Future jobs only, so the claim test never takes them.
+    #[tokio::test]
+    async fn reschedule_moves_a_users_job() {
+        let Some((pool, gid)) = setup(4).await else {
+            return;
+        };
+        let at = now() + 600;
+        let job = serde_json::json!({"user": 42});
+        enqueue(&pool, gid, "v", job.clone(), at).await.unwrap();
+        assert!(of_user(&pool, gid, "v", 43).await.unwrap().is_none());
+        let (id, run_at, payload) = of_user(&pool, gid, "v", 42).await.unwrap().unwrap();
+        assert_eq!((run_at, &payload), (at, &job));
+        let moved = serde_json::json!({"user": 42, "paused_until": at});
+        reschedule(&pool, id, at + 300, moved.clone())
+            .await
+            .unwrap();
+        let got = of_user(&pool, gid, "v", 42).await.unwrap().unwrap();
+        assert_eq!(got, (id, at + 300, moved));
+        clean(&pool, gid).await;
     }
 
     /// Called from the claim test: claim_due takes every guild's rows, so it cannot run in parallel.

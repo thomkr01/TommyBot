@@ -594,6 +594,13 @@ pub fn schema() -> Vec<Value> {
             fg("General", "require_all", "bool"),
             "Act only when every enabled filter matches",
         ),
+        hp(
+            ti(
+                dv(fg("General", "exclude_trusted_bots", "bool"), false),
+                "Exclude bots added by the owner or an Extra Owner",
+            ),
+            "Bots added by the owner or an Extra Owner skip the account filters. Trusted Admins and other admins do not count. If one of those accounts is taken over, a bot added through it is let in. Keep this off unless you need it.",
+        ),
     ];
     // (key, card, status label, filter whose default action the select shows).
     for (k, card, status, filter) in [
@@ -922,6 +929,13 @@ pub fn schema() -> Vec<Value> {
             ),
             "Kick, Ban and Quarantine run when the verification duration ends after the join.",
         ),
+        hp(
+            ti(
+                dv(fg("General", "audit_reason", "bool"), true),
+                "Add a reason to the audit log when the time limit runs out",
+            ),
+            "Kicks, bans and quarantines at the time limit show \"Did not verify within the time limit\" in the server's audit log.",
+        ),
         dv(
             ti(
                 choice(
@@ -946,14 +960,20 @@ pub fn schema() -> Vec<Value> {
             fg("General", "regen_ms", "int"),
             "New captcha image every (milliseconds, empty is off)",
         ),
-        dv(
-            ti(
-                fg("General", "time_limit_ms", "int"),
-                "Verification duration",
+        hp(
+            dv(
+                ti(
+                    fg("General", "time_limit_ms", "int"),
+                    "Verification duration",
+                ),
+                120_000,
             ),
-            120_000,
+            "The time limit pauses while a member is timed out.",
         ),
-        ti(fg("General", "channel", "channel"), "Verification channel"),
+        hp(
+            ti(fg("General", "channel", "channel"), "Verification channel"),
+            "If the verification channel is deleted, TommyBot makes a new one (up to 3 in 10 minutes), tells the owner, and quarantines whoever deleted it. Owners, Extra Owners and Trusted Admins only get a warning the first time.",
+        ),
         ti(fg("General", "roles", "roles"), "Verification roles"),
         unless(
             ti(

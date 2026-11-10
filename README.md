@@ -12,7 +12,7 @@ TommyBot is a fast, all-in-one Discord security and moderation bot written in Ru
 
 ## Features
 
-- **Anti-nuke and panic mode**: limits on mass bans, kicks, channel, role and webhook changes, with quarantine, automatic revert and a panic lockdown.
+- **Anti-nuke and panic mode**: limits on mass bans, kicks, channel, role and webhook changes, with quarantine, automatic revert and a short panic lockdown. A nuking bot stays in the server with its role emptied and in quarantine, channels it made are sanitized, and every panic sends one report of who was contained and what was restored.
 - **Automod**: a heat system that scores every message for spam, mentions, links, invites, caps, emojis and more, catches coordinated spam across accounts, reads QR codes in images to stop account-stealing login codes, and punishes with escalating strikes.
 - **Join gate and join raid**: screen new accounts and bots, and lock the server when a raid starts.
 - **Lockdown**: lock one channel, a category or the whole server, on a timer if you like, and unlock exactly what was locked.

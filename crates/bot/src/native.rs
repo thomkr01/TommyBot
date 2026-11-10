@@ -115,8 +115,30 @@ async fn native_action(
             )
             .await?
         }
-        BotAction::Kick => punish(app, cfg, gid, uid.get(), Action::Kick, WHY).await?,
-        BotAction::Ban => punish(app, cfg, gid, uid.get(), Action::Ban, WHY).await?,
+        BotAction::Kick => {
+            punish(
+                app,
+                cfg,
+                gid,
+                uid.get(),
+                Action::Kick,
+                WHY,
+                Default::default(),
+            )
+            .await?
+        }
+        BotAction::Ban => {
+            punish(
+                app,
+                cfg,
+                gid,
+                uid.get(),
+                Action::Ban,
+                WHY,
+                Default::default(),
+            )
+            .await?
+        }
         BotAction::Lock => {
             let sub = cfg
                 .discord_automod

@@ -24,6 +24,7 @@ The bot keeps data in a PostgreSQL database. It stores:
 | **Quarantine and lockdown records** (saved role IDs, lock snapshots). | To restore roles and channel permissions when a quarantine or lock ends. | Removed when the quarantine or lock is released. |
 | **Scheduled jobs** (for example, a timed ban or timeout). | To run them after a restart. | Removed when the job runs. |
 | **Server backups** (roles, channels, permission overwrites, as JSON). | `/backup` and nuke recovery. | A new backup is taken every 3 hours. Only the 10 most recent per server are kept. |
+| **Join Gate records** (the punished user's ID, whether it is a bot and who added it, the filters that matched, the action, and Discord's error if it failed). | To show staff every Join Gate action on the dashboard. | 30 days, and at most the 1,000 newest per server. |
 | **Nuke incident records** (who was quarantined and what was reverted). | Recovery history after an attack. | Until deletion is requested. |
 | **Dashboard sessions** (your Discord user ID and username, your Discord OAuth access token, a CSRF token, and a step-up timestamp). | To keep you signed in to the dashboard. | 7 days from sign-in, then expired. |
 | **Dashboard two-factor setup** (your user ID and TOTP secret). | Optional second factor for dashboard changes. | Until you remove it or deletion is requested. |

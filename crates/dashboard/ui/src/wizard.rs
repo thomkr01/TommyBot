@@ -276,7 +276,7 @@ pub const JOINGATE: &[Card] = &[Card {
     ("joingate.username_filter.enabled", "Accounts that have certain names"),
     ("joingate.username_strict", "Strict words"),
     ("joingate.username_terms", "Wildcard words"),
-], |c, _| text(if on(c, "joingate.enabled", false) { "New members are checked the moment they join." } else { "Join Gate is off." })))
+], |c, _| view! { {text(if on(c, "joingate.enabled", false) { "New members are checked the moment they join." } else { "Join Gate is off." })}{show("joingate_kick")} }.into_any()))
 }];
 
 pub const JOINRAID: &[Card] = &[Card {
@@ -316,7 +316,7 @@ pub const VERIFICATION: &[Card] = &[Card {
                 "SimpleCaptcha" => (Some(("bad", "This is very weak!")), show("verify_simple")),
                 _ => (None, show("verify_captcha")),
             };
-            view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after} }.into_any()
+            view! { {chip.map(|(k, t)| view! { <span class=format!("chip {k}")>{t}</span> })}{show("verify_panel")}<p class="muted">"After pressing Verify:"</p>{after}<p class="muted">"After pressing Help:"</p>{show("verify_help")} }.into_any()
         },
     )
 }];
