@@ -264,16 +264,18 @@ async fn fix(
         .await
     };
     if b.move_under_bot {
-        let q = roles
-            .iter()
-            .find(|r| r.id.to_string() == target)
-            .ok_or(ApiError::NotFound)?;
-        let moves = move_under_bot(roles, q, l.bot_pos, &l.setup.bot_roles);
-        if moves.is_empty() {
+        let moves = target
+            .parse()
+            .map(|t| move_under_bot(roles, t, l.bot_pos, &l.setup))
+            .unwrap_or_default();
+        let Some(q) = moves
+            .first()
+            .and_then(|(id, _)| roles.iter().find(|r| r.id == *id))
+        else {
             return Err(ApiError::BadRequest(
-                "the role is already right below the bot".into(),
+                "only the quarantine role can be moved, and only when a role sits between it and the bot".into(),
             ));
-        }
+        };
         let backup = backup().await?;
         let body: Vec<Value> = moves
             .iter()
@@ -432,7 +434,13 @@ struct RevertBody {
 }
 
 async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<()> {
-    let (m, path, body) = match inv {
+    let (m, path, body) = inverse_request(guild, inv);
+    st.discord.call(m, &path, body).await.map(drop)
+}
+
+/// The Discord call that undoes `inv`.
+fn inverse_request(guild: i64, inv: &Inverse) -> (Method, String, Option<Value>) {
+    match inv {
         Inverse::Unban { user } => (Method::DELETE, format!("/guilds/{guild}/bans/{user}"), None),
         Inverse::Ban { user } => (Method::PUT, format!("/guilds/{guild}/bans/{user}"), None),
         Inverse::Timeout { user, until } => (
@@ -458,8 +466,7 @@ async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result
         Inverse::Unquarantine { .. } | Inverse::Reinvite { .. } => {
             unreachable!("handled by the caller")
         }
-    };
-    st.discord.call(m, &path, body).await.map(drop)
+    }
 }
 
 async fn revert(
@@ -660,6 +667,13 @@ async fn rescue_claim(State(st): State<AppState>, s: Sess, Json(b): Json<Claim>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_role_permissions_are_restored_on_the_role() {
+        let (m, path, body) = inverse_request(5, &Inverse::RolePerms { id: 7, perms: 8 });
+        assert_eq!((m, path.as_str()), (Method::PATCH, "/guilds/5/roles/7"));
+        assert_eq!(body, Some(json!({"permissions": "8"})));
+    }
 
     #[tokio::test]
     async fn claim_needs_key_and_code_once() {

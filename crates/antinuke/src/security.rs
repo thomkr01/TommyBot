@@ -215,20 +215,28 @@ pub fn between_bot_and<'a>(
     v
 }
 
-/// New `(role, position)` pairs that put `q` right below the bot: the roles in between and `q`
-/// trade positions, so no role outside that block moves.
+/// New `(role, position)` pairs that put the quarantine role right below the bot: the roles in
+/// between and it trade positions, so no role outside that block moves. Empty for any other role,
+/// so the fix cannot lift a staff role up the list.
 pub fn move_under_bot(
     roles: &[RoleImg],
-    q: &RoleImg,
+    target: u64,
     bot_top: i64,
-    bot_roles: &[u64],
+    setup: &Setup,
 ) -> Vec<(u64, i64)> {
-    let mid = between_bot_and(roles, q, bot_top, bot_roles);
+    let Some(q) = roles
+        .iter()
+        .find(|r| r.id == target && setup.quarantine_role == Some(target))
+    else {
+        return vec![];
+    };
+    let mid = between_bot_and(roles, q, bot_top, &setup.bot_roles);
     let Some(top) = mid.first() else {
         return vec![];
     };
+    // A role tied with the bot's position may not take that position itself.
     let below = mid.iter().skip(1).map(|r| r.position).chain([q.position]);
-    std::iter::once((q.id, top.position))
+    std::iter::once((q.id, top.position.min(bot_top - 1)))
         .chain(mid.iter().map(|r| r.id).zip(below))
         .collect()
 }
@@ -739,11 +747,20 @@ mod tests {
             role(9, 2, false, 0),
             role(4, 1, false, 0),
         ];
+        let mut s = setup(Some(9), true);
+        s.bot_roles = vec![50];
         assert_eq!(
-            move_under_bot(&roles, &roles[3], 5, &[50]),
+            move_under_bot(&roles, 9, 5, &s),
             vec![(9, 4), (2, 3), (3, 2)]
         );
-        assert!(move_under_bot(&roles, &roles[1], 5, &[50]).is_empty());
+        // Only the quarantine role can be moved, and only when it is not already in place.
+        assert!(move_under_bot(&roles, 3, 5, &s).is_empty());
+        s.quarantine_role = Some(2);
+        assert!(move_under_bot(&roles, 2, 5, &s).is_empty());
+        // A role tied with the bot: the quarantine role goes just below the bot's position.
+        let tied = [bot.clone(), role(60, 5, false, 0), role(9, 2, false, 0)];
+        s.quarantine_role = Some(9);
+        assert_eq!(move_under_bot(&tied, 9, 5, &s), vec![(9, 4), (60, 2)]);
         // Above the bot: only the "above" row.
         assert_eq!(row(&[bot, role(9, 6, false, 0)]), (None, true));
         let f = Fix {

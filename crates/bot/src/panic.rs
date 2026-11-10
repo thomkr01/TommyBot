@@ -174,8 +174,11 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     crate::reply::alert_owner(app, gid, "Panic mode started").await;
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
+            // A failed step is logged, so the report below is still sent.
             PanicStep::LockServer => {
-                lockdown::lock(app, gid, LockKind::Role).await?;
+                if let Err(e) = lockdown::lock(app, gid, LockKind::Role).await {
+                    tracing::warn!(?e, "panic: locking the server failed");
+                }
             }
             PanicStep::PingWarnedRoles => {
                 let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
@@ -185,7 +188,11 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
                     .text(&format!(
                         "{ARROW} TommyBot will lockdown the server and run a scan."
                     ));
-                send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
+                if let Err(e) =
+                    send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await
+                {
+                    tracing::warn!(?e, "panic: pinging the warned roles failed");
+                }
             }
             // Mod commands are gated by `panic_runs`, and the involved accounts were quarantined
             // by the verdicts that tripped panic mode.

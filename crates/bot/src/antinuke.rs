@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use std::{
     collections::HashMap,
+    future::Future,
     time::{Duration, Instant},
 };
 use tommybot_antinuke::{
@@ -420,6 +421,18 @@ pub(crate) async fn quarantine(
 ) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let member = app.http.guild_member(gid, user).await?.model().await?;
+    // Read before the row is written, so a failed read leaves no quarantine row behind.
+    let managed: Vec<_> = app
+        .http
+        .roles(gid)
+        .await?
+        .models()
+        .await?
+        .into_iter()
+        .filter(|r| r.managed)
+        .map(|r| r.id)
+        .collect();
+    let roles = quarantine_roles(cfg.antinuke.quarantine_role, &member.roles, &managed);
     let saved: Vec<i64> = member.roles.iter().map(|r| r.get() as i64).collect();
     // Keep the first saved list when quarantined twice. Saved before the roles go, so a crash
     // between the two never loses them.
@@ -431,23 +444,6 @@ pub(crate) async fn quarantine(
         .await?
         .rows_affected()
         == 1;
-    // Discord refuses a role list that drops a managed (bot or integration) role, so those stay.
-    let managed: Vec<_> = app
-        .http
-        .roles(gid)
-        .await?
-        .models()
-        .await?
-        .into_iter()
-        .filter(|r| r.managed && member.roles.contains(&r.id))
-        .map(|r| r.id)
-        .collect();
-    let roles: Vec<_> = cfg
-        .antinuke
-        .quarantine_role
-        .into_iter()
-        .chain(managed)
-        .collect();
     if let Err(e) = app.http.update_guild_member(gid, user).roles(&roles).await {
         // Role too low or permission missing: they are not quarantined, so no row may say so.
         if fresh {
@@ -460,6 +456,19 @@ pub(crate) async fn quarantine(
         return Err(e.into());
     }
     record_quarantine(app, gid, user).await
+}
+
+/// The role list a quarantined member keeps: the quarantine role, plus the managed (bot or
+/// integration) roles they hold, as Discord refuses a list that drops one.
+fn quarantine_roles(
+    quarantine: Option<Id<RoleMarker>>,
+    member: &[Id<RoleMarker>],
+    managed: &[Id<RoleMarker>],
+) -> Vec<Id<RoleMarker>> {
+    quarantine
+        .into_iter()
+        .chain(member.iter().copied().filter(|r| managed.contains(r)))
+        .collect()
 }
 
 /// Logs the bot's quarantine so the revert center can undo it. Written after the role change
@@ -643,36 +652,86 @@ async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Resu
             bot_role: None,
         });
     }
-    let role = bot_role(app, gid, actor)
-        .await
-        .inspect_err(|e| tracing::warn!(?e, "reading the bot's role failed"))
-        .ok()
-        .flatten();
-    let mut bot_role = role.map(|_| false);
-    for step in contain_plan(role.is_some()) {
-        let r = match (step, role) {
-            (ContainStep::ClearBotRole, Some((id, perms))) => clear_bot_role(app, gid, id, perms)
+    let role = bot_role(app, gid, actor).await;
+    let done = contain_bot(
+        role.as_ref()
+            .map(|r| *r)
+            .map_err(|e| anyhow::anyhow!("{e}")),
+        |(id, _)| async move {
+            app.http
+                .update_role(gid, id)
+                .permissions(Permissions::empty())
+                .reason(BOT_ROLE_REASON)
                 .await
-                .map(|()| bot_role = Some(true)),
-            (ContainStep::ClearBotRole, None) => Ok(()),
-            (ContainStep::Quarantine, _) => quarantine(app, gid, actor).await,
-        };
-        if let Err(e) = r {
-            tracing::warn!(?e, ?step, "containing a bot failed, kicking it");
+                .map(drop)
+                .map_err(Into::into)
+        },
+        || quarantine(app, gid, actor),
+        || async move {
             app.http
                 .remove_guild_member(gid, actor)
                 .reason(BOT_ROLE_REASON)
-                .await?;
-            return Ok(Contained {
-                applied: Applied::Kicked,
-                bot_role,
-            });
+                .await
+                .map(drop)
+                .map_err(Into::into)
+        },
+    )
+    .await?;
+    // Logged only once the bot stays: a kick deletes its managed role, leaving nothing to restore.
+    if let (Applied::Quarantined, Some(true), Ok(Some((id, perms)))) =
+        (done.applied, done.bot_role, role)
+    {
+        record_bot_role(app, gid, id, perms).await?;
+    }
+    Ok(done)
+}
+
+/// A bot's contain steps from [`contain_plan`]; a failed step, or a failed lookup of its role,
+/// ends in a kick.
+async fn contain_bot<R: Copy, C, Q, K>(
+    role: Result<Option<R>>,
+    clear: impl FnOnce(R) -> C,
+    quarantine: impl FnOnce() -> Q,
+    kick: impl FnOnce() -> K,
+) -> Result<Contained>
+where
+    C: Future<Output = Result<()>>,
+    Q: Future<Output = Result<()>>,
+    K: Future<Output = Result<()>>,
+{
+    let (mut clear, mut quarantine) = (Some(clear), Some(quarantine));
+    let (role, mut bot_role, mut failed) = match role {
+        Ok(r) => (r, r.map(|_| false), None),
+        Err(e) => (None, None, Some(e)),
+    };
+    if failed.is_none() {
+        for step in contain_plan(role.is_some()) {
+            let r = match (step, role) {
+                (ContainStep::ClearBotRole, Some(r)) => match clear.take() {
+                    Some(f) => f(r).await.map(|()| bot_role = Some(true)),
+                    None => Ok(()),
+                },
+                (ContainStep::ClearBotRole, None) => Ok(()),
+                (ContainStep::Quarantine, _) => match quarantine.take() {
+                    Some(f) => f().await,
+                    None => Ok(()),
+                },
+            };
+            if let Err(e) = r {
+                failed = Some(e);
+                break;
+            }
         }
     }
-    Ok(Contained {
-        applied: Applied::Quarantined,
-        bot_role,
-    })
+    let applied = match failed {
+        None => Applied::Quarantined,
+        Some(e) => {
+            tracing::warn!(?e, "containing a bot failed, kicking it");
+            kick().await?;
+            Applied::Kicked
+        }
+    };
+    Ok(Contained { applied, bot_role })
 }
 
 /// The bot's own managed role (Discord tags it with the bot's id) and its permissions.
@@ -688,18 +747,14 @@ async fn bot_role(
         .map(|r| (r.id, r.permissions.bits())))
 }
 
-/// Sets the role to no permissions and logs the old ones, so the revert center can put them back.
-async fn clear_bot_role(
+/// Logs the bot role's old permissions, so the revert center can put them back.
+// shortcut: twilight drops permission bits newer than it knows; read the raw string if Discord adds some.
+async fn record_bot_role(
     app: &App,
     gid: Id<GuildMarker>,
     role: Id<RoleMarker>,
     perms: u64,
 ) -> Result<()> {
-    app.http
-        .update_role(gid, role)
-        .permissions(Permissions::empty())
-        .reason(BOT_ROLE_REASON)
-        .await?;
     sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
         .bind(gid.get() as i64)
         .bind(app.me.get() as i64)
@@ -964,6 +1019,67 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quarantine_keeps_only_the_quarantine_role_and_managed_roles() {
+        let id = |n| Id::<RoleMarker>::new(n);
+        let got = quarantine_roles(Some(id(9)), &[id(1), id(2), id(3)], &[id(2), id(7)]);
+        assert_eq!(got, vec![id(9), id(2)]);
+        assert!(quarantine_roles(None, &[id(1)], &[]).is_empty());
+    }
+
+    /// Runs the bot steps with fake calls; `fail` names the call that errors.
+    async fn bot_run(role: Result<Option<u8>>, fail: &str) -> (Contained, Vec<&'static str>) {
+        let calls = std::cell::RefCell::new(vec![]);
+        let call = |name: &'static str| {
+            calls.borrow_mut().push(name);
+            if name == fail {
+                anyhow::bail!("{name} failed")
+            }
+            Ok(())
+        };
+        let done = contain_bot(
+            role,
+            |_| std::future::ready(call("clear")),
+            || std::future::ready(call("quarantine")),
+            || std::future::ready(call("kick")),
+        )
+        .await
+        .unwrap();
+        (done, calls.into_inner())
+    }
+
+    #[tokio::test]
+    async fn a_bot_is_kicked_only_when_clearing_or_quarantine_fails() {
+        let c = |applied, bot_role| Contained { applied, bot_role };
+        assert_eq!(
+            bot_run(Ok(Some(1)), "").await,
+            (
+                c(Applied::Quarantined, Some(true)),
+                vec!["clear", "quarantine"]
+            )
+        );
+        assert_eq!(
+            bot_run(Ok(None), "").await,
+            (c(Applied::Quarantined, None), vec!["quarantine"])
+        );
+        assert_eq!(
+            bot_run(Ok(Some(1)), "clear").await,
+            (c(Applied::Kicked, Some(false)), vec!["clear", "kick"])
+        );
+        assert_eq!(
+            bot_run(Ok(Some(1)), "quarantine").await,
+            (
+                c(Applied::Kicked, Some(true)),
+                vec!["clear", "quarantine", "kick"]
+            )
+        );
+        // The bot's role could not be read: it may still hold it, so it is kicked.
+        assert_eq!(
+            bot_run(Err(anyhow::anyhow!("rate limited")), "").await,
+            (c(Applied::Kicked, None), vec!["kick"])
+        );
+    }
 
     #[test]
     fn only_dangerous_roles_below_the_bot_are_taken() {
