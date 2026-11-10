@@ -478,28 +478,6 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             return commands::say(app, msg, &text).await;
         }
     };
-    // A raw id or a name can hit the wrong member, a mention can't.
-    let typed: Vec<u64> = p.targets.iter().copied().filter(|t| *t >= SMALL).collect();
-    let unsure = users.len() > typed.len() || typed.iter().any(|t| !p.mentioned.contains(t));
-    let action = Action::Ext {
-        cmd,
-        channel: msg.channel_id,
-        reason: p.reason.clone(),
-        proof: None,
-        users: users.clone(),
-        unsure,
-        dm: p.flags.dm,
-    };
-    let job = Pending::new(gid, msg.author.id, action);
-    if job.needs_confirm(app.cfg(gid.get()).await?.misc.confirm) {
-        if !failed.is_empty() {
-            commands::say(app, msg, &failed.join("\n")).await?;
-        }
-        return confirm::ask_confirm(app, msg, job).await;
-    }
-    let Action::Ext { cmd, .. } = job.into_action() else {
-        unreachable!("built as Ext above")
-    };
     let kind = cmd.result_kind();
     let shown = (
         Flags {
@@ -510,30 +488,23 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
     );
     let private = matches!(cmd, ModCmd::NoteAdd { .. } | ModCmd::NoteList { .. });
     let paged = cmd.paged_user();
-    let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
-    let cmds = if cmds.is_empty() { vec![cmd] } else { cmds };
-    let mut texts = vec![];
-    for cmd in cmds {
-        // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
-        let level = app.level(gid, owner, msg.author.id).await?;
-        texts.push(
-            run(
-                app,
-                gid,
-                owner,
-                (msg.author.id, &level),
-                msg.channel_id,
-                cmd,
-                (p.reason.as_deref(), None),
-                p.flags.dm,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(?e, "mod command failed");
-                format!("Command failed: {}", crate::http_err::why(&e)).into()
-            }),
-        );
+    let action = Action::Ext {
+        cmd,
+        channel: msg.channel_id,
+        reason: p.reason.clone(),
+        proof: None,
+        users,
+        unsure: p.unsure(),
+        dm: p.flags.dm,
+    };
+    let job = Pending::new(gid, msg.author.id, action);
+    if job.needs_confirm(app.cfg(gid.get()).await?.misc.confirm) {
+        if !failed.is_empty() {
+            commands::say(app, msg, &failed.join("\n")).await?;
+        }
+        return confirm::ask_confirm(app, msg, job).await;
     }
+    let mut texts = job.run(app, owner, 0).await?;
     texts.extend(failed.into_iter().map(Applied::from));
     let compact = app.cfg(gid.get()).await?.misc.compact_replies || p.flags.compact;
     let (text, embeds) = reply_parts(

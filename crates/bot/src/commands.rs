@@ -519,14 +519,13 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         return Ok(());
     }
     let mut targets: Vec<Id<UserMarker>> = p.targets.iter().map(|t| Id::new(*t)).collect();
-    // A raw id or a name can hit the wrong member, a mention can't.
-    let unsure = !p.names.is_empty() || p.targets.iter().any(|t| !p.mentioned.contains(t));
     for n in &p.names {
         match targets::resolve(app, gid, n).await? {
             Ok(id) => targets.push(id),
             Err(e) => say(app, msg, &e).await?,
         }
     }
+    let unsure = p.unsure();
     let job = Pending::new(
         gid,
         msg.author.id,

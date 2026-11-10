@@ -19,6 +19,13 @@ pub struct Parsed {
     pub flags: Flags,
 }
 
+impl Parsed {
+    /// A target typed as a raw id or a name can hit the wrong member, a mention can't.
+    pub fn unsure(&self) -> bool {
+        !self.names.is_empty() || self.targets.iter().any(|t| !self.mentioned.contains(t))
+    }
+}
+
 /// Command aliases -> (canonical command, implied `?t` type).
 fn alias(cmd: &str) -> (&str, Option<&str>) {
     match cmd {
@@ -174,6 +181,9 @@ mod tests {
         assert_eq!(p.command, "ban");
         assert_eq!(p.targets, vec![111, 222]);
         assert_eq!(p.mentioned, vec![111]);
+        assert!(p.unsure());
+        assert!(!parse("ban <@111> ?r x").unwrap().unsure());
+        assert!(parse("ban alice").unwrap().unsure());
         assert_eq!(p.duration_s, Some(432_000));
         assert_eq!(p.reason.as_deref(), Some("spamming links"));
         assert!(p.flags.dm);

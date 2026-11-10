@@ -74,10 +74,6 @@ impl Pending {
         Self { gid, actor, action }
     }
 
-    pub fn into_action(self) -> Action {
-        self.action
-    }
-
     /// Mod commands ask when a target was typed as an id or a name (a mention is sure), and
     /// hackbans always; destructive extras (purge, note sweep) always ask.
     /// `enabled` is the server's `misc.confirm`: off never asks.
