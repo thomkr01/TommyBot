@@ -198,7 +198,7 @@ pub async fn apply_dm(
         moderator: (!cfg.misc.hide_staff_in_dms).then_some(actor_id),
         appeal,
     };
-    let dm = (flags.dm || cfg.misc.always_dm).then(|| reply::tell(app, gid, target, notice));
+    let dm = reply::wants_dm(flags.dm, &cfg.misc).then(|| reply::tell(app, gid, target, notice));
     let audit = audit_reason(reason, actor_id);
     let act = async {
         anyhow::Ok(match kind {
@@ -522,7 +522,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             unsure,
         },
     );
-    if cfg.misc.confirm && job.needs_confirm() {
+    if job.needs_confirm(cfg.misc.confirm) {
         return ask_confirm(app, msg, job).await;
     }
     let done = job.run(app, owner, cfg.misc.warn_base_points).await?;
@@ -923,6 +923,9 @@ mod tests {
             channel: Id::new(7),
             reason: None,
             proof: None,
+            users: vec![5],
+            unsure: true,
+            dm: false,
         };
         let Action::Ext { cmd, channel, .. } =
             serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap()

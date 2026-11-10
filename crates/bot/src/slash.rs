@@ -502,7 +502,7 @@ async fn run(
     let mut ask = async |action| -> Result<Option<String>> {
         let job = Pending::new(gid, actor_id, action);
         // User context menus act at once (no reason, no confirm).
-        if data.kind == CommandType::User || !(cfg_confirm && job.needs_confirm()) {
+        if data.kind == CommandType::User || !job.needs_confirm(cfg_confirm) {
             return Ok(None);
         }
         let (question, row) = confirm::stash_confirm(app, i.id.get(), job).await?;
@@ -598,12 +598,17 @@ async fn run(
                 channel: ch,
                 reason: reason.clone(),
                 proof: proof.clone(),
+                users: vec![],
+                // Slash options are picked members, as sure as a mention.
+                unsure: false,
+                dm: flag(flatten(&data.name, &data.options).1, "dm"),
             };
             if let Some(q) = ask(action).await? {
                 return Ok(q);
             }
             let paged = c.paged_user();
             let result_kind = c.result_kind();
+            let shown = (c.flags(), None);
             let dm = flag(flatten(&data.name, &data.options).1, "dm");
             let done = modcmds::run(
                 app,
@@ -627,7 +632,7 @@ async fn run(
                 result_kind,
                 compact,
                 &[done],
-                (Default::default(), None),
+                shown,
                 reason.as_deref(),
                 actor_id.get(),
             );

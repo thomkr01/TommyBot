@@ -189,8 +189,24 @@ impl ModCmd {
         }
     }
 
+    /// The result Details flags this command implies: a hackban shows Hack Ban ✅.
+    pub(crate) fn flags(&self) -> Flags {
+        Flags {
+            hack: matches!(self, Self::Hackban { .. }),
+            ..Flags::default()
+        }
+    }
+
+    /// Quarantine, unquarantine and unban ask Yes/No when a member was typed as an id or a name.
+    pub fn asks_when_unsure(&self) -> bool {
+        matches!(
+            self,
+            Self::Quarantine { .. } | Self::Unquarantine { .. } | Self::Unban { .. }
+        )
+    }
+
     /// These take several members; the prefix runs one copy per member.
-    fn with_user(&self, u: u64) -> Option<Self> {
+    pub(crate) fn with_user(&self, u: u64) -> Option<Self> {
         Some(match self {
             Self::Unban { .. } => Self::Unban { user: u },
             Self::Untimeout { .. } => Self::Untimeout { user: u },
@@ -462,16 +478,36 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             return commands::say(app, msg, &text).await;
         }
     };
-    if app.cfg(gid.get()).await?.misc.confirm && cmd.destructive() {
-        let action = Action::Ext {
-            cmd,
-            channel: msg.channel_id,
-            reason: p.reason,
-            proof: None,
-        };
-        return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action)).await;
+    // A raw id or a name can hit the wrong member, a mention can't.
+    let typed: Vec<u64> = p.targets.iter().copied().filter(|t| *t >= SMALL).collect();
+    let unsure = users.len() > typed.len() || typed.iter().any(|t| !p.mentioned.contains(t));
+    let action = Action::Ext {
+        cmd,
+        channel: msg.channel_id,
+        reason: p.reason.clone(),
+        proof: None,
+        users: users.clone(),
+        unsure,
+        dm: p.flags.dm,
+    };
+    let job = Pending::new(gid, msg.author.id, action);
+    if job.needs_confirm(app.cfg(gid.get()).await?.misc.confirm) {
+        if !failed.is_empty() {
+            commands::say(app, msg, &failed.join("\n")).await?;
+        }
+        return confirm::ask_confirm(app, msg, job).await;
     }
+    let Action::Ext { cmd, .. } = job.into_action() else {
+        unreachable!("built as Ext above")
+    };
     let kind = cmd.result_kind();
+    let shown = (
+        Flags {
+            hack: cmd.flags().hack,
+            ..p.flags
+        },
+        None,
+    );
     let private = matches!(cmd, ModCmd::NoteAdd { .. } | ModCmd::NoteList { .. });
     let paged = cmd.paged_user();
     let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
@@ -504,7 +540,7 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
         kind,
         compact,
         &texts,
-        (p.flags, None),
+        shown,
         p.reason.as_deref(),
         msg.author.id.get(),
     );
@@ -605,7 +641,7 @@ pub async fn run(
             moderator: (!cfg.misc.hide_staff_in_dms).then_some(actor_id),
             appeal: None,
         };
-        (dm || cfg.misc.always_dm).then(|| reply::tell(app, gid, Id::new(user), n))
+        reply::wants_dm(dm, &cfg.misc).then(|| reply::tell(app, gid, Id::new(user), n))
     };
     let mut told = DmOutcome::Off;
     // (case kind, case user, inverse, reason prefix, reply)

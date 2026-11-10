@@ -266,6 +266,11 @@ pub async fn dm_and_act<T>(
     }
 }
 
+/// A punishment DM goes out when the server's switch is on or the moderator added `?dm`.
+pub fn wants_dm(forced: bool, misc: &tommybot_core::sections::MiscCfg) -> bool {
+    forced || misc.always_dm
+}
+
 /// Punishments DM before they act; their removals act first.
 pub fn dm_first(kind: &str) -> bool {
     !matches!(kind, "unquarantine" | "untimeout" | "unban")
@@ -771,6 +776,16 @@ mod tests {
             let (told, _) = dm_and_act(first, none.clone(), async { anyhow::Ok(()) }).await;
             assert_eq!(told, DmOutcome::Off);
         }
+    }
+
+    #[test]
+    fn one_switch_for_every_dm() {
+        let mut misc = tommybot_core::sections::MiscCfg::default();
+        assert!(misc.always_dm, "on by default");
+        assert!(wants_dm(false, &misc));
+        misc.always_dm = false;
+        assert!(!wants_dm(false, &misc));
+        assert!(wants_dm(true, &misc), "?dm still sends one");
     }
 
     #[test]

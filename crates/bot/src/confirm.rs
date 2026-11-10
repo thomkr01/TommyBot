@@ -49,6 +49,14 @@ pub enum Action {
         reason: Option<String>,
         #[serde(default)]
         proof: Option<String>,
+        /// Quarantine, unquarantine and unban run once per member here; empty runs `cmd` as is.
+        #[serde(default)]
+        users: Vec<u64>,
+        #[serde(default)]
+        unsure: bool,
+        /// The `?dm` flag.
+        #[serde(default)]
+        dm: bool,
     },
 }
 
@@ -66,24 +74,36 @@ impl Pending {
         Self { gid, actor, action }
     }
 
+    pub fn into_action(self) -> Action {
+        self.action
+    }
+
     /// Mod commands ask when a target was typed as an id or a name (a mention is sure), and
     /// hackbans always; destructive extras (purge, note sweep) always ask.
-    pub fn needs_confirm(&self) -> bool {
-        match &self.action {
-            Action::Mod {
-                targets,
-                unsure,
-                flags,
-                ..
-            } => !targets.is_empty() && (*unsure || flags.hack),
-            Action::Ext { cmd, .. } => cmd.destructive(),
-        }
+    /// `enabled` is the server's `misc.confirm`: off never asks.
+    pub fn needs_confirm(&self, enabled: bool) -> bool {
+        enabled
+            && match &self.action {
+                Action::Mod {
+                    targets,
+                    unsure,
+                    flags,
+                    ..
+                } => !targets.is_empty() && (*unsure || flags.hack),
+                Action::Ext { cmd, unsure, .. } => {
+                    cmd.destructive() || (*unsure && cmd.asks_when_unsure())
+                }
+            }
     }
 
     fn question(&self) -> Embed {
         let target = match &self.action {
             Action::Mod { targets, .. } => {
                 let who: Vec<String> = targets.iter().map(|t| format!("<@{t}> [`{t}`]")).collect();
+                who.join("\n")
+            }
+            Action::Ext { users, .. } if !users.is_empty() => {
+                let who: Vec<String> = users.iter().map(|t| format!("<@{t}> [`{t}`]")).collect();
                 who.join("\n")
             }
             Action::Ext { cmd, .. } => cmd.describe(),
@@ -120,24 +140,38 @@ impl Pending {
                 channel,
                 reason,
                 proof,
+                users,
+                dm,
+                ..
             } => {
-                let actor = app.level(self.gid, owner, self.actor).await?;
-                let done = modcmds::run(
-                    app,
-                    self.gid,
-                    owner,
-                    (self.actor, &actor),
-                    *channel,
-                    cmd.clone(),
-                    (reason.as_deref(), proof.as_deref()),
-                    false,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(?e, "mod command failed");
-                    format!("Command failed: {}", crate::http_err::why(&e)).into()
-                });
-                return Ok(vec![done]);
+                let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
+                let cmds = if cmds.is_empty() {
+                    vec![cmd.clone()]
+                } else {
+                    cmds
+                };
+                let mut out = vec![];
+                for cmd in cmds {
+                    // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
+                    let actor = app.level(self.gid, owner, self.actor).await?;
+                    let done = modcmds::run(
+                        app,
+                        self.gid,
+                        owner,
+                        (self.actor, &actor),
+                        *channel,
+                        cmd,
+                        (reason.as_deref(), proof.as_deref()),
+                        *dm,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(?e, "mod command failed");
+                        format!("Command failed: {}", crate::http_err::why(&e)).into()
+                    });
+                    out.push(done);
+                }
+                return Ok(out);
             }
         };
         let mut out = vec![];
@@ -442,7 +476,7 @@ impl Pending {
                 cmd.result_kind(),
                 compact,
                 done,
-                (Flags::default(), None),
+                (cmd.flags(), None),
                 reason.as_deref(),
                 actor,
             ),
@@ -482,14 +516,47 @@ mod tests {
     #[test]
     fn asks_only_for_ids_and_names() {
         for kind in [ModKind::Ban, ModKind::Kick, ModKind::Timeout, ModKind::Warn] {
-            assert!(!job(kind, false, false).needs_confirm(), "mention {kind:?}");
             assert!(
-                job(kind, true, false).needs_confirm(),
+                !job(kind, false, false).needs_confirm(true),
+                "mention {kind:?}"
+            );
+            assert!(
+                job(kind, true, false).needs_confirm(true),
                 "id or name {kind:?}"
             );
         }
         // A hackban always asks, a mention or not.
-        assert!(job(ModKind::Ban, false, true).needs_confirm());
+        assert!(job(ModKind::Ban, false, true).needs_confirm(true));
+        // The settings switch off: nothing asks, not even a hackban by id.
+        assert!(!job(ModKind::Ban, true, true).needs_confirm(false));
+        assert!(!job(ModKind::Warn, true, false).needs_confirm(false));
+    }
+
+    fn ext(cmd: ModCmd, unsure: bool) -> Pending {
+        let action = Action::Ext {
+            cmd,
+            channel: Id::new(2),
+            reason: None,
+            proof: None,
+            users: vec![5],
+            unsure,
+            dm: false,
+        };
+        Pending::new(Id::new(1), Id::new(9), action)
+    }
+
+    #[test]
+    fn quarantine_and_unban_ask_for_ids_too() {
+        for cmd in [
+            ModCmd::Quarantine { user: 5 },
+            ModCmd::Unquarantine { user: 5 },
+            ModCmd::Unban { user: 5 },
+        ] {
+            assert!(!ext(cmd.clone(), false).needs_confirm(true), "{cmd:?}");
+            assert!(ext(cmd, true).needs_confirm(true));
+        }
+        assert!(!ext(ModCmd::Untimeout { user: 5 }, true).needs_confirm(true));
+        assert!(ext(ModCmd::Hackban { user: 5 }, false).needs_confirm(true));
     }
 
     #[test]
