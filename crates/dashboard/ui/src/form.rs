@@ -990,9 +990,9 @@ pub fn Section(
                 {raw_editor(val, n.get_value(), msg)}
             </details>
         </Show>
-        <AnimatedShow when=Signal::derive(move || val.get() != orig.get()) hide_class="out" hide_delay=OUT>
+        <Fade when=Signal::derive(move || val.get() != orig.get())>
             <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| val.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
-        </AnimatedShow>
+        </Fade>
         <Toast msg />
         <StepUp need enrolled />
     }

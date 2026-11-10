@@ -590,13 +590,13 @@ pub fn PurgeData(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <p class="muted">"Deletes everything TommyBot stores for this server: settings, cases, logs, backups, tickets and permits. This cannot be undone. Data is also deleted automatically 30 days after TommyBot is removed."</p>
             <button class="danger" on:click=move |_| open.set(true)>"Delete all data"</button>
         </div>
-        <AnimatedShow when=open hide_class="out" hide_delay=OUT>
+        <Fade when=open>
             <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete server data" on:keydown=move |e| dialog_keys(&e, || open.set(false))><div class="card">
                 <p>"Type the server name "<b>{name}</b>" to delete all of its stored data."</p>
                 <input aria-label="server name" autocomplete="off" prop:value=typed on:input=move |e| typed.set(event_target_value(&e)) />
                 <div class="row"><button class="ghost" on:click=move |_| open.set(false)>"Abort"</button><button class="danger" disabled=move || !matches() on:click=purge>"Delete"</button></div>
             </div></div>
-        </AnimatedShow>
+        </Fade>
         <Toast msg />
         <StepUp need enrolled />
     }

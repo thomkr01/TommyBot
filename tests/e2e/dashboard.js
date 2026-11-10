@@ -101,8 +101,7 @@ fs.mkdirSync(out, { recursive: true });
   if (/num\(\)/i.test(await page.innerText('body'))) failed.push('automod: number field shows source code');
   // Cancel on a changed setting puts dropdowns back too: a plain `selected=` attribute stops counting once the user has picked.
   await page.goto(`${base}/${links[0].replace(/^(#\/\d+\/).*/, '$1logging')}`);
-  // A pick made before the config has loaded is overwritten by it, so let the page settle first.
-  await page.waitForTimeout(1500);
+  // No wait here on purpose: a change made right after the page loaded once got its bar hidden again (ui/PITFALLS.md #3).
   const drop = page.locator('select:has(option[value=""]:text-is("none"))').first();
   await drop.waitFor({ timeout: 5000 }).catch(() => failed.push('cancel: no channel dropdown on logging'));
   const was = await drop.inputValue();

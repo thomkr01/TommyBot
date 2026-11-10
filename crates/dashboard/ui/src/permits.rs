@@ -166,13 +166,13 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                         <button class="ghost" title="Edit Permit" on:click=move |_| start(i as i32)>"Edit"</button></td></tr>
                 }).collect_view()}
             </tbody></table>
-            <AnimatedShow when=Signal::derive(move || deleting.get().is_some()) hide_class="out" hide_delay=OUT>{move || del.get().map(|n| { let r = NodeRef::new(); focus_on_open(r); view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| dialog_keys(&e, || deleting.set(None))><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get_untracked()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
+            <Fade when=Signal::derive(move || deleting.get().is_some())>{move || del.get().map(|n| { let r = NodeRef::new(); focus_on_open(r); view! { <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete permit" on:keydown=move |e| dialog_keys(&e, || deleting.set(None))><div class="card"><p>{format!("Delete the permit \"{}\"?", cfg.get_untracked()["custom"][n]["name"].as_str().unwrap_or(""))}</p>
                 <div class="row"><button class="ghost" on:click=move |_| deleting.set(None)>"Abort"</button><button class="danger" on:click=move |_| { delete(n); deleting.set(None) }>"Delete"</button></div></div></div> } })}
-    </AnimatedShow>
-            <AnimatedShow when=Signal::derive(move || open.get().is_some()) hide_class="out" hide_delay=OUT>{move || dlg.get().map(|i| dialog(i))}</AnimatedShow>
-            <AnimatedShow when=Signal::derive(move || cfg.get() != orig.get()) hide_class="out" hide_delay=OUT>
+    </Fade>
+            <Fade when=Signal::derive(move || open.get().is_some())>{move || dlg.get().map(|i| dialog(i))}</Fade>
+            <Fade when=Signal::derive(move || cfg.get() != orig.get())>
                 <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| cfg.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
-            </AnimatedShow>
+            </Fade>
             <Toast msg />
             <StepUp need enrolled />
         }
