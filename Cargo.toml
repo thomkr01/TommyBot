@@ -15,10 +15,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "json", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
-twilight-gateway = "0.17"
-twilight-http = "0.17"
-twilight-model = "0.17"
-twilight-util = { version = "0.17", features = ["builder"] }
+twilight-gateway = "0.18"
+twilight-http = "0.18"
+twilight-model = "0.18"
+twilight-util = { version = "0.18", features = ["builder"] }
 twilight-cache-inmemory = "0.17"
 tommybot-core = { path = "crates/core" }
 tommybot-antinuke = { path = "crates/antinuke" }
