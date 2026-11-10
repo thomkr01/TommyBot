@@ -15,6 +15,8 @@ use twilight_model::{
     id::Id,
 };
 
+use crate::antinuke::Applied;
+use crate::panic::{self, Backup};
 use crate::{antinuke, automod, commands, joingate, prefix::Flags, reply, tickets, verify};
 use tommybot_core::sections::FilterAction;
 
@@ -164,7 +166,7 @@ fn messages() -> Value {
         reinvite: vec![],
         recreated: 5,
     };
-    let nuke = |auto, quarantined| {
+    let nuke = |applied, bot_role| {
         let why = format!(
             "{:?} limit reached (5/min, 20/hour)",
             tommybot_antinuke::Action::ChannelDelete
@@ -172,10 +174,23 @@ fn messages() -> Value {
         log(antinuke::report_log(
             (4152, "n7Kd2x"),
             ROGUE,
-            (auto, quarantined),
+            antinuke::Contained { applied, bot_role },
             &why,
             &sum,
         ))
+    };
+    let case = (
+        "9g5udu".to_string(),
+        json!({"quarantined": [ROGUE], "failed": [], "fragments": {ROGUE.to_string(): 8}}),
+    );
+    let gone = crate::backup::Counts {
+        created: 4,
+        deleted: 0,
+        updated: 1,
+    };
+    let restored = crate::backup::Summary {
+        channels: gone,
+        ..Default::default()
     };
     let raid = RaidCfg {
         action: Action::Kick,
@@ -215,8 +230,14 @@ fn messages() -> Value {
         "automod_kick": log(automod::filter_log("member", FilterAction::Kick, "Posting an invite link", (GENERAL, "Join my server everyone discord.gg/example"), MEMBER)),
         "automod_timeout": log(automod::timeout_log("member", "Spamming the same message", (MEMBER, GENERAL), act.timeout_ms, act.strike)),
         "mod_log": log(commands::mod_log_embed((4151, "ban"), (YOU, MEMBER), None, Some("DM ads"))),
-        "nuke_quarantined": nuke(true, true),
-        "nuke_no_quarantine": nuke(false, false),
+        "nuke_quarantined": nuke(Applied::Quarantined, None),
+        "nuke_no_quarantine": nuke(Applied::Off, None),
+        "nuke_bot_cleared": nuke(Applied::Quarantined, Some(true)),
+        "nuke_bot_kicked": nuke(Applied::Kicked, Some(false)),
+        "panic_report_disabled": log(panic::report(Some(&case), &Backup::Disabled)),
+        "panic_report_none": log(panic::report(Some(&case), &Backup::None)),
+        "panic_report_loaded": log(panic::report(Some(&case), &Backup::Loaded(restored))),
+        "panic_report_failed": log(panic::report(Some(&case), &Backup::Failed("Missing Permissions".into()))),
         "raid": log(joingate::raid_trigger_log(&raid, &raiders, code, crate::invites::raid_url(code))),
         "raid_report": {
             "embeds": [joingate::raid_report_log(raiders.len() as i64, Some(code)).time().build()],

@@ -420,7 +420,7 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 let id = r["id"].as_i64().unwrap_or(0);
                 view! { <div class="card row">
                     <input type="checkbox" aria-label=format!("select action {id}") disabled=r["reverted"].as_bool().unwrap_or(false) on:change=move |e| picked.update(|p| { p.retain(|x| *x != id); if event_target_checked(&e) { p.push(id) } }) />
-                    <b>{s(&r["action"])}</b>
+                    <b>{match s(&r["action"]).as_str() { "bot_role_cleared" => "Restore bot role permissions".into(), a => a.to_string() }}</b>
                     <span class="muted">{format!("target {} at {}{}", s(&r["target_id"]), s(&r["at"]), if r["reverted"].as_bool().unwrap_or(false) { " (reverted)" } else { "" })}</span>
                 </div> }
             }

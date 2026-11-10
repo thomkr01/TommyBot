@@ -251,6 +251,11 @@ pub enum Inverse {
     Reinvite {
         user: u64,
     },
+    /// Gives a role back the permissions anti-nuke cleared (a nuking bot's managed role).
+    RolePerms {
+        id: u64,
+        perms: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -424,6 +429,10 @@ mod tests {
         };
         let s = serde_json::to_string(&i).unwrap();
         assert_eq!(s, r#"{"op":"restore_roles","user":1,"roles":[2,3]}"#);
+        assert_eq!(serde_json::from_str::<Inverse>(&s).unwrap(), i);
+        let i = Inverse::RolePerms { id: 4, perms: 8 };
+        let s = serde_json::to_string(&i).unwrap();
+        assert_eq!(s, r#"{"op":"role_perms","id":4,"perms":8}"#);
         assert_eq!(serde_json::from_str::<Inverse>(&s).unwrap(), i);
     }
 }

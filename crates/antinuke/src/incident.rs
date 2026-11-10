@@ -29,6 +29,9 @@ pub struct NukeCase {
     /// Undone actions per culprit, for the panic report.
     #[serde(default)]
     pub fragments: HashMap<u64, u32>,
+    /// Culprits the bot could not quarantine (or kick), counted as ❎ in the panic report.
+    #[serde(default)]
+    pub failed: Vec<u64>,
 }
 
 impl NukeCase {
@@ -38,12 +41,19 @@ impl NukeCase {
             quarantined: vec![],
             reverted: vec![],
             fragments: HashMap::new(),
+            failed: vec![],
         }
     }
 
-    pub fn add(&mut self, executor: u64, ops: impl IntoIterator<Item = Inverse>) {
-        if !self.quarantined.contains(&executor) {
-            self.quarantined.push(executor);
+    /// `contained` is false when the culprit could not be quarantined; a later success moves them over.
+    pub fn add(&mut self, executor: u64, ops: impl IntoIterator<Item = Inverse>, contained: bool) {
+        if contained {
+            self.failed.retain(|u| *u != executor);
+            if !self.quarantined.contains(&executor) {
+                self.quarantined.push(executor);
+            }
+        } else if !self.quarantined.contains(&executor) && !self.failed.contains(&executor) {
+            self.failed.push(executor);
         }
         let before = self.reverted.len();
         self.reverted.extend(ops);
@@ -125,6 +135,25 @@ pub fn panic_end_plan(unlock_when_ending: bool) -> Vec<PanicStep> {
     }
 }
 
+/// What a stopped nuke runs, in order. Panic mode is not an input: the revert always runs, and
+/// the anti-nuke report is sent before panic mode can start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NukeStep {
+    Contain,
+    Revert,
+    Report,
+    Panic,
+}
+
+pub fn nuke_plan(auto_quarantine: bool) -> Vec<NukeStep> {
+    use NukeStep::*;
+    if auto_quarantine {
+        vec![Contain, Revert, Report, Panic]
+    } else {
+        vec![Revert, Report]
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Webhook {
     pub id: u64,
@@ -172,11 +201,31 @@ mod tests {
     #[test]
     fn case_dedups_executors_and_collects_ops() {
         let mut c = NukeCase::new(7);
-        c.add(1, [Inverse::DeleteChannel { id: 5 }]);
-        c.add(1, [Inverse::Unban { user: 9 }]);
-        c.add(2, []);
+        c.add(1, [Inverse::DeleteChannel { id: 5 }], true);
+        c.add(1, [Inverse::Unban { user: 9 }], true);
+        c.add(2, [], true);
         assert_eq!(c.quarantined, vec![1, 2]);
         assert_eq!(c.reverted.len(), 2);
+    }
+
+    #[test]
+    fn failed_quarantines_are_kept_apart_until_one_succeeds() {
+        let mut c = NukeCase::new(7);
+        c.add(3, [Inverse::DeleteChannel { id: 5 }], false);
+        c.add(3, [], false);
+        assert_eq!((c.quarantined.clone(), c.failed.clone()), (vec![], vec![3]));
+        assert_eq!(c.fragments[&3], 1);
+        c.add(3, [], true);
+        assert_eq!((c.quarantined.clone(), c.failed.clone()), (vec![3], vec![]));
+        c.add(3, [], false); // already quarantined: stays a success
+        assert!(c.failed.is_empty());
+    }
+
+    #[test]
+    fn nuke_reverts_without_panic_and_reports_before_panic() {
+        use NukeStep::*;
+        assert_eq!(nuke_plan(false), vec![Revert, Report]);
+        assert_eq!(nuke_plan(true), vec![Contain, Revert, Report, Panic]);
     }
 
     #[test]
@@ -265,8 +314,9 @@ mod tests {
                 Inverse::DeleteWebhook { id: 1 },
                 Inverse::DeleteWebhook { id: 2 },
             ],
+            true,
         );
-        c.add(7, [Inverse::DeleteWebhook { id: 3 }]);
+        c.add(7, [Inverse::DeleteWebhook { id: 3 }], true);
         assert_eq!(c.fragments[&7], 3);
         let mut t = PanicTracker::new(Duration::from_secs(60), 3);
         let now = Instant::now();
