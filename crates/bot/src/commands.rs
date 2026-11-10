@@ -473,7 +473,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             proof: None,
         },
     );
-    if cfg.misc.confirm && job.needs_confirm() {
+    if job.needs_confirm(cfg.misc.confirm) {
         return ask_confirm(app, msg, job).await;
     }
     let texts = job.run(app, owner, cfg.misc.warn_base_points).await?;

@@ -502,7 +502,7 @@ async fn run(
     let mut ask = async |action| -> Result<Option<String>> {
         let job = Pending::new(gid, actor_id, action);
         // User context menus act at once (no reason, no confirm).
-        if data.kind == CommandType::User || !(cfg_confirm && job.needs_confirm()) {
+        if data.kind == CommandType::User || !job.needs_confirm(cfg_confirm) {
             return Ok(None);
         }
         let (text, row) = confirm::stash_confirm(app, i.id.get(), job).await?;

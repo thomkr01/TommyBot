@@ -405,9 +405,9 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 let v = if clamp { v.clamp(lo, hi) } else { v } as i64;
                 set(if v == 0 && default.get_value().is_null() { Value::Null } else { json!(v) });
             };
-            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || num() <= lo on:click=move |_| set_n(secs() / UNITS[unit()].1 - 1.0, true)>"-"</button>
+            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || lo >= num() on:click=move |_| set_n(secs() / UNITS[unit()].1 - 1.0, true)>"-"</button>
                 <input prop:value=move || format!("{}", secs() / UNITS[unit()].1) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<f64>() { set_n(x, false) } } />
-                <button class="ghost" aria-label="more" disabled=move || num() >= hi on:click=move |_| set_n(secs() / UNITS[unit()].1 + 1.0, true)>"+"</button>
+                <button class="ghost" aria-label="more" disabled=move || hi <= num() on:click=move |_| set_n(secs() / UNITS[unit()].1 + 1.0, true)>"+"</button>
                 <select aria-label="unit" on:change=move |e| chosen.set(UNITS.iter().position(|(u, _)| *u == event_target_value(&e)))>
                     {UNITS.iter().map(|(u, _)| view! { <option value=*u selected=move || UNITS[unit()].0 == *u>{*u}</option> }).collect_view()}
                 </select></div>
@@ -424,7 +424,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!(x) } else { json!(x as i64) })
             };
             let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
-            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || num() <= lo on:click=move |_| step(-1.0)>"-"</button>
+            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || lo >= num() on:click=move |_| step(-1.0)>"-"</button>
                 <input prop:value=shown on:change=move |e| {
                     let s = event_target_value(&e);
                     let s = s.trim();
@@ -432,7 +432,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x / k)) } }
                     else if let Ok(x) = s.parse::<i64>() { set(json!(x)) }
                 } />
-                <button class="ghost" aria-label="more" disabled=move || num() >= hi on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div>
+                <button class="ghost" aria-label="more" disabled=move || hi <= num() on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div>
                 {move || range_error((lo, hi), num(), None).map(|e| view! { <span class="err">{e}</span> })} }.into_any()
         }
         "list" | "lines" => {

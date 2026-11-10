@@ -1187,7 +1187,13 @@ mod tests {
         let field = |sec: &str, path: &str| {
             all.iter()
                 .find(|s| s["name"] == sec)
-                .and_then(|s| s["fields"].as_array()?.iter().find(|f| f["path"] == path).cloned())
+                .and_then(|s| {
+                    s["fields"]
+                        .as_array()?
+                        .iter()
+                        .find(|f| f["path"] == path)
+                        .cloned()
+                })
                 .unwrap()
         };
         let hour = field("antinuke", "limits.Ban.per_hour");
@@ -1195,7 +1201,10 @@ mod tests {
         let heat = field("antinuke", "limits.Unban.heat");
         assert_eq!((&heat["min"], &heat["max"]), (&json!(1), &json!(100)));
         let age = field("joingate", "min_age_override_ms");
-        assert_eq!((&age["min"], &age["max"]), (&json!(5_000), &json!(8_640_000_000_i64)));
+        assert_eq!(
+            (&age["min"], &age["max"]),
+            (&json!(5_000), &json!(8_640_000_000_i64))
+        );
         assert!(field("antinuke", "enabled")["min"].is_null());
     }
 

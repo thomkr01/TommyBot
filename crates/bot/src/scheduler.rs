@@ -64,6 +64,10 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 panic::start(app, gid, &cfg).await?;
             }
         }
+        "note_log" => {
+            let n = serde_json::from_value(job.payload.clone()).context("bad note_log payload")?;
+            crate::modview::send_note_log(app, gid.get(), &n).await?;
+        }
         "lock_update" => {
             let text = job.payload["text"]
                 .as_str()

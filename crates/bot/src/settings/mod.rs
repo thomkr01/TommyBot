@@ -220,7 +220,10 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
                         Err(_) => duration::parse(v),
                     };
                     let ms = secs.and_then(|s| s.checked_mul(1000)).ok_or_else(|| {
-                        format!("{}. Give days, or a number with a unit, like `12h` or `30m`.", bad())
+                        format!(
+                            "{}. Give days, or a number with a unit, like `12h` or `30m`.",
+                            bad()
+                        )
                     })?;
                     if !(lo..=hi).contains(&ms) {
                         return Err(format!("{label} ranges from 5 seconds to 100 days"));
@@ -710,7 +713,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         (f, _) => f,
     };
     let Some(row) = found else {
-        send(app, msg, &no_such_row(m, &code), None, vec![]).await?;
+        send(app, msg, &no_such_row(m, code), None, vec![]).await?;
         return Ok(true);
     };
     if matches!(row.kind, Kind::Users) {

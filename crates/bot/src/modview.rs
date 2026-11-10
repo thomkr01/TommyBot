@@ -1,12 +1,53 @@
 //! Read-only helpers of the `modcmds` commands: case and note listings and nickname cleanup.
 use anyhow::Result;
 
-use tommybot_logging::embed::{Log, BLUE};
+use tommybot_core::notes::NoteLog;
+use tommybot_logging::{
+    embed::{self, Log, BLUE, GREEN, ORANGE, RED},
+    LogKind,
+};
 use twilight_model::channel::message::Embed;
 
 use crate::app::App;
 
 const PER_PAGE: usize = 10;
+
+/// The private mod-log entry for a note change (command or dashboard).
+pub(crate) fn note_log(n: &NoteLog) -> Log {
+    let (title, color) = match n.action.as_str() {
+        "add" => ("Note Added", GREEN),
+        "modify" => ("Note Modified", ORANGE),
+        "remove" => ("Note Removed", RED),
+        _ => ("Notes Swept", RED),
+    };
+    let mut log = Log::new(title, color);
+    if let Some(id) = &n.id {
+        log = log.line("Note", &format!("`{id}`"));
+    }
+    if let Some(u) = n.user {
+        log = log.user("Member", u);
+    }
+    if let Some(a) = n.author {
+        log = log.user("Written By", a);
+    }
+    log = log.user("Moderator", n.by);
+    if n.action == "sweep" && n.user.is_none() && n.author.is_none() {
+        log = log.line("Scope", "Whole server");
+    }
+    if let Some(c) = n.count {
+        log = log.line("Notes Removed", &c.to_string());
+    }
+    match (&n.old, &n.text) {
+        (Some(old), new) => log.section("Changes").diff(Some(old), new.as_deref()),
+        (None, Some(t)) => log.line("Content", &embed::clip(t, 1000)),
+        _ => log,
+    }
+}
+
+/// Sends [`note_log`] to the mod log.
+pub(crate) async fn send_note_log(app: &App, gid: u64, n: &NoteLog) -> Result<()> {
+    crate::events::send_log(app, gid, LogKind::ModCommand, note_log(n)).await
+}
 
 /// `?t` codes (B, UB, K, TIMEOUT, WA, Q, UQ) and plain kind names, singular or plural.
 pub(crate) fn case_kind(t: Option<&str>) -> Result<Option<String>, String> {

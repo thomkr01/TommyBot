@@ -18,6 +18,7 @@ The bot keeps data in a PostgreSQL database. It stores:
 |---|---|---|
 | **Server config** (automod settings, log channels, permit roles, limits). Every change is saved as a new version. | To run the bot's features and to show config history on the dashboard. | As long as the server uses the bot: deleted 30 days after the bot is removed, or when the owner deletes it. |
 | **Moderation cases** (action type, target and moderator user IDs, reason, proof link you provide, points, expiry). | Warnings, bans, and history for `/case` and warn thresholds. | Until deletion is requested. Not removed automatically. |
+| **Staff notes** (member and moderator user IDs, the note text, when it was written) and **note edit history** (old and new text, who edited it and when). | Private notes staff keep about members; the history shows every earlier version on the dashboard. | Until staff remove the note (its history goes with it) or deletion is requested. |
 | **Action log** (each mutating action with the data needed to undo it). | `/revert` and audit history. | Until deletion is requested. Not removed automatically. |
 | **Automod strike state** (user IDs, strike counts and timestamps). | Keeps repeat-offender penalties working across restarts. | Until deletion is requested. |
 | **Quarantine and lockdown records** (saved role IDs, lock snapshots). | To restore roles and channel permissions when a quarantine or lock ends. | Removed when the quarantine or lock is released. |

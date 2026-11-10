@@ -6,6 +6,7 @@ pub mod duration;
 pub mod jobs;
 pub mod limits;
 pub mod models;
+pub mod notes;
 pub mod permits;
 pub mod sections;
 pub mod warn;

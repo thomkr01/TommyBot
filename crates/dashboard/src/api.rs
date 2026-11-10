@@ -708,7 +708,11 @@ mod logging_validate_tests {
         assert!(validate("antinuke", &nuke("per_hour", 501)).is_err());
         assert!(validate("antinuke", &nuke("heat", 0)).is_err());
         assert!(validate("joingate", &json!({"min_age_override_ms": 4_999})).is_err());
-        assert!(validate("joingate", &json!({"min_age_override_ms": 8_640_000_001_i64})).is_err());
+        assert!(validate(
+            "joingate",
+            &json!({"min_age_override_ms": 8_640_000_001_i64})
+        )
+        .is_err());
         assert!(validate("joingate", &json!({"min_age_override_ms": 5_000})).is_ok());
     }
 

@@ -177,3 +177,60 @@ fn dehoist_alias() {
         Ok(ModCmd::Sanitize { user: 5_000_000 })
     );
 }
+
+#[test]
+fn a_server_wide_note_sweep_always_asks() {
+    let all = ModCmd::NoteSweep {
+        user: None,
+        by: None,
+    };
+    assert!(all.asks_confirm(false) && all.asks_confirm(true));
+    let one = ModCmd::NoteSweep {
+        user: Some(5),
+        by: None,
+    };
+    assert!(!one.asks_confirm(false) && one.asks_confirm(true));
+    let by = ModCmd::NoteSweep {
+        user: None,
+        by: Some(5),
+    };
+    assert!(!by.asks_confirm(false));
+    assert!(!ModCmd::NoteRemove {
+        id: "a".into(),
+        user: None
+    }
+    .asks_confirm(true));
+}
+
+#[test]
+fn note_logs_show_the_change() {
+    use crate::modview::note_log;
+    use tommybot_core::notes::NoteLog;
+    let text = |n: &NoteLog| serde_json::to_string(&note_log(n).build()).unwrap();
+    let modify = NoteLog {
+        action: "modify".into(),
+        id: Some("1d300v".into()),
+        user: Some(7),
+        by: 8,
+        text: Some("new words".into()),
+        old: Some("old words".into()),
+        ..NoteLog::default()
+    };
+    let t = text(&modify);
+    assert!(t.contains("Note Modified") && t.contains("1d300v"), "{t}");
+    assert!(
+        t.contains("- old words") && t.contains("+ new words"),
+        "{t}"
+    );
+    let sweep = NoteLog {
+        action: "sweep".into(),
+        by: 8,
+        count: Some(3),
+        ..NoteLog::default()
+    };
+    let t = text(&sweep);
+    assert!(
+        t.contains("Whole server") && t.contains("Notes Removed") && t.contains('3'),
+        "{t}"
+    );
+}

@@ -108,7 +108,13 @@ impl AntinukeCfg {
         }
         let c = self.limits.get(&a.card()).copied().unwrap_or_default();
         let (per_minute, per_hour, heat) = c.values(a)?;
-        c.enabled.then_some((Limit { per_minute, per_hour }, heat))
+        c.enabled.then_some((
+            Limit {
+                per_minute,
+                per_hour,
+            },
+            heat,
+        ))
     }
 
     pub fn watched(&self) -> HashMap<NukeAction, Limit> {
@@ -798,7 +804,8 @@ mod tests {
         let (l, heat) = c.limit(NukeAction::Ban).unwrap();
         assert_eq!((l.per_minute, l.per_hour, heat), (50, 500, 20));
         let c: AntinukeCfg =
-            serde_json::from_value(json!({"limits": {"Ban": {"per_hour": 1, "heat": 101}}})).unwrap();
+            serde_json::from_value(json!({"limits": {"Ban": {"per_hour": 1, "heat": 101}}}))
+                .unwrap();
         let (l, heat) = c.limit(NukeAction::Kick).unwrap();
         assert_eq!((l.per_minute, l.per_hour, heat), (5, 2, 100));
         // Prune is no card: its built-in 1/1 stays.
