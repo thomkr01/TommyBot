@@ -54,9 +54,7 @@ async fn load_emojis(http: &twilight_http::Client) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let _log = tommybot_core::log::init("bot", tracing_subscriber::EnvFilter::from_default_env());
 
     let cfg = Config::from_env()?;
     let pool = db::connect(&cfg.database_url).await?;

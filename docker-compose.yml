@@ -38,9 +38,13 @@ services:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set DISCORD_TOKEN in .env}
       DATABASE_URL: postgres://tommybot:${POSTGRES_PASSWORD}@postgres:5432/tommybot
       RUST_LOG: ${RUST_LOG:-info}
+      # Also log to files here, read by the MCP server.
+      LOG_DIR: /logs
       # Links in the welcome message.
       DASHBOARD_URL: ${DASHBOARD_URL:-}
       SUPPORT_URL: ${SUPPORT_URL:-}
+    volumes:
+      - logs:/logs
 
   dashboard:
     image: ghcr.io/thomkr01/tommybot-dashboard:${TOMMYBOT_TAG:-latest}
@@ -65,6 +69,9 @@ services:
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
       SUPPORT_URL: ${SUPPORT_URL:-}
       RUST_LOG: ${RUST_LOG:-info}
+      LOG_DIR: /logs
+    volumes:
+      - logs:/logs
 
   # Runs updates started from the dashboard (bot owner only). It alone holds the Docker socket, has no
   # open port, and only ever pulls this project's images and recreates bot and dashboard.
@@ -97,3 +104,4 @@ services:
 
 volumes:
   pgdata:
+  logs:
