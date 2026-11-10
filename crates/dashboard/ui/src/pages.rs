@@ -68,7 +68,11 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 );
             }
             if let Ok(c) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
-                pct.set(crate::wizard::score(&c["config"], &dc.get_untracked(), &g));
+                // The page may be gone by now; a disposed signal panics on read.
+                let Some(d) = dc.try_get_untracked() else {
+                    return;
+                };
+                pct.set(crate::wizard::score(&c["config"], &d, &g));
             }
         });
     });

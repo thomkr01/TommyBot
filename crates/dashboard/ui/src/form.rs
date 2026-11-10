@@ -405,7 +405,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 let v = if clamp { v.clamp(lo, hi) } else { v } as i64;
                 set(if v == 0 && default.get_value().is_null() { Value::Null } else { json!(v) });
             };
-            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || lo >= num() on:click=move |_| set_n(secs() / UNITS[unit()].1 - 1.0, true)>"-"</button>
+            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || num() <= lo on:click=move |_| set_n(secs() / UNITS[unit()].1 - 1.0, true)>"-"</button>
                 <input prop:value=move || format!("{}", secs() / UNITS[unit()].1) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<f64>() { set_n(x, false) } } />
                 <button class="ghost" aria-label="more" disabled=move || hi <= num() on:click=move |_| set_n(secs() / UNITS[unit()].1 + 1.0, true)>"+"</button>
                 <select aria-label="unit" on:change=move |e| chosen.set(UNITS.iter().position(|(u, _)| *u == event_target_value(&e)))>
@@ -424,7 +424,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!(x) } else { json!(x as i64) })
             };
             let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
-            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || lo >= num() on:click=move |_| step(-1.0)>"-"</button>
+            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || num() <= lo on:click=move |_| step(-1.0)>"-"</button>
                 <input prop:value=shown on:change=move |e| {
                     let s = event_target_value(&e);
                     let s = s.trim();
@@ -447,6 +447,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 let Some(file) = event_target::<web_sys::HtmlInputElement>(&e).files().and_then(|l| l.get(0)) else { return };
                 spawn_local(async move {
                     let Ok(text) = wasm_bindgen_futures::JsFuture::from(file.text()).await else { return };
+                    if p.is_disposed() { return }
                     let mut cur = strs(&get());
                     for l in text.as_string().unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
                         if !cur.iter().any(|c| c == l) { cur.push(l.to_string()) }
@@ -698,7 +699,12 @@ pub fn Section(
     let loaded = RwSignal::new(false);
     let (g, n) = (guild.clone(), name.clone());
     spawn_local(async move {
-        match api("GET", &format!("/api/guilds/{g}/config"), None).await {
+        let r = api("GET", &format!("/api/guilds/{g}/config"), None).await;
+        // Leaving the page while a request runs disposes the signals, and reading one then panics.
+        if val.is_disposed() {
+            return;
+        }
+        match r {
             Ok(v) => {
                 version.set(v["version"].as_i64().unwrap_or(0));
                 let mut c = if v["config"].is_object() {
@@ -715,7 +721,11 @@ pub fn Section(
             Err(e) => msg.err(e),
         }
         // Missing schema/discord data degrades to the raw editor.
-        if let Ok(s) = api("GET", &format!("/api/guilds/{g}/schema"), None).await {
+        let s = api("GET", &format!("/api/guilds/{g}/schema"), None).await;
+        if val.is_disposed() {
+            return;
+        }
+        if let Ok(s) = s {
             if let Some(sec) = s
                 .as_array()
                 .and_then(|a| a.iter().find(|x| x["name"] == n.as_str()))
@@ -848,7 +858,7 @@ pub fn Section(
             dc.track();
             let (i, ready) = (at.get(), loaded.get());
             request_animation_frame(move || {
-                let Some(el) = pv.get_untracked() else { return };
+                let Some(el) = pv.try_get_untracked().flatten() else { return };
                 seen.update_value(|(card, texts)| {
                     if *card != i || !ready { *card = i; *texts = None; }
                     crate::discord::flash_changes(&el, texts);

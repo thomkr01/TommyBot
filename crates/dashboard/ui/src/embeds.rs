@@ -128,6 +128,9 @@ pub fn Embeds(guild: String) -> impl IntoView {
     let channels = RwSignal::new(Vec::<(String, String)>::new());
     let (cur, msg) = (RwSignal::new(blank()), Msg::default());
     let load = move || {
+        if g.is_disposed() {
+            return;
+        }
         spawn_local(async move {
             match api(
                 "GET",

@@ -156,6 +156,9 @@ pub fn CaseList(guild: String) -> impl IntoView {
         )
     };
     let load = move || {
+        if page.is_disposed() {
+            return;
+        }
         fetch(
             format!("{}{}", list(), page.get_untracked()),
             set_rows,
@@ -248,6 +251,9 @@ pub fn NoteList(guild: String) -> impl IntoView {
         )
     };
     let load = move || {
+        if page.is_disposed() {
+            return;
+        }
         fetch(
             format!("{}{}", list(), page.get_untracked()),
             set_rows,
@@ -322,6 +328,9 @@ pub fn ReportList(guild: String) -> impl IntoView {
         )
     };
     let load = move || {
+        if page.is_disposed() {
+            return;
+        }
         fetch(
             format!("{}{}", list(), page.get_untracked()),
             set_rows,

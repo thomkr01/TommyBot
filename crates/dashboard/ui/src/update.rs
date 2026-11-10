@@ -45,7 +45,12 @@ pub fn Update(enrolled: ReadSignal<bool>) -> impl IntoView {
     let need = RwSignal::new(false);
     let load = move || {
         spawn_local(async move {
-            match api("GET", "/api/update", None).await {
+            let r = api("GET", "/api/update", None).await;
+            // The user may have left the page while the request ran (the dashboard restarts mid-update).
+            if data.is_disposed() {
+                return;
+            }
+            match r {
                 Ok(v) => {
                     if loaded_sha.get_value().is_none() {
                         loaded_sha.set_value(Some(v["current"].clone()))

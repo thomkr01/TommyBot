@@ -26,6 +26,9 @@ pub fn AppealList(guild: String) -> impl IntoView {
         )
     };
     let load = move || {
+        if g.is_disposed() {
+            return;
+        }
         spawn_local(async move {
             let path = format!("{}{}", list(), page.get_untracked());
             match api("GET", &path, None).await {
@@ -100,6 +103,9 @@ pub fn Blacklist(
     let loaded = RwSignal::new(false);
     let g = StoredValue::new(guild);
     let load = move || {
+        if g.is_disposed() {
+            return;
+        }
         spawn_local(async move {
             match api(
                 "GET",
@@ -162,6 +168,9 @@ pub fn AppealForm(guild: String) -> impl IntoView {
     let g = StoredValue::new(guild);
     let mine = RwSignal::new(Vec::<Value>::new());
     let load_mine = move || {
+        if g.is_disposed() {
+            return;
+        }
         spawn_local(async move {
             if let Ok(v) = api("GET", &format!("/api/appeal/{}/mine", g.get_value()), None).await {
                 mine.set(v.as_array().cloned().unwrap_or_default());
