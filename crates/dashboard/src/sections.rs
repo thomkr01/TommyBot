@@ -524,6 +524,11 @@ fn at<'a>(config: &'a Value, path: &[&str]) -> &'a Value {
     path.iter().fold(config, |v, k| &v[*k])
 }
 
+fn not_found(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<reqwest::Error>().and_then(|e| e.status())
+        == Some(reqwest::StatusCode::NOT_FOUND)
+}
+
 fn own(v: &Value) -> Option<String> {
     v.as_str().filter(|s| !s.is_empty()).map(String::from)
 }
@@ -561,14 +566,20 @@ fn stale<'a>(channels: &'a Value, config: &Value, name: &str) -> Vec<&'a str> {
 /// leftover roles named Quarantine are deleted first so the server never ends up with several.
 async fn quarantine_role(st: &AppState, guild: i64, config: &Value) -> Result<String, ApiError> {
     if let Some(id) = own(&config["antinuke"]["quarantine_role"]) {
-        st.discord
+        let r = st
+            .discord
             .call(
                 Method::PATCH,
                 &format!("/guilds/{guild}/roles/{id}"),
                 Some(json!({"permissions": "0"})),
             )
-            .await?;
-        return Ok(id);
+            .await;
+        // A saved role someone deleted in Discord is made again below instead of failing the setup.
+        match r {
+            Ok(_) => return Ok(id),
+            Err(e) if !not_found(&e) => return Err(e.into()),
+            Err(_) => {}
+        }
     }
     let roles = st
         .discord
@@ -598,7 +609,16 @@ async fn create(
     body: Value,
 ) -> Result<String, ApiError> {
     if let Some(id) = existing {
-        return Ok(id);
+        let at = match path {
+            "roles" => format!("/guilds/{guild}/roles/{id}"),
+            _ => format!("/channels/{id}"),
+        };
+        // Reuse it only while it still exists; one deleted in Discord is made again.
+        match st.discord.call(Method::GET, &at, None).await {
+            Ok(_) => return Ok(id),
+            Err(e) if !not_found(&e) => return Err(e.into()),
+            Err(_) => {}
+        }
     }
     let r = st
         .discord
