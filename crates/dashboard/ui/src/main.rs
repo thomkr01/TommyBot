@@ -382,7 +382,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <button class="ghost" disabled=move || access.rank() < 2 on:click=move |_| { if let Some(i) = file.get() { i.click() } }>"Import settings"</button>
             <input type="file" accept=".json,application/json" hidden=true node_ref=file on:change=import />
         </div>
-        <AnimatedShow when=Signal::derive(move || preview.get().is_some()) hide_class="out" hide_delay=OUT>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
+        <Fade when=Signal::derive(move || preview.get().is_some())>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
             let apply = apply.clone();
             let r = NodeRef::new();
             focus_on_open(r);
@@ -395,7 +395,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 {(!cleared.is_empty()).then(|| view! { <p class="info">{format!("Ids from the other server are cleared; set these again after the import: {cleared}")}</p> })}
                 <div class="row"><button class="ghost" on:click=move |_| preview.set(None)>"Abort"</button><button disabled=changes.is_empty() on:click=apply>"Import"</button></div>
             </div></div> }
-        })}</AnimatedShow>
+        })}</Fade>
         <For each=move || rows.get() key=|r| r["version"].as_i64() let:r>
             {
                 let v = r["version"].as_i64().unwrap_or(0);

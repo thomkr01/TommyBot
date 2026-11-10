@@ -43,7 +43,7 @@ Runde 2: hver feil over er lett etter flere steder, i koden og med nye sjekker.
 |---|---|---|---|
 | 12 | Rettelse 11 virket ikke: `.io label` tapte mot `.row label`, som står senere i fila. Import var fortsatt bred og fet. Thomas' funn. | `style.css` | `.row label:has(> input)` vinner på spesifisitet. |
 | 13 | Samme regel gjorde alle avkrysningsbokser i rolle- og kanallister fete og med stor forbokstav (Main Roles, Partnering Channels og 8 andre sider). | `style.css` | Samme rettelse. |
-| 14 | `@everyone` sto som «@@everyone» i rollelister og i forhåndsvisning av meldinger. | `form.rs`, `md.rs` | Ingen ekstra @ når navnet har den. |
+| 14 | `@everyone` sto som «@@everyone» i rollelister og i forhåndsvisning av meldinger. | `form.rs`, `md.rs` | Ingen ekstra @ når navnet har den (også rettet i #158, slått sammen). |
 | 15 | Hjelpetekst ved brytere ble klemt i to smale kolonner (Join Gate «Exclude bots added by the owner», to på Miscellaneous, Auto Mod, Verification). | `style.css` | Hjelpeteksten står på egen linje under. |
 | 16 | På mobil (390 px) var toppmenyen bredere enn skjermen: avataren ble kuttet og søkefeltet dekket logoen. | `style.css`, `main.rs` | Under 600 px ligger Commands og Update i kontomenyen. |
 | 17 | Oversikt: Fix-knappene og systembryterne var aktive for viewers (serveren nektet). Samme feil som 7 og 8. | `pages.rs` | Grå uten tilgang. |

@@ -2,7 +2,7 @@
 
 Pitfalls for the rest of the bot are in [PITFALLS.md](../../../PITFALLS.md) at the repo root.
 
-Two Leptos mistakes broke the dashboard in November 2026. Both compile without a warning, so read this before you change the UI. The e2e sweep (`tests/e2e/dashboard.js`) now checks for both.
+These are Leptos mistakes that broke the dashboard in November 2026. They compile without a warning, so read this before you change the UI. The e2e sweep (`tests/e2e/dashboard.js`) checks for each of them.
 
 ## 1. A `>` in an attribute ends the tag
 
@@ -124,6 +124,16 @@ Every icon in `assets/icons` has fixed ids (`info-grad`, `info-cut`). With the i
 The info icon grew on hover with `transform:scale` on `.tip`, which also scaled the card inside it, so the card was wider than measured and crossed the screen edge on a phone.
 
 **Rule:** animate the icon (`.tip .i`), not the element that holds the popup. The info card is placed when it opens (`Tip` in `common.rs`): shifted to stay inside `main` and the screen, and moved below the icon near the header. `DEEP_ONLY=overflow` opens every info card and checks it.
+
+## 12. `AnimatedShow` can hide itself while `when` is true
+
+Leptos's `AnimatedShow` starts a hide timer each time it reruns with `when` false, but only remembers the last timer. A form that loads sets `val` and `orig` one after the other, so `when` (`val != orig`) reruns false twice. The first timer is lost and fires later. If the user changes something within 200 ms, the "Changes detected!" bar shows and is hidden again at once. Nothing can be saved or cancelled until the next change. The Cancel e2e check hit this on a fresh server (#158).
+
+**Rule:** use `common::Fade` instead of `AnimatedShow`. It puts `when` behind a `Memo`, so it reruns only when the value really changes. All 8 uses were switched.
+
+Same class of bug, also in #158: the page wrapper read the access level straight from the access signal, so every access answer (one per page change) rebuilt the open page and could throw away edits made before it arrived. It now reads a `Memo` of the level.
+
+**Rule:** when a reactive closure builds a whole page or form, read derived values through a `Memo`, not a signal that is set again with the same content.
 
 ## Where it was fixed (#143)
 

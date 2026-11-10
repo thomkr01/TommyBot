@@ -322,7 +322,7 @@ fn RuleEditor(
             {fld("name", "text", "Rule name")}
             <div class="row"><label>"Trigger"</label>
                 <select on:change=move |e| val.update(|v| v["trigger"] = json!(event_target_value(&e)))>
-                    {[("keyword", "Keywords"), ("spam", "Spam"), ("mention", "Mention spam"), ("preset", "Keyword preset")].into_iter().map(|(k, t)| view! { <option value=k selected=move || trigger() == k>{t}</option> }).collect_view()}
+                    {[("keyword", "Keywords"), ("spam", "Spam"), ("mention", "Mention spam"), ("preset", "Keyword preset")].into_iter().map(|(k, t)| view! { <option value=k prop:selected=move || trigger() == k>{t}</option> }).collect_view()}
                 </select></div>
             <Show when=move || trigger() == "keyword"><h3>"1 Words"</h3>{fld("keywords", "list", "Add Word")}
                 <details><summary>"Need help?"</summary>
@@ -331,7 +331,7 @@ fn RuleEditor(
             <Show when=move || trigger() == "mention">{fld("mention_limit", "int", "mentions per message")}
                 <div class="row"><label>"Mention scope"</label>
                     <select on:change=move |e| val.update(|v| v["scope"] = json!(event_target_value(&e)))>
-                        {[("", "Limit per message only"), ("discord", "Discord Mention Scope (detects mention raids)"), ("user", "TommyBot Mention Scope: per user"), ("server", "TommyBot Mention Scope: whole server")].into_iter().map(|(k, t)| view! { <option value=k selected=move || s(&val.get()["scope"]) == k>{t}</option> }).collect_view()}
+                        {[("", "Limit per message only"), ("discord", "Discord Mention Scope (detects mention raids)"), ("user", "TommyBot Mention Scope: per user"), ("server", "TommyBot Mention Scope: whole server")].into_iter().map(|(k, t)| view! { <option value=k prop:selected=move || s(&val.get()["scope"]) == k>{t}</option> }).collect_view()}
                     </select></div>
                 <Show when=move || matches!(s(&val.get()["scope"]).as_str(), "user" | "server")>
                     {fld("scope_triggers", "int", "Triggers")}{fld("scope_duration_s", "int", "Trigger Duration (seconds)")}
@@ -350,7 +350,7 @@ fn RuleEditor(
                 <Show when=move || val.get()["bot_actions"].as_array().is_some_and(|l| l.contains(&json!("lock")))>
                     <label>"Lock mode"</label>
                     <select on:change=move |e| val.update(|v| v["lock"] = json!(event_target_value(&e)))>
-                        {[("", "Server lockdown settings"), ("channel", "Channel"), ("server", "All Public Channels"), ("kick", "Kick New Members"), ("ban", "Ban New Members"), ("invites", "Pause Invites + DMs")].into_iter().map(|(k, t)| view! { <option value=k selected=move || s(&val.get()["lock"]) == k>{t}</option> }).collect_view()}
+                        {[("", "Server lockdown settings"), ("channel", "Channel"), ("server", "All Public Channels"), ("kick", "Kick New Members"), ("ban", "Ban New Members"), ("invites", "Pause Invites + DMs")].into_iter().map(|(k, t)| view! { <option value=k prop:selected=move || s(&val.get()["lock"]) == k>{t}</option> }).collect_view()}
                     </select></Show></div></Show>
             <h3>"3 Allowed Keywords"</h3>
             <Show when=move || matches!(trigger().as_str(), "keyword" | "preset")>{fld("allow", "list", "Add Keyword")}</Show>

@@ -6,6 +6,15 @@ use std::{cell::RefCell, time::Duration};
 /// How long a closing bar, toast or dialog fades out; matches `--dur` in style.css.
 pub const OUT: Duration = Duration::from_millis(200);
 
+/// `AnimatedShow` with the fade-out we use everywhere. Leptos starts a hide timer on every rerun while
+/// `when` is false and only cancels the last one, so false->false reruns (e.g. a form loading) leave a
+/// timer that hides the box again right after it showed. A memo only reruns on a real change.
+#[component]
+pub fn Fade(#[prop(into)] when: Signal<bool>, children: ChildrenFn) -> impl IntoView {
+    let when = Memo::new(move |_| when.get());
+    view! { <AnimatedShow when=when hide_class="out" hide_delay=OUT>{children()}</AnimatedShow> }
+}
+
 thread_local! { pub static CSRF: RefCell<String> = const { RefCell::new(String::new()) }; }
 
 pub async fn api(method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
@@ -112,7 +121,7 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
         })
     };
     view! {
-        <AnimatedShow when=need hide_class="out" hide_delay=OUT>
+        <Fade when=need>
             <div class="card">
                 <b>"Confirm it's you"</b>
                 <p class="muted">"This change needs your authenticator code. After verifying, save again."</p>
@@ -130,7 +139,7 @@ pub fn StepUp(need: RwSignal<bool>, enrolled: ReadSignal<bool>) -> impl IntoView
                 </div>
                 <p class="err">{move || err.get()}</p>
             </div>
-        </AnimatedShow>
+        </Fade>
     }
 }
 
@@ -263,7 +272,7 @@ pub fn Toast(msg: Msg) -> impl IntoView {
             TOAST_LIFE,
         );
     });
-    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}{move || { life.track(); view! { <span class="life" class:stay=move || msg.stay.get()></span> } }}</p></AnimatedShow> }
+    view! { <Fade when=Signal::derive(move || !msg.get().is_empty())><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}{move || { life.track(); view! { <span class="life" class:stay=move || msg.stay.get()></span> } }}</p></Fade> }
 }
 
 /// Runs a save, recording the new version.
