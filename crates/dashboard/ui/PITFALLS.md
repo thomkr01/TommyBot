@@ -65,7 +65,7 @@ We did not switch every task to `spawn_local_scoped_with_cancellation`. It also 
 
 **Check:** the sweep switches through every page while each API response is held back 800 ms, then again while every request fails. Any panic fails the test.
 
-## Where it was fixed
+## Where it was fixed (#143)
 
 - `form.rs`: the `-` button on number fields (`>=` in the attribute); the settings card's config/schema load; the preview flash frame callback; list import.
 - `update.rs`: the update status request.
