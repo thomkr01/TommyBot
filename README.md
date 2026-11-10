@@ -14,9 +14,9 @@ TommyBot is a fast, all-in-one Discord security and moderation bot written in Ru
 
 - **Anti-nuke and panic mode**: limits on mass bans, kicks, channel, role and webhook changes, with quarantine, automatic revert and a short panic lockdown. A nuking bot stays in the server with its role emptied and in quarantine, channels it made are sanitized, and every panic sends one report of who was contained and what was restored.
 - **Automod**: a heat system that scores every message for spam, mentions, links, invites, caps, emojis and more, catches coordinated spam across accounts, reads QR codes in images to stop account-stealing login codes, and punishes with escalating strikes.
-- **Join gate and join raid**: screen new accounts and bots, and lock the server when a raid starts.
+- **Join gate and join raid**: screen new accounts and bots, log every join gate punishment with the reason and who added a bot, and lock the server when a raid starts.
 - **Lockdown**: lock one channel, a category or the whole server, on a timer if you like, and unlock exactly what was locked.
-- **Verification**: captcha in Discord or on the web.
+- **Verification**: captcha in Discord or on the web. The time limit pauses while a member is timed out, and a deleted verification channel is rebuilt and the person who deleted it is reported.
 - **Logging**: message, member, role, channel, voice and moderation logs in tidy embeds, sent only to private log channels.
 - **Appeals, reports and cases**: ban and timeout appeals, a report button for members, a searchable case history, and staff notes with their full edit history (a server-wide sweep always asks first).
 - **Tickets, embeds and Discord AutoMod**: members DM TommyBot to open a ticket with any server they share with it, staff answer in a private channel (anonymous replies, snippets, greeting and closing messages, blacklist, full transcripts viewable on the dashboard); plus an embed builder and control of Discord's own AutoMod rules.
