@@ -69,10 +69,11 @@ pub async fn message_menu(
         (actor_id, &actor),
         msg.channel_id,
         cmd,
-        None,
-        None,
+        (None, None),
+        false,
     )
     .await
+    .map(|a| a.text)
 }
 
 fn button(label: &str, id: i64, action: &str, style: ButtonStyle) -> Component {
@@ -474,10 +475,11 @@ async fn act(
                 who,
                 Id::new(channel as u64),
                 cmd,
-                None,
-                None,
+                (None, None),
+                false,
             )
-            .await?;
+            .await?
+            .text;
             return Ok(Outcome { text, line: None });
         }
         "warn" => (ModKind::Warn, "Warn"),
@@ -500,7 +502,7 @@ async fn act(
         return Ok(attempted("This user is already banned".into()));
     }
     let points = app.cfg(gid.get()).await?.misc.warn_base_points;
-    let text = commands::apply(
+    let done = commands::apply(
         app,
         gid,
         owner,
@@ -512,12 +514,12 @@ async fn act(
         points,
     )
     .await?;
-    // A refusal never opens a case, so "Case #" tells the two apart.
-    if !text.starts_with("Case #") {
-        return Ok(attempted(text));
+    // A refusal never opens a case.
+    if done.case.is_none() {
+        return Ok(attempted(done.text));
     }
     Ok(Outcome {
-        text,
+        text: done.text,
         line: Some((
             format!(
                 "- <@{actor_id}> issued a **{name}** <t:{}:R>",

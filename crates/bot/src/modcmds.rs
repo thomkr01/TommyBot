@@ -28,8 +28,10 @@ use crate::{
     commands::{self, gated, target_above_bot},
     confirm::{self, Action, Pending},
     events::send_log,
-    prefix::Parsed,
-    purge, reply, settings, targets,
+    prefix::{Flags, Parsed},
+    purge,
+    reply::{self, Applied, DmOutcome},
+    settings, targets,
 };
 
 /// The clicked message of a purge menu: From Here purges it and the newer ones below it, Until Here
@@ -166,15 +168,6 @@ impl ModCmd {
         }
     }
 
-    /// What a DM about this command calls it.
-    pub(crate) fn dm_name(&self) -> &'static str {
-        match self {
-            Self::Untimeout { .. } => "timeout removal",
-            Self::Unquarantine { .. } => "quarantine removal",
-            _ => self.perm(),
-        }
-    }
-
     /// Commands that lose data or are hard to undo ask for a Confirm click first (`MiscCfg.confirm`).
     pub fn destructive(&self) -> bool {
         matches!(
@@ -212,8 +205,24 @@ impl ModCmd {
         }
     }
 
+    /// The result Details flags this command implies: a hackban shows Hack Ban ✅.
+    pub(crate) fn flags(&self) -> Flags {
+        Flags {
+            hack: matches!(self, Self::Hackban { .. }),
+            ..Flags::default()
+        }
+    }
+
+    /// Quarantine, unquarantine and unban ask Yes/No when a member was typed as an id or a name.
+    pub fn asks_when_unsure(&self) -> bool {
+        matches!(
+            self,
+            Self::Quarantine { .. } | Self::Unquarantine { .. } | Self::Unban { .. }
+        )
+    }
+
     /// These take several members; the prefix runs one copy per member.
-    fn with_user(&self, u: u64) -> Option<Self> {
+    pub(crate) fn with_user(&self, u: u64) -> Option<Self> {
         Some(match self {
             Self::Unban { .. } => Self::Unban { user: u },
             Self::Untimeout { .. } => Self::Untimeout { user: u },
@@ -271,21 +280,31 @@ impl ModCmd {
 pub(crate) fn reply_parts(
     kind: Option<&str>,
     compact: bool,
-    texts: &[String],
+    done: &[Applied],
+    shown: (Flags, Option<i64>),
     reason: Option<&str>,
     actor: u64,
 ) -> (String, Vec<Embed>) {
+    let joined = || {
+        done.iter()
+            .map(|a| a.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     match kind {
         // A note card shows the note's text, so it goes to the moderator only (see `run_prefix`).
-        Some("note") => match texts.first() {
-            Some(t) if !compact && t.starts_with("Note: ") => {
-                (String::new(), vec![crate::modview::note_embed(t)])
+        Some("note") => match done.first() {
+            Some(a) if !compact && a.text.starts_with("Note: ") => {
+                (String::new(), vec![crate::modview::note_embed(&a.text)])
             }
-            _ => (texts.join("\n"), vec![]),
+            _ => (joined(), vec![]),
         },
-        Some(k) if !compact => (String::new(), reply::result_embeds(k, texts, reason, actor)),
-        Some(k) => (reply::summary(k, true, texts, reason, actor), vec![]),
-        None => (texts.join("\n"), vec![]),
+        Some(k) if !compact => (
+            String::new(),
+            reply::result_embeds(k, done, shown, reason, actor),
+        ),
+        Some(k) => (reply::summary(k, true, done, reason, actor), vec![]),
+        None => (joined(), vec![]),
     }
 }
 
@@ -475,48 +494,40 @@ pub async fn run_prefix(app: &App, msg: &MessageCreate, p: Parsed) -> Result<()>
             return commands::say(app, msg, &text).await;
         }
     };
-    if cmd.asks_confirm(app.cfg(gid.get()).await?.misc.confirm) {
-        let action = Action::Ext {
-            cmd,
-            channel: msg.channel_id,
-            reason: p.reason,
-            proof: None,
-        };
-        return confirm::ask_confirm(app, msg, Pending::new(gid, msg.author.id, action)).await;
-    }
     let kind = cmd.result_kind();
+    let shown = (
+        Flags {
+            hack: cmd.flags().hack,
+            ..p.flags
+        },
+        None,
+    );
     let private = matches!(cmd, ModCmd::NoteAdd { .. } | ModCmd::NoteList { .. });
     let paged = cmd.paged_user();
-    let cmds: Vec<ModCmd> = users.iter().filter_map(|u| cmd.with_user(*u)).collect();
-    let cmds = if cmds.is_empty() { vec![cmd] } else { cmds };
-    let mut texts = vec![];
-    for cmd in cmds {
-        // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
-        let level = app.level(gid, owner, msg.author.id).await?;
-        texts.push(
-            run(
-                app,
-                gid,
-                owner,
-                (msg.author.id, &level),
-                msg.channel_id,
-                cmd,
-                p.reason.as_deref(),
-                None,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(?e, "mod command failed");
-                format!("Command failed: {}", crate::http_err::why(&e))
-            }),
-        );
+    let action = Action::Ext {
+        cmd,
+        channel: msg.channel_id,
+        reason: p.reason.clone(),
+        proof: None,
+        users,
+        unsure: p.unsure(),
+        dm: p.flags.dm,
+    };
+    let job = Pending::new(gid, msg.author.id, action);
+    if job.needs_confirm(app.cfg(gid.get()).await?.misc.confirm) {
+        if !failed.is_empty() {
+            commands::say(app, msg, &failed.join("\n")).await?;
+        }
+        return confirm::ask_confirm(app, msg, job).await;
     }
-    texts.extend(failed);
+    let mut texts = job.run(app, owner, 0).await?;
+    texts.extend(failed.into_iter().map(Applied::from));
     let compact = app.cfg(gid.get()).await?.misc.compact_replies || p.flags.compact;
     let (text, embeds) = reply_parts(
         kind,
         compact,
         &texts,
+        shown,
         p.reason.as_deref(),
         msg.author.id.get(),
     );
@@ -570,7 +581,13 @@ pub(crate) async fn cases_pager(
     }))
 }
 
-/// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text.
+/// A reply that is no case: a refusal, a listing or a note.
+fn plain(text: impl Into<String>) -> Result<Applied> {
+    Ok(Applied::from(text.into()))
+}
+
+/// Permit check -> hierarchy -> rate limit -> action -> case. `dm` is the `?dm` flag: quarantine
+/// and the removals DM the member when it or the server's DM toggle says so.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     app: &App,
@@ -579,27 +596,41 @@ pub async fn run(
     (actor_id, actor): (Id<UserMarker>, &permits::Level),
     channel: Id<ChannelMarker>,
     cmd: ModCmd,
-    reason: Option<&str>,
-    proof: Option<&str>,
-) -> Result<String> {
+    (reason, proof): (Option<&str>, Option<&str>),
+    dm: bool,
+) -> Result<Applied> {
     let perm = cmd.perm();
+    let target = cmd.target();
     if let Some(t) = cmd.target() {
         let target = Id::new(t);
         let level = app.level(gid, owner, target).await?;
         let above = target_above_bot(app, gid, target).await?;
         let actor_n = actor_id.get() as i64;
         if let Err(d) = permits::check(actor, perm, actor_n, &level, t as i64, above) {
-            return Ok(commands::deny_text(perm, t, &d));
+            return plain(commands::deny_text(perm, t, &d));
         }
     } else if !actor.has(perm) {
-        return Ok(format!("Cannot use `{perm}`: no permit"));
+        return plain(format!("Cannot use `{perm}`: no permit"));
     }
     if let Some(msg) = gated(app, gid, actor_id, actor, perm).await? {
-        return Ok(msg);
+        return plain(msg);
     }
     let g = gid.get() as i64;
     let reasonless = reason.is_none();
     let audit = commands::audit_reason(reason, actor_id);
+    let cfg = app.cfg(gid.get()).await?;
+    // The DM for quarantine and the removals, sent by `reply::dm_and_act` around the action.
+    let notice = |kind, user: u64| {
+        let n = reply::Notice {
+            kind,
+            reason,
+            duration_s: None,
+            moderator: (!cfg.misc.hide_staff_in_dms).then_some(actor_id),
+            appeal: None,
+        };
+        reply::wants_dm(dm, &cfg.misc).then(|| reply::tell(app, gid, Id::new(user), n))
+    };
+    let mut told = DmOutcome::Off;
     // (case kind, case user, inverse, reason prefix, reply)
     let (kind, uid, inverse, note, reply): (&str, u64, Option<Value>, Option<String>, String) =
         match cmd {
@@ -608,10 +639,14 @@ pub async fn run(
                 user,
                 by,
                 kind,
-            } => return crate::modview::view_cases(app, g, case, user, by, kind, 0).await,
+            } => {
+                return crate::modview::view_cases(app, g, case, user, by, kind, 0)
+                    .await
+                    .map(Applied::from)
+            }
             ModCmd::NoteAdd { user, text } => {
                 if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
-                    return Ok(format!(
+                    return plain(format!(
                         "A note must be {NOTE_MIN} to {NOTE_MAX} characters long"
                     ));
                 }
@@ -635,18 +670,18 @@ pub async fn run(
                 crate::modview::send_note_log(app, gid.get(), &log)
                     .await
                     .ok();
-                return Ok(crate::modview::note_text(&id, user, actor_id.get(), &text));
+                return plain(crate::modview::note_text(&id, user, actor_id.get(), &text));
             }
             ModCmd::NoteModify { id, text } => {
                 if !(NOTE_MIN..=NOTE_MAX).contains(&text.chars().count()) {
-                    return Ok(format!(
+                    return plain(format!(
                         "A note must be {NOTE_MIN} to {NOTE_MAX} characters long"
                     ));
                 }
                 let actor = actor_id.get();
                 let Some((user, old)) = notes::edit(&app.pool, g, &id, &text, actor as i64).await?
                 else {
-                    return Ok(format!("No note `{id}`"));
+                    return plain(format!("No note `{id}`"));
                 };
                 let log = NoteLog {
                     action: NoteAction::Modify,
@@ -660,10 +695,12 @@ pub async fn run(
                 crate::modview::send_note_log(app, gid.get(), &log)
                     .await
                     .ok();
-                return Ok(format!("Note `{id}` updated"));
+                return plain(format!("Note `{id}` updated"));
             }
             ModCmd::NoteList { user, id, by } => {
-                return crate::modview::view_notes(app, g, user, id, by).await
+                return crate::modview::view_notes(app, g, user, id, by)
+                    .await
+                    .map(Applied::from)
             }
             ModCmd::NoteRemove { id, user } => {
                 let gone: Option<(i64, String)> = sqlx::query_as(
@@ -675,7 +712,7 @@ pub async fn run(
                 .fetch_optional(&app.pool)
                 .await?;
                 let Some((user, text)) = gone else {
-                    return Ok(format!("No note `{id}`"));
+                    return plain(format!("No note `{id}`"));
                 };
                 let log = NoteLog {
                     action: NoteAction::Remove,
@@ -688,7 +725,7 @@ pub async fn run(
                 crate::modview::send_note_log(app, gid.get(), &log)
                     .await
                     .ok();
-                return Ok(format!("Removed note `{id}`"));
+                return plain(format!("Removed note `{id}`"));
             }
             ModCmd::NoteSweep { user, by } => {
                 let n = sqlx::query(
@@ -711,7 +748,7 @@ pub async fn run(
                 crate::modview::send_note_log(app, gid.get(), &log)
                     .await
                     .ok();
-                return Ok(format!("Removed {n} notes"));
+                return plain(format!("Removed {n} notes"));
             }
             ModCmd::CasesEdit { case, reason } => {
                 let done =
@@ -731,7 +768,7 @@ pub async fn run(
                         .await
                         .ok();
                 }
-                return Ok(match done {
+                return plain(match done {
                     0 => format!("No case #{case}"),
                     _ => format!("Case #{case} reason updated"),
                 });
@@ -745,7 +782,7 @@ pub async fn run(
                         .execute(&app.pool)
                         .await?
                         .rows_affected();
-                return Ok(match (done, active) {
+                return plain(match (done, active) {
                     (0, _) => format!("No case #{case}"),
                     (_, true) => format!("Case #{case} is active again"),
                     _ => format!("Case #{case} closed"),
@@ -753,17 +790,23 @@ pub async fn run(
             }
             ModCmd::ClearWarns { user } => {
                 cases::reset_warns(&app.pool, g, user as i64).await?;
-                return Ok(format!("Cleared the warns of <@{user}>"));
+                return plain(format!("Cleared the warns of <@{user}>"));
             }
             ModCmd::Unban { user } => {
-                app.http
-                    .delete_ban(gid, Id::new(user))
-                    .reason(&audit)
-                    .await?;
+                let act = async {
+                    Ok(app
+                        .http
+                        .delete_ban(gid, Id::new(user))
+                        .reason(&audit)
+                        .await?)
+                };
+                let (d, r) =
+                    reply::dm_and_act(reply::dm_first("unban"), notice("unban", user), act).await;
+                (told, _) = (d, r?);
                 ("unban", user, None, None, format!("Unbanned <@{user}>"))
             }
             ModCmd::Hackban { user } => {
-                let secs = app.cfg(gid.get()).await?.misc.purge_secs();
+                let secs = cfg.misc.purge_secs();
                 app.http
                     .create_ban(gid, Id::new(user))
                     .delete_message_seconds(secs)
@@ -779,11 +822,18 @@ pub async fn run(
                 )
             }
             ModCmd::Untimeout { user } => {
-                app.http
-                    .update_guild_member(gid, Id::new(user))
-                    .communication_disabled_until(None)
-                    .reason(&audit)
-                    .await?;
+                let act = async {
+                    Ok(app
+                        .http
+                        .update_guild_member(gid, Id::new(user))
+                        .communication_disabled_until(None)
+                        .reason(&audit)
+                        .await?)
+                };
+                let (d, r) =
+                    reply::dm_and_act(reply::dm_first("untimeout"), notice("untimeout", user), act)
+                        .await;
+                (told, _) = (d, r?);
                 let text = format!("Removed timeout of <@{user}>");
                 ("untimeout", user, None, None, text)
             }
@@ -796,7 +846,7 @@ pub async fn run(
                 .fetch_optional(&app.pool)
                 .await?;
                 let Some((uid,)) = row else {
-                    return Ok(format!("No active warn case #{case}"));
+                    return plain(format!("No active warn case #{case}"));
                 };
                 let text = format!("Deactivated warn #{case} of <@{uid}>");
                 (
@@ -808,7 +858,14 @@ pub async fn run(
                 )
             }
             ModCmd::Quarantine { user } => {
-                antinuke::quarantine(app, gid, Id::new(user)).await?;
+                let act = antinuke::quarantine(app, gid, Id::new(user));
+                let (d, r) = reply::dm_and_act(
+                    reply::dm_first("quarantine"),
+                    notice("quarantine", user),
+                    act,
+                )
+                .await;
+                (told, _) = (d, r?);
                 let inv = json!({"op":"unquarantine","user":user});
                 let text = format!("Quarantined <@{user}>");
                 ("quarantine", user, Some(inv), None, text)
@@ -822,14 +879,21 @@ pub async fn run(
                 .fetch_optional(&app.pool)
                 .await?;
                 if held.is_none() {
-                    return Ok(format!("<@{user}> is not quarantined"));
+                    return plain(format!("<@{user}> is not quarantined"));
                 }
-                antinuke::run_inverse(app, gid, &Inverse::Unquarantine { user }).await?;
+                let inv = Inverse::Unquarantine { user };
+                let act = antinuke::run_inverse(app, gid, &inv);
+                let (d, r) = reply::dm_and_act(
+                    reply::dm_first("unquarantine"),
+                    notice("unquarantine", user),
+                    act,
+                )
+                .await;
+                (told, _) = (d, r?);
                 let text = format!("Released <@{user}> from quarantine");
                 ("unquarantine", user, None, None, text)
             }
             ModCmd::Verify { user } => {
-                let cfg = app.cfg(gid.get()).await?;
                 // Verify also ends a quarantine.
                 let held: Option<(i64,)> = sqlx::query_as(
                     "SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2",
@@ -842,7 +906,7 @@ pub async fn run(
                     antinuke::run_inverse(app, gid, &Inverse::Unquarantine { user }).await?;
                 }
                 if cfg.verification.roles.is_empty() && held.is_none() {
-                    return Ok("Set the verification roles on the dashboard first".into());
+                    return plain("Set the verification roles on the dashboard first");
                 }
                 crate::verify::grant(app, gid, Id::new(user), &cfg.verification).await?;
                 ("verify", user, None, None, format!("Verified <@{user}>"))
@@ -857,7 +921,7 @@ pub async fn run(
                 let name = m.nick.or(m.user.global_name).unwrap_or(m.user.name);
                 let clean = crate::modview::sanitized(&name);
                 if clean == name {
-                    return Ok(format!("<@{user}> already has a clean name"));
+                    return plain(format!("<@{user}> already has a clean name"));
                 }
                 app.http
                     .update_guild_member(gid, Id::new(user))
@@ -876,7 +940,7 @@ pub async fn run(
             } => {
                 let n = purge::run(app, gid, channel, count, user, &filters, from).await?;
                 if n == 0 {
-                    return Ok("No deletable messages found (over 14 days old are skipped)".into());
+                    return plain("No deletable messages found (over 14 days old are skipped)");
                 }
                 let who = user.unwrap_or(actor_id.get());
                 let note = format!("{n} messages in <#{channel}>");
@@ -944,7 +1008,12 @@ pub async fn run(
     } else {
         String::new()
     };
-    Ok(format!("Case #{case_no}: {reply}{hint}"))
+    Ok(Applied {
+        target,
+        case: Some(case_no),
+        text: format!("Case #{case_no}: {reply}{hint}"),
+        dm: told,
+    })
 }
 
 #[cfg(test)]

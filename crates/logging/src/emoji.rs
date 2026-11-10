@@ -68,6 +68,9 @@ const fn e(name: &'static str, fallback: &'static str) -> Emoji {
 pub const ARROW: Emoji = e("right_sort", "▸");
 pub const YES: Emoji = e("success", "✅");
 pub const NO: Emoji = e("error", "❌");
+/// An option that was not used, or a DM that did not arrive.
+pub const UNSET: Emoji = e("checkbox_off", "❎");
+pub const DETAILS: Emoji = e("note", "🗒️");
 pub const REASON: Emoji = e("reason", "📄");
 pub const MODERATOR: Emoji = e("moderator_field", "👤");
 pub const MEMBER: Emoji = e("member", "👤");

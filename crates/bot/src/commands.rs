@@ -29,7 +29,7 @@ use crate::{
     hierarchy::top_position,
     lockdown, modcmds,
     prefix::{Flags, Parsed},
-    reply,
+    reply::{self, Applied},
     slash::BackupCmd,
     targets,
 };
@@ -105,8 +105,8 @@ pub(crate) fn deny_text(perm: &str, target: u64, d: &permits::Denied) -> String 
     format!("Cannot {perm} <@{target}>: {why}")
 }
 
-/// Permit check -> hierarchy -> rate limit -> action -> case. Returns the reply text; Err only for
-/// infrastructure failures. `points` only matters for warns.
+/// Permit check -> hierarchy -> rate limit -> DM -> action -> case. Err only for infrastructure
+/// failures. `points` only matters for warns.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply(
     app: &App,
@@ -118,7 +118,7 @@ pub async fn apply(
     reason: Option<&str>,
     duration_s: Option<i64>,
     points: i32,
-) -> Result<String> {
+) -> Result<Applied> {
     apply_dm(
         app,
         gid,
@@ -135,7 +135,8 @@ pub async fn apply(
     .await
 }
 
-/// [`apply`] with the prefix flags: `dm` tells the target first, `soft` turns a ban into a softban, `compact` shortens the reply.
+/// [`apply`] with the prefix flags: `dm` tells the target even when the server's DM toggle is off,
+/// `soft` turns a ban into a softban, `no_avatar` / `voice` limit a kick, `compact` shortens the reply.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_dm(
     app: &App,
@@ -149,8 +150,13 @@ pub async fn apply_dm(
     points: i32,
     flags: Flags,
     proof: Option<&str>,
-) -> Result<String> {
+) -> Result<Applied> {
     let perm = kind.name();
+    let t = target.get();
+    let refused = |text: String| Applied {
+        target: Some(t),
+        ..text.into()
+    };
     let target_level = app.level(gid, owner, target).await?;
     let above = kind != ModKind::Warn && target_above_bot(app, gid, target).await?;
     if let Err(d) = permits::check(
@@ -161,73 +167,96 @@ pub async fn apply_dm(
         target.get() as i64,
         above,
     ) {
-        return Ok(deny_text(perm, target.get(), &d));
+        return Ok(refused(deny_text(perm, t, &d)));
     }
     if let Some(msg) = gated(app, gid, actor_id, actor, perm).await? {
-        return Ok(msg);
+        return Ok(refused(msg));
     }
-    let t = target.get();
+    if kind == ModKind::Kick {
+        if let Some(why) = kick_filtered(app, gid, target, flags).await? {
+            return Ok(refused(format!("Skipped <@{t}>: {why}")));
+        }
+    }
     let cfg = app.cfg(gid.get()).await?;
     let soft = flags.soft && kind == ModKind::Ban;
-    // One DM before the action: a banned user can't be DMed afterwards.
-    let note = appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
+    let name = if soft { "softban" } else { perm };
+    let dm_kind = match kind {
+        ModKind::Ban if duration_s.is_some() && !soft => "tempban",
+        _ => name,
+    };
+    let appeal = appeals::note(&cfg.appeals, &cfg.misc.ban_appeal_message, gid)
         .filter(|_| matches!(kind, ModKind::Ban | ModKind::Timeout) && !soft);
-    let told = (flags.dm || cfg.misc.always_dm).then(|| {
-        let who = (!cfg.misc.hide_staff_in_dms).then_some(actor_id.get());
-        reply::dm_text(perm, reason, who)
-    });
-    if let Some(text) = [told, note]
-        .into_iter()
-        .flatten()
-        .reduce(|a, b| format!("{a}\n{b}"))
-    {
-        reply::dm(app, target, &text).await;
-    }
+    let timeout_s = duration_s.unwrap_or(cfg.misc.timeout_secs() as i64);
+    let notice = reply::Notice {
+        kind: dm_kind,
+        reason,
+        duration_s: if kind == ModKind::Timeout {
+            Some(timeout_s)
+        } else {
+            duration_s
+        },
+        moderator: (!cfg.misc.hide_staff_in_dms).then_some(actor_id),
+        appeal,
+    };
+    // A hackban targets ids that left the server: a DM per raid id would only cost DM_WAIT each.
+    let dm = (reply::wants_dm(flags.dm, &cfg.misc) && !flags.hack)
+        .then(|| reply::tell(app, gid, target, notice));
     let audit = audit_reason(reason, actor_id);
-    let (inverse, points) = match kind {
-        ModKind::Ban if soft => {
-            // A softban exists to purge messages, so purge a day when the server default is none.
-            app.http
-                .create_ban(gid, target)
-                .delete_message_seconds(cfg.misc.purge_secs().max(86_400))
-                .reason(&audit)
-                .await?;
-            app.http.delete_ban(gid, target).reason(&audit).await?;
-            (None, 0)
-        }
-        ModKind::Ban => {
-            // Queued first: a restart right after the ban must not make it permanent. If the ban
-            // fails, the unban later finds no ban and is dropped.
-            if let Some(d) = duration_s {
-                let job = json!({"user":t});
-                jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d).await?;
+    let act = async {
+        anyhow::Ok(match kind {
+            ModKind::Ban if soft => {
+                // A softban exists to purge messages, so purge a day when the server default is none.
+                app.http
+                    .create_ban(gid, target)
+                    .delete_message_seconds(cfg.misc.purge_secs().max(86_400))
+                    .reason(&audit)
+                    .await?;
+                app.http.delete_ban(gid, target).reason(&audit).await?;
+                (None, 0)
             }
-            app.http
-                .create_ban(gid, target)
-                .delete_message_seconds(cfg.misc.purge_secs())
-                .reason(&audit)
-                .await?;
-            (Some(json!({"op":"unban","user":t})), 0)
+            ModKind::Ban => {
+                // Queued first: a restart right after the ban must not make it permanent. If the ban
+                // fails, the unban later finds no ban and is dropped.
+                if let Some(d) = duration_s {
+                    let job = json!({"user":t});
+                    jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d)
+                        .await?;
+                }
+                app.http
+                    .create_ban(gid, target)
+                    .delete_message_seconds(cfg.misc.purge_secs())
+                    .reason(&audit)
+                    .await?;
+                (Some(json!({"op":"unban","user":t})), 0)
+            }
+            ModKind::Kick => {
+                app.http
+                    .remove_guild_member(gid, target)
+                    .reason(&audit)
+                    .await?;
+                (None, 0)
+            }
+            ModKind::Timeout => {
+                timeout_until(app, gid, target, now_secs() + timeout_s, &audit).await?;
+                (Some(json!({"op":"untimeout","user":t})), 0)
+            }
+            ModKind::Warn => (None, points),
+        })
+    };
+    // The DM goes first: a kicked or banned member can't be reached afterwards.
+    let (told, acted) = reply::dm_and_act(reply::dm_first(dm_kind), dm, act).await;
+    let (inverse, points) = match acted {
+        Ok(a) => a,
+        // Keep the DM outcome: the member may already have been told.
+        Err(e) => {
+            tracing::warn!(?e, "mod command failed");
+            let why = crate::http_err::why(&e);
+            let text = format!("Failed to {perm} <@{t}>: {why}");
+            return Ok(Applied {
+                dm: told,
+                ..refused(text)
+            });
         }
-        ModKind::Kick => {
-            app.http
-                .remove_guild_member(gid, target)
-                .reason(&audit)
-                .await?;
-            (None, 0)
-        }
-        ModKind::Timeout => {
-            timeout_until(
-                app,
-                gid,
-                target,
-                now_secs() + duration_s.unwrap_or(cfg.misc.timeout_secs() as i64),
-                &audit,
-            )
-            .await?;
-            (Some(json!({"op":"untimeout","user":t})), 0)
-        }
-        ModKind::Warn => (None, points),
     };
     let case_no = cases::create(
         &app.pool,
@@ -244,7 +273,6 @@ pub async fn apply_dm(
         },
     )
     .await?;
-    let name = if soft { "softban" } else { perm };
     mod_log(
         app,
         gid,
@@ -256,7 +284,7 @@ pub async fn apply_dm(
     .await;
     let mut text = reply::case_text(
         cfg.misc.compact_replies || flags.compact,
-        (case_no.into(), if soft { "softban" } else { perm }, t),
+        (case_no.into(), name, t),
         reason,
         actor_id.get(),
     );
@@ -265,7 +293,43 @@ pub async fn apply_dm(
             text += format!("\n{extra}").as_str();
         }
     }
-    Ok(text)
+    Ok(Applied {
+        target: Some(t),
+        case: Some(case_no),
+        text,
+        dm: told,
+    })
+}
+
+/// Why `?na` / `?vc` leave this member out of a kick, if they do.
+async fn kick_filtered(
+    app: &App,
+    gid: Id<GuildMarker>,
+    target: Id<UserMarker>,
+    flags: Flags,
+) -> Result<Option<&'static str>> {
+    if flags.no_avatar {
+        match crate::http_err::member(&app.http, gid, target).await? {
+            None => return Ok(Some("they are not in the server")),
+            Some(m) if m.avatar.is_some() || m.user.avatar.is_some() => {
+                return Ok(Some(
+                    "they have an avatar (`?na` kicks only members without one)",
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    if flags.voice {
+        // Discord answers 404 when the member is in no voice channel; other errors skip them too,
+        // since a kick that may not match the filter is worse than one left out.
+        let in_voice = app.http.user_voice_state(gid, target).await.is_ok();
+        if !in_voice {
+            return Ok(Some(
+                "they are not in a voice channel (`?vc` kicks only members in one)",
+            ));
+        }
+    }
+    Ok(None)
 }
 
 /// The bot stays silent for quarantined members and in a voice channel's chat (purge excepted).
@@ -337,6 +401,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
         return Ok(());
     };
     p.flags.soft |= p.command == "softban";
+    p.flags.hack |= p.command == "hackban";
     if KNOWN.contains(&p.command.as_str()) {
         let cfg = app.cfg(gid.get()).await?;
         if cfg.misc.delete_invocation {
@@ -460,7 +525,7 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             Err(e) => say(app, msg, &e).await?,
         }
     }
-    let reason = p.reason.clone();
+    let unsure = p.unsure();
     let job = Pending::new(
         gid,
         msg.author.id,
@@ -471,25 +536,15 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             duration_s: p.duration_s,
             flags: p.flags,
             proof: None,
+            unsure,
         },
     );
     if job.needs_confirm(cfg.misc.confirm) {
         return ask_confirm(app, msg, job).await;
     }
-    let texts = job.run(app, owner, cfg.misc.warn_base_points).await?;
-    let compact = cfg.misc.compact_replies || p.flags.compact;
-    if !compact {
-        let e = reply::result_embeds(kind.name(), &texts, reason.as_deref(), msg.author.id.get());
-        return say_embeds(app, msg, "", &e).await;
-    }
-    let text = reply::summary(
-        kind.name(),
-        compact,
-        &texts,
-        reason.as_deref(),
-        msg.author.id.get(),
-    );
-    say(app, msg, &text).await
+    let done = job.run(app, owner, cfg.misc.warn_base_points).await?;
+    let (text, embeds) = job.reply(&done, cfg.misc.compact_replies, cfg.misc.timeout_secs());
+    say_embeds(app, msg, &text, &embeds).await
 }
 
 async fn cfg_compact(app: &App, gid: Id<GuildMarker>, flags: Flags) -> Result<bool> {
@@ -580,23 +635,29 @@ pub(crate) async fn apply_warn_actions(
     };
     let why = format!("Reached {} warn points", t.points);
     let (kind, secs) = match t.action {
-        warn::Action::Ban => {
-            app.http.create_ban(g, u).reason(&why).await?;
-            ("ban", None)
-        }
-        warn::Action::Kick => {
-            app.http.remove_guild_member(g, u).reason(&why).await?;
-            ("kick", None)
-        }
-        warn::Action::Timeout { secs } => {
-            let secs = match secs {
-                0 => misc.timeout_secs() as i64,
-                s => s,
-            };
-            timeout(&app.http, g, u, secs, &why).await?;
-            ("timeout", Some(secs))
-        }
+        warn::Action::Ban => ("ban", None),
+        warn::Action::Kick => ("kick", None),
+        warn::Action::Timeout { secs: 0 } => ("timeout", Some(misc.timeout_secs() as i64)),
+        warn::Action::Timeout { secs } => ("timeout", Some(secs)),
     };
+    let notice = reply::Notice {
+        kind,
+        reason: Some(&why),
+        duration_s: secs,
+        moderator: (!misc.hide_staff_in_dms).then_some(app.me.cast()),
+        appeal: None,
+    };
+    let dm = reply::wants_dm(false, misc).then(|| reply::tell(app, g, u, notice));
+    let act = async {
+        match secs {
+            Some(s) => timeout(&app.http, g, u, s, &why).await?,
+            None if kind == "ban" => drop(app.http.create_ban(g, u).reason(&why).await?),
+            None => drop(app.http.remove_guild_member(g, u).reason(&why).await?),
+        }
+        anyhow::Ok(())
+    };
+    // Same rule as a typed punishment: tell the member first.
+    reply::dm_and_act(true, dm, act).await.1?;
     let case_no = cases::create(
         &app.pool,
         cases::NewCase {
@@ -861,6 +922,7 @@ mod tests {
             duration_s: Some(60),
             flags,
             proof: Some("https://x/y.png".into()),
+            unsure: true,
         };
         let Action::Mod {
             kind,
@@ -884,6 +946,9 @@ mod tests {
             channel: Id::new(7),
             reason: None,
             proof: None,
+            users: vec![5],
+            unsure: true,
+            dm: false,
         };
         let Action::Ext { cmd, channel, .. } =
             serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap()

@@ -863,8 +863,14 @@ pub fn schema() -> Vec<Value> {
                 "Spam, @everyone pings and invites are allowed here.",
             ),
         ),
-        ti(dv(fg("Moderation commands", "confirm", "bool"), true), "Display a confirmation message before executing the moderation action a moderator wants"),
-        ti(fg("Moderation commands", "always_dm", "bool"), "Always DM the members punished regardless of the presence of a ?dm parameter"),
+        hp(
+            ti(dv(fg("Moderation commands", "confirm", "bool"), true), "Ask for a Yes/No confirmation when the target is given as an ID or a name"),
+            "A @mention is never asked about. Only the moderator who ran the command can press Yes or No, and the question closes after 10 seconds. Purge, hackbans and note sweeps ask too.",
+        ),
+        hp(
+            ti(dv(fg("Moderation commands", "always_dm", "bool"), true), "DM members when they are punished or when a punishment is removed"),
+            "The DM is sent before the action. If the member has closed DMs, the action still happens and the result shows DM-Members ❎. Unban DMs usually fail because the member no longer shares a server with TommyBot. Off: only ?dm sends one.",
+        ),
         ti(fg("Moderation commands", "delete_invocation", "bool"), "Always delete the moderation execution messages for regular prefix commands"),
         ti(fg("Moderation commands", "hide_staff_in_dms", "bool"), "Hide the staff member responsible when DMing the punished member"),
         hp(

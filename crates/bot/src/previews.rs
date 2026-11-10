@@ -17,7 +17,7 @@ use twilight_model::{
 
 use crate::antinuke::Applied;
 use crate::panic::{self, Backup};
-use crate::{antinuke, automod, commands, joingate, reply, tickets, verify};
+use crate::{antinuke, automod, commands, joingate, prefix::Flags, reply, tickets, verify};
 use tommybot_core::sections::FilterAction;
 
 const MEMBER: u64 = 1001;
@@ -94,9 +94,70 @@ fn tickets() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// A finished action on [`MEMBER`] with its DM delivered.
+fn applied(kind: &str, compact: bool) -> reply::Applied {
+    reply::Applied {
+        target: Some(MEMBER),
+        case: Some(4151),
+        text: reply::case_text(compact, (4151, kind, MEMBER), Some("toxic"), YOU),
+        dm: reply::DmOutcome::Sent,
+    }
+}
+
+/// Result embeds for each punishment, once with every target done and once with one refused.
+fn results() -> Vec<(String, Value)> {
+    let hour = Some(3600);
+    let cases: [(&str, &str, Flags, Option<i64>); 7] = [
+        ("warn", "warn", Flags::default(), None),
+        ("timeout", "timeout", Flags::default(), hour),
+        ("kick", "kick", Flags::default(), None),
+        ("ban", "ban", Flags::default(), None),
+        ("softban", "softban", Flags::default(), None),
+        ("tempban", "ban", Flags::default(), Some(7 * 86_400)),
+        ("quarantine", "quarantine", Flags::default(), None),
+    ];
+    let mut out = vec![];
+    for (key, kind, flags, dur) in cases {
+        let ok = [applied(kind, false)];
+        let refused = reply::Applied {
+            target: Some(ROGUE),
+            text: format!("Cannot {kind} <@{ROGUE}>: they are immune"),
+            ..Default::default()
+        };
+        let one_failed = [applied(kind, false), refused];
+        let embeds = |done: &[reply::Applied]| json!({"embeds": reply::result_embeds(kind, done, (flags, dur), Some("toxic"), YOU)});
+        out.push((format!("{key}_result_all"), embeds(&ok)));
+        out.push((format!("{key}_result_failed"), embeds(&one_failed)));
+    }
+    out
+}
+
+/// The DM a member gets for each punishment and each removal.
+fn dms() -> Vec<(String, Value)> {
+    let kinds = [
+        ("warn", None),
+        ("timeout", Some(3600)),
+        ("quarantine", None),
+        ("kick", None),
+        ("ban", None),
+        ("softban", None),
+        ("tempban", Some(7 * 86_400)),
+        ("unquarantine", None),
+        ("untimeout", None),
+        ("unban", None),
+    ];
+    kinds
+        .into_iter()
+        .map(|(k, d)| {
+            let e = reply::dm_embed(k, SERVER, Some("toxic"), Some("you"), d);
+            (format!("dm_{k}"), embed(e))
+        })
+        .collect()
+}
+
 fn messages() -> Value {
-    let full = reply::case_text(false, (4151, "ban", MEMBER), Some("toxic"), YOU);
-    let compact = reply::case_text(true, (4151, "ban", MEMBER), Some("toxic"), YOU);
+    let full = applied("ban", false);
+    let compact = applied("ban", true);
     let act = strike(&mut StrikeState::default(), &StrikeCfg::default(), 0);
     let sum = antinuke::RevertSummary {
         ops: 5,
@@ -176,7 +237,7 @@ fn messages() -> Value {
     };
     let mut all = json!({
         "names": {"users": {MEMBER.to_string(): "member", YOU.to_string(): "you", ROGUE.to_string(): "rogue-admin"}, "channels": {GENERAL.to_string(): "general"}, "roles": {"3001": "Member"}},
-        "ban_result": json!({"embeds": reply::result_embeds("ban", &[full], Some("toxic"), YOU)}),
+        "ban_result": json!({"embeds": reply::result_embeds("ban", &[full], (Flags::default(), None), Some("toxic"), YOU)}),
         "ban_compact": {"content": reply::summary("ban", true, &[compact], Some("toxic"), YOU)},
         "automod_warn": log(automod::filter_log("member", FilterAction::Warn, "Use of blacklisted words", (GENERAL, "you all suck"), MEMBER)),
         "automod_kick": log(automod::filter_log("member", FilterAction::Kick, "Posting an invite link", (GENERAL, "Join my server everyone discord.gg/example"), MEMBER)),
@@ -217,6 +278,11 @@ fn messages() -> Value {
     for (k, v) in tickets() {
         all[k] = v;
     }
+    for (k, v) in results().into_iter().chain(dms()) {
+        all[k] = v;
+    }
+    let question = crate::confirm::sample_question(MEMBER);
+    all["confirm_question"] = json!({"embeds": [question.0], "components": [question.1]});
     all
 }
 
