@@ -244,8 +244,8 @@ pub const WHITELIST: &[Card] = &[
         ..card("@everyone whitelist", "Pick the users, roles, channels, categories and webhooks you want to whitelist when it comes to sending @everyone mentions (or main roles).", wl!("everyone."), |_, _| chat("member", text("@everyone you suck!")))
     },
     Card {
-        notes: &["TommyBot's own tickets are always exempt, so skip this unless you use another ticket bot.", "This whitelist covers the channels made under the categories picked below."],
-        ..card("Channel creation whitelist (other ticket bots)", "Only needed if another ticket bot opens channels here: pick the categories where its channel creations are fine.", &[("antinuke.ticket_categories", "Categories")], |c, dc| {
+        notes: &["You do not need this step if you use TommyBot's own tickets: they are always exempt.", "If you use another ticket bot, you should set this whitelist, or its new ticket channels count towards the antinuke limits."],
+        ..card("Channel creation whitelist (other ticket bots)", "Using another ticket bot? Pick the categories it opens ticket channels in, so antinuke leaves them alone.", &[("antinuke.ticket_categories", "Categories")], |c, dc| {
             let cats: Vec<String> = strs(&c["antinuke"]["ticket_categories"]).iter().map(|id| name_of(dc, "categories", id)).collect();
             text(&if cats.is_empty() { "Every channel creation counts towards the antinuke limits.".to_string() } else { format!("Channels made or deleted under {} never count.", cats.join(", ")) })
         })
