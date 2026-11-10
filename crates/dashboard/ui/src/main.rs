@@ -369,7 +369,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <button class="ghost" on:click=move |_| { if let Some(i) = file.get() { i.click() } }>"Import settings"</button>
             <input type="file" accept=".json,application/json" hidden=true node_ref=file on:change=import />
         </div>
-        <AnimatedShow when=Signal::derive(move || preview.get().is_some()) hide_class="out" hide_delay=OUT>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
+        <Fade when=Signal::derive(move || preview.get().is_some())>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
             let apply = apply.clone();
             let r = NodeRef::new();
             focus_on_open(r);
@@ -382,7 +382,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 {(!cleared.is_empty()).then(|| view! { <p class="info">{format!("Ids from the other server are cleared; set these again after the import: {cleared}")}</p> })}
                 <div class="row"><button class="ghost" on:click=move |_| preview.set(None)>"Abort"</button><button disabled=changes.is_empty() on:click=apply>"Import"</button></div>
             </div></div> }
-        })}</AnimatedShow>
+        })}</Fade>
         <For each=move || rows.get() key=|r| r["version"].as_i64() let:r>
             {
                 let v = r["version"].as_i64().unwrap_or(0);
@@ -460,6 +460,9 @@ fn App() -> impl IntoView {
             }
         });
     });
+    // The open page's access level. A memo, so the refetch on every page change only rebuilds the page
+    // (and throws away unsaved edits) when the level really changed.
+    let level = Memo::new(move |_| route.with(|r| r.get(1).map(|p| access.of(p)).unwrap_or_default()));
     // 2FA on request, for protected changes made in Discord (the bot checks this step-up).
     let step_up = RwSignal::new(false);
     // The server the user last opened, so pages without a server (Update, Commands) can mark it in the menu.
@@ -631,7 +634,7 @@ fn App() -> impl IntoView {
                                 _ => sec(p, ""),
                             };
                             { let (page_name, big) = title(p); let head = match big { Some(b) => view! { <Head guild=g.clone() page=page_name big=b /> }.into_any(), None => view! { <Head guild=g.clone() page=page_name /> }.into_any() };
-                              let page = match access.of(p).as_str() {
+                              let page = match level.get().as_str() {
                                   "hidden" => view! { <div class="card empty"><h2>"No access"</h2><p>"Your permit does not give access to this page. Ask a server owner if you need it."</p></div> }.into_any(),
                                   "read" => view! { <p class="card info" role="note">"You can view this page, but your permit does not let you change it."</p><fieldset class="ro" disabled>{page}</fieldset> }.into_any(),
                                   _ => page,
