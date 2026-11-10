@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tommybot_core::limits;
 
 pub(crate) type Res = Result<Json<Value>, ApiError>;
 
@@ -269,6 +270,7 @@ pub async fn put_section(
     require(&st, &s, guild, min, step_up).await?;
     let (cur, mut config) = store::current(&st.db, guild).await?;
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
+    limits::check(&section, &b.value, &config[&section]).map_err(ApiError::BadRequest)?;
     // Turning Tickets on is the whole setup: its category and log channel are made here.
     let tickets_on = section == "tickets"
         && b.value["enabled"] == true
@@ -520,6 +522,7 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
                 }
             }
             validate(k, &v)?;
+            limits::check(k, &v, &now[k]).map_err(ApiError::BadRequest)?;
         }
         new[k] = v;
     }
@@ -645,7 +648,6 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
             }
         }
     }
-    tommybot_core::limits::check(section, v).map_err(ApiError::BadRequest)?;
     if section == "misc" && v["warn_actions"].as_array().is_some_and(|a| a.len() > 5) {
         return Err(ApiError::BadRequest("at most 5 warn actions".into()));
     }
@@ -702,18 +704,14 @@ mod logging_validate_tests {
     use serde_json::json;
 
     #[test]
-    fn saving_refuses_numbers_outside_their_range() {
-        let nuke = |k: &str, n: i64| json!({"limits": {"Ban": {k: n}}});
-        assert!(validate("antinuke", &nuke("per_hour", 500)).is_ok());
-        assert!(validate("antinuke", &nuke("per_hour", 501)).is_err());
-        assert!(validate("antinuke", &nuke("heat", 0)).is_err());
-        assert!(validate("joingate", &json!({"min_age_override_ms": 4_999})).is_err());
-        assert!(validate(
-            "joingate",
-            &json!({"min_age_override_ms": 8_640_000_001_i64})
-        )
-        .is_err());
-        assert!(validate("joingate", &json!({"min_age_override_ms": 5_000})).is_ok());
+    fn imports_refuse_new_numbers_outside_their_range() {
+        let nuke = |n: i64| json!({"antinuke": {"limits": {"Ban": {"heat": n}}}});
+        assert!(import_config(&nuke(100), &json!({})).is_ok());
+        assert!(import_config(&nuke(0), &json!({})).is_err());
+        // An old 0 already saved here may come back unchanged.
+        assert!(import_config(&nuke(0), &nuke(0)).is_ok());
+        let age = json!({"joingate": {"min_age_override_ms": 4_999}});
+        assert!(import_config(&age, &json!({})).is_err());
     }
 
     #[test]

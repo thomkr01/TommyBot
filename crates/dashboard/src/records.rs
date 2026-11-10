@@ -289,10 +289,12 @@ struct NoteBody {
 }
 
 /// The bot sends the private mod-log entry (the dashboard has no Discord connection of its own).
-async fn note_log(st: &AppState, guild: i64, log: NoteLog) -> Result<(), ApiError> {
+/// The note change is already saved, so a failed enqueue is only logged: a retry would repeat it.
+async fn note_log(st: &AppState, guild: i64, log: NoteLog) {
     let at = chrono::Utc::now().timestamp();
-    jobs::enqueue(&st.db, guild, "note_log", json!(log), at).await?;
-    Ok(())
+    if let Err(e) = jobs::enqueue(&st.db, guild, "note_log", json!(log), at).await {
+        tracing::warn!(?e, guild, "queueing the note log failed");
+    }
 }
 
 async fn note_add(
@@ -320,7 +322,7 @@ async fn note_add(
         text: Some(text),
         ..NoteLog::default()
     };
-    note_log(&st, guild, log).await?;
+    note_log(&st, guild, log).await;
     ok()
 }
 
@@ -344,7 +346,7 @@ async fn note_edit(
         old: Some(old),
         ..NoteLog::default()
     };
-    note_log(&st, guild, log).await?;
+    note_log(&st, guild, log).await;
     ok()
 }
 
@@ -370,7 +372,7 @@ async fn note_delete(
             text: Some(text),
             ..NoteLog::default()
         };
-        note_log(&st, guild, log).await?;
+        note_log(&st, guild, log).await;
     }
     ok()
 }
@@ -403,7 +405,7 @@ async fn note_sweep(
         count: Some(n),
         ..NoteLog::default()
     };
-    note_log(&st, guild, log).await?;
+    note_log(&st, guild, log).await;
     Ok(Json(json!({"removed": n})))
 }
 
