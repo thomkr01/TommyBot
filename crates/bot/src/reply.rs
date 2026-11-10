@@ -351,23 +351,27 @@ pub async fn dm(app: &App, user: Id<UserMarker>, text: &str) -> bool {
 }
 
 async fn send_dm(app: &App, user: Id<UserMarker>, text: &str, embeds: &[Embed]) -> bool {
-    let send = async {
-        let ch = best_effort(app.http.create_private_channel(user).await, "open DM")?;
-        let ch = ch.model().await.ok()?;
-        best_effort(
-            app.http
-                .create_message(ch.id)
-                .content(text)
-                .embeds(embeds)
-                .await,
-            "send DM",
-        )
-    };
-    tokio::time::timeout(DM_WAIT, send)
+    tokio::time::timeout(DM_WAIT, try_dm(app, user, text, embeds))
         .await
         .ok()
         .flatten()
         .is_some()
+}
+
+/// A DM with no time limit, for the owner's alerts: during an attack Discord's rate limits can
+/// hold it past [`DM_WAIT`], and nothing waits on it.
+async fn try_dm(app: &App, user: Id<UserMarker>, text: &str, embeds: &[Embed]) -> Option<()> {
+    let ch = best_effort(app.http.create_private_channel(user).await, "open DM")?;
+    let ch = ch.model().await.ok()?;
+    best_effort(
+        app.http
+            .create_message(ch.id)
+            .content(text)
+            .embeds(embeds)
+            .await,
+        "send DM",
+    )
+    .map(drop)
 }
 
 /// DMs the server owner that an attack started, so they hear about it even when nobody watches
@@ -390,14 +394,14 @@ pub async fn alert_owner(app: &App, gid: Id<GuildMarker>, what: &str) {
             format!("\nDetails: https://discord.com/channels/{gid}/{ch}")
         });
     let text = format!("{PANIC} **{what}** on your server. TommyBot is handling it.{logs}");
-    dm(app, info.owner, &text).await;
+    try_dm(app, info.owner, &text, &[]).await;
 }
 
 /// DMs the server owner right away, without [`alert_owner`]'s 10-minute limit.
 pub async fn dm_owner(app: &App, gid: Id<GuildMarker>, text: &str) {
     match app.guild_info(gid).await {
         Ok(i) => {
-            dm(app, i.owner, text).await;
+            try_dm(app, i.owner, text, &[]).await;
         }
         Err(e) => tracing::warn!(?e, "owner DM: guild lookup failed"),
     }
