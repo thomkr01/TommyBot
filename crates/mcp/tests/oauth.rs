@@ -246,6 +246,29 @@ async fn owner_gets_a_token_others_do_not() {
         .await;
     assert_eq!(code, 200);
     assert_eq!(t.mcp(again["access_token"].as_str().unwrap()).await, 200);
+    // A refresh keeps the login time, so the chain ends 30 days after the Discord login.
+    let claims = |t: &str| -> Value {
+        serde_json::from_slice(&B64.decode(t.split('.').next().unwrap()).unwrap()).unwrap()
+    };
+    let (r1, r2) = (
+        claims(tok["refresh_token"].as_str().unwrap()),
+        claims(again["refresh_token"].as_str().unwrap()),
+    );
+    assert_eq!(r1["auth"], r2["auth"]);
+    assert!(r2["exp"].as_u64() <= r1["exp"].as_u64());
+    // A refresh token without a login time (made before the limit) is refused.
+    let old =
+        t.0.oauth
+            .as_ref()
+            .unwrap()
+            .sign("refresh", 3600, json!({"sub": OWNER, "cid": cid}));
+    let (code, _) = t
+        .form(
+            "/token",
+            format!("grant_type=refresh_token&refresh_token={}", enc(&old)),
+        )
+        .await;
+    assert_eq!(code, 400);
     // The static token still works next to OAuth.
     assert_eq!(t.mcp("static-static-static-static-static-x").await, 200);
 }

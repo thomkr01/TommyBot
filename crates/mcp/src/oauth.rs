@@ -322,12 +322,23 @@ pub async fn callback(S(st): St, Query(q): Query<CallbackQ>) -> Response {
     Redirect::to(&to).into_response()
 }
 
-fn tokens(o: &OAuth, sub: &str, cid: &str) -> Response {
+/// `auth` is when the owner logged in with Discord. A refresh keeps it, so a login (or a stolen refresh
+/// token) lasts at most `REFRESH_S` in all instead of renewing itself forever.
+fn tokens(o: &OAuth, sub: &str, cid: &str, auth: u64) -> Response {
+    let left = (auth + REFRESH_S).saturating_sub(now());
+    if left == 0 {
+        return bad(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "login too old, log in again",
+        );
+    }
+    let access = ACCESS_S.min(left);
     Json(json!({
-        "access_token": o.sign("access", ACCESS_S, json!({"sub": sub})),
+        "access_token": o.sign("access", access, json!({"sub": sub})),
         "token_type": "Bearer",
-        "expires_in": ACCESS_S,
-        "refresh_token": o.sign("refresh", REFRESH_S, json!({"sub": sub, "cid": cid})),
+        "expires_in": access,
+        "refresh_token": o.sign("refresh", left, json!({"sub": sub, "cid": cid, "auth": auth})),
         "scope": "read",
     }))
     .into_response()
@@ -358,19 +369,28 @@ pub async fn token(S(st): St, Form(f): Form<HashMap<String, String>>) -> Respons
             {
                 return invalid();
             }
-            tokens(o, c["sub"].as_str().unwrap_or_default(), get("client_id"))
+            tokens(
+                o,
+                c["sub"].as_str().unwrap_or_default(),
+                get("client_id"),
+                now(),
+            )
         }
         "refresh_token" => {
             let Some(r) = o.open(get("refresh_token"), "refresh") else {
                 return invalid();
             };
             let cid = r["cid"].as_str().unwrap_or_default();
+            // Refresh tokens from before the login limit have no `auth`: one new login.
+            let Some(auth) = r["auth"].as_u64() else {
+                return invalid();
+            };
             if r["sub"] != o.owner_id.as_str()
                 || (!get("client_id").is_empty() && get("client_id") != cid)
             {
                 return invalid();
             }
-            tokens(o, &o.owner_id, cid)
+            tokens(o, &o.owner_id, cid, auth)
         }
         _ => bad(
             StatusCode::BAD_REQUEST,
