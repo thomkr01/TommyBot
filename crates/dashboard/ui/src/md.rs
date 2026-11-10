@@ -203,7 +203,9 @@ fn token(t: &str) -> Option<String> {
         let r = id(r)?;
         return pill(format!(
             "@{}",
-            crate::discord::name("roles", &r).unwrap_or("unknown-role".into())
+            crate::discord::name("roles", &r)
+                .unwrap_or("unknown-role".into())
+                .trim_start_matches('@')
         ));
     }
     if let Some(r) = t.strip_prefix('@') {

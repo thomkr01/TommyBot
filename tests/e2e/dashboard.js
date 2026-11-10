@@ -99,6 +99,15 @@ fs.mkdirSync(out, { recursive: true });
   await page.goto(`${base}/${links[0].replace(/^(#\/\d+\/).*/, '$1automod')}`);
   await page.waitForSelector('.step input', { timeout: 5000 }).catch(() => failed.push('automod: no number field'));
   if (/num\(\)/i.test(await page.innerText('body'))) failed.push('automod: number field shows source code');
+  // Cancel on a changed setting puts dropdowns back too: a plain `selected=` attribute stops counting once the user has picked.
+  await page.goto(`${base}/${links[0].replace(/^(#\/\d+\/).*/, '$1logging')}`);
+  const drop = page.locator('select:has(option[value=""]:text-is("none"))').first();
+  await drop.waitFor({ timeout: 5000 }).catch(() => failed.push('cancel: no channel dropdown on logging'));
+  const was = await drop.inputValue();
+  const other = await drop.locator('option').evaluateAll((os, w) => os.map((o) => o.value).find((v) => v !== w), was);
+  await drop.selectOption(other);
+  await page.click('.bar >> text=Cancel', { timeout: 5000 }).catch(() => failed.push('cancel: no Changes detected bar'));
+  if ((await drop.inputValue()) !== was) failed.push(`cancel: dropdown kept ${other}, saved is ${was || 'none'}`);
   // Leaving a page while its requests run (or fail, as while the dashboard restarts) must not read disposed signals.
   for (const mode of ['slow', 'fail']) {
     errors.length = 0;
