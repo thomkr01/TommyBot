@@ -77,10 +77,13 @@ pub async fn snapshot(http: &Client, gid: Id<GuildMarker>) -> Result<Image> {
             r.models()
                 .await?
                 .into_iter()
-                .map(|w| WebhookImg {
-                    id: w.id.get(),
-                    name: w.name.unwrap_or_default(),
-                    channel: w.channel_id.get(),
+                // twilight 0.18: channel_id is nullable; a webhook without a channel can't be restored.
+                .filter_map(|w| {
+                    Some(WebhookImg {
+                        id: w.id.get(),
+                        name: w.name.unwrap_or_default(),
+                        channel: w.channel_id?.get(),
+                    })
                 })
                 .collect(),
         ),
