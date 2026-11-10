@@ -6,7 +6,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 
 ### Added
 - A Yes/No question ("Do you want to proceed?", 10 seconds) before ban, kick, timeout, warn, quarantine, unquarantine and unban when the target is typed as a raw id or a name. A mention or a slash command pick never asks. Only the moderator who ran the command can answer. The Confirm switch turns it off. (#136)
-- Members get a DM before a warn, timeout, quarantine, kick, ban, softban or tempban, and after an unquarantine, untimeout or unban worked. TommyBot waits at most 3 seconds for the DM and punishes whatever happens to it. (#136)
+- Members get a DM before a warn, timeout, quarantine, kick, ban, softban or tempban (not a hackban), and after an unquarantine, untimeout or unban worked. TommyBot waits at most 3 seconds for the DM and punishes whatever happens to it. (#136)
 - Result messages list the reason, the moderator, the details of the action (duration, soft ban, hack ban, no avatar, voice, DM sent), who was punished and who was not, with the reason. (#136)
 - `kick ?na` kicks only members without an avatar, and `kick ?vc` only members in a voice channel. (#136)
 - A switch, on by default, that writes "Did not verify within the time limit" to the audit log when verification kicks, bans or quarantines a member. (#135)
