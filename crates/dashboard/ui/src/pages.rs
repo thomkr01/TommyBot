@@ -80,19 +80,38 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let g = guild.clone();
     let custom = RwSignal::new(false);
     let picks = RwSignal::new(Vec::<String>::new());
-    let running = move || msg.get().starts_with("Running");
+    // The run's own state: the toast closes itself after 3 s, so it cannot carry the result.
+    let phase = RwSignal::new(Phase::Idle);
+    let ch_failed = RwSignal::new(false);
+    let summary = RwSignal::new(String::new());
+    let running = move || phase.get() == Phase::Running;
     let auto = move |logs: Option<Vec<String>>| {
         let (g, g2) = (g.clone(), g.clone());
+        phase.set(Phase::Running);
+        summary.set(String::new());
         msg.ok("Running Auto Setup... this takes a little while on servers with many channels.");
         run_act(
             async move {
-                let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
-                api(
-                    "POST",
-                    &format!("/api/guilds/{g}/wizard/auto-setup"),
-                    Some(json!({"expected_version": c["version"], "logs": logs})),
-                )
-                .await
+                let r = async {
+                    let c = api("GET", &format!("/api/guilds/{g}/config"), None).await?;
+                    api(
+                        "POST",
+                        &format!("/api/guilds/{g}/wizard/auto-setup"),
+                        Some(json!({"expected_version": c["version"], "logs": logs})),
+                    )
+                    .await
+                }
+                .await;
+                // Set is safe after the page is gone; a 2FA prompt is not a failure.
+                match &r {
+                    Err(e) if e == "step_up_required" => phase.set(Phase::Idle),
+                    Err(e) => {
+                        phase.set(Phase::Failed);
+                        summary.set(format!("Auto Setup failed: {e}. Nothing after the failed step was done; fix it and run it again."));
+                    }
+                    Ok(_) => {}
+                }
+                r
             },
             msg,
             need,
@@ -124,7 +143,10 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                         member
                     };
                     let quarantine = match failed.as_u64() { Some(0) => String::new(), Some(n) => format!(" Could not set the quarantine role in {n} channels; give TommyBot Manage Roles there."), None => " Could not set the quarantine role in the channels.".into() };
-                    msg.ok(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
+                    ch_failed.set(failed.as_u64() != Some(0));
+                    phase.set(Phase::Done);
+                    msg.ok("Auto Setup finished");
+                    summary.set(format!("Done: quarantine role {}{member}, {logs}.{quarantine} Looks like you are good to go! It seems like your server has what the automatic setup works on adding, you are good to proceed!", role("quarantine_role")));
                 })
             },
         );
@@ -166,7 +188,12 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 arrows(view! { <div>
                     <h2>"Initial Setup"</h2>
                     <p>"TommyBot needs to do some magic in your server: it creates #tommybot-logs and #mod-logs, the Quarantine role (set up in all of your channels), a Member main role and Admins and Moderators staff roles when you have none. Anything you already set is kept."</p>
-                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].into_iter().enumerate().map(|(i, t)| view! { <li style=format!("--i:{i}") class:run=running class:ok=move || msg.get().starts_with("Done")>{t}</li> }).collect_view()}</ul>
+                    <ul class="checks">{["Ensuring Quarantine role", "Setting up Quarantine role across all channels", "Ensuring Member role", "Ensuring staff roles and permits", "Ensuring #tommybot-logs channel", "Ensuring #mod-logs channel"].into_iter().enumerate().map(|(i, t)| {
+                        // Step 1 (channels) is the one that can partly fail while the rest succeeds.
+                        let warn = move || phase.get() == Phase::Done && i == 1 && ch_failed.get();
+                        view! { <li style=format!("--i:{i}") class:run=running class:ok=move || phase.get() == Phase::Done && !warn() class:warn=warn class:err=move || phase.get() == Phase::Failed>{t}</li> }
+                    }).collect_view()}</ul>
+                    <Show when=move || !summary.get().is_empty()><p class="card" class:ok=move || phase.get() == Phase::Done class:err=move || phase.get() == Phase::Failed role="status">{move || summary.get()}</p></Show>
                     <p>"It makes #tommybot-logs and #mod-logs; every other log goes to #tommybot-logs until you give it a channel under Logging > Customize. Custom also makes a channel for the types you tick."</p>
                     <button disabled=running on:click=move |_| all(None)>{move || if running() { "Setting up..." } else { "Auto Setup" }}</button>
                     <button class="ghost" class:on=custom on:click=move |_| custom.update(|c| *c = !*c)>"Custom"</button>
@@ -183,6 +210,14 @@ pub fn Wizard(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         }}</div> }}
         <StepUp need enrolled />
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Idle,
+    Running,
+    Done,
+    Failed,
 }
 
 /// Progress ring: `pct` filled, number in the middle.
