@@ -174,8 +174,11 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     crate::reply::alert_owner(app, gid, "Panic mode started").await;
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
+            // A failed step is logged, so the report below is still sent.
             PanicStep::LockServer => {
-                lockdown::lock(app, gid, LockKind::Role).await?;
+                if let Err(e) = lockdown::lock(app, gid, LockKind::Role).await {
+                    tracing::warn!(?e, "panic: locking the server failed");
+                }
             }
             PanicStep::PingWarnedRoles => {
                 let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
@@ -185,25 +188,40 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
                     .text(&format!(
                         "{ARROW} TommyBot will lockdown the server and run a scan."
                     ));
-                send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
+                if let Err(e) =
+                    send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await
+                {
+                    tracing::warn!(?e, "panic: pinging the warned roles failed");
+                }
             }
             // Mod commands are gated by `panic_runs`, and the involved accounts were quarantined
             // by the verdicts that tripped panic mode.
             PanicStep::LockModCommands | PanicStep::QuarantineInvolved => {}
             PanicStep::LoadLatestBackup => {
-                let log = match backup::restore_latest(app, gid).await {
-                    Ok(Some(sum)) => report(app, gid, &sum).await,
-                    Ok(None) => Log::new("Panic Mode Report:", ALERT)
-                        .section("Backup System Report:")
-                        .text(&format!("{NO} **There is no backup to load.**")),
-                    Err(e) => Log::new("Panic Mode Report:", ALERT)
-                        .section("Backup System Report:")
-                        .text(&format!(
-                            "{NO} **Backup System failed to load the recent backup!**"
-                        ))
-                        .line("Error", &e.to_string()),
+                let b = app.cfg(gid.get()).await?.backups.clone();
+                let backup = if !(b.enabled && b.restore) {
+                    Backup::Disabled
+                } else {
+                    match backup::restore_latest(app, gid).await {
+                        Ok(Some(sum)) => Backup::Loaded(sum),
+                        Ok(None) => Backup::None,
+                        Err(e) => Backup::Failed(e.to_string()),
+                    }
                 };
-                send_log(app, gid.get(), LogKind::Panic, log).await?;
+                let case: Option<(String, Value)> = sqlx::query_as(
+                    "SELECT case_id, data FROM nuke_incidents WHERE guild_id = $1 ORDER BY created_at DESC LIMIT 1",
+                )
+                .bind(gid.get() as i64)
+                .fetch_optional(&app.pool)
+                .await
+                .unwrap_or_default();
+                send_log(
+                    app,
+                    gid.get(),
+                    LogKind::Panic,
+                    report(case.as_ref(), &backup),
+                )
+                .await?;
             }
             PanicStep::UnlockServer => {}
         }
@@ -218,54 +236,82 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     .await
 }
 
-/// The green "Panic Mode Report:" embed: latest nuke case, who was quarantined and what the
-/// backup restore changed.
-async fn report(app: &App, gid: Id<GuildMarker>, sum: &backup::Summary) -> Log {
-    let case: Option<(String, Value)> = sqlx::query_as(
-        "SELECT case_id, data FROM nuke_incidents WHERE guild_id = $1 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(gid.get() as i64)
-    .fetch_optional(&app.pool)
-    .await
-    .unwrap_or_default();
+/// What panic mode's backup step did.
+pub(crate) enum Backup {
+    /// Backups or "Restore after a nuke" are off.
+    Disabled,
+    None,
+    Loaded(backup::Summary),
+    Failed(String),
+}
+
+/// The green "Panic Mode Report:" embed, sent once per panic: the latest nuke case, who was and
+/// was not quarantined, and what the backup step did.
+pub(crate) fn report(case: Option<&(String, Value)>, b: &Backup) -> Log {
     let mut log = Log::new("Panic Mode Report:", DONE);
-    if let Some((id, data)) = &case {
-        log = log.text(&format!("{ARROW} CASE: `{id}`"));
-        let who = data["quarantined"].as_array().cloned().unwrap_or_default();
-        log = log.text(&format!(
-            "{QUARANTINED} Members Quarantined: {} {YES} | 0 {NO}",
-            who.len()
-        ));
-        for u in who.iter().filter_map(Value::as_u64) {
+    if let Some((id, data)) = case {
+        let ids = |k: &str| -> Vec<u64> {
+            data[k]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .collect()
+        };
+        let (who, failed) = (ids("quarantined"), ids("failed"));
+        log = log
+            .text(&format!("{ARROW} **CASE:** `{id}`"))
+            .text(&format!(
+                "{QUARANTINED} **Members Quarantined:** {} {YES} | {} {NO}",
+                who.len(),
+                failed.len()
+            ));
+        for (u, mark) in who
+            .iter()
+            .map(|u| (u, QUARANTINED))
+            .chain(failed.iter().map(|u| (u, NO)))
+        {
             let frags = data["fragments"][u.to_string()].as_u64().unwrap_or(0);
             log = log.text(&format!(
-                "{ARROW} {} [{frags} fragments] {QUARANTINED}",
-                embed::user(u)
+                "{ARROW} {} [{frags} fragments] {mark}",
+                embed::user(*u)
             ));
         }
     }
+    let log = log.section("Backup System Report:");
+    let sum = match b {
+        Backup::Disabled => return log.text(&format!("{NO} **Backup System is disabled!**")),
+        Backup::None => return log.text(&format!("{NO} **There is no backup to load.**")),
+        Backup::Failed(e) => {
+            return log
+                .text(&format!(
+                    "{NO} **Backup System failed to load the recent backup!**"
+                ))
+                .line("Error", e)
+        }
+        Backup::Loaded(sum) => sum,
+    };
     let col = |c: backup::Counts| {
         format!(
             "Deleted: `{}`\nRecovered: `{}`\nEdited: `{}`",
             c.deleted, c.created, c.updated
         )
     };
-    log.section("Backup System Report:")
-        .text(&format!(
-            "{YES} **Backup System loaded the recent backup successfully!**"
-        ))
-        .inline("Roles", &col(sum.roles))
-        .inline("Channels", &col(sum.channels))
-        .inline("Categories", &col(sum.categories))
-        .inline("Webhooks", &format!("Deleted: `{}`", sum.webhooks_deleted))
-        .inline(
-            "Settings",
-            // Restores never touch TommyBot's own settings.
-            &format!(
-                "{ARROW} Server: {}\n{ARROW} TommyBot: {NO}",
-                if sum.settings { YES } else { NO }
-            ),
-        )
+    log.text(&format!(
+        "{YES} **Backup System loaded the recent backup successfully!**"
+    ))
+    .inline("Roles", &col(sum.roles))
+    .inline("Channels", &col(sum.channels))
+    .inline("Categories", &col(sum.categories))
+    .inline("Webhooks", &format!("Deleted: `{}`", sum.webhooks_deleted))
+    .inline(
+        "Settings",
+        // Restores never touch TommyBot's own settings.
+        &format!(
+            "{ARROW} Server: {}\n{ARROW} TommyBot: {NO}",
+            if sum.settings { YES } else { NO }
+        ),
+    )
 }
 
 /// Ends panic mode for a guild; runs from the `panic_end` job, whose payload says what to put back.
@@ -313,4 +359,47 @@ pub async fn restore(app: &App) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(l: Log) -> String {
+        serde_json::to_string(&l.build()).unwrap()
+    }
+
+    #[test]
+    fn report_counts_both_sides_and_names_every_backup_outcome() {
+        let case = (
+            "9g5udu".to_string(),
+            json!({"quarantined": [11], "failed": [22], "fragments": {"11": 8, "22": 1}}),
+        );
+        let t = text(report(Some(&case), &Backup::Disabled));
+        assert!(t.contains("**CASE:** `9g5udu`"), "{t}");
+        assert!(
+            t.contains(&format!("**Members Quarantined:** 1 {YES} | 1 {NO}")),
+            "{t}"
+        );
+        assert!(
+            t.contains("[8 fragments]") && t.contains("[1 fragments]"),
+            "{t}"
+        );
+        assert!(t.contains("Backup System is disabled!"), "{t}");
+        assert!(text(report(Some(&case), &Backup::None)).contains("There is no backup to load."));
+        let failed = text(report(None, &Backup::Failed("boom".into())));
+        assert!(failed.contains("failed to load") && failed.contains("boom"));
+        assert!(!failed.contains("CASE"));
+        let loaded = text(report(
+            Some(&case),
+            &Backup::Loaded(backup::Summary::default()),
+        ));
+        assert!(
+            loaded.contains("loaded the recent backup successfully"),
+            "{loaded}"
+        );
+        // An older case saved before the failed list existed reads as 0 failed.
+        let old = ("abc123".to_string(), json!({"quarantined": [11]}));
+        assert!(text(report(Some(&old), &Backup::None)).contains(&format!("1 {YES} | 0 {NO}")));
+    }
 }

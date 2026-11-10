@@ -322,7 +322,7 @@ pub fn schema() -> Vec<Value> {
         ti(fg("Status", "prune", "bool"), "Detect and react to member prunes"),
         ti(dv(fg("Status", "quarantine_hold", "bool"), true), "Punish anyone who touches a quarantined member"),
         ti(fg("Status", "vanity_guard", "bool"), "Have TommyBot guard your server's vanity url"),
-        ti(dv(fg("Auto quarantine", "auto_quarantine", "bool"), true), "Use the auto quarantine module"),
+        ti(dv(fg("Auto quarantine", "auto_quarantine", "bool"), true), "Use the auto quarantine module. A nuking bot stays in the server: its own role loses all permissions and it is quarantined. It is kicked only if that fails."),
         hp(
             ti(fg("Auto quarantine", "quarantine_role", "role"), "Quarantine role"),
             "Leave it empty and Auto Setup makes @Quarantine for you, deleting old Quarantine roles. Pick a role and Auto Setup removes all of its permissions and denies it in every channel.",
@@ -755,7 +755,7 @@ pub fn schema() -> Vec<Value> {
             "Heat degradation (every second)",
         ),
         dv(fg("Trigger", "window_secs", "int"), 600),
-        dv(fg("Response", "duration_secs", "int"), 600),
+        dv(fg("Response", "duration_secs", "int"), 60),
         dv(fg("Response", "lock_mod_commands", "bool"), true),
         dv(fg("Response", "unlock_when_ending", "bool"), true),
         ti(
