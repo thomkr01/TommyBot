@@ -16,6 +16,7 @@ mod permits;
 mod records;
 mod recovery;
 mod search;
+mod mcp;
 mod update;
 mod wizard;
 use appeals::{AppealForm, AppealList, Blacklist};
@@ -33,6 +34,7 @@ use commands::Commands;
 use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Tickets, Wizard};
 use recovery::{Backups, Panic};
 use search::{Search, SearchBox};
+use mcp::McpTokens;
 use update::Update;
 
 /// Sidebar with only with the pages TommyBot has.
@@ -551,7 +553,7 @@ fn App() -> impl IntoView {
                 <button class="ghost menu-btn" aria-label="menu" aria-expanded=move || nav_open.get().to_string() on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/"><img src="/logo.svg" alt="" width="32" height="32" />"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
                 <a class="ghost" href="#/commands">"Commands"</a>
-                <Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="ghost" href="#/update">"Update"</a></Show>
+                <Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="ghost" href="#/update">"Update"</a><a class="ghost" href="#/mcp-tokens">"MCP"</a></Show>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
@@ -565,7 +567,7 @@ fn App() -> impl IntoView {
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
                         None => server_list().into_any(),
-                        Some(a) if a == "commands" || a == "update" => server_list().into_any(),
+                        Some(a) if a == "commands" || a == "update" || a == "mcp-tokens" => server_list().into_any(),
                         Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
@@ -607,6 +609,7 @@ fn App() -> impl IntoView {
                         }.into_any(),
                         [a] if a == "commands" => view! { <Commands /> }.into_any(),
                         [a] if a == "update" => view! { <Update enrolled /> }.into_any(),
+                        [a] if a == "mcp-tokens" => view! { <McpTokens enrolled /> }.into_any(),
                         [a, g] if a == "appeal" =>view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview").0 /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, rest @ ..] => {

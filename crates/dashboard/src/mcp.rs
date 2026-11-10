@@ -185,6 +185,10 @@ async fn service(st: &AppState, h: &HeaderMap) -> Result<Client, ApiError> {
         tracing::warn!("mcp call refused: unknown or revoked token");
         ApiError::Unauthorized
     })?;
+    // Expired changes lose their body on the next call, so no request text outlives its 5 minutes by much.
+    sqlx::query("update mcp_writes set status = 'expired', body = null where status = 'pending' and expires_at < now()")
+        .execute(&st.db)
+        .await?;
     let via: String = h
         .get("x-mcp-via")
         .and_then(|v| v.to_str().ok())
@@ -331,9 +335,6 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
     let target = p.target.as_deref().filter(|t| !t.is_empty());
     route(&p.action, guild, target)?;
     let body = if p.body.is_null() { json!({}) } else { p.body };
-    sqlx::query("update mcp_writes set status = 'expired', body = null where status = 'pending' and expires_at < now()")
-        .execute(&st.db)
-        .await?;
     let open: i64 = sqlx::query_scalar("select count(*) from mcp_writes where status = 'pending'")
         .fetch_one(&st.db)
         .await?;
@@ -446,7 +447,16 @@ async fn confirm(State(st): State<AppState>, h: HeaderMap, Json(c): Json<Confirm
         }
     }
     let (method, path) = route(&action, guild, target.as_deref())?;
-    let (status, out) = run(&st, owner, stepped_up, method, &path, &body).await?;
+    let (status, out) = match run(&st, owner, stepped_up, method, &path, &body).await {
+        Ok(r) => r,
+        Err(e) => {
+            sqlx::query("update mcp_writes set status = 'failed', body = null where id = $1")
+                .bind(c.id)
+                .execute(&st.db)
+                .await?;
+            return Err(e);
+        }
+    };
     if out["error"] == "step_up_required" {
         reopen().await?;
         return Err(bad("this change also needs a code from the owner's authenticator app: ask for it and confirm again with the same code and totp"));

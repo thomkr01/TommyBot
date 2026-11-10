@@ -195,19 +195,25 @@ Off by default. When on, Claude gets `propose_change`, `confirm_change` and `sco
 
 The change then runs through the dashboard as you, the bot owner, with every check the dashboard page has, and the log channel names it `Claude (MCP)`. Claude can change config sections, permits, roll config back, lock and unlock, add and edit notes, edit cases, and save and post embeds. It can never start an update, delete server data, load or delete backups, or revert anti-nuke actions; those routes are not reachable from the MCP server at all. At most 5 changes can wait for a code at once.
 
-**(server)** Turn it on. The same token goes to the dashboard and the mcp container:
+Each place that uses the MCP server gets its own token, made on the dashboard. Only a hash of it is stored, so a token you lose cannot be shown again: make a new one and revoke the old. The DM names the token that proposed the change, and so does the audit trail.
 
-```bash
-cd ~/tommybot
-git pull
-echo "MCP_WRITE_TOKEN=$(openssl rand -hex 32)" >> .env
-docker compose pull && docker compose up -d
-docker compose logs mcp | tail -3
-```
+1. **(server)** Once, so `docker-compose.yml` passes the new variable (the updater does not change that file):
 
-The log no longer says `writes off`. `git pull` is needed once, because `docker-compose.yml` passes the new variable (the updater does not change that file). Reconnect the connector in claude.ai (or restart Claude Code) so the new tools show up.
+   ```bash
+   cd ~/tommybot && git pull && docker compose pull && docker compose up -d
+   ```
 
-To turn it off, delete the `MCP_WRITE_TOKEN` line from `.env` and run `docker compose up -d`. Every proposal and its outcome (no content) is kept in the `mcp_writes` table.
+2. **(dashboard)** Open **MCP** in the top bar (only the bot owner sees it). Type a name, for example `VPS`, and click **Make token**. Confirm 2FA when asked. The token is shown once: click **Copy**.
+3. **(server)** Add it to `.env` without pasting it into a chat or a screenshot. Run `nano .env`, add a line `MCP_WRITE_TOKEN=` followed by the token, save and close. Then:
+
+   ```bash
+   docker compose up -d mcp
+   docker compose logs mcp | tail -3
+   ```
+
+   The log no longer says `writes off`. Reconnect the connector in claude.ai (or restart Claude Code) so the new tools show up.
+
+To turn writes off, click **Revoke** on the MCP page (2FA). This works at once, also closes the changes that token still had waiting for a code, and is the first thing to do if you get a DM you did not ask for. Then delete the `MCP_WRITE_TOKEN` line from `.env` and run `docker compose up -d mcp`. Every proposal is kept in the `mcp_writes` table with the token name, the action, when and the outcome; the request itself is removed once it no longer waits for a code.
 
 ### 6.5 Keeping it safe
 
@@ -222,8 +228,9 @@ Every tool call is logged by name only (`docker compose logs mcp`); arguments ca
 | Dashboard or `mcp.` address shows a Cloudflare 502 page | The container is not running, or the route's service URL is wrong | `docker compose ps`; check the route is `http://dashboard:8080` or `http://mcp:8090` |
 | `mcp` keeps restarting, log says `MCP_OWNER_ID must be a Discord user id` | The placeholder was pasted literally | `sed -i 's/^MCP_OWNER_ID=.*/MCP_OWNER_ID=<your id>/' .env`, then `docker compose up -d mcp` |
 | `mcp` log says `MCP_TOKEN must be at least 32 characters` or `not set` | Missing or short token | Redo the `echo "MCP_TOKEN=..."` line, check with `grep MCP_ .env` |
-| `mcp` keeps restarting, log says `MCP_WRITE_TOKEN must be at least 32 characters` | Short or hand-typed token | Redo the `echo "MCP_WRITE_TOKEN=..."` line from step 6.4 |
-| `propose_change` says `dashboard refused (404 Not Found)` | The dashboard has no `MCP_WRITE_TOKEN` (or one under 32 characters), or `docker-compose.yml` is old | `git pull && docker compose up -d`, then `grep MCP_WRITE .env` |
+| `mcp` keeps restarting, log says `MCP_WRITE_TOKEN must be at least 32 characters` | Part of the token was lost when you pasted it | Make a new token on the MCP page (step 6.4), revoke the old one |
+| `propose_change` says `dashboard refused (401 Unauthorized)` | The token was revoked, mistyped, or made on another installation | Make a new token on the MCP page and put it in `.env` |
+| `propose_change` says `dashboard refused (404 Not Found)` | The dashboard image is older than this feature | `git pull && docker compose pull && docker compose up -d` |
 | `propose_change` says `could not DM the bot owner` | Your DMs from the bot are closed | Allow DMs from server members in a server you share with the bot |
 | `mcp` log says `oauth off` | One of the three OAuth values is missing | Step 6.3.3; `grep MCP_ .env` shows which |
 | claude.ai login ends on Discord with "Invalid OAuth2 redirect_uri" | The redirect is not in the Discord app | Step 1.2 |
