@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tommybot_core::limits;
 
 pub(crate) type Res = Result<Json<Value>, ApiError>;
 
@@ -269,6 +270,7 @@ pub async fn put_section(
     require(&st, &s, guild, min, step_up).await?;
     let (cur, mut config) = store::current(&st.db, guild).await?;
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
+    limits::check(&section, &b.value, &config[&section]).map_err(ApiError::BadRequest)?;
     // Turning Tickets on is the whole setup: its category and log channel are made here.
     let tickets_on = section == "tickets"
         && b.value["enabled"] == true
@@ -520,6 +522,7 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
                 }
             }
             validate(k, &v)?;
+            limits::check(k, &v, &now[k]).map_err(ApiError::BadRequest)?;
         }
         new[k] = v;
     }
@@ -699,6 +702,17 @@ fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
 mod logging_validate_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn imports_refuse_new_numbers_outside_their_range() {
+        let nuke = |n: i64| json!({"antinuke": {"limits": {"Ban": {"heat": n}}}});
+        assert!(import_config(&nuke(100), &json!({})).is_ok());
+        assert!(import_config(&nuke(0), &json!({})).is_err());
+        // An old 0 already saved here may come back unchanged.
+        assert!(import_config(&nuke(0), &nuke(0)).is_ok());
+        let age = json!({"joingate": {"min_age_override_ms": 4_999}});
+        assert!(import_config(&age, &json!({})).is_err());
+    }
 
     #[test]
     fn rollback_needs_the_bar_of_every_changed_section() {

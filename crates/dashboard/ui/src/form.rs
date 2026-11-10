@@ -68,6 +68,17 @@ fn span(ms: f64) -> String {
     format!("{} {}(s)", secs / UNITS[u].1, UNITS[u].0)
 }
 
+/// The schema range of a number field, in stored units; a side without a bound is infinite.
+fn range(f: &Value) -> (f64, f64) {
+    (f["min"].as_f64().unwrap_or(f64::NEG_INFINITY), f["max"].as_f64().unwrap_or(f64::INFINITY))
+}
+
+/// The note under a number outside its range; `per` (seconds per stored unit) shows it as a duration.
+fn range_error((lo, hi): (f64, f64), v: f64, per: Option<f64>) -> Option<String> {
+    let show = |x: f64| per.map_or(x.to_string(), |p| span(x * p * 1000.0));
+    (v < lo || v > hi).then(|| format!("Must be between {} and {}", show(lo), show(hi)))
+}
+
 /// The Join Raid page's one-line reading of its trigger settings; unset values use the bot's defaults.
 fn raid_summary(cfg: &Value) -> String {
     let at = |k: &str| get_path(cfg, &format!("joinraid.{k}"));
@@ -378,6 +389,9 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
     let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
     let tail = path.rsplit('.').next().unwrap_or("").to_string();
     let dur = kind == "int" && (tail.ends_with("_secs") || tail.ends_with("_ms"));
+    // Typed values outside the range stay (with a note, and the server refuses to save them); +/- stop at the bounds.
+    let (lo, hi) = range(&f);
+    let num = move || get().as_f64().unwrap_or(0.0);
     // A single category picker is the channel picker listing categories.
     let input = match if kind == "category" { "channel" } else { kind.as_str() } {
         "bool" => view! { <input type="checkbox" class="sw" prop:checked=move || get().as_bool().unwrap_or(false) on:change=move |e| set(json!(event_target_checked(&e))) /> }.into_any(),
@@ -386,17 +400,19 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             let secs = move || get().as_f64().unwrap_or(0.0) * per;
             let chosen = RwSignal::new(None::<usize>);
             let unit = move || chosen.get().unwrap_or_else(|| best_unit(secs()));
-            let set_n = move |n: f64| {
-                let v = (n.max(0.0) * UNITS[unit()].1 / per).round() as i64;
+            let set_n = move |n: f64, clamp: bool| {
+                let v = (n.max(0.0) * UNITS[unit()].1 / per).round();
+                let v = if clamp { v.clamp(lo, hi) } else { v } as i64;
                 set(if v == 0 && default.get_value().is_null() { Value::Null } else { json!(v) });
             };
-            view! { <div class="step"><button class="ghost" aria-label="less" on:click=move |_| set_n(secs() / UNITS[unit()].1 - 1.0)>"-"</button>
-                <input prop:value=move || format!("{}", secs() / UNITS[unit()].1) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<f64>() { set_n(x) } } />
-                <button class="ghost" aria-label="more" on:click=move |_| set_n(secs() / UNITS[unit()].1 + 1.0)>"+"</button>
+            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || lo >= num() on:click=move |_| set_n(secs() / UNITS[unit()].1 - 1.0, true)>"-"</button>
+                <input prop:value=move || format!("{}", secs() / UNITS[unit()].1) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<f64>() { set_n(x, false) } } />
+                <button class="ghost" aria-label="more" disabled=move || hi <= num() on:click=move |_| set_n(secs() / UNITS[unit()].1 + 1.0, true)>"+"</button>
                 <select aria-label="unit" on:change=move |e| chosen.set(UNITS.iter().position(|(u, _)| *u == event_target_value(&e)))>
                     {UNITS.iter().map(|(u, _)| view! { <option value=*u selected=move || UNITS[unit()].0 == *u>{*u}</option> }).collect_view()}
                 </select></div>
-                <span class="chip">{move || { let s = secs(); let u = best_unit(s); let n = s / UNITS[u].1; format!("{n} {}{}", UNITS[u].0, if n == 1.0 { "" } else { "s" }) }}</span> }.into_any()
+                <span class="chip">{move || { let s = secs(); let u = best_unit(s); let n = s / UNITS[u].1; format!("{n} {}{}", UNITS[u].0, if n == 1.0 { "" } else { "s" }) }}</span>
+                {move || range_error((lo, hi), num(), Some(per)).map(|e| view! { <span class="err">{e}</span> })} }.into_any()
         }
         "int" | "float" | "pct" => {
             let float = kind != "int";
@@ -404,11 +420,11 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             let k = if kind == "pct" { 100.0 } else { 1.0 };
             let shown = move || if k == 1.0 { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
             let step = move |d: f64| {
-                let x = get().as_f64().unwrap_or(0.0) * k + d;
+                let x = (get().as_f64().unwrap_or(0.0) * k + d).clamp(lo * k, hi * k);
                 set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!(x) } else { json!(x as i64) })
             };
             let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
-            view! { <div class="step"><button class="ghost" aria-label="less" on:click=move |_| step(-1.0)>"-"</button>
+            view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || lo >= num() on:click=move |_| step(-1.0)>"-"</button>
                 <input prop:value=shown on:change=move |e| {
                     let s = event_target_value(&e);
                     let s = s.trim();
@@ -416,7 +432,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     else if float { if let Ok(x) = s.parse::<f64>() { set(json!(x / k)) } }
                     else if let Ok(x) = s.parse::<i64>() { set(json!(x)) }
                 } />
-                <button class="ghost" aria-label="more" on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div> }.into_any()
+                <button class="ghost" aria-label="more" disabled=move || hi <= num() on:click=move |_| step(1.0)>"+"</button>{(!unit.is_empty()).then(|| view! { <span>{unit}</span> })}</div>
+                {move || range_error((lo, hi), num(), None).map(|e| view! { <span class="err">{e}</span> })} }.into_any()
         }
         "list" | "lines" => {
             let box_ = if kind == "lines" {
@@ -969,6 +986,17 @@ pub fn Section(
 
 #[cfg(test)]
 mod raid_tests {
+    #[test]
+    fn numbers_outside_the_schema_range_get_a_note() {
+        use super::{range, range_error};
+        let f = serde_json::json!({"min": 2, "max": 500});
+        assert_eq!(range_error(range(&f), 500.0, None), None);
+        assert_eq!(range_error(range(&f), 501.0, None).as_deref(), Some("Must be between 2 and 500"));
+        let age = serde_json::json!({"min": 5_000, "max": 8_640_000_000_i64});
+        assert_eq!(range_error(range(&age), 0.0, Some(0.001)).as_deref(), Some("Must be between 5 second(s) and 100 day(s)"));
+        assert_eq!(range_error(range(&serde_json::json!({})), -9.0, None), None);
+    }
+
     #[test]
     fn raid_summary_reads_the_settings() {
         assert_eq!(

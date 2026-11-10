@@ -75,21 +75,20 @@ impl Pending {
     }
 
     /// Mod commands ask when a target was typed as an id or a name (a mention is sure), and
-    /// hackbans always; destructive extras (purge, note sweep) always ask.
-    /// `enabled` is the server's `misc.confirm`: off never asks.
+    /// hackbans always; destructive extras ask as `ModCmd::asks_confirm` says.
+    /// `enabled` is the server's `misc.confirm`.
     pub fn needs_confirm(&self, enabled: bool) -> bool {
-        enabled
-            && match &self.action {
-                Action::Mod {
-                    targets,
-                    unsure,
-                    flags,
-                    ..
-                } => !targets.is_empty() && (*unsure || flags.hack),
-                Action::Ext { cmd, unsure, .. } => {
-                    cmd.destructive() || (*unsure && cmd.asks_when_unsure())
-                }
+        match &self.action {
+            Action::Mod {
+                targets,
+                unsure,
+                flags,
+                ..
+            } => enabled && !targets.is_empty() && (*unsure || flags.hack),
+            Action::Ext { cmd, unsure, .. } => {
+                cmd.asks_confirm(enabled) || (enabled && *unsure && cmd.asks_when_unsure())
             }
+        }
     }
 
     fn question(&self) -> Embed {

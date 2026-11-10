@@ -512,6 +512,23 @@ mod tests {
     }
 
     #[test]
+    fn channel_lock_keeps_its_full_deny_list_on_main_roles() {
+        // Send Messages, Send in Threads, Public + Private Threads, Add Reactions, Create Polls,
+        // Use External Apps, Mention @everyone, Set Voice Channel Status. Deliberately stricter
+        // than denying only Send Messages: do not trim this list.
+        let bits = [11, 38, 35, 36, 6, 49, 50, 17, 48];
+        assert_eq!(SILENCE, bits.iter().map(|b| 1u64 << b).sum::<u64>());
+        let p = plan(&LockKind::Channel(7), G, &[10], &roles(), 5, false);
+        assert_eq!(
+            p.ops,
+            vec![Op::DenyChannelSend {
+                channel: 7,
+                role: 10
+            }]
+        );
+    }
+
+    #[test]
     fn channel_lock_silences_threads_reactions_and_optionally_voice() {
         let all = SILENCE | VOICE | VIEW_CHANNEL | 1;
         let r = [role(10, all, 1)];

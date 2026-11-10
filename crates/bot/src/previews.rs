@@ -228,6 +228,15 @@ fn messages() -> Value {
         "verify_captcha": challenge(verify::PROMPT, true),
         "verify_simple": challenge(&verify::new_sum().0, false),
         "verify_dm": reply_text("Check your DMs for the challenge."),
+        "note_modified": log(crate::modview::note_log(&tommybot_core::notes::NoteLog {
+            action: tommybot_core::notes::NoteAction::Modify,
+            id: Some("1d300v".into()),
+            user: Some(MEMBER),
+            by: YOU,
+            text: Some("Asked staff for the raid list twice".into()),
+            old: Some("Asked staff for the raid list".into()),
+            ..Default::default()
+        })),
     });
     for (k, v) in tickets() {
         all[k] = v;

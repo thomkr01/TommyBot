@@ -8,6 +8,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tommybot_core::{
+    jobs,
+    notes::{self, NoteAction, NoteLog},
+};
 
 type Res = Result<Json<Value>, ApiError>;
 type At = chrono::DateTime<chrono::Utc>;
@@ -254,8 +258,12 @@ async fn notes(
     Query(f): Query<NoteFilter>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_view", "notes_manage"]).await?;
-    let rows: Vec<(String, String, String, String, At)> = sqlx::query_as(
-        "select short_id, user_id::text, author_id::text, text, created_at from notes
+    let rows: Vec<(String, String, String, String, At, Value)> = sqlx::query_as(
+        "select short_id, user_id::text, author_id::text, text, created_at,
+                (select coalesce(json_agg(json_build_object('at', e.edited_at, 'by', e.editor_id::text,
+                        'old', e.old_text, 'new', e.new_text) order by e.id), '[]'::json)
+                 from note_edits e where e.note_id = notes.id)
+         from notes
          where guild_id = $1 and ($2 = '' or user_id::text = $2) order by id desc limit 50 offset $3",
     )
     .bind(guild)
@@ -265,7 +273,7 @@ async fn notes(
     .await?;
     Ok(Json(json!(rows
         .into_iter()
-        .map(|(id, user, author, text, at)| json!({"id": id, "user_id": user, "author_id": author, "text": text, "at": at}))
+        .map(|(id, user, author, text, at, edits)| json!({"id": id, "user_id": user, "author_id": author, "text": text, "at": at, "edits": edits}))
         .collect::<Vec<_>>())))
 }
 
@@ -275,6 +283,18 @@ struct NoteBody {
     user_id: String,
     #[serde(default)]
     text: String,
+    /// Sweep: every note of the server instead of one member's.
+    #[serde(default)]
+    all: bool,
+}
+
+/// The bot sends the private mod-log entry (the dashboard has no Discord connection of its own).
+/// The note change is already saved, so a failed enqueue is only logged: a retry would repeat it.
+async fn note_log(st: &AppState, guild: i64, log: NoteLog) {
+    let at = chrono::Utc::now().timestamp();
+    if let Err(e) = jobs::enqueue(&st.db, guild, "note_log", json!(log), at).await {
+        tracing::warn!(?e, guild, "queueing the note log failed");
+    }
 }
 
 async fn note_add(
@@ -284,13 +304,25 @@ async fn note_add(
     Json(b): Json<NoteBody>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_manage"]).await?;
-    sqlx::query("insert into notes (guild_id, user_id, author_id, text) values ($1,$2,$3,$4)")
-        .bind(guild)
-        .bind(user_id(&b.user_id)?)
-        .bind(s.user_id)
-        .bind(clip(&b.text, NOTE_MAX)?)
-        .execute(&st.db)
-        .await?;
+    let (user, text) = (user_id(&b.user_id)?, clip(&b.text, NOTE_MAX)?);
+    let (id,): (String,) = sqlx::query_as(
+        "insert into notes (guild_id, user_id, author_id, text) values ($1,$2,$3,$4) returning short_id",
+    )
+    .bind(guild)
+    .bind(user)
+    .bind(s.user_id)
+    .bind(&text)
+    .fetch_one(&st.db)
+    .await?;
+    let log = NoteLog {
+        action: NoteAction::Add,
+        id: Some(id),
+        user: Some(user as u64),
+        by: s.user_id as u64,
+        text: Some(text),
+        ..NoteLog::default()
+    };
+    note_log(&st, guild, log).await;
     ok()
 }
 
@@ -301,16 +333,20 @@ async fn note_edit(
     Json(b): Json<NoteBody>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_manage"]).await?;
-    let n = sqlx::query("update notes set text = $3 where guild_id = $1 and short_id = $2")
-        .bind(guild)
-        .bind(id)
-        .bind(clip(&b.text, NOTE_MAX)?)
-        .execute(&st.db)
+    let text = clip(&b.text, NOTE_MAX)?;
+    let (user, old) = notes::edit(&st.db, guild, &id, &text, s.user_id)
         .await?
-        .rows_affected();
-    if n == 0 {
-        return Err(ApiError::NotFound);
-    }
+        .ok_or(ApiError::NotFound)?;
+    let log = NoteLog {
+        action: NoteAction::Modify,
+        id: Some(id),
+        user: Some(user as u64),
+        by: s.user_id as u64,
+        text: Some(text),
+        old: Some(old),
+        ..NoteLog::default()
+    };
+    note_log(&st, guild, log).await;
     ok()
 }
 
@@ -320,11 +356,24 @@ async fn note_delete(
     Path((guild, id)): Path<(i64, String)>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_manage"]).await?;
-    sqlx::query("delete from notes where guild_id = $1 and short_id = $2")
-        .bind(guild)
-        .bind(id)
-        .execute(&st.db)
-        .await?;
+    let gone: Option<(i64, String)> = sqlx::query_as(
+        "delete from notes where guild_id = $1 and short_id = $2 returning user_id, text",
+    )
+    .bind(guild)
+    .bind(&id)
+    .fetch_optional(&st.db)
+    .await?;
+    if let Some((user, text)) = gone {
+        let log = NoteLog {
+            action: NoteAction::Remove,
+            id: Some(id),
+            user: Some(user as u64),
+            by: s.user_id as u64,
+            text: Some(text),
+            ..NoteLog::default()
+        };
+        note_log(&st, guild, log).await;
+    }
     ok()
 }
 
@@ -335,12 +384,28 @@ async fn note_sweep(
     Json(b): Json<NoteBody>,
 ) -> Res {
     api::staff(&st, &s, guild, &["notes_manage"]).await?;
-    let n = sqlx::query("delete from notes where guild_id = $1 and user_id = $2")
-        .bind(guild)
-        .bind(user_id(&b.user_id)?)
-        .execute(&st.db)
-        .await?
-        .rows_affected();
+    // The page asks before a sweep of the whole server; `all` must be explicit, an empty id is an error.
+    let user = if b.all {
+        None
+    } else {
+        Some(user_id(&b.user_id)?)
+    };
+    let n = sqlx::query(
+        "delete from notes where guild_id = $1 and ($2::bigint is null or user_id = $2)",
+    )
+    .bind(guild)
+    .bind(user)
+    .execute(&st.db)
+    .await?
+    .rows_affected();
+    let log = NoteLog {
+        action: NoteAction::Sweep,
+        user: user.map(|u| u as u64),
+        by: s.user_id as u64,
+        count: Some(n),
+        ..NoteLog::default()
+    };
+    note_log(&st, guild, log).await;
     Ok(Json(json!({"removed": n})))
 }
 
