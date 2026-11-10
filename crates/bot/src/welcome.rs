@@ -58,6 +58,7 @@ pub async fn on_ready(
     app: &App,
     ev: &twilight_model::gateway::payload::incoming::Ready,
 ) -> Result<()> {
+    tracing::info!(guilds = ev.guilds.len(), "gateway ready");
     let ids: Vec<i64> = ev.guilds.iter().map(|g| g.id.get() as i64).collect();
     sqlx::query(
         "INSERT INTO guild_left (guild_id) SELECT DISTINCT guild_id FROM guild_config \

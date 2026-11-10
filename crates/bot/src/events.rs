@@ -322,8 +322,10 @@ pub async fn flush_logs(app: Arc<App>) {
 pub async fn handle(app: Arc<App>, ev: Event) {
     metrics::EVENTS.fetch_add(1, Relaxed);
     metrics::IN_FLIGHT.fetch_add(1, Relaxed);
-    if let Err(e) = run(&app, &ev).await {
-        tracing::warn!(?e, kind = ?ev.kind(), "event handler failed");
+    // Every log line from the handler carries the server id, so a failed Discord call can be traced to it.
+    let span = tracing::info_span!("event", guild = ev.guild_id().map(|g| g.get()));
+    if let Err(e) = tracing::Instrument::instrument(run(&app, &ev), span).await {
+        tracing::warn!(?e, kind = ?ev.kind(), guild = ev.guild_id().map(|g| g.get()), "event handler failed");
         metrics::EVENT_ERRORS.fetch_add(1, Relaxed);
     }
     metrics::IN_FLIGHT.fetch_sub(1, Relaxed);

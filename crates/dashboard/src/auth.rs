@@ -186,10 +186,12 @@ pub async fn callback(
     Query(q): Query<Callback>,
 ) -> Result<impl IntoResponse, ApiError> {
     if jar.get("oauth_state").map(|c| c.value()) != Some(&q.state) {
+        tracing::warn!("dashboard login refused: oauth state mismatch");
         return Err(ApiError::Forbidden("oauth state mismatch"));
     }
     let tok = st.discord.exchange(&q.code).await?;
     let me = st.discord.me(&tok).await?;
+    tracing::info!(user = %me.id, "dashboard login");
     let (sid, csrf) = (token(), token());
     sqlx::query("insert into dash_session (id, user_id, username, access_token, csrf, expires_at) values ($1,$2,$3,$4,$5,$6)")
         .bind(&sid).bind(me.id.parse::<i64>().map_err(anyhow::Error::from)?).bind(me.username).bind(tok).bind(csrf)
@@ -290,9 +292,14 @@ pub async fn totp_verify(
         let mut m = st.totp.lock().unwrap();
         let a = m.entry(s.user_id).or_default();
         if a.locked(Instant::now()) {
+            tracing::warn!(
+                user = s.user_id,
+                "dashboard 2FA locked after too many wrong codes"
+            );
             return Err(ApiError::TooMany);
         }
         if !a.accept(step, Instant::now()) {
+            tracing::warn!(user = s.user_id, "dashboard 2FA code rejected");
             return Err(ApiError::Forbidden("invalid code"));
         }
     }

@@ -42,6 +42,18 @@ async fn read_only_role_and_tools() {
     let g = 8_000_000_000 + std::process::id() as i64;
     sqlx::query("INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id, reason) VALUES ($1, 1, 'warn', 42, 7, 'spam')")
         .bind(g).execute(&admin).await.unwrap();
+    sqlx::query("INSERT INTO notes (guild_id, user_id, author_id, text) VALUES ($1, 42, 7, 'watch this one')")
+        .bind(g)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO action_log (guild_id, actor_id, action, target_id) VALUES ($1, 7, 'ban', 42)",
+    )
+    .bind(g)
+    .execute(&admin)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO guild_config (guild_id, version, config) VALUES ($1, 1, '{\"automod\": {\"on\": true}}')")
         .bind(g).execute(&admin).await.unwrap();
 
@@ -60,6 +72,8 @@ async fn read_only_role_and_tools() {
         "SELECT 1 FROM cases LIMIT 1",
         "SELECT 1 FROM dash_session LIMIT 1",
         "SELECT 1 FROM dash_totp LIMIT 1",
+        "SELECT content FROM reports LIMIT 1",
+        "SELECT answers FROM appeals LIMIT 1",
     ] {
         assert!(
             sqlx::query(sql).execute(&db).await.is_err(),
@@ -117,8 +131,34 @@ async fn read_only_role_and_tools() {
     tool(&st, "status", json!({})).await;
     tool(&st, "raid_log", json!({"guild_id": g.to_string()})).await;
     tool(&st, "joingate_log", json!({"guild_id": g.to_string()})).await;
+    for t in [
+        "nuke_incidents",
+        "quarantines",
+        "strikes",
+        "appeals",
+        "reports",
+        "backups",
+    ] {
+        tool(&st, t, json!({"guild_id": g.to_string()})).await;
+    }
+    tool(&st, "jobs", json!({})).await;
+    let notes = tool(
+        &st,
+        "notes",
+        json!({"guild_id": g.to_string(), "user_id": "42"}),
+    )
+    .await;
+    assert_eq!(notes[0]["text"], "watch this one");
+    let acts = tool(
+        &st,
+        "action_log",
+        json!({"guild_id": g.to_string(), "actor_id": "7"}),
+    )
+    .await;
+    assert_eq!(acts[0]["action"], "ban");
+    assert_eq!(acts[0]["target_id"], "42");
 
-    for t in ["cases", "guild_config"] {
+    for t in ["cases", "guild_config", "notes", "action_log"] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {t} WHERE guild_id = $1"
         )))
