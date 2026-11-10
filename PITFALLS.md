@@ -2,6 +2,8 @@
 
 Technical mistakes that already happened in TommyBot and were fixed. Each entry says what went wrong, why, and how to avoid it next time. Read the section for the area you change before you start. Add a new entry when you fix a bug whose cause could happen again.
 
+**When you fix a bug, search the whole codebase for the same mistake and for similar ones, and fix every place, not only the one that was reported.** Name in the entry where else it was found. (Thomas, 2026-11-10)
+
 Dashboard UI (Leptos) details are in [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md).
 
 ## 1. Discord API and permissions
@@ -134,8 +136,8 @@ See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the t
 - **The debug wasm is about 100 MB** and makes the page close silently in Playwright. Use `trunk build --release` for screenshots and the e2e sweep.
 - **A refused save vanished with the toast** (8d72d50). An error the user must fix stays up until it is fixed or clicked away.
 - **Auto Setup's steps read their state from the toast text** (#151). The toast closes itself after 3 s, so "Running" and "Done" vanished and the steps never stayed green. *Avoid:* keep a run's state in its own signal and show the result in the page; the toast only announces it.
-- **A dropdown option's `selected=` stops working once the user has picked** (#158). The attribute only sets the default; after a pick the browser keeps the user's choice. Cancel reset the setting and the preview, but the dropdown still showed the old pick. *Avoid:* use `prop:selected=` (the live property) on every `<option>`. The e2e sweep picks a channel on Logging, presses Cancel and checks the dropdown.
-- **Role names from Discord already start with `@` for @everyone** (#158). The dashboard added its own `@` and showed `@@everyone`. *Avoid:* trim a leading `@` before adding one (`form::items`, `md.rs` mentions; the backend's `recovery.rs` already does).
+- **A dropdown option's `selected=` stops working once the user has picked** (#158). The attribute only sets the default; after a pick the browser keeps the user's choice. Cancel reset the setting and the preview, but the dropdown still showed the old pick. *Avoid:* use `prop:selected=` (the live property) on every `<option>`, and `prop:value`/`prop:checked` on inputs. Fixed in all 16 options in `form.rs`, `embeds.rs` and `lockdown.rs`; no plain `selected=`/`checked=`/`value=` bindings are left. The e2e sweep picks a channel on Logging, presses Cancel and checks the dropdown; it waits for the page to load first, because a pick made before the config arrives is overwritten by it.
+- **Role names from Discord already start with `@` for @everyone** (#158). The dashboard added its own `@` and showed `@@everyone`. *Avoid:* trim a leading `@` before adding one. Fixed in `form::items` (every role list and picker) and the `md.rs` role mentions; `recovery.rs` and the wizard's ticket pings already did. The bot itself never writes a role name after `@`.
 - **The toast looked like two pieces.** A coloured `border-left` on a rounded box curves at the corners, and the absolutely placed progress strip starts inside that border, so the two met as a hook. *Avoid:* one colour mark per box. Put strips and edges inside an `overflow:hidden` box with `left:0; right:0` and no border on that side. Also `cargo fmt` in `crates/dashboard/ui` reformats unrelated files; revert them before committing.
 
 ## 7. Build and deploy
