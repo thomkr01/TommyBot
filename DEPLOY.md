@@ -84,6 +84,24 @@ The `mcp` service lets Claude read TommyBot: version, log lines from the last 24
 3. In Cloudflare, add a published application route to the same tunnel: subdomain `mcp`, service URL `http://mcp:8090`.
 4. Claude Code: `claude mcp add --transport http tommybot https://mcp.example.com/mcp --header "Authorization: Bearer <MCP_TOKEN>"`.
 
+### claude.ai
+
+claude.ai connects with OAuth, not a fixed token. The MCP server sends you through Discord (the same app as the dashboard) and lets only `MCP_OWNER_ID` in.
+
+1. Discord Developer Portal > **OAuth2 > Redirects**: add `https://mcp.example.com/oauth/callback`.
+2. In `.env` (your user id: Discord settings > Advanced > Developer Mode, then right-click yourself > Copy User ID):
+
+   ```bash
+   MCP_OAUTH_SECRET=<openssl rand -hex 32>
+   MCP_PUBLIC_URL=https://mcp.example.com
+   MCP_OWNER_ID=<your Discord user id>
+   ```
+
+3. `docker compose up -d mcp`. `docker compose logs mcp` no longer says `oauth off`.
+4. claude.ai > Settings > Connectors > **Add custom connector**: name `TommyBot`, URL `https://mcp.example.com/mcp`. Click Connect and log in with Discord.
+
+Access tokens last an hour and claude.ai renews them for 30 days. Changing `MCP_OAUTH_SECRET` (then `docker compose up -d mcp`) logs every client out at once.
+
 Every tool call is logged with its arguments (`docker compose logs mcp`). Anyone with `MCP_TOKEN` can read everything above, so keep it out of chats and repositories; change it in `.env` and run `docker compose up -d mcp` to revoke it. The dashboard's Update button does not update `mcp`: use the pull command above.
 
 ## Database backup

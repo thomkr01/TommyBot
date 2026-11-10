@@ -76,6 +76,7 @@ async fn read_only_role_and_tools() {
         db,
         token: TOKEN.into(),
         log_dir: "/nonexistent".into(),
+        oauth: None,
     };
     let (code, _) = rpc(
         &st,
