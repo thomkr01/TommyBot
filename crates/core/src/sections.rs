@@ -681,7 +681,7 @@ impl Default for PanicCfg {
         Self {
             executors: 0,
             window_secs: 600,
-            duration_secs: 600,
+            duration_secs: 60,
             lock_mod_commands: true,
             warned_roles: vec![],
             unlock_when_ending: true,
@@ -783,6 +783,51 @@ mod tests {
         assert!(!c.enabled && c.channel.is_none() && c.action == CatchAction::Ban);
         let c: CatchCfg = serde_json::from_value(json!({"action": "Log"})).unwrap();
         assert_eq!(c.action, CatchAction::Log);
+    }
+
+    #[test]
+    fn panic_lasts_a_minute_by_default() {
+        assert_eq!(PanicCfg::default().duration_secs, 60);
+        let p: PanicCfg = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(p.duration_secs, 60);
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres: the stored old default 600
+    /// moves to 60, other durations stay.
+    #[tokio::test]
+    async fn migration_moves_only_the_old_panic_default() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = crate::db::connect(&url).await.unwrap();
+        let g = 7_000_000_000 + std::process::id() as i64 * 10;
+        let put = |gid: i64, secs: i64| {
+            sqlx::query("INSERT INTO guild_config (guild_id, version, config) VALUES ($1, 1, $2)")
+                .bind(gid)
+                .bind(json!({"panic": {"duration_secs": secs}, "misc": {"prefix": "t!"}}))
+                .execute(&pool)
+        };
+        put(g, 600).await.unwrap();
+        put(g + 1, 300).await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/2200_panic_duration_60s.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let read = |gid: i64| {
+            sqlx::query_scalar::<_, Value>("SELECT config FROM guild_config WHERE guild_id = $1")
+                .bind(gid)
+                .fetch_one(&pool)
+        };
+        let moved = read(g).await.unwrap();
+        assert_eq!(moved["panic"]["duration_secs"], 60);
+        assert_eq!(moved["misc"]["prefix"], "t!");
+        assert_eq!(read(g + 1).await.unwrap()["panic"]["duration_secs"], 300);
+        sqlx::query("DELETE FROM guild_config WHERE guild_id IN ($1, $2)")
+            .bind(g)
+            .bind(g + 1)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[test]

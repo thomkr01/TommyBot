@@ -20,6 +20,8 @@ use twilight_model::{
     id::{marker::GuildMarker, Id},
 };
 
+use twilight_http::request::AuditLogReason;
+
 use crate::{
     app::App,
     settings::{apply, save, Edit},
@@ -52,7 +54,10 @@ pub async fn enforce_quarantine(app: &App, c: &Channel) -> Result<()> {
             allow: None,
             deny: Some(want),
         };
-        app.http.update_channel_permission(c.id, &o).await?;
+        app.http
+            .update_channel_permission(c.id, &o)
+            .reason("Sanitizing the channel: quarantine permissions were missing")
+            .await?;
     }
     Ok(())
 }
@@ -274,5 +279,13 @@ mod tests {
             | Permissions::CREATE_PUBLIC_THREADS
             | Permissions::CREATE_PRIVATE_THREADS;
         assert_eq!(p.bits(), QUARANTINE_DENY);
+        // A sanitized channel blocks at least invites, viewing, sending and every thread kind.
+        let must = Permissions::CREATE_INVITE
+            | Permissions::VIEW_CHANNEL
+            | Permissions::SEND_MESSAGES
+            | Permissions::CREATE_PUBLIC_THREADS
+            | Permissions::CREATE_PRIVATE_THREADS
+            | Permissions::SEND_MESSAGES_IN_THREADS;
+        assert!(Permissions::from_bits_truncate(QUARANTINE_DENY).contains(must));
     }
 }

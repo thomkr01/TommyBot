@@ -59,6 +59,9 @@ pub struct Fix {
     /// A guild setting [`setting_fix`] knows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setting: Option<&'static str>,
+    /// With `role_id`: move that role right below the bot's top role.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub move_under_bot: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -76,6 +79,7 @@ fn strip(role: impl ToString) -> Option<Fix> {
         role_id: Some(role.to_string()),
         channel_id: None,
         setting: None,
+        move_under_bot: false,
     })
 }
 
@@ -85,6 +89,7 @@ fn set(setting: &'static str) -> Option<Fix> {
         role_id: None,
         channel_id: None,
         setting: Some(setting),
+        move_under_bot: false,
     })
 }
 
@@ -182,6 +187,52 @@ pub fn stripped_overwrite(o: &OverwriteImg, guild: u64, setup: &Setup) -> Overwr
     }
 }
 
+/// Discord's role order: higher position first, the lower id first on a tie.
+fn rank(r: &RoleImg) -> (i64, std::cmp::Reverse<u64>) {
+    (r.position, std::cmp::Reverse(r.id))
+}
+
+/// Roles ranked between `q` and the bot's top role, highest first (by Discord's order, as
+/// positions can tie).
+pub fn between_bot_and<'a>(
+    roles: &'a [RoleImg],
+    q: &RoleImg,
+    bot_top: i64,
+    bot_roles: &[u64],
+) -> Vec<&'a RoleImg> {
+    let bot = roles
+        .iter()
+        .filter(|r| bot_roles.contains(&r.id))
+        .map(rank)
+        .max()
+        // Without the bot's role list, a role tied with the bot counts as below it.
+        .unwrap_or((bot_top, std::cmp::Reverse(0)));
+    let mut v: Vec<&RoleImg> = roles
+        .iter()
+        .filter(|r| rank(r) > rank(q) && rank(r) < bot)
+        .collect();
+    v.sort_by_key(|r| std::cmp::Reverse(rank(r)));
+    v
+}
+
+/// New `(role, position)` pairs that put `q` right below the bot: the roles in between and `q`
+/// trade positions, so no role outside that block moves.
+pub fn move_under_bot(
+    roles: &[RoleImg],
+    q: &RoleImg,
+    bot_top: i64,
+    bot_roles: &[u64],
+) -> Vec<(u64, i64)> {
+    let mid = between_bot_and(roles, q, bot_top, bot_roles);
+    let Some(top) = mid.first() else {
+        return vec![];
+    };
+    let below = mid.iter().skip(1).map(|r| r.position).chain([q.position]);
+    std::iter::once((q.id, top.position))
+        .chain(mid.iter().map(|r| r.id).zip(below))
+        .collect()
+}
+
 /// Roles the bot can safely strip in one go: not managed, not @everyone, below the bot.
 pub fn strip_targets(roles: &[RoleImg], guild: u64, bot_top: i64) -> Vec<&RoleImg> {
     roles
@@ -238,6 +289,23 @@ pub fn checks(
                         q.name
                     ),
                     None,
+                );
+            } else if !between_bot_and(roles, q, bot_top, &setup.bot_roles).is_empty() {
+                row(
+                    "quarantine_not_right_under",
+                    Severity::Warn,
+                    "Quarantine role not right below the bot",
+                    format!(
+                        "{} is not right below the bot's top role. A role in between could give quarantined members permissions.",
+                        q.name
+                    ),
+                    Some(Fix {
+                        label: "Move role",
+                        role_id: Some(q.id.to_string()),
+                        channel_id: None,
+                        setting: None,
+                        move_under_bot: true,
+                    }),
                 );
             }
             if q.permissions & DANGEROUS != 0 {
@@ -425,6 +493,7 @@ pub fn checks(
                 role_id: Some(o.target.to_string()),
                 channel_id: Some(c.id.to_string()),
                 setting: None,
+                move_under_bot: false,
             }),
         );
     }
@@ -442,6 +511,7 @@ pub fn checks(
                 role_id: Some("*".into()),
                 channel_id: None,
                 setting: None,
+                move_under_bot: false,
             }),
         );
     }
@@ -629,6 +699,64 @@ mod tests {
         assert_eq!(rows.len(), 13);
         assert_eq!(score(&rows), 11 * 100 / 13);
         assert_eq!(score(&[]), 0);
+    }
+
+    #[test]
+    fn quarantine_must_sit_right_below_the_bot() {
+        let row = |roles: &[RoleImg]| {
+            let mut s = setup(Some(9), true);
+            s.bot_roles = vec![50];
+            let rows = checks(&SAFE, roles, &[], 5, &s);
+            (
+                sev(&rows, "quarantine_not_right_under").map(|c| (c.severity, c.fix.is_some())),
+                sev(&rows, "quarantine_above_bot").is_some(),
+            )
+        };
+        let bot = role(50, 5, true, 0x8);
+        // Right below: no row.
+        assert_eq!(
+            row(&[bot.clone(), role(9, 4, false, 0), role(2, 3, false, 0)]),
+            (None, false)
+        );
+        // One role in between: a warning with a move fix, not the "above" row.
+        assert_eq!(
+            row(&[bot.clone(), role(2, 4, false, 0), role(9, 3, false, 0)]),
+            (Some((Severity::Warn, true)), false)
+        );
+        // Tied positions follow Discord's order: the lower id ranks higher.
+        assert_eq!(
+            row(&[bot.clone(), role(9, 4, false, 0), role(20, 4, false, 0)]),
+            (None, false)
+        );
+        assert_eq!(
+            row(&[bot.clone(), role(9, 4, false, 0), role(3, 4, false, 0)]),
+            (Some((Severity::Warn, true)), false)
+        );
+        let roles = [
+            bot.clone(),
+            role(2, 4, false, 0),
+            role(3, 3, false, 0),
+            role(9, 2, false, 0),
+            role(4, 1, false, 0),
+        ];
+        assert_eq!(
+            move_under_bot(&roles, &roles[3], 5, &[50]),
+            vec![(9, 4), (2, 3), (3, 2)]
+        );
+        assert!(move_under_bot(&roles, &roles[1], 5, &[50]).is_empty());
+        // Above the bot: only the "above" row.
+        assert_eq!(row(&[bot, role(9, 6, false, 0)]), (None, true));
+        let f = Fix {
+            label: "Move role",
+            role_id: Some("9".into()),
+            channel_id: None,
+            setting: None,
+            move_under_bot: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&f).unwrap(),
+            serde_json::json!({"label": "Move role", "role_id": "9", "move_under_bot": true})
+        );
     }
 
     #[test]

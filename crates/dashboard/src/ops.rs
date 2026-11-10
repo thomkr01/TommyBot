@@ -20,8 +20,8 @@ use std::{
 };
 use tommybot_antinuke::{
     security::{
-        checks, overwrite_targets, setting_fix, strip_targets, stripped, stripped_overwrite,
-        synced_children, GuildSafety, Setup,
+        checks, move_under_bot, overwrite_targets, setting_fix, strip_targets, stripped,
+        stripped_overwrite, synced_children, GuildSafety, Setup,
     },
     Inverse, RoleImg,
 };
@@ -210,6 +210,8 @@ struct FixBody {
     role_id: Option<String>,
     channel_id: Option<String>,
     setting: Option<String>,
+    #[serde(default)]
+    move_under_bot: bool,
 }
 
 /// Role and overwrite strips take a backup first, so Backups can put the old permissions back.
@@ -248,6 +250,54 @@ async fn fix(
         .ok_or_else(|| ApiError::BadRequest("nothing to fix".into()))?;
     let l = live(&st, guild, &c).await?;
     let (g, roles, channels) = (guild as u64, &l.image.roles, &l.image.channels);
+    let backup = || async {
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(guild)
+        .bind(sqlx::types::Json(crate::recovery::live_image(
+            guild,
+            &l.roles,
+            &l.channels,
+        )))
+        .fetch_one(&st.db)
+        .await
+    };
+    if b.move_under_bot {
+        let q = roles
+            .iter()
+            .find(|r| r.id.to_string() == target)
+            .ok_or(ApiError::NotFound)?;
+        let moves = move_under_bot(roles, q, l.bot_pos, &l.setup.bot_roles);
+        if moves.is_empty() {
+            return Err(ApiError::BadRequest(
+                "the role is already right below the bot".into(),
+            ));
+        }
+        let backup = backup().await?;
+        let body: Vec<Value> = moves
+            .iter()
+            .map(|(id, p)| json!({"id": id.to_string(), "position": p}))
+            .collect();
+        st.discord
+            .call(
+                Method::PATCH,
+                &format!("/guilds/{guild}/roles"),
+                Some(json!(body)),
+            )
+            .await?;
+        log_change(
+            &st,
+            guild,
+            &c,
+            format!(
+                "{} (<@{}>) moved role `{}` right below the bot from the security score, backup #{backup}",
+                s.username, s.user_id, q.name
+            ),
+        )
+        .await;
+        return Ok(Json(json!({"ok": true, "backup": backup})));
+    }
     let all = target == "*";
     let flagged = overwrite_targets(channels, roles, g, &l.setup);
     let overwrites: Vec<_> = flagged
@@ -276,16 +326,7 @@ async fn fix(
         }
         vec![r]
     };
-    let backup: i64 =
-        sqlx::query_scalar("INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id")
-            .bind(guild)
-            .bind(sqlx::types::Json(crate::recovery::live_image(
-                guild,
-                &l.roles,
-                &l.channels,
-            )))
-            .fetch_one(&st.db)
-            .await?;
+    let backup = backup().await?;
     // Keep going past a failed call (e.g. a private channel the bot cannot see), so everything
     // that can be fixed is, and the log lists both.
     let (mut done, mut failed) = (vec![], vec![]);
@@ -408,6 +449,11 @@ async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result
             Method::PATCH,
             format!("/guilds/{guild}/members/{user}"),
             Some(json!({"roles": roles.iter().map(u64::to_string).collect::<Vec<_>>()})),
+        ),
+        Inverse::RolePerms { id, perms } => (
+            Method::PATCH,
+            format!("/guilds/{guild}/roles/{id}"),
+            Some(json!({"permissions": perms.to_string()})),
         ),
         Inverse::Unquarantine { .. } | Inverse::Reinvite { .. } => {
             unreachable!("handled by the caller")

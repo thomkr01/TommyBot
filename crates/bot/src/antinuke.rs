@@ -1,14 +1,14 @@
 //! Audit-log driven anti-nuke: count watched actions per executor, quarantine and revert on a breach,
 //! and enforce the quarantine hold.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
 use tommybot_antinuke::{
-    gained_dangerous, has_dangerous, hold_violation, plan_revert, Action, Inverse, LogEntry,
-    NukeCase, Verdict,
+    contain_plan, gained_dangerous, has_dangerous, hold_violation, nuke_plan, plan_revert, Action,
+    ContainStep, Inverse, LogEntry, NukeCase, NukeStep, Verdict,
 };
 use tommybot_automod::heat::{Breakdown, HeatCfg};
 use tommybot_core::{
@@ -20,7 +20,7 @@ use tommybot_logging::{
     embed::{ALERT, NO, YES},
     Log, LogKind,
 };
-use twilight_http::request::{Method, RequestBuilder};
+use twilight_http::request::{AuditLogReason, Method, RequestBuilder};
 use twilight_model::{
     gateway::payload::incoming::MemberUpdate,
     guild::{
@@ -431,7 +431,23 @@ pub(crate) async fn quarantine(
         .await?
         .rows_affected()
         == 1;
-    let roles: Vec<_> = cfg.antinuke.quarantine_role.into_iter().collect();
+    // Discord refuses a role list that drops a managed (bot or integration) role, so those stay.
+    let managed: Vec<_> = app
+        .http
+        .roles(gid)
+        .await?
+        .models()
+        .await?
+        .into_iter()
+        .filter(|r| r.managed && member.roles.contains(&r.id))
+        .map(|r| r.id)
+        .collect();
+    let roles: Vec<_> = cfg
+        .antinuke
+        .quarantine_role
+        .into_iter()
+        .chain(managed)
+        .collect();
     if let Err(e) = app.http.update_guild_member(gid, user).roles(&roles).await {
         // Role too low or permission missing: they are not quarantined, so no row may say so.
         if fresh {
@@ -595,14 +611,104 @@ pub(crate) async fn revert_actor(
     })
 }
 
-/// Quarantines a nuking member; a nuking bot is kicked, as its managed role cannot be removed.
-async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Result<()> {
+/// How a nuker was dealt with, for the report and the nuke case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Applied {
+    /// Auto quarantine is off.
+    Off,
+    Failed,
+    Quarantined,
+    /// A bot that could not be quarantined.
+    Kicked,
+}
+
+/// What [`contain`] did; `bot_role` is set for a bot with its own managed role: true when that
+/// role's permissions were cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Contained {
+    pub applied: Applied,
+    pub bot_role: Option<bool>,
+}
+
+const BOT_ROLE_REASON: &str = "Anti-nuke: this bot nuked the server";
+
+/// Quarantines a nuker. A bot first loses its managed role's permissions (the role cannot be
+/// taken off it) and is kicked only when that or the quarantine fails.
+async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Result<Contained> {
     let member = app.http.guild_member(gid, actor).await?.model().await?;
-    if member.user.bot {
-        app.http.remove_guild_member(gid, actor).await?;
-        return Ok(());
+    if !member.user.bot {
+        quarantine(app, gid, actor).await?;
+        return Ok(Contained {
+            applied: Applied::Quarantined,
+            bot_role: None,
+        });
     }
-    quarantine(app, gid, actor).await
+    let role = bot_role(app, gid, actor)
+        .await
+        .inspect_err(|e| tracing::warn!(?e, "reading the bot's role failed"))
+        .ok()
+        .flatten();
+    let mut bot_role = role.map(|_| false);
+    for step in contain_plan(role.is_some()) {
+        let r = match (step, role) {
+            (ContainStep::ClearBotRole, Some((id, perms))) => clear_bot_role(app, gid, id, perms)
+                .await
+                .map(|()| bot_role = Some(true)),
+            (ContainStep::ClearBotRole, None) => Ok(()),
+            (ContainStep::Quarantine, _) => quarantine(app, gid, actor).await,
+        };
+        if let Err(e) = r {
+            tracing::warn!(?e, ?step, "containing a bot failed, kicking it");
+            app.http
+                .remove_guild_member(gid, actor)
+                .reason(BOT_ROLE_REASON)
+                .await?;
+            return Ok(Contained {
+                applied: Applied::Kicked,
+                bot_role,
+            });
+        }
+    }
+    Ok(Contained {
+        applied: Applied::Quarantined,
+        bot_role,
+    })
+}
+
+/// The bot's own managed role (Discord tags it with the bot's id) and its permissions.
+async fn bot_role(
+    app: &App,
+    gid: Id<GuildMarker>,
+    bot: Id<UserMarker>,
+) -> Result<Option<(Id<RoleMarker>, u64)>> {
+    let roles = app.http.roles(gid).await?.models().await?;
+    Ok(roles
+        .into_iter()
+        .find(|r| r.tags.as_ref().and_then(|t| t.bot_id) == Some(bot))
+        .map(|r| (r.id, r.permissions.bits())))
+}
+
+/// Sets the role to no permissions and logs the old ones, so the revert center can put them back.
+async fn clear_bot_role(
+    app: &App,
+    gid: Id<GuildMarker>,
+    role: Id<RoleMarker>,
+    perms: u64,
+) -> Result<()> {
+    app.http
+        .update_role(gid, role)
+        .permissions(Permissions::empty())
+        .reason(BOT_ROLE_REASON)
+        .await?;
+    sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+        .bind(gid.get() as i64)
+        .bind(app.me.get() as i64)
+        .bind("bot_role_cleared")
+        .bind(role.get() as i64)
+        .bind(json!(Inverse::RolePerms { id: role.get(), perms }))
+        .execute(&app.pool)
+        .await?;
+    Ok(())
 }
 
 /// A restart mid-revert would leave the nuke half undone: the `nuke_revert` guard job runs it again
@@ -636,39 +742,57 @@ pub(crate) async fn revert_and_report(
     since: i64,
 ) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
-    let auto = cfg.antinuke.auto_quarantine;
-    // A failed quarantine (bot role too low) must not stop the revert.
-    let quarantined = auto
-        && contain(app, gid, actor)
-            .await
-            .inspect_err(|e| tracing::warn!(?e, "quarantine failed"))
-            .is_ok();
-    let sum = revert_actor(app, gid, actor, since, Some(&cfg.backups)).await?;
-    let case = open_case(app, gid, actor, why).await?;
-    let nuke = record_nuke(app, gid, actor, &sum.done).await?;
-    let log = report_log((case, &nuke), actor.get(), (auto, quarantined), why, &sum);
-    send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
-    crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
-    if !auto {
-        return Ok(());
+    let mut done = Contained {
+        applied: Applied::Off,
+        bot_role: None,
+    };
+    let mut sum = None;
+    for step in nuke_plan(cfg.antinuke.auto_quarantine) {
+        match step {
+            // A failed quarantine (bot role too low) must not stop the revert.
+            NukeStep::Contain => {
+                done = contain(app, gid, actor).await.unwrap_or_else(|e| {
+                    tracing::warn!(?e, "quarantine failed");
+                    Contained {
+                        applied: Applied::Failed,
+                        bot_role: None,
+                    }
+                })
+            }
+            NukeStep::Revert => {
+                sum = Some(revert_actor(app, gid, actor, since, Some(&cfg.backups)).await?)
+            }
+            NukeStep::Report => {
+                let sum = sum.as_ref().context("the revert runs before the report")?;
+                let case = open_case(app, gid, actor, why).await?;
+                let contained = matches!(done.applied, Applied::Quarantined | Applied::Kicked);
+                let nuke = record_nuke(app, gid, actor, &sum.done, contained).await?;
+                let log = report_log((case, &nuke), actor.get(), done, why, sum);
+                send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
+                crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
+            }
+            NukeStep::Panic => crate::panic::note(app, gid, actor, false).await?,
+        }
     }
-    crate::panic::note(app, gid, actor, false).await
+    Ok(())
 }
 
 /// The log after a nuke is stopped and reverted.
 pub(crate) fn report_log(
     (case, nuke): (i32, &str),
     actor: u64,
-    (auto, quarantined): (bool, bool),
+    done: Contained,
     why: &str,
     sum: &RevertSummary,
 ) -> Log {
-    let action = if quarantined {
-        format!("{YES} **Quarantined** (bots are kicked)")
-    } else if auto {
-        format!("{NO} **NOT quarantined** (check that the bot's role is on top)")
-    } else {
-        format!("{NO} **Not quarantined** (auto quarantine is off)")
+    let action = match (done.applied, done.bot_role) {
+        (Applied::Quarantined, Some(true)) => format!("{YES} **Quarantined**, bot role cleared"),
+        (Applied::Quarantined, _) => format!("{YES} **Quarantined**"),
+        (Applied::Kicked, _) => format!("{YES} **Kicked** (the bot could not be quarantined)"),
+        (Applied::Failed, _) => {
+            format!("{NO} **NOT quarantined** (check that the bot's role is on top)")
+        }
+        (Applied::Off, _) => format!("{NO} **Not quarantined** (auto quarantine is off)"),
     };
     let reinvite = if sum.reinvite.is_empty() {
         "None".into()
@@ -679,12 +803,24 @@ pub(crate) fn report_log(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    Log::new("Anti Nuke Report:", ALERT)
+    let mark = |b: bool| if b { YES } else { NO }.to_string();
+    let mut log = Log::new("Anti Nuke Report:", ALERT)
         .line("CASE", &format!("`{case}` (nuke `{nuke}`)"))
         .user("Responsible", actor)
         .text(&action)
         .line("Reason", why)
-        .section("Revert Report:")
+        .section("More Details:")
+        .line(
+            "Action Applied",
+            &mark(matches!(
+                done.applied,
+                Applied::Quarantined | Applied::Kicked
+            )),
+        );
+    if let Some(cleared) = done.bot_role {
+        log = log.line("Bot Role Cleansing", &mark(cleared));
+    }
+    log.section("Revert Report:")
         .line(
             "Reverted",
             &format!("`{}/{}`", sum.ops - sum.failed, sum.ops),
@@ -702,6 +838,7 @@ async fn record_nuke(
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     ops: &[Inverse],
+    contained: bool,
 ) -> Result<String> {
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -716,7 +853,7 @@ async fn record_nuke(
             *entry = (NukeCase::new(seed), Instant::now());
         }
         entry.1 = Instant::now();
-        entry.0.add(actor.get(), ops.iter().cloned());
+        entry.0.add(actor.get(), ops.iter().cloned(), contained);
         entry.0.clone()
     };
     sqlx::query(
@@ -778,6 +915,12 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
         }
         Inverse::Timeout { user, until } => {
             crate::commands::timeout_until(app, gid, Id::new(*user), *until, "Restored timeout")
+                .await?;
+        }
+        Inverse::RolePerms { id, perms } => {
+            app.http
+                .update_role(gid, Id::new(*id))
+                .permissions(Permissions::from_bits_truncate(*perms))
                 .await?;
         }
         // Discord cannot undo a kick, so this is reported for re-invite, not executed.
@@ -864,10 +1007,16 @@ mod tests {
             Id::new(1),
         );
         let gid = Id::new(6_000_000_000 + std::process::id() as u64);
-        let first = record_nuke(&app, gid, Id::new(10), &[Inverse::DeleteChannel { id: 5 }])
-            .await
-            .unwrap();
-        let second = record_nuke(&app, gid, Id::new(11), &[Inverse::Unban { user: 7 }])
+        let first = record_nuke(
+            &app,
+            gid,
+            Id::new(10),
+            &[Inverse::DeleteChannel { id: 5 }],
+            true,
+        )
+        .await
+        .unwrap();
+        let second = record_nuke(&app, gid, Id::new(11), &[Inverse::Unban { user: 7 }], false)
             .await
             .unwrap();
         assert_eq!(first, second);
@@ -878,7 +1027,8 @@ mod tests {
                 .fetch_one(&app.pool)
                 .await
                 .unwrap();
-        assert_eq!(data["quarantined"], serde_json::json!([10, 11]));
+        assert_eq!(data["quarantined"], serde_json::json!([10]));
+        assert_eq!(data["failed"], serde_json::json!([11]));
         assert_eq!(data["reverted"].as_array().unwrap().len(), 2);
         sqlx::query("DELETE FROM nuke_incidents WHERE guild_id=$1")
             .bind(gid.get() as i64)
