@@ -52,6 +52,8 @@ Runde 2: hver feil over er lett etter flere steder, i koden og med nye sjekker.
 | 20 | + og så − på et tomt valgfritt felt ga 0 i stedet for tomt. For Join Raid «ID flag» betyr 0 at alle som blir med under et raid flagges. | `form.rs` | Ned til 0 på et felt uten standard gir tomt igjen. |
 | 21 | Et desimalfelt viste «100.0» etter +/−. | `form.rs` | Desimaler vises som tall. |
 
+Info-ikonet (godkjent av Thomas): ikonet `info` fra emoji-settet med tooltip-kortet fra designspesifikasjonen. Det står ved 21 vanskelige innstillinger (lista i `schema.rs`, `TIPS`), og erstatter de røde «! Notes» på kort som ikke er i bruk med «Not in use right now». Kortet holder seg inne på siden ved kantene, og layout-testen åpner hvert kort.
+
 Nye tester: `schema::tests::number_fields_without_default_accept_null` (alle tallfelt), `one_field_alone_deserializes` (alle seksjoner lastes med bare ett felt, fanger feil 2 igjen), og `DEEP_ONLY=overflow` (alle sider i 1400, 1024 og 390 px: tekst utenfor boksen, kuttet, oppå annen tekst eller klemt). Tilgang før validering, kopiering og manglende `serde(default)` er sjekket i alle ruter og strukturer uten flere funn.
 
 Nye feiltyper er lagt i `PITFALLS.md` (rot) og `crates/dashboard/ui/PITFALLS.md` (punkt 3 til 7).

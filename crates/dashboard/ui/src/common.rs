@@ -394,3 +394,26 @@ pub fn copy_label(state: Option<bool>) -> &'static str {
         Some(false) => "Copy failed, select and copy by hand",
     }
 }
+
+/// Info icon with a hover card (also on keyboard focus and tap) that explains a setting in plain words.
+#[component]
+pub fn Tip(#[prop(into)] text: Signal<String>) -> impl IntoView {
+    // The card is centred over the icon; near an edge it is shifted to stay inside the page area
+    // (not under the sidebar or past the screen), and below the icon when the header would cover it.
+    let place = |e: &web_sys::Event| {
+        use wasm_bindgen::JsCast;
+        let Some(t) = e.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) else { return };
+        let Some(b) = t.query_selector(".bubble").ok().flatten().and_then(|b| b.dyn_into::<web_sys::HtmlElement>().ok()) else { return };
+        let _ = t.class_list().remove_1("below");
+        let _ = b.style().set_property("--dx", "0px");
+        let r = b.get_bounding_client_rect();
+        let w = web_sys::window().and_then(|w| w.inner_width().ok()).and_then(|x| x.as_f64()).unwrap_or(r.right());
+        let (lo, hi) = t.closest("main").ok().flatten().map_or((0.0, w), |m| { let m = m.get_bounding_client_rect(); (m.left(), m.right().min(w)) });
+        let dx = if r.left() < lo + 8.0 { lo + 8.0 - r.left() } else if r.right() > hi - 8.0 { hi - 8.0 - r.right() } else { 0.0 };
+        let _ = b.style().set_property("--dx", &format!("{dx}px"));
+        if r.top() < 88.0 {
+            let _ = t.class_list().add_1("below");
+        }
+    };
+    view! { <span class="tip" tabindex="0" role="note" aria-label=text on:mouseenter=move |e| place(&e) on:focus=move |e| place(&e)>{crate::icons::icon_unique("info")}<span class="bubble" aria-hidden="true">{text}</span></span> }
+}

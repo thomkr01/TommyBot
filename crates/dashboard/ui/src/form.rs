@@ -640,6 +640,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         }
         _ => view! { <input prop:value=move || show(&get()) on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) } /> }.into_any(),
     };
+    let tip = f["tip"].as_str().map(|t| view! { <crate::common::Tip text=t.to_string() /> });
     let help = f["help"]
         .as_str()
         .map(|h| view! { <span class="muted">{h.to_string()}</span> });
@@ -675,7 +676,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         .as_str()
         .map_or_else(|| tail.replace('_', " "), String::from);
     // The group's name labels the control inside, whatever kind it is.
-    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
+    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}{tip}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
 }
 
 /// Raw JSON of one section of the config in `val`.
@@ -990,7 +991,7 @@ pub fn Section(
                         let note = note.clone();
                         let text = move || if !plain && off.get() { note.clone() } else { "Your current choices do not use this card, so its settings have no effect.".into() };
                         let fields = fs.into_iter().map(|f| { let only = f["only"].clone(); view! { <Show when=move || val.with(|v| holds(v, &only))><Field f=f.clone() val dc /></Show> } }).collect_view();
-                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{text.clone()}</p></details></Show></div> }
+                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><p class="offnote"><crate::common::Tip text=Signal::derive(text.clone()) />"Not in use right now"</p></Show></div> }
                     }).collect_view()
                 }}
             </div>

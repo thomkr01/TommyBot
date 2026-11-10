@@ -556,6 +556,16 @@ async function overflow(browser) {
       await page.evaluate(() => document.querySelectorAll('main details:not(.ico):not(header details)').forEach((d) => (d.open = true)));
       await page.waitForTimeout(150);
       const bad = await page.evaluate(findOverflow);
+      // Every info card opens on focus and stays inside the page area and the screen.
+      const tips = page.locator('main .tip');
+      for (let i = 0, n = await tips.count(); i < n; i++) {
+        const t = tips.nth(i);
+        if (!(await t.isVisible().catch(() => false))) continue;
+        await t.focus();
+        await page.waitForTimeout(260);
+        const r = await t.evaluate((e) => { const b = e.querySelector('.bubble').getBoundingClientRect(), m = e.closest('main').getBoundingClientRect(); return { ok: +getComputedStyle(e.querySelector('.bubble')).opacity > 0.9 && b.left >= m.left - 1 && b.right <= Math.min(m.right, innerWidth) + 1 && b.top >= 0, text: e.textContent.trim().slice(0, 30) }; });
+        if (!r.ok) bad.push(`info card off the page or not shown: "${r.text}"`);
+      }
       if (bad.length) {
         fail('overflow', `${vw}px ${h}: ${bad.slice(0, 8).join(' | ')}${bad.length > 8 ? ` (+${bad.length - 8})` : ''}`);
         await page.screenshot({ path: `${out}/overflow_${vw}_${h.replace(/\W+/g, '_')}.png`, fullPage: true });

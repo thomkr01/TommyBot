@@ -113,6 +113,18 @@ Each Overview switch loaded the config and kept its own version, so after one sw
 
 **Rule:** widgets on one page that save into the same config share one loaded config and one version signal, and update it after each save.
 
+## 10. Many copies of one SVG icon share its ids
+
+Every icon in `assets/icons` has fixed ids (`info-grad`, `info-cut`). With the info icon shown many times on a page, every copy paints with the first copy's gradient and mask, and draws nothing once that first copy is hidden (Chrome does not render a gradient from a `display:none` SVG).
+
+**Rule:** an icon that can appear more than once on a page uses `icons::icon_unique`, which numbers its ids.
+
+## 11. A transform on a parent moves its popup too
+
+The info icon grew on hover with `transform:scale` on `.tip`, which also scaled the card inside it, so the card was wider than measured and crossed the screen edge on a phone.
+
+**Rule:** animate the icon (`.tip .i`), not the element that holds the popup. The info card is placed when it opens (`Tip` in `common.rs`): shifted to stay inside `main` and the screen, and moved below the icon near the header. `DEEP_ONLY=overflow` opens every info card and checks it.
+
 ## Where it was fixed (#143)
 
 - `form.rs`: the `-` button on number fields (`>=` in the attribute); the settings card's config/schema load; the preview flash frame callback; list import.
