@@ -9,6 +9,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - The dashboard no longer crashes ("reactive value that has already been disposed") when you leave a page while it is still loading or saving, for example during an Update. (#143)
 
 ### Added
+- The MCP server can make changes for Claude when `MCP_WRITE_TOKEN` is set: config sections, permits, config rollback, lockdown, notes, cases and embeds, plus the security score. Each change shows a diff and runs only after the owner types Claude the code the bot sent by DM; sections that need 2FA on the dashboard also need an authenticator code. Update, deleting server data, backups and anti-nuke revert stay out of reach. MCP logs now name the tool only, not its arguments.
 - On pages without a server (the server list, Commands, Update) the left menu lists every server you can manage. Click one to open it. The server you opened last is highlighted.
 - A Yes/No question ("Do you want to proceed?", 10 seconds) before ban, kick, timeout, warn, quarantine, unquarantine and unban when the target is typed as a raw id or a name. A mention or a slash command pick never asks. Only the moderator who ran the command can answer. The Confirm switch turns it off. (#136)
 - Members get a DM before a warn, timeout, quarantine, kick, ban, softban or tempban (not a hackban), and after an unquarantine, untimeout or unban worked. TommyBot waits at most 3 seconds for the DM and punishes whatever happens to it. (#136)

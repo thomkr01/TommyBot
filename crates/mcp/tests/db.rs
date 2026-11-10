@@ -74,6 +74,7 @@ async fn read_only_role_and_tools() {
         "SELECT 1 FROM dash_totp LIMIT 1",
         "SELECT content FROM reports LIMIT 1",
         "SELECT answers FROM appeals LIMIT 1",
+        "SELECT 1 FROM mcp_writes LIMIT 1",
     ] {
         assert!(
             sqlx::query(sql).execute(&db).await.is_err(),
@@ -91,6 +92,7 @@ async fn read_only_role_and_tools() {
         token: TOKEN.into(),
         log_dir: "/nonexistent".into(),
         oauth: None,
+        writes: None,
     };
     let (code, _) = rpc(
         &st,

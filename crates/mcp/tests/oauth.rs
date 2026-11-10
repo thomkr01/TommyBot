@@ -132,6 +132,7 @@ async fn owner_gets_a_token_others_do_not() {
             discord_api: api,
             http: reqwest::Client::new(),
         }),
+        writes: None,
     });
 
     // 401 points the client at the metadata.

@@ -162,4 +162,5 @@ Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` on
 - **The live script shares the bot's token** and its rate limits. Cache channel and role lookups and wait longer instead of polling hard (#142).
 - **Make scenarios clean up after themselves** so they can run again. The old nuke scenario kicked the attacker bot every run (#142).
 - **Cloud env vars are read at session start.** A variable added during a session needs a new session.
+- **Two DB tests used the same guild id.** (MCP writes, PR 4) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
 - **`tests/e2e/run.sh` needs root Postgres, trunk and Playwright**; the gateway is not covered by the Discord mock.

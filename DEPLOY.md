@@ -116,7 +116,7 @@ TOMMYBOT_TAG=a1b2c3d
 
 ## 6. MCP server for Claude (optional)
 
-The `mcp` service lets Claude read TommyBot: running version, log lines from the last 24 hours (secrets masked), guild config and its history, cases, the raid and join gate logs, the action log, antinuke incidents and quarantines, automod strikes, appeals and reports (without the message or answers), notes, scheduled jobs and backups. **It cannot change anything.** It holds no bot token and no Docker socket, logs in to Postgres as `tommybot_mcp` (which sees only the `mcp_*` views, read-only), and mounts the log files read-only. Two ways in:
+The `mcp` service lets Claude read TommyBot: running version, log lines from the last 24 hours (secrets masked), guild config and its history, cases, the raid and join gate logs, the action log, antinuke incidents and quarantines, automod strikes, appeals and reports (without the message or answers), notes, scheduled jobs and backups. It can only read until you turn on changes (step 6.4), and even then every change needs a code the bot DMs you. It holds no bot token and no Docker socket, logs in to Postgres as `tommybot_mcp` (which sees only the `mcp_*` views, read-only), and mounts the log files read-only. Two ways in:
 
 - **Claude Code** (the `claude` command in a terminal) uses a fixed token, `MCP_TOKEN`.
 - **claude.ai** (web and apps, including Projects) logs in through Discord; only the user in `MCP_OWNER_ID` gets in.
@@ -186,9 +186,32 @@ claude.ai cannot send a fixed token; it uses OAuth, and the MCP server sends you
 
 Access tokens last an hour and claude.ai renews them for 30 days. Changing `MCP_OAUTH_SECRET` (then `docker compose up -d mcp`) logs every claude.ai client out at once.
 
-### 6.4 Keeping it safe
+### 6.4 Letting Claude make changes (optional)
 
-Every tool call is logged with its arguments (`docker compose logs mcp`). Anyone with `MCP_TOKEN` can read everything the tools show, so keep it out of chats, screenshots and repositories. To revoke it, put a new value in `.env` and run `docker compose up -d mcp`, then run `claude mcp add` again on your computer. Text from Discord (reasons, names, messages) reaches Claude through these tools; the server is read-only so such text cannot make Claude change anything in TommyBot.
+Off by default. When on, Claude gets `propose_change`, `confirm_change` and `score`. A change takes two steps:
+
+1. Claude calls `propose_change`. Nothing changes yet. The bot sends **you** a Discord DM with what will change (a diff for config) and a 6-digit code, valid 5 minutes. Claude never sees the code.
+2. Read the DM. If it is what you want, type the code to Claude, which calls `confirm_change`. Anti-nuke, whitelist, panic, catch, permits and rollback also need a code from your authenticator app, the same as on the dashboard (you must have set up 2FA there). Three wrong codes close the change.
+
+The change then runs through the dashboard as you, the bot owner, with every check the dashboard page has, and the log channel names it `Claude (MCP)`. Claude can change config sections, permits, roll config back, lock and unlock, add and edit notes, edit cases, and save and post embeds. It can never start an update, delete server data, load or delete backups, or revert anti-nuke actions; those routes are not reachable from the MCP server at all. At most 5 changes can wait for a code at once.
+
+**(server)** Turn it on. The same token goes to the dashboard and the mcp container:
+
+```bash
+cd ~/tommybot
+git pull
+echo "MCP_WRITE_TOKEN=$(openssl rand -hex 32)" >> .env
+docker compose pull && docker compose up -d
+docker compose logs mcp | tail -3
+```
+
+The log no longer says `writes off`. `git pull` is needed once, because `docker-compose.yml` passes the new variable (the updater does not change that file). Reconnect the connector in claude.ai (or restart Claude Code) so the new tools show up.
+
+To turn it off, delete the `MCP_WRITE_TOKEN` line from `.env` and run `docker compose up -d`. Every proposal and its outcome (no content) is kept in the `mcp_writes` table.
+
+### 6.5 Keeping it safe
+
+Every tool call is logged by name only (`docker compose logs mcp`); arguments can hold codes, note text and member ids, so they are not logged. Anyone with `MCP_TOKEN` can read everything the tools show, so keep it out of chats, screenshots and repositories. To revoke it, put a new value in `.env` and run `docker compose up -d mcp`, then run `claude mcp add` again on your computer. Text from Discord (reasons, names, messages) reaches Claude through these tools; such text cannot make a change on its own, because every change needs the code from your DM. Never type that code anywhere except to Claude, and only after you have read the DM.
 
 ## 7. Troubleshooting
 
@@ -199,6 +222,9 @@ Every tool call is logged with its arguments (`docker compose logs mcp`). Anyone
 | Dashboard or `mcp.` address shows a Cloudflare 502 page | The container is not running, or the route's service URL is wrong | `docker compose ps`; check the route is `http://dashboard:8080` or `http://mcp:8090` |
 | `mcp` keeps restarting, log says `MCP_OWNER_ID must be a Discord user id` | The placeholder was pasted literally | `sed -i 's/^MCP_OWNER_ID=.*/MCP_OWNER_ID=<your id>/' .env`, then `docker compose up -d mcp` |
 | `mcp` log says `MCP_TOKEN must be at least 32 characters` or `not set` | Missing or short token | Redo the `echo "MCP_TOKEN=..."` line, check with `grep MCP_ .env` |
+| `mcp` keeps restarting, log says `MCP_WRITE_TOKEN must be at least 32 characters` | Short or hand-typed token | Redo the `echo "MCP_WRITE_TOKEN=..."` line from step 6.4 |
+| `propose_change` says `dashboard refused (404 Not Found)` | The dashboard has no `MCP_WRITE_TOKEN` (or one under 32 characters), or `docker-compose.yml` is old | `git pull && docker compose up -d`, then `grep MCP_WRITE .env` |
+| `propose_change` says `could not DM the bot owner` | Your DMs from the bot are closed | Allow DMs from server members in a server you share with the bot |
 | `mcp` log says `oauth off` | One of the three OAuth values is missing | Step 6.3.3; `grep MCP_ .env` shows which |
 | claude.ai login ends on Discord with "Invalid OAuth2 redirect_uri" | The redirect is not in the Discord app | Step 1.2 |
 | claude.ai login says only the bot owner has access | You logged in with another Discord account, or `MCP_OWNER_ID` is wrong | Check the id (step 6.3.2) |

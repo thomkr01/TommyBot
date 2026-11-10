@@ -70,6 +70,8 @@ services:
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
       SUPPORT_URL: ${SUPPORT_URL:-}
+      # Lets the mcp container propose changes (owner confirms with a DM code); off when empty. See DEPLOY.md.
+      MCP_WRITE_TOKEN: ${MCP_WRITE_TOKEN:-}
       RUST_LOG: ${RUST_LOG:-info}
       LOG_DIR: /logs
     volumes:
@@ -116,6 +118,9 @@ services:
       MCP_OWNER_ID: ${MCP_OWNER_ID:-}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      # Writes go through the dashboard; off when empty.
+      MCP_WRITE_TOKEN: ${MCP_WRITE_TOKEN:-}
+      DASHBOARD_INTERNAL_URL: http://dashboard:8080
       MCP_DATABASE_URL: postgres://tommybot_mcp:${MCP_DB_PASSWORD:-}@postgres:5432/tommybot
       RUST_LOG: ${RUST_LOG:-info}
     volumes:

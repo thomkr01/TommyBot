@@ -7,6 +7,7 @@ mod diff;
 mod discord;
 mod embeds;
 mod lockdown;
+mod mcp;
 mod ops;
 mod otp;
 mod records;
@@ -52,6 +53,8 @@ pub struct AppState {
     pub totp: Shared<i64, auth::TotpAttempts>,
     /// Per-session request buckets.
     pub rate: Shared<String, auth::Bucket>,
+    /// `MCP_WRITE_TOKEN`: lets the MCP server propose changes (`mcp.rs`). None turns that off.
+    pub mcp_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -144,6 +147,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(verify::routes())
         .merge(embeds::routes())
         .merge(update::routes())
+        .merge(mcp::routes())
         // Only routes, not the static UI: one page load fetches many assets.
         .route_layer(middleware::from_fn_with_state(st.clone(), auth::rate_limit))
         // Hash routing means the server never needs an index.html fallback; one would also hide
@@ -196,6 +200,13 @@ async fn main() -> anyhow::Result<()> {
         secure: base.starts_with("https://"),
         totp: Default::default(),
         rate: Default::default(),
+        mcp_token: std::env::var("MCP_WRITE_TOKEN").ok().filter(|t| {
+            let ok = t.len() >= 32;
+            if !ok && !t.is_empty() {
+                tracing::warn!("MCP_WRITE_TOKEN is shorter than 32 characters, MCP writes are off");
+            }
+            ok
+        }),
         discord: discord::Discord {
             http: reqwest::Client::new(),
             client_id: env("DISCORD_CLIENT_ID")?,
@@ -244,6 +255,7 @@ mod tests {
             secure: false,
             totp: Default::default(),
             rate: Default::default(),
+            mcp_token: None,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
