@@ -349,6 +349,7 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
             .map(|u| u as u64)
             .chain([g.owner_id.get(), app.me.get()])
             .collect(),
+        log_channels: cfg.logging.channels().iter().map(|c| c.get()).collect(),
     };
     let bot_top = app.guild_info(gid).await?.bot_top;
     let channels: Vec<_> = app

@@ -404,6 +404,45 @@ pub fn RaidLog(guild: String) -> impl IntoView {
     }
 }
 
+/// Every Join Gate punishment: the filters that matched, the bot and who added it, and Discord's refusal.
+#[component]
+pub fn JoinGateLog(guild: String) -> impl IntoView {
+    let (rows, set_rows) = signal(Vec::<Value>::new());
+    let (msg, loaded, page) = (Msg::default(), RwSignal::new(false), RwSignal::new(0i64));
+    let load = move || {
+        fetch(
+            format!("/api/guilds/{guild}/joingate_log?page={}", page.get_untracked()),
+            set_rows,
+            msg,
+            loaded,
+        )
+    };
+    let load = StoredValue::new(load);
+    load.get_value()();
+    let reload = move || load.get_value()();
+    view! {
+        <Toast msg />
+        <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"Join Gate has not punished anyone yet."</p></Show>
+        {move || rows.get().into_iter().map(|r| {
+            let filters: Vec<String> = r["filters"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(String::from)).collect();
+            let bot = r["is_bot"].as_bool().unwrap_or(false).then(|| match r["adder_id"].as_str() {
+                Some(a) => format!("Bot added by {a}"),
+                None => "Bot, adder unknown".into(),
+            });
+            let result = match r["ok"].as_bool() {
+                Some(true) => "Done".to_string(),
+                _ => format!("Failed: {}", s(&r["error"])),
+            };
+            view! { <div class="card">
+                <div class="row"><b>{s(&r["action"])}</b><code>{s(&r["user_id"])}</code><span class="muted">{s(&r["at"])}</span><span>{result}</span></div>
+                <p>{s(&r["reason"])}{(!filters.is_empty()).then(|| format!(" ({})", filters.join(", ")))}</p>
+                {bot.map(|b| view! { <p class="muted">{b}</p> })}
+            </div> }
+        }).collect_view()}
+        {pager(page, move || rows.get().len(), reload)}
+    }
+}
+
 /// One transcript line, `[time] Name (Role): text`, as (time, name, role, text).
 fn log_line(l: &str) -> (&str, &str, &str, &str) {
     let Some((time, rest)) = l.strip_prefix('[').and_then(|r| r.split_once("] ")) else {

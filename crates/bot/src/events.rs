@@ -96,6 +96,28 @@ async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
     Ok(p)
 }
 
+/// A held-back log is not only in the container log: the owner hears once a day per channel.
+async fn warn_public(app: &App, channel: Id<ChannelMarker>) {
+    static LAST: std::sync::Mutex<std::collections::BTreeMap<u64, i64>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    if !crate::reply::alert_due(
+        &mut LAST.lock().unwrap(),
+        channel.get(),
+        crate::app::now_secs(),
+        86_400,
+    ) {
+        return;
+    }
+    let gid = match app.http.channel(channel).await {
+        Ok(r) => r.model().await.ok().and_then(|c| c.guild_id),
+        Err(_) => None,
+    };
+    if let Some(gid) = gid {
+        let text = format!("TommyBot did not post a log in <#{channel}>: every member can read that channel. Make it private, or press **Make private** under the security score on the dashboard.");
+        crate::reply::dm_owner(app, gid, &text).await;
+    }
+}
+
 /// Logged text is user-controlled, so it is sent with mentions disabled.
 async fn send(
     app: &App,
@@ -106,6 +128,7 @@ async fn send(
     mentions: &AllowedMentions,
 ) -> Result<Id<MessageMarker>> {
     if public(app, channel).await? {
+        warn_public(app, channel).await;
         anyhow::bail!(
             "not logging to {channel}: @everyone can read it, pick a private log channel"
         );
@@ -405,6 +428,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
         Event::ChannelDelete(c) => {
             app.note_parent(&c.0);
             tickets::on_channel_delete(app, c.id).await?;
+            if let Err(e) = verify::deleted::on_channel_delete(app, c).await {
+                tracing::warn!(?e, "remaking the verification channel failed");
+            }
             if let Some(g) = c.guild_id {
                 app.invalidate_guild(g);
                 forget_log_channel(app, g, &c.0).await?;
@@ -422,6 +448,9 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(e) = crate::timeout_roles::on_member_update(app, m).await {
                 tracing::warn!(?e, "removing main roles on timeout failed");
             }
+            if let Err(e) = verify::on_member_update(app, m).await {
+                tracing::warn!(?e, "pausing the verification time limit failed");
+            }
             crate::joingate::on_member_update(app, m).await?
         }
         Event::MemberAdd(m) => crate::joingate::on_join(app, m).await?,
@@ -437,7 +466,14 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
                 slash::handle(app, &i.0).await?
             }
         }
-        Event::GuildAuditLogEntryCreate(e) => antinuke::on_audit(app, &e.0).await?,
+        // Anti-nuke first: the verification check can wait for the gateway delete.
+        Event::GuildAuditLogEntryCreate(e) => {
+            let nuke = antinuke::on_audit(app, &e.0).await;
+            if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
+                tracing::warn!(?err, "verification channel delete check failed");
+            }
+            nuke?
+        }
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
         Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,

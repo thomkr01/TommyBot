@@ -79,6 +79,19 @@ impl Filter {
             _ => Action::Kick,
         }
     }
+
+    /// The card name staff see in the Join Gate log and records.
+    pub fn name(self) -> &'static str {
+        match self {
+            Filter::NoAvatar => "No Avatar",
+            Filter::AccountAge => "Account Age",
+            Filter::UnauthorizedBot => "Bot Addition",
+            Filter::UnverifiedBot => "Unverified Bot",
+            Filter::InviteInName => "Advertising Names",
+            Filter::Suspicious => "Suspicious Account",
+            Filter::UsernameFilter => "Username Filter",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +119,8 @@ pub struct GateCfg {
     pub username_post_join: bool,
     /// Join Guard style: act only when every enabled filter matches, with the harshest action.
     pub require_all: bool,
+    /// Bots added by the owner or an Extra Owner skip the account filters (the bot filters still apply).
+    pub exclude_trusted_bots: bool,
 }
 
 /// One Join Gate card: its status switch and trigger action (None: the card default).
@@ -175,6 +190,7 @@ impl Default for GateCfg {
             username_strict: vec![],
             username_post_join: false,
             require_all: false,
+            exclude_trusted_bots: false,
         }
     }
 }
@@ -210,6 +226,8 @@ pub struct Joiner<'a> {
     pub bot_verified: bool,
     /// For bots: whoever added it is Owner/EO/TA or above the bot.
     pub added_by_authorized: bool,
+    /// For bots: the audit log names the owner or an Extra Owner as the one who added it.
+    pub added_by_owner: bool,
     /// The invite code the member joined with, when known.
     pub invite: Option<&'a str>,
 }
@@ -257,6 +275,8 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
         return vec![];
     }
     let age = now - account_created_ms(j.id);
+    // The account filters (all but the two bot filters) leave out bots the owner vouched for.
+    let account = !(cfg.exclude_trusted_bots && j.is_bot && j.added_by_owner);
     let mut enabled = 0;
     let mut hits = vec![];
     let mut check = |on: GateFilter, f: Filter, hit: bool| {
@@ -267,9 +287,13 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
             }
         }
     };
-    check(cfg.no_avatar, Filter::NoAvatar, !j.has_avatar);
+    check(cfg.no_avatar, Filter::NoAvatar, account && !j.has_avatar);
     let min = cfg.min_age_ms();
-    check(cfg.account_age, Filter::AccountAge, age < min.max(5_000));
+    check(
+        cfg.account_age,
+        Filter::AccountAge,
+        account && age < min.max(5_000),
+    );
     check(
         cfg.unauthorized_bot,
         Filter::UnauthorizedBot,
@@ -280,16 +304,20 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
         Filter::UnverifiedBot,
         j.is_bot && !j.bot_verified,
     );
-    check(cfg.invite_in_name, Filter::InviteInName, has_invite(j.name));
+    check(
+        cfg.invite_in_name,
+        Filter::InviteInName,
+        account && has_invite(j.name),
+    );
     check(
         cfg.suspicious,
         Filter::Suspicious,
-        is_suspicious(j, cfg, min, now),
+        account && is_suspicious(j, cfg, min, now),
     );
     check(
         cfg.username_filter,
         Filter::UsernameFilter,
-        cfg.name_matches(j.name),
+        account && cfg.name_matches(j.name),
     );
     // Age timeouts only last for the remaining period.
     for h in &mut hits {
@@ -618,6 +646,8 @@ pub struct VerifyCfg {
     /// Send a new captcha image every this many ms while a member is solving one (`v 12`); None is off.
     pub regen_ms: Option<i64>,
     pub captcha: CaptchaCfg,
+    /// Kick, ban and quarantine at the time limit write a reason into the audit log (`v 14`).
+    pub audit_reason: bool,
 }
 
 /// Web verification only works with action Nothing and at least one verified/main role (roles fall back to
@@ -719,6 +749,7 @@ impl Default for VerifyCfg {
             show_notes: true,
             regen_ms: None,
             captcha: CaptchaCfg::default(),
+            audit_reason: true,
         }
     }
 }
@@ -894,6 +925,48 @@ mod tests {
         assert_eq!(harshest(&gate(&bot, &cfg, NOW)), Some(Action::Kick));
         let j = joiner(id_aged(DAY_MS, 0), "join discord.gg/abc", true);
         assert_eq!(harshest(&gate(&j, &cfg, NOW)), Some(Action::Ban));
+    }
+
+    #[test]
+    fn owner_bots_skip_account_filters_only_when_asked() {
+        let mut cfg = GateCfg {
+            enabled: true,
+            no_avatar: GateFilter::on(Action::Kick),
+            suspicious: GateFilter::on(Action::Kick),
+            ..Default::default()
+        };
+        let bot = Joiner {
+            id: id_aged(10 * DAY_MS, 0),
+            name: "helper",
+            is_bot: true,
+            added_by_authorized: true,
+            added_by_owner: true,
+            ..Default::default()
+        };
+        let names =
+            |j: &Joiner, c: &GateCfg| gate(j, c, NOW).iter().map(|h| h.0).collect::<Vec<_>>();
+        // Off (the default): every bot meets the account filters.
+        assert_eq!(names(&bot, &cfg), [Filter::NoAvatar, Filter::Suspicious]);
+        cfg.exclude_trusted_bots = true;
+        assert!(names(&bot, &cfg).is_empty());
+        // The bot filters still apply.
+        cfg.unverified_bot = GateFilter::on(Action::Kick);
+        assert_eq!(names(&bot, &cfg), [Filter::UnverifiedBot]);
+        // Not vouched for (a Trusted Admin, an admin or no audit entry): caught.
+        let other = Joiner {
+            added_by_owner: false,
+            ..bot.clone()
+        };
+        assert_eq!(
+            names(&other, &cfg),
+            [Filter::NoAvatar, Filter::UnverifiedBot, Filter::Suspicious]
+        );
+        // Humans never skip.
+        let human = Joiner {
+            is_bot: false,
+            ..bot
+        };
+        assert_eq!(names(&human, &cfg), [Filter::NoAvatar, Filter::Suspicious]);
     }
 
     #[test]

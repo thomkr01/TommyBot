@@ -24,7 +24,7 @@ use embeds::Embeds;
 use form::Section;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use permits::Permits;
-use records::{CaseList, NoteList, RaidLog, ReportList, TicketLog};
+use records::{CaseList, JoinGateLog, NoteList, RaidLog, ReportList, TicketLog};
 /// The server list's empty state; its text is the marker that shows the help card.
 const NO_SERVERS: &str = "No servers";
 
@@ -103,6 +103,7 @@ const APPEAL_TABS: &[(&str, &str)] = &[
     ("appeal_blacklist", "Blacklist"),
 ];
 const RAID_TABS: &[(&str, &str)] = &[("joinraid", "Settings"), ("raid_log", "Raid Log")];
+const GATE_TABS: &[(&str, &str)] = &[("joingate", "Settings"), ("joingate_log", "Join Gate Log")];
 const REPORT_TABS: &[(&str, &str)] = &[("report_list", "List"), ("report_blacklist", "Blacklist")];
 const WL_TABS: &[(&str, &str)] = &[
     ("whitelist", "Spam"),
@@ -166,6 +167,7 @@ fn title(p: &str) -> (String, Option<String>) {
         "antinuke" => two("Anti Nuke", "General Settings"),
         "antinuke_filters" => two("Anti Nuke", "Filters"),
         "joingate" => two("Join gate", "General Settings"),
+        "joingate_log" => ("Join gate".into(), None),
         "joinraid" | "raid_log" => ("Join Raid".into(), None),
         "verification" => two("Verification", "General Settings"),
         "automod_panic" => ("Auto Mod Panic Mode".into(), None),
@@ -556,6 +558,8 @@ fn App() -> impl IntoView {
                                 ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><Blacklist guild=g.clone() base="appeals" purge=true /> }.into_any(),
                                 ("joinraid", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() />{sec("joinraid", "")} }.into_any(),
                                 ("raid_log", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() /><RaidLog guild=g.clone() /> }.into_any(),
+                                ("joingate", _) => view! { <Tabs guild=g.clone() items=GATE_TABS active=p.clone() />{sec("joingate", "")} }.into_any(),
+                                ("joingate_log", _) => view! { <Tabs guild=g.clone() items=GATE_TABS active=p.clone() /><JoinGateLog guild=g.clone() /> }.into_any(),
                                 ("catch", _) => view! { <Catch guild=g.clone() enrolled /> }.into_any(),
                                 ("cases", _) => view! { <CaseList guild=g.clone() /> }.into_any(),
                                 ("notes", _) => view! { <NoteList guild=g.clone() /> }.into_any(),

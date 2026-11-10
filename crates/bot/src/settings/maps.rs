@@ -277,7 +277,7 @@ pub(super) static RESTORE: Module = Module {
     ],
 };
 
-static JOINGATE_ROWS: [Row; 26] = {
+static JOINGATE_ROWS: [Row; 27] = {
     let [a1, a2, a3] = gate_filter!("2", "No PfP Filter", no_avatar);
     let [b1, b2, b3] = gate_filter!("3", "Account Age Filter", account_age);
     let [c1, c2, c3] = gate_filter!("4", "Bot Addition Filter", unauthorized_bot);
@@ -289,6 +289,7 @@ static JOINGATE_ROWS: [Row; 26] = {
         group!("1", "General"),
         r!("1a", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
         r!("1b", "DM Members", "joingate.dm_punished", Kind::Bool, |c| on(c.joingate.dm_punished)),
+        r!("1c", "Exclude Owner Bots", "joingate.exclude_trusted_bots", Kind::Bool, |c| on(c.joingate.exclude_trusted_bots)),
         a1, a2, a3, b1, b2, b3,
         r!("3c", "Minimum Age", "joingate.min_age_override_ms", Kind::Age, |c| ms(c.joingate.min_age_ms())),
         r!("3d", "Expose Minimum Age", "joingate.expose_min_age", Kind::Bool, |c| on(c.joingate.expose_min_age)),
@@ -346,6 +347,7 @@ pub(super) static VERIFICATION: Module = Module {
         r!("12", "Regeneration", "verification.regen_ms", Kind::Ms, |c| c.verification.verify.regen_ms.map_or(NO.into(), ms)),
         r!("12a", "Regeneration Status", "verification.regen_ms", Kind::Switch("12000", "null"), |c| on(c.verification.verify.regen_ms.is_some())),
         r!("13", "Notes", "verification.show_notes", Kind::Bool, |c| on(c.verification.verify.show_notes)),
+        r!("14", "Audit Log Reason", "verification.audit_reason", Kind::Bool, |c| on(c.verification.verify.audit_reason)),
     ],
 };
 

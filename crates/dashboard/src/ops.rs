@@ -20,8 +20,8 @@ use std::{
 };
 use tommybot_antinuke::{
     security::{
-        checks, move_under_bot, overwrite_targets, setting_fix, strip_targets, stripped,
-        stripped_overwrite, synced_children, GuildSafety, Setup,
+        checks, move_under_bot, overwrite_targets, private_overwrites, setting_fix, strip_targets,
+        stripped, stripped_overwrite, synced_children, GuildSafety, Setup, PRIVATE,
     },
     Inverse, RoleImg,
 };
@@ -182,6 +182,14 @@ async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Live, ApiErro
                 .chain(id(&g["owner_id"]))
                 .chain(me.parse().ok())
                 .collect(),
+            log_channels: serde_json::from_value::<tommybot_logging::LogConfig>(
+                config["logging"].clone(),
+            )
+            .unwrap_or_default()
+            .channels()
+            .iter()
+            .map(|c| c.get())
+            .collect(),
         },
         bot_pos,
         image,
@@ -223,6 +231,9 @@ async fn fix(
 ) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
     let (_, c) = crate::store::current(&st.db, guild).await?;
+    if b.setting.as_deref() == Some(PRIVATE) {
+        return make_private(&st, &s, guild, &c, b.channel_id.as_deref()).await;
+    }
     if let Some(setting) = b.setting {
         let (key, value) =
             setting_fix(&setting).ok_or_else(|| ApiError::BadRequest("unknown setting".into()))?;
@@ -361,11 +372,7 @@ async fn fix(
                 .call(
                     Method::PUT,
                     &format!("/channels/{id}/permissions/{}", o.target),
-                    Some(json!({
-                        "type": if o.is_role { 0 } else { 1 },
-                        "allow": fixed.allow.to_string(),
-                        "deny": fixed.deny.to_string(),
-                    })),
+                    Some(overwrite_body(&fixed)),
                 )
                 .await;
             let line = format!("<#{id}> for {who}");
@@ -396,6 +403,62 @@ async fn fix(
             failed.join(", ")
         )));
     }
+    Ok(Json(json!({"ok": true, "backup": backup})))
+}
+
+/// The body of Discord's edit-channel-permissions call.
+pub(crate) fn overwrite_body(o: &tommybot_antinuke::OverwriteImg) -> Value {
+    json!({"type": if o.is_role { 0 } else { 1 }, "allow": o.allow.to_string(), "deny": o.deny.to_string()})
+}
+
+/// Hides a public log channel: @everyone and the main roles lose View Channel, the bot keeps access.
+async fn make_private(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+    config: &Value,
+    channel: Option<&str>,
+) -> Res {
+    let l = live(st, guild, config).await?;
+    let ch = l
+        .image
+        .channels
+        .iter()
+        .find(|x| {
+            Some(x.id.to_string().as_str()) == channel && l.setup.log_channels.contains(&x.id)
+        })
+        .ok_or(ApiError::NotFound)?;
+    // A backup first, so Backups can put the old overwrites back.
+    let backup: i64 =
+        sqlx::query_scalar("INSERT INTO backups (guild_id, image) VALUES ($1, $2) RETURNING id")
+            .bind(guild)
+            .bind(sqlx::types::Json(crate::recovery::live_image(
+                guild,
+                &l.roles,
+                &l.channels,
+            )))
+            .fetch_one(&st.db)
+            .await?;
+    let bot = st.discord.client_id.parse().unwrap_or_default();
+    for o in private_overwrites(ch, guild as u64, bot, &l.setup.main_roles) {
+        st.discord
+            .call(
+                Method::PUT,
+                &format!("/channels/{}/permissions/{}", ch.id, o.target),
+                Some(overwrite_body(&o)),
+            )
+            .await?;
+    }
+    log_change(
+        st,
+        guild,
+        config,
+        format!(
+            "{} (<@{}>) made the log channel <#{}> private from the security score, backup #{backup}",
+            s.username, s.user_id, ch.id
+        ),
+    )
+    .await;
     Ok(Json(json!({"ok": true, "backup": backup})))
 }
 
