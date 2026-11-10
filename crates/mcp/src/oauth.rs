@@ -121,10 +121,25 @@ pub async fn server_meta(S(st): St) -> Response {
     .into_response()
 }
 
-fn allowed_redirect(u: &str) -> bool {
-    u.starts_with("https://")
-        || u.starts_with("http://localhost")
-        || u.starts_with("http://127.0.0.1")
+/// Hosts a login may return to. Any https host would let a stranger register their own site, send the owner
+/// a login link and catch the code with the owner's access.
+/// shortcut: claude.ai only; another MCP client needs its callback host here.
+const REDIRECT_HOSTS: [&str; 2] = ["claude.ai", "claude.com"];
+
+/// claude.ai, or a client on the owner's own computer (Claude Code). Parsed, not a prefix check:
+/// `http://localhost.evil.com` starts with `http://localhost`.
+pub fn allowed_redirect(u: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(u) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    match (url.scheme(), url.host_str()) {
+        ("https", Some(h)) => REDIRECT_HOSTS.contains(&h),
+        ("http", Some(h)) => matches!(h, "localhost" | "127.0.0.1" | "[::1]"),
+        _ => false,
+    }
 }
 
 /// Dynamic client registration. Anyone may register; only the owner can finish a login.
@@ -148,7 +163,7 @@ pub async fn register(S(st): St, Json(req): Json<Value>) -> Response {
         return bad(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uri",
-            "https redirect_uris required",
+            "redirect_uris must be claude.ai or localhost",
         );
     }
     let id = o.sign("client", 10 * 365 * 86400, json!({"uris": uris}));

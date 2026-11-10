@@ -160,7 +160,25 @@ async fn owner_gets_a_token_others_do_not() {
             .body(Body::from(json!({"redirect_uris": uris}).to_string()))
             .unwrap()
     };
-    assert_eq!(t.req(reg(json!(["http://evil.example/cb"]))).await.0, 400);
+    // Only claude.ai and the owner's own computer: any other site could catch the owner's code.
+    for bad in [
+        "http://evil.example/cb",
+        "https://evil.example/cb",
+        "http://localhost.evil.example/cb",
+        "http://127.0.0.1.evil.example/cb",
+        "https://claude.ai.evil.example/cb",
+        "https://x@evil.example/cb",
+    ] {
+        assert_eq!(t.req(reg(json!([bad]))).await.0, 400, "{bad}");
+        assert!(!tommybot_mcp::oauth::allowed_redirect(bad), "{bad}");
+    }
+    for ok in [
+        "http://localhost:4321/callback",
+        "http://127.0.0.1:9/cb",
+        "https://claude.com/api/mcp/auth_callback",
+    ] {
+        assert!(tommybot_mcp::oauth::allowed_redirect(ok), "{ok}");
+    }
     let (code, _, c) = t.req(reg(json!([CB]))).await;
     assert_eq!(code, 201);
     let cid = c["client_id"].as_str().unwrap().to_string();
