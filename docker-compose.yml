@@ -110,6 +110,12 @@ services:
         condition: service_started
     environment:
       MCP_TOKEN: ${MCP_TOKEN:-}
+      # Login for claude.ai through Discord (the dashboard's app); off until all are set. See DEPLOY.md.
+      MCP_OAUTH_SECRET: ${MCP_OAUTH_SECRET:-}
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
+      MCP_OWNER_ID: ${MCP_OWNER_ID:-}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       MCP_DATABASE_URL: postgres://tommybot_mcp:${MCP_DB_PASSWORD:-}@postgres:5432/tommybot
       RUST_LOG: ${RUST_LOG:-info}
     volumes:

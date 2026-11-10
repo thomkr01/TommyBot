@@ -8,6 +8,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
+pub mod oauth;
 pub mod tools;
 
 #[derive(Clone)]
@@ -15,6 +16,8 @@ pub struct State {
     pub db: sqlx::PgPool,
     pub token: String,
     pub log_dir: String,
+    /// Off when the OAuth settings are not all set: then only `token` works.
+    pub oauth: Option<oauth::OAuth>,
 }
 
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -26,6 +29,26 @@ pub fn router(st: State) -> Router {
             post(mcp).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
         )
         .route("/health", get(|| async { "ok" }))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::resource_meta),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::resource_meta),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::server_meta),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/mcp",
+            get(oauth::server_meta),
+        )
+        .route("/register", post(oauth::register))
+        .route("/authorize", get(oauth::authorize))
+        .route("/oauth/callback", get(oauth::callback))
+        .route("/token", post(oauth::token))
         .with_state(st)
 }
 
@@ -33,16 +56,24 @@ fn authorized(st: &State, h: &HeaderMap) -> bool {
     h.get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| constant_time_eq::constant_time_eq(t.as_bytes(), st.token.as_bytes()))
+        .is_some_and(|t| {
+            constant_time_eq::constant_time_eq(t.as_bytes(), st.token.as_bytes())
+                || st.oauth.as_ref().is_some_and(|o| o.access_ok(t))
+        })
 }
 
 async fn mcp(S(st): S<State>, h: HeaderMap, Json(req): Json<Value>) -> Response {
     if !authorized(&st, &h) {
-        return (
+        let mut res = (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "unauthorized"})),
         )
             .into_response();
+        if let Some(o) = &st.oauth {
+            res.headers_mut()
+                .insert("www-authenticate", o.challenge_header().parse().unwrap());
+        }
+        return res;
     }
     // Notifications and responses carry no id and get no answer.
     let Some(id) = req.get("id").cloned() else {

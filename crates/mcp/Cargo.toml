@@ -14,6 +14,11 @@ sqlx.workspace = true
 axum = "0.8"
 regex = "1"
 constant_time_eq = "0.4"
+serde.workspace = true
+base64 = "0.23"
+hmac = "0.13"
+sha2 = "0.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
