@@ -507,7 +507,7 @@ pub(crate) async fn quarantine_actor(
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     why: &str,
-) -> Result<()> {
+) -> Result<Contained> {
     let done = contain(app, gid, actor).await?;
     let case = open_case(app, gid, actor, why).await?;
     let log = Log::new("Anti Nuke", ALERT)
@@ -515,7 +515,8 @@ pub(crate) async fn quarantine_actor(
         .user("Responsible", actor.get())
         .text(&action_text(done))
         .line("Reason", why);
-    send_log(app, gid.get(), LogKind::AntiNuke, log).await
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
+    Ok(done)
 }
 
 async fn open_case(

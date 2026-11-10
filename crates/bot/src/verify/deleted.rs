@@ -221,8 +221,13 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             let why = "Deleted the verification channel";
             match crate::antinuke::quarantine_actor(app, gid, actor, why).await {
                 // The quarantine has its own anti-nuke log.
-                Ok(()) => {
-                    let text = format!("{deleted} <@{actor}> was quarantined.");
+                Ok(done) => {
+                    let what = if done.applied == crate::antinuke::Applied::Kicked {
+                        "was kicked (the bot could not be quarantined)"
+                    } else {
+                        "was quarantined"
+                    };
+                    let text = format!("{deleted} <@{actor}> {what}.");
                     crate::reply::dm_owner(app, gid, &text).await
                 }
                 Err(e) => {
