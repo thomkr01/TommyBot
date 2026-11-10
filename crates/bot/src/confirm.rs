@@ -1,18 +1,20 @@
 //! Confirm / Cancel prompts: a mod command parked in `pending_confirms` until its buttons are clicked.
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tommybot_core::jobs;
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::message::{
         component::{ActionRow, Button, ButtonStyle, Component},
-        AllowedMentions, MessageFlags,
+        AllowedMentions, Embed, MessageFlags,
     },
     gateway::payload::incoming::MessageCreate,
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::{
-        marker::{ChannelMarker, GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
         Id,
     },
 };
@@ -22,7 +24,9 @@ use crate::{
     commands::{apply_dm, ModKind},
     modcmds::{self, ModCmd},
     prefix::Flags,
+    reply::{self, Applied},
 };
+use tommybot_logging::embed::{Log, ARROW, BLUE};
 
 /// What a [`Pending`] does once confirmed.
 #[derive(Serialize, Deserialize)]
@@ -35,6 +39,9 @@ pub enum Action {
         flags: Flags,
         #[serde(default)]
         proof: Option<String>,
+        /// A target typed as a raw id or a name, not a mention: worth a Yes/No first.
+        #[serde(default)]
+        unsure: bool,
     },
     Ext {
         cmd: ModCmd,
@@ -52,48 +59,52 @@ pub struct Pending {
     action: Action,
 }
 
-const CONFIRM_TTL: Duration = Duration::from_secs(60);
+pub const CONFIRM_TTL: Duration = Duration::from_secs(10);
 
 impl Pending {
     pub fn new(gid: Id<GuildMarker>, actor: Id<UserMarker>, action: Action) -> Self {
         Self { gid, actor, action }
     }
 
-    /// Warns and non-destructive commands run straight away.
+    /// Mod commands ask when a target was typed as an id or a name (a mention is sure), and
+    /// hackbans always; destructive extras (purge, note sweep) always ask.
     pub fn needs_confirm(&self) -> bool {
         match &self.action {
-            Action::Mod { kind, targets, .. } => *kind != ModKind::Warn && !targets.is_empty(),
+            Action::Mod {
+                targets,
+                unsure,
+                flags,
+                ..
+            } => !targets.is_empty() && (*unsure || flags.hack),
             Action::Ext { cmd, .. } => cmd.destructive(),
         }
     }
 
-    fn question(&self) -> String {
-        match &self.action {
-            Action::Mod {
-                kind,
-                targets,
-                flags,
-                ..
-            } => {
-                let what = if flags.soft && *kind == ModKind::Ban {
-                    "softban"
-                } else {
-                    kind.name()
-                };
-                let who: Vec<String> = targets.iter().map(|t| format!("<@{t}>")).collect();
-                format!("Really {what} {}?", who.join(", "))
+    fn question(&self) -> Embed {
+        let target = match &self.action {
+            Action::Mod { targets, .. } => {
+                let who: Vec<String> = targets.iter().map(|t| format!("<@{t}> [`{t}`]")).collect();
+                who.join("\n")
             }
-            Action::Ext { cmd, .. } => format!("Really {}?", cmd.describe()),
-        }
+            Action::Ext { cmd, .. } => cmd.describe(),
+        };
+        Log::new("Do you want to proceed?", BLUE)
+            .text(&format!("{ARROW} **Target:**"))
+            .text(&target)
+            .text(&format!(
+                "Press Yes or No. You have {} seconds.",
+                CONFIRM_TTL.as_secs()
+            ))
+            .build()
     }
 
-    /// One reply per target.
+    /// One outcome per target.
     pub(crate) async fn run(
         &self,
         app: &App,
         owner: Id<UserMarker>,
         points: i32,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<Applied>> {
         let (kind, targets, reason, duration_s, flags, proof) = match &self.action {
             Action::Mod {
                 kind,
@@ -102,6 +113,7 @@ impl Pending {
                 duration_s,
                 flags,
                 proof,
+                ..
             } => (*kind, targets, reason, *duration_s, *flags, proof),
             Action::Ext {
                 cmd,
@@ -110,29 +122,29 @@ impl Pending {
                 proof,
             } => {
                 let actor = app.level(self.gid, owner, self.actor).await?;
-                let text = modcmds::run(
+                let done = modcmds::run(
                     app,
                     self.gid,
                     owner,
                     (self.actor, &actor),
                     *channel,
                     cmd.clone(),
-                    reason.as_deref(),
-                    proof.as_deref(),
+                    (reason.as_deref(), proof.as_deref()),
+                    false,
                 )
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(?e, "mod command failed");
-                    format!("Command failed: {}", crate::http_err::why(&e))
+                    format!("Command failed: {}", crate::http_err::why(&e)).into()
                 });
-                return Ok(vec![text]);
+                return Ok(vec![done]);
             }
         };
         let mut out = vec![];
         for &t in targets {
             // Fresh level each time: a rate-limit quarantine mid-list must stop the rest.
             let actor = app.level(self.gid, owner, self.actor).await?;
-            let text = match apply_dm(
+            let done = match apply_dm(
                 app,
                 self.gid,
                 owner,
@@ -147,17 +159,21 @@ impl Pending {
             )
             .await
             {
-                Ok(text) => text,
+                Ok(done) => done,
                 Err(e) => {
                     tracing::warn!(?e, "mod command failed");
-                    format!(
+                    let text = format!(
                         "Failed to {} <@{t}>: {}",
                         kind.name(),
                         crate::http_err::why(&e)
-                    )
+                    );
+                    Applied {
+                        target: Some(t.get()),
+                        ..text.into()
+                    }
                 }
             };
-            out.push(text);
+            out.push(done);
         }
         Ok(out)
     }
@@ -176,24 +192,45 @@ fn confirm_button(label: &str, id: String, style: ButtonStyle) -> Component {
     })
 }
 
-/// Stores `job` for its buttons and returns the question with the Confirm / Cancel row.
+/// The question for a warn on `target`, for the dashboard preview.
+pub fn sample_question(target: u64) -> (Embed, Component) {
+    let action = Action::Mod {
+        kind: ModKind::Warn,
+        targets: vec![Id::new(target)],
+        reason: None,
+        duration_s: None,
+        flags: Flags::default(),
+        proof: None,
+        unsure: true,
+    };
+    let job = Pending::new(Id::new(1), Id::new(1), action);
+    (job.question(), job.row(1))
+}
+
+impl Pending {
+    fn row(&self, nonce: u64) -> Component {
+        Component::ActionRow(ActionRow {
+            id: None,
+            components: vec![
+                confirm_button(
+                    "Yes",
+                    format!("{CONFIRM}{nonce}:{}:y", self.actor),
+                    ButtonStyle::Success,
+                ),
+                confirm_button(
+                    "No",
+                    format!("{CONFIRM}{nonce}:{}:n", self.actor),
+                    ButtonStyle::Danger,
+                ),
+            ],
+        })
+    }
+}
+
+/// Stores `job` for its buttons and returns the question with the Yes / No row.
 /// `nonce` is the command message or interaction id.
-pub async fn stash_confirm(app: &App, nonce: u64, job: Pending) -> Result<(String, Component)> {
-    let row = Component::ActionRow(ActionRow {
-        id: None,
-        components: vec![
-            confirm_button(
-                "Confirm",
-                format!("{CONFIRM}{nonce}:{}:y", job.actor),
-                ButtonStyle::Danger,
-            ),
-            confirm_button(
-                "Cancel",
-                format!("{CONFIRM}{nonce}:{}:n", job.actor),
-                ButtonStyle::Secondary,
-            ),
-        ],
-    });
+pub async fn stash_confirm(app: &App, nonce: u64, job: Pending) -> Result<(Embed, Component)> {
+    let row = job.row(nonce);
     // Expired rows are dropped on the way in, so the table stays small without a sweeper.
     sqlx::query(
         "WITH gone AS (DELETE FROM pending_confirms WHERE created_at < now() - make_interval(secs => $4))
@@ -209,28 +246,103 @@ pub async fn stash_confirm(app: &App, nonce: u64, job: Pending) -> Result<(Strin
 }
 
 pub async fn ask_confirm(app: &App, msg: &MessageCreate, job: Pending) -> Result<()> {
-    let (text, row) = stash_confirm(app, msg.id.get(), job).await?;
-    app.http
+    let nonce = msg.id.get();
+    let (embed, row) = stash_confirm(app, nonce, job).await?;
+    let sent = app
+        .http
         .create_message(msg.channel_id)
-        .content(&text)
+        .embeds(&[embed])
         .components(&[row])
         .allowed_mentions(Some(&AllowedMentions::default()))
+        .await?
+        .model()
         .await?;
+    let gid = msg.guild_id.context("not in a server")?;
+    expire_later(app, gid, nonce, Asked::Message(msg.channel_id, sent.id)).await
+}
+
+/// Where a question was posted, so it can be closed when nobody answers.
+pub enum Asked {
+    Message(Id<ChannelMarker>, Id<MessageMarker>),
+    /// A slash command's interaction token (valid 15 minutes).
+    Interaction(String),
+}
+
+const TIMED_OUT: &str = "Timed out, nothing was done.";
+
+/// Queues the `confirm_expire` job that closes the question after [`CONFIRM_TTL`] (the
+/// scheduler ticks every 5 s, so it closes 10 to 15 s after asking).
+pub async fn expire_later(app: &App, gid: Id<GuildMarker>, nonce: u64, at: Asked) -> Result<()> {
+    let job = match at {
+        Asked::Message(c, m) => json!({"nonce": nonce, "channel": c.get(), "message": m.get()}),
+        Asked::Interaction(token) => json!({"nonce": nonce, "token": token}),
+    };
+    let when = crate::app::now_secs() + CONFIRM_TTL.as_secs() as i64;
+    jobs::enqueue(&app.pool, gid.get() as i64, "confirm_expire", job, when).await?;
+    Ok(())
+}
+
+/// Scheduler arm for `confirm_expire`: swaps an unanswered question for [`TIMED_OUT`]. The row is
+/// taken first, so a click at the same moment either runs the command or sees it expired.
+pub async fn run_expire(app: &App, p: &Value) -> Result<()> {
+    let nonce = p["nonce"].as_i64().context("no nonce")?;
+    let gone = sqlx::query("DELETE FROM pending_confirms WHERE nonce = $1")
+        .bind(nonce)
+        .execute(&app.pool)
+        .await?;
+    if gone.rows_affected() == 0 {
+        return Ok(());
+    }
+    let none: &[Embed] = &[];
+    let r = match (
+        p["token"].as_str(),
+        p["channel"].as_u64(),
+        p["message"].as_u64(),
+    ) {
+        (Some(token), ..) => app
+            .http
+            .interaction(Id::new(app.me.get()))
+            .update_response(token)
+            .content(Some(TIMED_OUT))
+            .embeds(Some(none))
+            .components(Some(&[]))
+            .await
+            .map(drop),
+        (None, Some(c), Some(m)) => app
+            .http
+            .update_message(Id::new(c), Id::new(m))
+            .content(Some(TIMED_OUT))
+            .embeds(Some(none))
+            .components(Some(&[]))
+            .await
+            .map(drop),
+        _ => return Ok(()),
+    };
+    // The question may already be deleted; nothing else to do then.
+    crate::http_err::best_effort(r, "close timed out question");
     Ok(())
 }
 
 const CONFIRM: &str = "confirm:";
+
+/// `confirm:<nonce>:<actor>:<y|n>` -> (nonce, actor, yes).
+fn parse_answer(custom_id: &str) -> Option<(i64, u64, bool)> {
+    let mut it = custom_id.strip_prefix(CONFIRM)?.splitn(3, ':');
+    let (n, actor, a) = (it.next()?, it.next()?, it.next()?);
+    Some((n.parse().ok()?, actor.parse().ok()?, a == "y"))
+}
+
+/// Only the member who typed the command may answer, whatever their level.
+fn may_answer(presser: Option<u64>, actor: u64) -> bool {
+    presser == Some(actor)
+}
 
 /// Handles the Confirm / Cancel buttons. Returns false for other interactions.
 pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
     let Some(InteractionData::MessageComponent(c)) = &i.data else {
         return Ok(false);
     };
-    let Some((nonce, actor, yes)) = c.custom_id.strip_prefix(CONFIRM).and_then(|r| {
-        let mut it = r.splitn(3, ':');
-        let (n, actor, a) = (it.next()?, it.next()?, it.next()?);
-        Some((n.parse::<i64>().ok()?, actor.parse::<u64>().ok()?, a == "y"))
-    }) else {
+    let Some((nonce, actor, yes)) = parse_answer(&c.custom_id) else {
         return Ok(false);
     };
     let client = app.http.interaction(Id::new(app.me.get()));
@@ -243,8 +355,8 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
         }),
     };
     const EXPIRED: &str = "This confirmation expired, type the command again.";
-    let taken = if i.author_id().map(Id::get) != Some(actor) {
-        Err("Only the staff member who typed the command can answer.")
+    let taken = if !may_answer(i.author_id().map(Id::get), actor) {
+        Err("Only the moderator who ran this command can answer.")
     } else {
         let row: Option<(i64, serde_json::Value, bool)> = sqlx::query_as(
             "DELETE FROM pending_confirms WHERE nonce = $1
@@ -278,20 +390,127 @@ pub async fn handle_confirm(app: &App, i: &Interaction) -> Result<bool> {
     // Several HTTP calls can exceed the 3s answer window, so acknowledge first.
     let ack = respond(InteractionResponseType::DeferredUpdateMessage, None, None);
     client.create_response(i.id, &i.token, &ack).await?;
-    let text = if yes {
+    let (text, embeds) = if yes {
         let owner = app.guild_info(job.gid).await?.owner;
-        let points = app.cfg(job.gid.get()).await?.misc.warn_base_points;
-        let mut t = job.run(app, owner, points).await?.join("\n");
-        t.truncate(t.floor_char_boundary(2000));
-        t
+        let cfg = app.cfg(job.gid.get()).await?;
+        let done = job.run(app, owner, cfg.misc.warn_base_points).await?;
+        job.reply(&done, cfg.misc.compact_replies, cfg.misc.timeout_secs())
     } else {
-        "Cancelled.".into()
+        ("Cancelled.".into(), vec![])
     };
     client
         .update_response(&i.token)
         .content(Some(&text))
+        .embeds(Some(&embeds))
         .components(Some(&[]))
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?;
     Ok(true)
+}
+
+impl Pending {
+    /// The reply once the command ran: result embeds, or text when compact.
+    pub(crate) fn reply(
+        &self,
+        done: &[Applied],
+        compact: bool,
+        default_timeout_s: u64,
+    ) -> (String, Vec<Embed>) {
+        let actor = self.actor.get();
+        match &self.action {
+            Action::Mod {
+                kind,
+                reason,
+                duration_s,
+                flags,
+                ..
+            } => {
+                let name = result_kind(*kind, *flags);
+                let compact = compact || flags.compact;
+                if compact {
+                    let s = reply::summary(name, true, done, reason.as_deref(), actor);
+                    return (s, vec![]);
+                }
+                let dur = match kind {
+                    ModKind::Timeout => duration_s.or(Some(default_timeout_s as i64)),
+                    _ => *duration_s,
+                };
+                let e = reply::result_embeds(name, done, (*flags, dur), reason.as_deref(), actor);
+                (String::new(), e)
+            }
+            Action::Ext { cmd, reason, .. } => modcmds::reply_parts(
+                cmd.result_kind(),
+                compact,
+                done,
+                (Flags::default(), None),
+                reason.as_deref(),
+                actor,
+            ),
+        }
+    }
+}
+
+/// The result embed key: a ban with `?s` is a softban.
+pub(crate) fn result_kind(kind: ModKind, flags: Flags) -> &'static str {
+    match kind {
+        ModKind::Ban if flags.soft => "softban",
+        k => k.name(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(kind: ModKind, unsure: bool, hack: bool) -> Pending {
+        let flags = Flags {
+            hack,
+            ..Default::default()
+        };
+        let action = Action::Mod {
+            kind,
+            targets: vec![Id::new(5)],
+            reason: None,
+            duration_s: None,
+            flags,
+            proof: None,
+            unsure,
+        };
+        Pending::new(Id::new(1), Id::new(9), action)
+    }
+
+    #[test]
+    fn asks_only_for_ids_and_names() {
+        for kind in [ModKind::Ban, ModKind::Kick, ModKind::Timeout, ModKind::Warn] {
+            assert!(!job(kind, false, false).needs_confirm(), "mention {kind:?}");
+            assert!(
+                job(kind, true, false).needs_confirm(),
+                "id or name {kind:?}"
+            );
+        }
+        // A hackban always asks, a mention or not.
+        assert!(job(ModKind::Ban, false, true).needs_confirm());
+    }
+
+    #[test]
+    fn ten_second_question() {
+        assert_eq!(CONFIRM_TTL, Duration::from_secs(10));
+        let d = job(ModKind::Warn, true, false)
+            .question()
+            .description
+            .unwrap();
+        assert!(d.contains("Target:") && d.contains("<@5>") && d.contains("10 seconds"));
+    }
+
+    #[test]
+    fn only_the_moderator_who_ran_it_answers() {
+        let (nonce, actor, yes) = parse_answer("confirm:77:9:y").unwrap();
+        assert_eq!((nonce, actor, yes), (77, 9, true));
+        assert!(may_answer(Some(9), actor));
+        // Anyone else, owner or trusted admin included, is refused before the row is touched.
+        assert!(!may_answer(Some(1), actor));
+        assert!(!may_answer(None, actor));
+        assert_eq!(parse_answer("confirm:77:9:n").map(|a| a.2), Some(false));
+        assert!(parse_answer("other:77:9:y").is_none());
+    }
 }

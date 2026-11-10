@@ -94,6 +94,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             send_log(app, gid.get(), LogKind::Server, log).await?;
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
+        "confirm_expire" => crate::confirm::run_expire(app, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_grant" => {
             let same_ip: Vec<u64> = job.payload["same_ip"]

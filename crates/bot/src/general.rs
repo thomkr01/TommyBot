@@ -231,7 +231,7 @@ const CMDS: &[Cmd] = &[
         "kick",
         &["k"],
         "kick",
-        "kick MEMBERS [?r REASON] [?dm]",
+        "kick MEMBERS [?r REASON] [?dm] [?na] [?vc]",
         "Kick",
         "kick @member ?r ads ?dm",
     ),
@@ -599,8 +599,8 @@ const CMDS: &[Cmd] = &[
 
 /// What each word in a `CMDS` usage means; shown by `COMMAND -h` and on the dashboard's Commands page.
 const ARGS: &[(&str, &str)] = &[
-    ("MEMBER", "A member: @mention, user id or name"),
-    ("MEMBERS", "One or more members: @mentions, user ids or names (separate names with spaces by commas)"),
+    ("MEMBER", "A member: @mention, user id, name or tag (name#0)"),
+    ("MEMBERS", "One or more members: @mentions, user ids, names or tags (separate names with spaces by commas). An id or a name asks Yes/No first"),
     ("MODERATOR", "A staff member: @mention or user id"),
     ("USERS", "One or more users: @mentions or user ids; inside a ticket, empty means its member"),
     ("IDS", "One or more user ids, also of people who are not in the server"),
@@ -614,8 +614,10 @@ const ARGS: &[(&str, &str)] = &[
     ("TIME", "A duration: a number then s, m, h, d or w (30s, 10m, 2h, 7d, 1w). ban: unban after it (none = permanent); timeout: its length (none = the default from settings); lock: unlock after it; slowmode: the delay between messages"),
     ("REASON", "Free text, saved in the case and the log"),
     ("?r", "Starts the reason (or note text): every word after it up to the next ?flag"),
-    ("?dm", "Also tell the member by DM"),
+    ("?dm", "Tell the member by DM even when punishment DMs are off in the settings"),
     ("?s", "Softban: ban and unban right away, to delete their recent messages"),
+    ("?na", "Kick only the members without an avatar"),
+    ("?vc", "Kick only the members in a voice channel"),
     ("?p", "Short one-line reply instead of the result embed"),
     ("?t", "Starts the type, see TYPE"),
     ("TYPE", "lock/unlock: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s); cases: b, ub, k, timeout, wa, q or uq"),

@@ -3,6 +3,8 @@
 pub struct Parsed {
     pub command: String,
     pub targets: Vec<u64>,
+    /// Targets typed as `<@id>` mentions; the others in `targets` are raw ids.
+    pub mentioned: Vec<u64>,
     /// Usernames or nicknames to look up, in order.
     pub names: Vec<String>,
     pub duration_s: Option<i64>,
@@ -48,8 +50,9 @@ fn alias(cmd: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// `?dm` tell the target, `?s` softban (ban + unban to purge messages), `?p` short reply.
-/// `?h` (hackban) is accepted but needs no code: bans already work on ids that left the server.
+/// `?dm` tell the target, `?s` softban (ban + unban to purge messages), `?p` short reply,
+/// `?h` hackban (bans already work on ids that left the server; the flag shows in the result),
+/// `?na` / `?vc` kick only members without an avatar / in a voice channel.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Flags {
     pub dm: bool,
@@ -58,6 +61,12 @@ pub struct Flags {
     /// `-blind` / `-b` on a lock: hide the channels too.
     #[serde(default)]
     pub blind: bool,
+    #[serde(default)]
+    pub hack: bool,
+    #[serde(default)]
+    pub no_avatar: bool,
+    #[serde(default)]
+    pub voice: bool,
 }
 
 /// `s` is the message text with the prefix already stripped. Targets are mentions, raw ids, or names (words before the first `?flag`; with commas,
@@ -78,7 +87,8 @@ pub fn parse(s: &str) -> Option<Parsed> {
         match tok {
             "?r" => {
                 let mut words = vec![];
-                while let Some(t) = it.next_if(|t| !matches!(*t, "?dm" | "?s" | "?h" | "?p" | "?t"))
+                while let Some(t) =
+                    it.next_if(|t| !matches!(*t, "?dm" | "?s" | "?h" | "?p" | "?t" | "?na" | "?vc"))
                 {
                     words.push(t);
                 }
@@ -106,7 +116,9 @@ pub fn parse(s: &str) -> Option<Parsed> {
             "?dm" => p.flags.dm = true,
             "?s" => p.flags.soft = true,
             "?p" => p.flags.compact = true,
-            "?h" => {}
+            "?h" => p.flags.hack = true,
+            "?na" => p.flags.no_avatar = true,
+            "?vc" => p.flags.voice = true,
             "-blind" | "-b" if command == "lock" || command == "unlock" => p.flags.blind = true,
             _ if tok.starts_with("<@&") || tok.starts_with("<#") => {
                 if let Ok(id) = tok.trim_matches(|c: char| !c.is_ascii_digit()).parse() {
@@ -126,6 +138,9 @@ pub fn parse(s: &str) -> Option<Parsed> {
                     id,
                     tok.starts_with("<@") || tok.chars().all(|c| c.is_ascii_digit()),
                 ) {
+                    if tok.starts_with("<@") {
+                        p.mentioned.push(id);
+                    }
                     p.targets.push(id);
                 } else if let Some(d) = tommybot_core::duration::parse(tok) {
                     p.duration_s = Some(d);
@@ -158,6 +173,7 @@ mod tests {
         let p = parse("ban <@!111> 222 5d ?r spamming links ?dm").unwrap();
         assert_eq!(p.command, "ban");
         assert_eq!(p.targets, vec![111, 222]);
+        assert_eq!(p.mentioned, vec![111]);
         assert_eq!(p.duration_s, Some(432_000));
         assert_eq!(p.reason.as_deref(), Some("spamming links"));
         assert!(p.flags.dm);
@@ -171,6 +187,11 @@ mod tests {
         assert_eq!(p.names, vec!["john smith", "bob"]);
         assert_eq!(p.targets, vec![5]);
         assert!(parse("ban ?r not a name").unwrap().names.is_empty());
+        let p = parse("warn tile_from_chile#0").unwrap();
+        assert_eq!(
+            (p.names, p.targets),
+            (vec!["tile_from_chile#0".to_string()], vec![])
+        );
     }
 
     #[test]
@@ -241,6 +262,16 @@ mod tests {
         assert!(parse("lock -blind").unwrap().flags.blind);
         assert!(parse("lock sc -b").unwrap().flags.blind);
         assert!(!parse("purge 5 -b").unwrap().flags.blind);
+    }
+
+    #[test]
+    fn kick_filters_and_hackban_flag() {
+        let p = parse("kick 5 ?na ?vc ?r spam").unwrap();
+        assert!(p.flags.no_avatar && p.flags.voice && !p.flags.hack);
+        assert_eq!(p.reason.as_deref(), Some("spam"));
+        let p = parse("ban 5 ?r x ?na").unwrap();
+        assert_eq!(p.reason.as_deref(), Some("x"));
+        assert!(parse("ban 5 ?h").unwrap().flags.hack);
     }
 
     #[test]

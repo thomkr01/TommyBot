@@ -90,7 +90,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     )
     .await;
     let text = match done {
-        Ok(t) if t.starts_with("Cannot") => t,
+        Ok(a) if a.case.is_none() => a.text,
         Ok(_) => return Ok(true),
         Err(e) => format!("Failed: {e}"),
     };

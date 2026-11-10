@@ -505,9 +505,11 @@ async fn run(
         if data.kind == CommandType::User || !(cfg_confirm && job.needs_confirm()) {
             return Ok(None);
         }
-        let (text, row) = confirm::stash_confirm(app, i.id.get(), job).await?;
-        *confirm = Some(row);
-        Ok(Some(text))
+        let (question, row) = confirm::stash_confirm(app, i.id.get(), job).await?;
+        let at = confirm::Asked::Interaction(i.token.clone());
+        confirm::expire_later(app, gid, i.id.get(), at).await?;
+        (*out, *confirm) = (vec![question], Some(row));
+        Ok(Some(String::new()))
     };
     match cmd {
         Cmd::Mod {
@@ -525,11 +527,13 @@ async fn run(
                 duration_s,
                 flags,
                 proof: proof.clone(),
+                // Slash options are picked members, as sure as a mention.
+                unsure: false,
             };
             if let Some(q) = ask(action).await? {
                 return Ok(q);
             }
-            let text = commands::apply_dm(
+            let done = commands::apply_dm(
                 app,
                 gid,
                 owner,
@@ -543,12 +547,23 @@ async fn run(
                 proof.as_deref(),
             )
             .await?;
-            if !app.cfg(gid.get()).await?.misc.compact_replies {
-                *out =
-                    reply::result_embeds(kind.name(), &[text], reason.as_deref(), actor_id.get());
+            let misc = &app.cfg(gid.get()).await?.misc;
+            if !misc.compact_replies {
+                let dur = match kind {
+                    ModKind::Timeout => duration_s.or(Some(misc.timeout_secs() as i64)),
+                    _ => duration_s,
+                };
+                let name = confirm::result_kind(kind, flags);
+                *out = reply::result_embeds(
+                    name,
+                    &[done],
+                    (flags, dur),
+                    reason.as_deref(),
+                    actor_id.get(),
+                );
                 return Ok(String::new());
             }
-            Ok(text)
+            Ok(done.text)
         }
         Cmd::Lock { kind, duration_s } => {
             let r = crate::lockdown::command(app, gid, (actor_id, &actor), false, kind, duration_s)
@@ -587,41 +602,32 @@ async fn run(
             if let Some(q) = ask(action).await? {
                 return Ok(q);
             }
-            let target = c.target().map(Id::new);
             let paged = c.paged_user();
-            let dm_name = c.dm_name();
             let result_kind = c.result_kind();
-            let text = modcmds::run(
+            let dm = flag(flatten(&data.name, &data.options).1, "dm");
+            let done = modcmds::run(
                 app,
                 gid,
                 owner,
                 (actor_id, &actor),
                 ch,
                 c,
-                reason.as_deref(),
-                proof.as_deref(),
+                (reason.as_deref(), proof.as_deref()),
+                dm,
             )
             .await?;
             if let Some((e, row)) =
-                modcmds::cases_pager(app, gid, actor_id.get(), paged, &text).await?
+                modcmds::cases_pager(app, gid, actor_id.get(), paged, &done.text).await?
             {
                 (*out, *confirm) = (vec![e], Some(row));
                 return Ok(String::new());
-            }
-            if let (Some(t), true, true) = (
-                target,
-                text.starts_with("Case #"),
-                flag(flatten(&data.name, &data.options).1, "dm"),
-            ) {
-                let hide = app.cfg(gid.get()).await?.misc.hide_staff_in_dms;
-                let who = (!hide).then_some(actor_id.get());
-                reply::dm(app, t, &reply::dm_text(dm_name, reason.as_deref(), who)).await;
             }
             let compact = app.cfg(gid.get()).await?.misc.compact_replies;
             let (text, embeds) = modcmds::reply_parts(
                 result_kind,
                 compact,
-                &[text],
+                &[done],
+                (Default::default(), None),
                 reason.as_deref(),
                 actor_id.get(),
             );

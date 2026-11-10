@@ -110,7 +110,7 @@ pub async fn setup(app: &App, gid: Id<GuildMarker>) -> Result<String> {
     Ok(format!("Posted the verify button in <#{ch}>"))
 }
 
-async fn guild_name(app: &App, gid: Id<GuildMarker>) -> String {
+pub(crate) async fn guild_name(app: &App, gid: Id<GuildMarker>) -> String {
     async { anyhow::Ok(app.http.guild(gid).await?.model().await?.name) }
         .await
         .unwrap_or_else(|_| "the server".into())

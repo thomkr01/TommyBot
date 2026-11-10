@@ -616,7 +616,7 @@ impl Default for MiscCfg {
             enforce_permits: false,
             ban_appeal_message: String::new(),
             confirm: true,
-            always_dm: false,
+            always_dm: true,
             delete_invocation: false,
             hide_staff_in_dms: false,
             default_timeout_secs: 0,

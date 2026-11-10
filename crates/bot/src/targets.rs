@@ -29,12 +29,27 @@ pub fn pick(query: &str, cands: &[(u64, Vec<String>)]) -> Pick {
     }
 }
 
+/// `name#0` and `name#1234` (old Discord tags) search as `name`.
+pub fn untag(name: &str) -> &str {
+    match name.rsplit_once('#') {
+        Some((n, tag))
+            if !n.is_empty()
+                && (1..=4).contains(&tag.len())
+                && tag.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            n
+        }
+        _ => name,
+    }
+}
+
 /// [`resolve`] for `unban`: a banned user is no member, so look through the ban list instead.
 pub async fn resolve_banned(
     app: &App,
     gid: Id<GuildMarker>,
     name: &str,
 ) -> Result<Result<Id<UserMarker>, String>> {
+    let name = untag(name);
     let mut bans: Vec<twilight_model::guild::Ban> = Vec::new();
     loop {
         let mut req = app.http.bans(gid).limit(1000);
@@ -76,6 +91,7 @@ pub async fn resolve(
     gid: Id<GuildMarker>,
     name: &str,
 ) -> Result<Result<Id<UserMarker>, String>> {
+    let name = untag(name);
     let found = app
         .http
         .search_guild_members(gid, name)
@@ -106,6 +122,17 @@ mod tests {
 
     fn c(id: u64, n: &[&str]) -> (u64, Vec<String>) {
         (id, n.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn tags_search_as_names() {
+        assert_eq!(untag("tile_from_chile#0"), "tile_from_chile");
+        assert_eq!(untag("bob#1234"), "bob");
+        assert_eq!(untag("bob#12345"), "bob#12345");
+        assert_eq!(untag("bob#x1"), "bob#x1");
+        assert_eq!(untag("#0"), "#0");
+        let cands = [c(1, &["tile_from_chile"])];
+        assert_eq!(pick(untag("tile_from_chile#0"), &cands), Pick::One(1));
     }
 
     #[test]
