@@ -365,4 +365,32 @@ impl Access {
     pub fn of(&self, page: &str) -> String {
         self.pages.with(|p| p["pages"][page].as_str().unwrap_or("full").to_string())
     }
+    /// The user's level as a rank (viewer 1 .. owner 4) for buttons on pages everyone may open.
+    /// Unknown counts as owner; the server still refuses.
+    pub fn rank(&self) -> u8 {
+        self.pages.with(|p| match p["level"].as_str() {
+            Some("none") => 0,
+            Some("viewer") => 1,
+            Some("editor") => 2,
+            Some("admin") => 3,
+            _ => 4,
+        })
+    }
+}
+
+/// Copies text and says whether the browser allowed it; it refuses without focus or permission.
+pub async fn copy_text(text: &str) -> bool {
+    let Some(w) = web_sys::window() else { return false };
+    wasm_bindgen_futures::JsFuture::from(w.navigator().clipboard().write_text(text))
+        .await
+        .is_ok()
+}
+
+/// The label of a Copy button: before, after a copy, after a refused copy.
+pub fn copy_label(state: Option<bool>) -> &'static str {
+    match state {
+        None => "Copy",
+        Some(true) => "Copied!",
+        Some(false) => "Copy failed, select and copy by hand",
+    }
 }

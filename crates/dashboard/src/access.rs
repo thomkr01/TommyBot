@@ -113,7 +113,9 @@ pub fn page(page: &str, l: Level, perms: &[String]) -> PageAccess {
         "rescue" if l < Level::Owner => Hidden,
         "revert" if l < Level::Editor => Hidden,
         // Pages whose buttons are mostly for reading; the server refuses the few writes.
-        "overview" | "history" | "backups" | "lockdown" | "channel_setup" => Full,
+        "overview" | "history" | "backups" | "channel_setup" => Full,
+        // Lock, unlock and the member update are the page; a viewer only watches.
+        "lockdown" => need(Level::Editor),
         "permits" | "revert" => need(Level::Admin),
         "antinuke" | "antinuke_filters" => need(write_bar("antinuke").0),
         "automod_panic" | "antinuke_panic" => need(write_bar("panic").0),
@@ -179,6 +181,8 @@ mod tests {
             PageAccess::Read
         );
         assert_eq!(page("automod", Level::Viewer, &[]), PageAccess::Read);
+        assert_eq!(page("lockdown", Level::Viewer, &[]), PageAccess::Read);
+        assert_eq!(page("lockdown", Level::Editor, &[]), PageAccess::Full);
         assert_eq!(page("automod", Level::Editor, &[]), PageAccess::Full);
         assert_eq!(page("antinuke", Level::Admin, &[]), PageAccess::Read);
         assert_eq!(page("misc", Level::Admin, &[]), PageAccess::Read);

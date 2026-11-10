@@ -247,6 +247,18 @@ fn toggle_theme() {
         "light"
     };
     let _ = root.set_attribute("data-theme", next);
+    if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = s.set_item("theme", next);
+    }
+}
+
+/// The theme the user picked last time, so a reload does not switch back to dark.
+fn restore_theme() {
+    let w = web_sys::window();
+    let saved = w.as_ref().and_then(|w| w.local_storage().ok().flatten()).and_then(|s| s.get_item("theme").ok().flatten());
+    if let (Some(t), Some(root)) = (saved, w.and_then(|w| w.document()).and_then(|d| d.document_element())) {
+        let _ = root.set_attribute("data-theme", &t);
+    }
 }
 
 pub(crate) fn hash() -> Vec<String> {
@@ -267,6 +279,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
     let (diff, set_diff) = signal(String::new());
     let version = RwSignal::new(0i64);
+    let access = expect_context::<Access>();
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let load = {
         let g = guild.clone();
@@ -366,7 +379,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     view! {
         <div class="row">
             <button class="ghost" on:click=export>"Export settings"</button>
-            <button class="ghost" on:click=move |_| { if let Some(i) = file.get() { i.click() } }>"Import settings"</button>
+            <button class="ghost" disabled=move || access.rank() < 2 on:click=move |_| { if let Some(i) = file.get() { i.click() } }>"Import settings"</button>
             <input type="file" accept=".json,application/json" hidden=true node_ref=file on:change=import />
         </div>
         <AnimatedShow when=Signal::derive(move || preview.get().is_some()) hide_class="out" hide_delay=OUT>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
@@ -397,7 +410,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                                 Ok(d) => set_diff.set(format!("Changes from v{v} to current (v{cur}):\n{}", serde_json::to_string_pretty(&d).unwrap_or_default())),
                                 Err(e) => set_diff.set(e),
                             }}) }>"Diff vs current"</button>
-                        <button on:click=move |_| { let (g, load) = (g2.clone(), load.clone()); run_save(async move {
+                        <button disabled=move || access.rank() < 3 title=move || if access.rank() < 3 { "Only Trusted Admins and owners can roll back" } else { "" } on:click=move |_| { let (g, load) = (g2.clone(), load.clone()); run_save(async move {
                             let r = api("POST", &format!("/api/guilds/{g}/history/{v}/rollback"), Some(json!({"expected_version": version.get_untracked()}))).await;
                             load(); r }, version, msg, need) }>"Roll back"</button>
                     </div>
@@ -452,13 +465,27 @@ fn App() -> impl IntoView {
         route.track();
         let Some(g) = guild.get() else { return };
         spawn_local(async move {
-            if let Ok(v) = api("GET", &format!("/api/guilds/{g}/access"), None).await {
-                // A late answer for a server the user already left must not overwrite the new one.
-                if guild.get_untracked().as_deref() == Some(g.as_str()) {
-                    access.pages.set(v);
-                }
+            // A failed request shows the pages as before (the server still refuses), not a skeleton forever.
+            let v = api("GET", &format!("/api/guilds/{g}/access"), None)
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "guild": g }));
+            // A late answer for a server the user already left must not overwrite the new one.
+            if guild.try_get_untracked().flatten().as_deref() == Some(g.as_str()) {
+                access.pages.set(v);
             }
         });
+    });
+    // The open page's access as one value. The access is fetched again on every page change; an
+    // unchanged answer must not rebuild the page (that loaded its settings twice), and another
+    // server's answer must not show while this one's is still on its way.
+    let page_access = Memo::new(move |_| {
+        let r = route.get();
+        match (r.first(), r.get(1)) {
+            (Some(g), Some(p)) if access.pages.with(|a| a["guild"].as_str() == Some(g.as_str())) => access.of(p),
+            (Some(g), Some(_)) if g.bytes().all(|b| b.is_ascii_digit()) => "loading".to_string(),
+            (_, Some(p)) => access.of(p),
+            _ => String::new(),
+        }
     });
     // 2FA on request, for protected changes made in Discord (the bot checks this step-up).
     let step_up = RwSignal::new(false);
@@ -583,6 +610,12 @@ fn App() -> impl IntoView {
                         [a, g] if a == "appeal" =>view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview").0 /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, rest @ ..] => {
+                            // Nothing of the page is built before its access is known, so a hidden page loads nothing.
+                            let acc = page_access.get();
+                            if acc == "loading" || acc == "hidden" {
+                                let body = if acc == "hidden" { view! { <div class="card empty"><h2>"No access"</h2><p>"Your permit does not give access to this page. Ask a server owner if you need it."</p></div> }.into_any() } else { view! { <div class="skel"></div> }.into_any() };
+                                return view! { <Head guild=g.clone() page=title(p).0 />{body} }.into_any();
+                            }
                             let sec = |name: &str, part: &str| view! { <Section guild=g.clone() name=name.to_string() part=part.to_string() enrolled /> }.into_any();
                             let page = match (p.as_str(), rest.first()) {
                                 ("permits", _) => view! { <Permits guild=g.clone() enrolled /> }.into_any(),
@@ -631,8 +664,7 @@ fn App() -> impl IntoView {
                                 _ => sec(p, ""),
                             };
                             { let (page_name, big) = title(p); let head = match big { Some(b) => view! { <Head guild=g.clone() page=page_name big=b /> }.into_any(), None => view! { <Head guild=g.clone() page=page_name /> }.into_any() };
-                              let page = match access.of(p).as_str() {
-                                  "hidden" => view! { <div class="card empty"><h2>"No access"</h2><p>"Your permit does not give access to this page. Ask a server owner if you need it."</p></div> }.into_any(),
+                              let page = match acc.as_str() {
                                   "read" => view! { <p class="card info" role="note">"You can view this page, but your permit does not let you change it."</p><fieldset class="ro" disabled>{page}</fieldset> }.into_any(),
                                   _ => page,
                               };
@@ -655,5 +687,6 @@ fn main() {
             let _ = body.insert_adjacent_text("beforeend", &format!("Dashboard crashed: {info}"));
         }
     }));
+    restore_theme();
     leptos::mount::mount_to_body(App);
 }

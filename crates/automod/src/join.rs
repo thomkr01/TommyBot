@@ -357,7 +357,9 @@ pub fn parse_pattern(p: &str) -> (StringOp, String) {
     (op, p[1..].to_lowercase())
 }
 
+/// Missing fields take `RaidCfg::default()`, so a first save that sets only a few of them works.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RaidCfg {
     #[serde(default)]
     pub enabled: bool,

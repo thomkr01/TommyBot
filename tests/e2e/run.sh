@@ -26,3 +26,8 @@ for _ in $(seq 600); do curl -s $DASHBOARD_URL/api/me -o /dev/null -w "%{http_co
 
 # The mock's owner is the guild owner, so the dashboard grants owner level without any seed data.
 node tests/e2e/dashboard.js
+# DEEP=1: every write route for every access level, every page as every level, every control (tests/e2e/deep.js, ~1 h).
+if [ -n "${DEEP:-}" ]; then
+  psql "$DATABASE_URL" -q -f tests/e2e/levels.sql
+  node tests/e2e/deep.js
+fi

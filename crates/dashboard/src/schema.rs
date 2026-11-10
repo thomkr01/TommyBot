@@ -746,7 +746,7 @@ pub fn schema() -> Vec<Value> {
     // "heat" is the Auto Mod page, "nuke" the Anti Nuke page; the fields without a page are shared.
     let panic = vec![
         ti(
-            pg(fg("Trigger", "executors", "int"), "nuke"),
+            pg(dv(fg("Trigger", "executors", "int"), 0), "nuke"),
             "Quarantined accounts to trip",
         ),
         ti(
