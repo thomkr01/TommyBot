@@ -45,10 +45,20 @@ pub fn routes() -> Router<AppState> {
         .route("/api/mcp/propose", post(propose))
         .route("/api/mcp/confirm", post(confirm))
         .route("/api/mcp/score/{guild}", get(score))
-        // The MCP server calls from inside the compose network; Cloudflare marks everything from the internet.
+        // The MCP server calls straight from the compose network; anything a proxy (Cloudflare or another)
+        // forwarded is refused. Defence in depth only: the hashed token is the real guard.
         .route_layer(axum::middleware::from_fn(
             |req: Request<Body>, next: axum::middleware::Next| async move {
-                if req.headers().contains_key("cf-connecting-ip") {
+                let h = req.headers();
+                if [
+                    "cf-connecting-ip",
+                    "x-forwarded-for",
+                    "forwarded",
+                    "x-real-ip",
+                ]
+                .iter()
+                .any(|k| h.contains_key(*k))
+                {
                     return ApiError::NotFound.into_response();
                 }
                 next.run(req).await
@@ -728,7 +738,7 @@ mod tests {
         );
         let from_net = Request::post("/api/mcp/propose")
             .header("authorization", format!("Bearer {tok}"))
-            .header("cf-connecting-ip", "1.2.3.4")
+            .header("x-forwarded-for", "1.2.3.4")
             .body(Body::empty())
             .unwrap();
         let res = crate::router(st.clone(), "/nonexistent")
