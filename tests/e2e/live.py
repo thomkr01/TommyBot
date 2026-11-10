@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|purge|emojis|edit|restart|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke also needs
+Usage: live.py spam|lock|mention_lock|nuke|panic|verify_delete|dm_timing|purge|emojis|edit|restart|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke, panic, verify_delete and dm_timing also need
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import json
@@ -149,38 +149,245 @@ def spam():
                  f"spam: webhook deleted={hook_gone}, {len(left)}/{len(ids)} messages left, automod logged")
 
 
+def attacker_id():
+    return call("GET", "/users/@me", os.environ["ATTACKER_TOKEN"])["id"]
+
+
+def bot_role_of(user):
+    """The managed role Discord made for this bot, or None."""
+    return next((r for r in call("GET", f"/guilds/{GUILD}/roles")
+                 if (r.get("tags") or {}).get("bot_id") == user), None)
+
+
+def quarantine_role():
+    return next(r["id"] for r in call("GET", f"/guilds/{GUILD}/roles") if r["name"] == "Quarantine")
+
+
+def antinuke_on(**extra):
+    """Anti-nuke on (new servers start with it off), quarantining into the server's Quarantine role."""
+    current = json.loads(sql(f"select coalesce(config->'antinuke', '{{}}') from guild_config "
+                             f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
+    set_config("antinuke", {**current, "enabled": True, "quarantine_role": quarantine_role(), **extra})
+
+
+def free_attacker(user, perms):
+    """Undoes the containment so the scenario can run again without a new invite."""
+    role = bot_role_of(user)
+    if role and int(role["permissions"]) != perms:
+        call("PATCH", f"/guilds/{GUILD}/roles/{role['id']}", body={"permissions": str(perms)})
+    call("DELETE", f"/guilds/{GUILD}/members/{user}/roles/{quarantine_role()}", soft=True)
+    sql(f"delete from quarantines where guild_id = {GUILD} and user_id = {user}")
+    print("cleaned: attacker bot role permissions back, quarantine removed")
+
+
+def contained(user):
+    """(still a member, its bot role has no permissions, holds the Quarantine role)."""
+    member = call("GET", f"/guilds/{GUILD}/members/{user}", soft=True)
+    role = bot_role_of(user)
+    return (member is not None, role is not None and int(role["permissions"]) == 0,
+            member is not None and quarantine_role() in member["roles"])
+
+
+def sanitized(since):
+    """The bot put the Quarantine overwrite on a new channel, with its audit reason."""
+    entries = call("GET", f"/guilds/{GUILD}/audit-logs?action_type=13&limit=50")["audit_log_entries"]
+    return any(int(e["id"]) > int(since) and "Sanitizing the channel" in (e.get("reason") or "")
+               for e in entries)
+
+
+def attack_channels(n, attacker):
+    """The attacker makes n channels, waits so the bot can sanitize them, then deletes them."""
+    made = [call("POST", f"/guilds/{GUILD}/channels", attacker, {"name": f"nuke-{i}"}, soft=True)
+            for i in range(n)]
+    time.sleep(3)
+    for c in filter(None, made):
+        call("DELETE", f"/channels/{c['id']}", attacker, soft=True)
+
+
+def clean_nuke_channels():
+    restored = [c for c in call("GET", f"/guilds/{GUILD}/channels") if c["name"].startswith("nuke-")]
+    for c in restored:
+        call("DELETE", f"/channels/{c['id']}", soft=True)
+    print(f"cleaned: {len(restored)} nuke-* channels")
+
+
 def nuke():
-    """A second bot mass-creates and deletes channels; antinuke must open an incident."""
+    """A second bot mass-creates and deletes channels: the bot clears its role, quarantines it,
+    sanitizes the new channels and reverts; the attacker is not kicked (AVVIK-82, 83)."""
     attacker = os.environ.get("ATTACKER_TOKEN")
     if not attacker:
         print("SKIP nuke: ATTACKER_TOKEN not set")
         return True
-    # New servers start with anti-nuke off.
-    current = json.loads(sql(f"select coalesce(config->'antinuke', '{{}}') from guild_config "
-                             f"where guild_id = {GUILD} order by version desc limit 1") or "{}")
-    set_config("antinuke", {**current, "enabled": True})
+    user = attacker_id()
+    role = bot_role_of(user)
+    if role is None:
+        raise SystemExit("the attacker bot is not on the test server: invite it again")
+    perms = int(role["permissions"])
+    antinuke_on()
     before = sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}")
     since = snowflake_now()
-    # Soft: once the bot quarantines the attacker its calls fail, which is the point.
-    made = [call("POST", f"/guilds/{GUILD}/channels", attacker, {"name": f"nuke-{i}"}, soft=True)
-            for i in range(6)]
-    for c in filter(None, made):
-        call("DELETE", f"/channels/{c['id']}", attacker, soft=True)
-    # The kick lands within seconds; the incident row only after the revert, which can take ~40s.
-    for _ in range(30):
+    # Soft: once the bot contains the attacker its calls fail, which is the point.
+    attack_channels(6, attacker)
+    # The incident row is written after the revert, which can take ~40s.
+    after = wait_for(f"select count(*) from nuke_incidents where guild_id = {GUILD}",
+                     lambda n: n > int(before), tries=30)
+    member, cleared, quarantined = contained(user)
+    report = [e for m in log_messages("anti_nuke", since) for e in m["embeds"]
+              if e.get("title") == "Anti Nuke Report:"]
+    text = json.dumps(report)
+    clean_nuke_channels()
+    free_attacker(user, perms)
+    return check(after > int(before) and member and cleared and quarantined and sanitized(since)
+                 and "bot role cleared" in text and "Bot Role Cleansing" in text,
+                 f"nuke: incidents {before} -> {after}, still a member={member}, role cleared={cleared}, "
+                 f"quarantined={quarantined}, sanitized={sanitized(since)}, report={bool(report)}")
+
+
+def titled(kind, since, title):
+    return [(m, e) for m in log_messages(kind, since) for e in m["embeds"] if e.get("title") == title]
+
+
+def panic():
+    """Panic (and heat panic) on: a nuke trips panic mode: anti-nuke log, Panic Mode Report with the
+    quarantined attacker, a role lock for about 60 s, then the unlock (AVVIK-85, 86, 87)."""
+    attacker = os.environ.get("ATTACKER_TOKEN")
+    if not attacker:
+        print("SKIP panic: ATTACKER_TOKEN not set")
+        return True
+    user = attacker_id()
+    role = bot_role_of(user)
+    if role is None:
+        raise SystemExit("the attacker bot is not on the test server: invite it again")
+    perms = int(role["permissions"])
+    antinuke_on()
+    # Backups off, so the panic never loads a backup over the test server.
+    set_config("backups", {"enabled": False})
+    set_config("panic", {"executors": 1, "window_secs": 600, "duration_secs": 60, "heat_algorithm": True,
+                         "heat_executors": 2, "lock_on_trigger": True, "unlock_when_ending": True})
+    since = snowflake_now()
+    try:
+        attack_channels(4, attacker)
+        locked = wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n > 0)
         time.sleep(3)
-        after = sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}")
-        if int(after) > int(before):
-            break
-    # Restored channels come back under the same names; clean them up.
-    restored = [c for c in call("GET", f"/guilds/{GUILD}/channels") if c["name"].startswith("nuke-")]
-    for c in restored:
-        call("DELETE", f"/channels/{c['id']}", soft=True)
-    print(f"cleaned: {len(restored)} restored nuke-* channels")
-    # A bot cannot be quarantined (managed role), so the attacker gets kicked: re-invite it to rerun.
-    print("not reversible here: the attacker bot was kicked, re-invite it to rerun")
-    return check(int(after) > int(before) and logged("anti_nuke", since),
-                 f"nuke: incidents {before} -> {after}, antinuke logged")
+        anti = titled("anti_nuke", since, "Anti Nuke Report:")
+        trig = titled("panic", since, "Panic Mode Triggered! [Anti Nuke]")
+        rep = titled("panic", since, "Panic Mode Report:")
+        lock_log = titled("panic", since, "Panic Mode Lockdown")
+        body = json.dumps([e for _, e in rep])
+        counts = "Members Quarantined:** 1" in body and f"<@{user}>" in body and "fragments" in body
+        # The unlock is a scheduler job about 60 s after the start.
+        ended, waited = [], 0
+        while not ended and waited < 120:
+            time.sleep(5)
+            waited += 5
+            ended = titled("panic", since, "Panic Mode Ended")
+        unlocked = int(sql(f"select count(*) from lock_snapshots where guild_id = {GUILD}")) == 0
+        secs = None
+        if lock_log and ended:
+            ts = lambda m: (int(m["id"]) >> 22) / 1000
+            secs = round(ts(ended[0][0]) - ts(lock_log[0][0]))
+    finally:
+        set_config("panic", {"executors": 0})
+        clean_nuke_channels()
+        free_attacker(user, perms)
+    print(f"panic: report body {body[:400]}")
+    return check(locked and anti and trig and rep and counts and lock_log and ended and unlocked
+                 and secs is not None and 50 <= secs <= 90,
+                 f"panic: locked={bool(locked)}, anti-nuke log={bool(anti)}, triggered={bool(trig)}, "
+                 f"report={bool(rep)} counts={counts}, lockdown log={bool(lock_log)}, ended={bool(ended)} "
+                 f"after {secs}s, unlocked={unlocked}")
+
+
+def owner_dms(since):
+    """Messages the bot sent the server owner after `since` (the bot can read its own DM channel)."""
+    owner = call("GET", f"/guilds/{GUILD}")["owner_id"]
+    dm = call("POST", "/users/@me/channels", body={"recipient_id": owner})
+    return [m["content"] for m in call("GET", f"/channels/{dm['id']}/messages?after={since}&limit=50")]
+
+
+def verify_delete():
+    """The attacker deletes the verification channel: a new one with the panel, the attacker
+    quarantined, the owner told. Three new channels in 10 minutes, the fourth delete stops (AVVIK-92).
+    Run once per bot start: the 3-per-10-minutes count lives in the bot's memory."""
+    attacker = os.environ.get("ATTACKER_TOKEN")
+    if not attacker:
+        print("SKIP verify_delete: ATTACKER_TOKEN not set")
+        return True
+    user = attacker_id()
+    perms = int(bot_role_of(user)["permissions"])
+    set_config("antinuke", {"enabled": False, "quarantine_role": quarantine_role()})
+    me = call("GET", "/users/@me")["id"]
+    chan = call("POST", f"/guilds/{GUILD}/channels", body={"name": "verify-e2e"})
+    set_config("verification", {"enabled": True, "channel": chan["id"]})
+    since = snowflake_now()
+    made, stopped, quarantined, still_admin = [], False, False, None
+    current = chan["id"]
+    try:
+        for i in range(4):
+            # The attacker deletes while it still can; once it is contained the test bot does it.
+            call("DELETE", f"/channels/{current}", attacker, soft=True)
+            by_attacker = call("GET", f"/channels/{current}", soft=True) is None
+            if i > 0 and still_admin is None:
+                still_admin = by_attacker
+            if not by_attacker:
+                call("DELETE", f"/channels/{current}")
+            new = None
+            for _ in range(15):
+                time.sleep(2)
+                c = json.loads(sql(f"select coalesce(config->'verification'->>'channel', 'null') from guild_config "
+                                   f"where guild_id = {GUILD} order by version desc limit 1"))
+                if c and str(c) != current:
+                    new = str(c)
+                    break
+            if i == 0:
+                time.sleep(3)
+                quarantined = int(sql(f"select count(*) from quarantines where guild_id = {GUILD} "
+                                      f"and user_id = {user}")) == 1
+            if new is None:
+                stopped = i == 3
+                break
+            panel = any(m["author"]["id"] == me and m.get("components")
+                        for m in call("GET", f"/channels/{new}/messages?limit=5"))
+            made.append((new, panel))
+            current = new
+        time.sleep(3)
+        dms = owner_dms(since)
+        logs = [e.get("description", "") for m in log_messages("anti_nuke", since) for e in m["embeds"]]
+    finally:
+        set_config("verification", {"enabled": False})
+        for c in call("GET", f"/guilds/{GUILD}/channels"):
+            if c["name"] == "verify-e2e":
+                call("DELETE", f"/channels/{c['id']}", soft=True)
+        free_attacker(user, perms)
+        print("cleaned: verify-e2e channels, verification off")
+    stop_dm = any("after 3 new ones" in d for d in dms)
+    print(f"verify_delete: owner DMs {[d[:90] for d in dms]}")
+    print(f"verify_delete: a quarantined bot could still delete channels: {still_admin}")
+    return check(len(made) == 3 and all(p for _, p in made) and stopped and quarantined
+                 and any("was quarantined" in d for d in dms) and stop_dm
+                 and any("after 3 new ones" in l for l in logs),
+                 f"verify_delete: {len(made)} new channels (panels {[p for _, p in made]}), 4th stopped={stopped}, "
+                 f"attacker quarantined={quarantined}, owner DM quarantine/stop="
+                 f"{any('was quarantined' in d for d in dms)}/{stop_dm}")
+
+
+def dm_timing():
+    """How long Discord takes to refuse a DM to a bot, on the same two calls the bot makes before
+    a kick or ban (AVVIK-81). The bot waits at most 3 s; the real time to a member who gets the DM
+    is measured in the later round with an alt account."""
+    attacker = os.environ.get("ATTACKER_TOKEN")
+    if not attacker:
+        print("SKIP dm_timing: ATTACKER_TOKEN not set")
+        return True
+    times = []
+    for _ in range(5):
+        t = time.monotonic()
+        dm = call("POST", "/users/@me/channels", body={"recipient_id": attacker_id()}, soft=True)
+        sent = dm and call("POST", f"/channels/{dm['id']}/messages", body={"content": "e2e dm timing"}, soft=True)
+        times.append((time.monotonic() - t, bool(sent)))
+    worst = max(t for t, _ in times)
+    print(f"dm_timing: {[round(t, 2) for t, _ in times]} s, sent={[s for _, s in times]}")
+    return check(not any(s for _, s in times) and worst < 3, f"dm_timing: DM to a bot refused in at most {worst:.2f} s")
 
 
 def wait_for(q, want, tries=20):
@@ -341,7 +548,8 @@ def edit():
 
 
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
-             "purge": purge, "emojis": emojis, "edit": edit, "restart": restart}
+             "purge": purge, "emojis": emojis, "edit": edit, "restart": restart, "panic": panic,
+             "verify_delete": verify_delete, "dm_timing": dm_timing}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
