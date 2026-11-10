@@ -2,6 +2,7 @@
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
+use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE};
 use tommybot_core::warn::Action as WarnAction;
 use twilight_model::id::{marker::RoleMarker, Id};
 
@@ -44,9 +45,9 @@ macro_rules! cap {
         [
             group!($n, $name),
             r!(concat!($n, "a"), "Status", concat!("antinuke.limits.", stringify!($a), ".enabled"), Kind::Bool, |c| on(cap(c, NukeAction::$a).0)),
-            r!(concat!($n, "b"), "Minute Cap", concat!("antinuke.limits.", stringify!($a), ".per_minute"), Kind::Int(2, 50), |c| cap(c, NukeAction::$a).1.to_string()),
-            r!(concat!($n, "c"), "Hour Cap", concat!("antinuke.limits.", stringify!($a), ".per_hour"), Kind::Int(2, 1000), |c| cap(c, NukeAction::$a).2.to_string()),
-            r!(concat!($n, "d"), "Heat %", concat!("antinuke.limits.", stringify!($a), ".heat"), Kind::Int(0, 100), |c| format!("{}%", cap(c, NukeAction::$a).3)),
+            r!(concat!($n, "b"), "Minute Cap", concat!("antinuke.limits.", stringify!($a), ".per_minute"), Kind::Int(NUKE_MINUTE.0, NUKE_MINUTE.1), |c| cap(c, NukeAction::$a).1.to_string()),
+            r!(concat!($n, "c"), "Hour Cap", concat!("antinuke.limits.", stringify!($a), ".per_hour"), Kind::Int(NUKE_HOUR.0, NUKE_HOUR.1), |c| cap(c, NukeAction::$a).2.to_string()),
+            r!(concat!($n, "d"), "Heat %", concat!("antinuke.limits.", stringify!($a), ".heat"), Kind::Int(NUKE_HEAT.0, NUKE_HEAT.1), |c| format!("{}%", cap(c, NukeAction::$a).3)),
         ]
     };
 }
@@ -54,8 +55,8 @@ macro_rules! cap {
 /// (status, minute cap, hour cap, heat %) of an anti-nuke card.
 fn cap(c: &GuildCfg, a: NukeAction) -> (bool, u32, u32, u32) {
     let l = c.antinuke.limits.get(&a).copied().unwrap_or_default();
-    let (m, h, heat) = a.default_limit().unwrap_or_default();
-    (l.enabled, l.per_minute.unwrap_or(m), l.per_hour.unwrap_or(h), l.heat.unwrap_or(heat))
+    let (m, h, heat) = l.values(a).unwrap_or_default();
+    (l.enabled, m, h, heat)
 }
 
 /// One Join Gate card: status and action.
@@ -289,7 +290,7 @@ static JOINGATE_ROWS: [Row; 26] = {
         r!("1a", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
         r!("1b", "DM Members", "joingate.dm_punished", Kind::Bool, |c| on(c.joingate.dm_punished)),
         a1, a2, a3, b1, b2, b3,
-        r!("3c", "Minimum Age", "joingate.min_age_override_ms", Kind::Ms, |c| ms(c.joingate.min_age_ms())),
+        r!("3c", "Minimum Age", "joingate.min_age_override_ms", Kind::Age, |c| ms(c.joingate.min_age_ms())),
         r!("3d", "Expose Minimum Age", "joingate.expose_min_age", Kind::Bool, |c| on(c.joingate.expose_min_age)),
         c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3,
     ]

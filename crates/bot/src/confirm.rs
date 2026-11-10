@@ -59,11 +59,13 @@ impl Pending {
         Self { gid, actor, action }
     }
 
-    /// Warns and non-destructive commands run straight away.
-    pub fn needs_confirm(&self) -> bool {
+    /// `confirm_on` is the server's `misc.confirm`. Warns and non-destructive commands run straight away.
+    pub fn needs_confirm(&self, confirm_on: bool) -> bool {
         match &self.action {
-            Action::Mod { kind, targets, .. } => *kind != ModKind::Warn && !targets.is_empty(),
-            Action::Ext { cmd, .. } => cmd.destructive(),
+            Action::Mod { kind, targets, .. } => {
+                confirm_on && *kind != ModKind::Warn && !targets.is_empty()
+            }
+            Action::Ext { cmd, .. } => cmd.asks_confirm(confirm_on),
         }
     }
 

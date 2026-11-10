@@ -281,6 +281,7 @@ pub fn NoteList(guild: String) -> impl IntoView {
             <input placeholder="New note" aria-label="new note" maxlength="500" prop:value=text on:input=move |e| text.set(event_target_value(&e)) />
             <button on:click=move |_| { post(String::new(), json!({"user_id": q.get_untracked(), "text": text.get_untracked()})); text.set(String::new()) }>"Add note"</button>
             <button class="ghost" on:click=move |_| if confirm("Remove every note of this user?") { post("/sweep".into(), json!({"user_id": q.get_untracked()})) }>"Sweep user"</button>
+            <button class="ghost" on:click=move |_| if confirm("Remove every note in this server? This cannot be undone.") { post("/sweep".into(), json!({"all": true})) }>"Sweep server"</button>
             {export_csv(list, "notes", &["id", "user_id", "author_id", "text", "at"], msg)}
             <Toast msg />
         </div>
@@ -290,8 +291,12 @@ pub fn NoteList(guild: String) -> impl IntoView {
                 let id = s(&r["id"]);
                 let del = id.clone();
                 let body = RwSignal::new(s(&r["text"]));
+                let edits = r["edits"].as_array().cloned().unwrap_or_default();
                 view! { <div class="card">
-                    <div class="row"><b>{id.clone()}</b><code>{s(&r["user_id"])}</code><span class="muted">{format!("by {}, {}", s(&r["author_id"]), s(&r["at"]))}</span></div>
+                    <div class="row"><b>{id.clone()}</b><code>{s(&r["user_id"])}</code><span class="muted">{format!("Created {} by {}", s(&r["at"]), s(&r["author_id"]))}</span></div>
+                    {(!edits.is_empty()).then(|| view! { <details><summary>{format!("History ({})", edits.len())}</summary><ul>
+                        {edits.iter().map(|e| view! { <li><span class="muted">{format!("{} by {}: ", s(&e["at"]), s(&e["by"]))}</span>{s(&e["old"])}" → "{s(&e["new"])}</li> }).collect_view()}
+                    </ul></details> })}
                     <div class="row"><input maxlength="500" aria-label="note text" prop:value=body on:input=move |e| body.set(event_target_value(&e)) />
                         <button on:click=move |_| post(format!("/{id}"), json!({"text": body.get_untracked()}))>"Save"</button>
                         <button class="ghost" on:click=move |_| if confirm("Delete this note?") { post(format!("/{del}/delete"), json!({})) }>"Delete"</button></div>
