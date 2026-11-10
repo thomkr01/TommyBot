@@ -259,11 +259,13 @@ pub(crate) fn report(case: Option<&(String, Value)>, b: &Backup) -> Log {
                 .collect()
         };
         let (who, failed) = (ids("quarantined"), ids("failed"));
-        log = log.text(&format!("{ARROW} CASE: `{id}`")).text(&format!(
-            "{QUARANTINED} Members Quarantined: {} {YES} | {} {NO}",
-            who.len(),
-            failed.len()
-        ));
+        log = log
+            .text(&format!("{ARROW} **CASE:** `{id}`"))
+            .text(&format!(
+                "{QUARANTINED} **Members Quarantined:** {} {YES} | {} {NO}",
+                who.len(),
+                failed.len()
+            ));
         for (u, mark) in who
             .iter()
             .map(|u| (u, QUARANTINED))
@@ -374,9 +376,9 @@ mod tests {
             json!({"quarantined": [11], "failed": [22], "fragments": {"11": 8, "22": 1}}),
         );
         let t = text(report(Some(&case), &Backup::Disabled));
-        assert!(t.contains("CASE: `9g5udu`"), "{t}");
+        assert!(t.contains("**CASE:** `9g5udu`"), "{t}");
         assert!(
-            t.contains(&format!("Members Quarantined: 1 {YES} | 1 {NO}")),
+            t.contains(&format!("**Members Quarantined:** 1 {YES} | 1 {NO}")),
             "{t}"
         );
         assert!(

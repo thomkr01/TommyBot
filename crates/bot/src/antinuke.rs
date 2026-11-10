@@ -687,7 +687,10 @@ async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Resu
     if let (Applied::Quarantined, Some(true), Some((id, perms))) =
         (done.applied, done.bot_role, found)
     {
-        record_bot_role(app, gid, id, perms).await?;
+        // The bot is already contained; a missing revert row must not report it as free.
+        if let Err(e) = record_bot_role(app, gid, id, perms).await {
+            tracing::warn!(?e, "logging the cleared bot role failed");
+        }
     }
     Ok(done)
 }
@@ -811,15 +814,30 @@ pub(crate) async fn revert_and_report(
             }
             NukeStep::Report => {
                 let sum = sum.as_ref().context("the revert runs before the report")?;
-                let case = open_case(app, gid, actor, why).await?;
-                let nuke = record_nuke(app, gid, actor, &sum.done, done.stopped()).await?;
-                let log = report_log((case, &nuke), actor.get(), done, why, sum);
-                send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
-                crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
+                // A failed report must not keep panic mode from starting.
+                if let Err(e) = report(app, gid, actor, why, done, sum).await {
+                    tracing::warn!(?e, "anti-nuke report failed");
+                }
             }
             NukeStep::Panic => crate::panic::note(app, gid, actor, false).await?,
         }
     }
+    Ok(())
+}
+
+async fn report(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+    done: Contained,
+    sum: &RevertSummary,
+) -> Result<()> {
+    let case = open_case(app, gid, actor, why).await?;
+    let nuke = record_nuke(app, gid, actor, &sum.done, done.stopped()).await?;
+    let log = report_log((case, &nuke), actor.get(), done, why, sum);
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
+    crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
     Ok(())
 }
 
