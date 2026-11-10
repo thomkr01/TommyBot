@@ -728,8 +728,9 @@ pub fn schema() -> Vec<Value> {
             ),
             "Granularity",
         ),
+        // Same as RaidCfg::default; the field is not optional, so emptying it must not save null.
         ti(
-            fg("ID flag", "id_margin_ms", "int"),
+            dv(fg("ID flag", "id_margin_ms", "int"), 60 * 60_000),
             "Margin (milliseconds)",
         ),
         dv(
@@ -1271,35 +1272,40 @@ mod tests {
         );
     }
 
+    /// A valid value for a schema field, by its kind.
+    fn sample(fd: &Value) -> Value {
+    match fd["kind"].as_str().unwrap() {
+                "bool" => json!(true),
+                "int" => fd.get("min").cloned().unwrap_or(json!(5)),
+                "float" | "pct" => json!(0.5),
+                "text" | "color" => json!("x"),
+                "list" => json!(["1"]),
+                "choice" => fd["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|o| o.as_str() != Some(""))
+                    .unwrap()
+                    .clone(),
+                "channel" | "role" | "category" => json!("1"),
+                "form" => json!([{"label": "x"}]),
+                "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
+                "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
+                "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
+                "snippets" => json!([{"name": "x", "content": "y"}]),
+                "profiles" => {
+                    json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
+                }
+                _ => json!(["1"]),
+            }
+    }
+
     #[test]
     fn every_schema_path_deserializes() {
         let mut objs: std::collections::BTreeMap<String, Value> = Default::default();
         for sec in schema() {
             for fd in sec["fields"].as_array().unwrap() {
-                let sample = match fd["kind"].as_str().unwrap() {
-                    "bool" => json!(true),
-                    "int" => fd.get("min").cloned().unwrap_or(json!(5)),
-                    "float" | "pct" => json!(0.5),
-                    "text" | "color" => json!("x"),
-                    "list" => json!(["1"]),
-                    "choice" => fd["options"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|o| o.as_str() != Some(""))
-                        .unwrap()
-                        .clone(),
-                    "channel" | "role" | "category" => json!("1"),
-                    "form" => json!([{"label": "x"}]),
-                    "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
-                    "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
-                    "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
-                    "snippets" => json!([{"name": "x", "content": "y"}]),
-                    "profiles" => {
-                        json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
-                    }
-                    _ => json!(["1"]),
-                };
+                let sample = sample(fd);
                 let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
                 let mut cur = objs.entry(name.to_string()).or_insert_with(|| json!({}));
                 let parts: Vec<_> = fd["path"].as_str().unwrap().split('.').collect();
@@ -1313,5 +1319,54 @@ mod tests {
             api::validate(&name, &obj)
                 .unwrap_or_else(|e| panic!("{name} schema does not deserialize: {e:?}"));
         }
+    }
+
+    /// The form saves an emptied number field as its default, or null when it has none,
+    /// so a field without a default must be optional in the config, or saving fails.
+    #[test]
+    fn number_fields_without_default_accept_null() {
+        let mut bad = vec![];
+        for sec in schema() {
+            for fd in sec["fields"].as_array().unwrap() {
+                if !matches!(fd["kind"].as_str(), Some("int" | "float" | "pct")) || !fd["default"].is_null() {
+                    continue;
+                }
+                let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
+                let mut obj = json!({});
+                let mut cur = &mut obj;
+                let parts: Vec<_> = fd["path"].as_str().unwrap().split('.').collect();
+                for p in &parts[..parts.len() - 1] {
+                    cur = &mut cur[*p];
+                }
+                cur[parts[parts.len() - 1]] = Value::Null;
+                if let Err(e) = api::validate(name, &obj) {
+                    bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "number fields that cannot be emptied:\n{}", bad.join("\n"));
+    }
+
+    /// A section saved with only some fields (a server that never set the rest) still loads:
+    /// every config struct needs `#[serde(default)]`, like Join Raid lacked (`suspicious_only`).
+    #[test]
+    fn one_field_alone_deserializes() {
+        let mut bad = vec![];
+        for sec in schema() {
+            for fd in sec["fields"].as_array().unwrap() {
+                let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
+                let mut obj = json!({});
+                let mut cur = &mut obj;
+                let parts: Vec<_> = fd["path"].as_str().unwrap().split('.').collect();
+                for p in &parts[..parts.len() - 1] {
+                    cur = &mut cur[*p];
+                }
+                cur[parts[parts.len() - 1]] = sample(fd);
+                if let Err(e) = api::validate(name, &obj) {
+                    bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "sections that need every field:\n{}", bad.join("\n"));
     }
 }

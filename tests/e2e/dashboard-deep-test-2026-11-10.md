@@ -37,15 +37,31 @@ Brukerne (se `tests/e2e/levels.sql`): Discord-eier, Extra Owner, Trusted Admin, 
 | 11 | Import-knappen på listefelt (Strict Words, Wildcard Words og alle andre lister med Export/Import) ble fet og strakk seg over hele raden, og hjelpeteksten lå oppå den. Thomas' funn i Wizard 6. | `style.css`, `form.rs` | Import er en vanlig knapp, og hjelpeteksten står under feltet. |
 | 10 | Lagring av en seksjon og import sjekket innholdet før tilgangen, så en uten tilgang fikk vite hvordan seksjonen ser ut fra feilmeldingen. | `api.rs` | Tilgangen sjekkes først. |
 
+Runde 2: hver feil over er lett etter flere steder, i koden og med nye sjekker.
+
+| # | Funn | Hvor | Rettelse |
+|---|---|---|---|
+| 12 | Rettelse 11 virket ikke: `.io label` tapte mot `.row label`, som står senere i fila. Import var fortsatt bred og fet. Thomas' funn. | `style.css` | `.row label:has(> input)` vinner på spesifisitet. |
+| 13 | Samme regel gjorde alle avkrysningsbokser i rolle- og kanallister fete og med stor forbokstav (Main Roles, Partnering Channels og 8 andre sider). | `style.css` | Samme rettelse. |
+| 14 | `@everyone` sto som «@@everyone» i rollelister og i forhåndsvisning av meldinger. | `form.rs`, `md.rs` | Ingen ekstra @ når navnet har den. |
+| 15 | Hjelpetekst ved brytere ble klemt i to smale kolonner (Join Gate «Exclude bots added by the owner», to på Miscellaneous, Auto Mod, Verification). | `style.css` | Hjelpeteksten står på egen linje under. |
+| 16 | På mobil (390 px) var toppmenyen bredere enn skjermen: avataren ble kuttet og søkefeltet dekket logoen. | `style.css`, `main.rs` | Under 600 px ligger Commands og Update i kontomenyen. |
+| 17 | Oversikt: Fix-knappene og systembryterne var aktive for viewers (serveren nektet). Samme feil som 7 og 8. | `pages.rs` | Grå uten tilgang. |
+| 18 | Oversikt: etter én bryter ble neste bryter avvist med «config changed, reload», fordi hver bryter hadde sin egen versjon. Fem like forespørsler ved lasting. | `pages.rs` | Én felles config og versjon. |
+| 19 | Join Raid «Margin» (`id_margin_ms`) kunne ikke tømmes: lagringen feilet med null. Samme feil som 3, det siste feltet. | `schema.rs` | Standard 1 time, som boten. Ny test over alle tallfelt. |
+| 20 | + og så − på et tomt valgfritt felt ga 0 i stedet for tomt. For Join Raid «ID flag» betyr 0 at alle som blir med under et raid flagges. | `form.rs` | Ned til 0 på et felt uten standard gir tomt igjen. |
+| 21 | Et desimalfelt viste «100.0» etter +/−. | `form.rs` | Desimaler vises som tall. |
+
+Nye tester: `schema::tests::number_fields_without_default_accept_null` (alle tallfelt), `one_field_alone_deserializes` (alle seksjoner lastes med bare ett felt, fanger feil 2 igjen), og `DEEP_ONLY=overflow` (alle sider i 1400, 1024 og 390 px: tekst utenfor boksen, kuttet, oppå annen tekst eller klemt). Tilgang før validering, kopiering og manglende `serde(default)` er sjekket i alle ruter og strukturer uten flere funn.
+
 Nye feiltyper er lagt i `PITFALLS.md` (rot) og `crates/dashboard/ui/PITFALLS.md` (punkt 3 til 7).
 
 ### Sett, ikke rettet (trenger ditt valg eller er med vilje)
 
 - **Tallfelt uten grenser.** Bare antinuke-grensene og Join Gate-alder har min/maks. Alle andre tallfelt tar imot alt, for eksempel 999 999 999 minutter strike-timeout. Boten kapper timeouts til 28 dager, så ingenting går i stykker, men dashboardet viser en verdi som ikke gjelder. Forslag: grenser i `core::limits` for timeouts (maks 28 dager) og antallfelt. Det er en større runde, fordi hvert felt trenger sin grense.
 - **Feilmelding fra en handling lukker seg selv** (for eksempel «user ID must be a number» på Notes). Bare feil fra lagring av innstillinger blir stående, slik PITFALLS sier. Si fra hvis handlinger også skal bli stående.
-- **+ og deretter − på et tomt valgfritt felt** (for eksempel «Lock at this strike number») gir 0 i stedet for tomt. 0 betyr av, så det virker likt.
-- **`id_margin_ms` i Join Raid** kan fortsatt ikke tømmes til null. Gamle oppsett uten feltet leses som 0, mens nye får 1 time, så standarden i skjemaet er et valg du bør ta.
 - **Bryterne på Oversikt** lagrer med en gang uten «Changes detected». Det er slik de er laget.
+- **Logging-siden** henter config to ganger (notisen om egne kanaler og skjemaet). Ufarlig.
 - **2FA-vinduet** har ikke `role="dialog"`, så skjermlesere sier ikke at det er et vindu.
 
 ### Ikke dekket

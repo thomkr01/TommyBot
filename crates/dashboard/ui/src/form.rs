@@ -185,7 +185,8 @@ fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
                 .map(|x| {
                     (
                         x["id"].as_str().unwrap_or("").to_string(),
-                        format!("{pre}{}", x["name"].as_str().unwrap_or("?")),
+                        // @everyone is already named "@everyone"; it showed as "@@everyone".
+                        format!("{pre}{}", x["name"].as_str().unwrap_or("?").trim_start_matches(pre)),
                     )
                 })
                 .collect()
@@ -424,10 +425,14 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             let float = kind != "int";
             // "pct" is stored as a fraction (0.05) and shown as a percent (5).
             let k = if kind == "pct" { 100.0 } else { 1.0 };
-            let shown = move || if k == 1.0 { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
+            // Floats print through f64, so a stepped 100.0 shows as 100.
+            let shown = move || if !float { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
             let step = move |d: f64| {
                 let x = (get().as_f64().unwrap_or(0.0) * k + d).clamp(lo * k, hi * k);
                 // Rounded, so 0.01 + 1 - 1 is 0.01 again and not 0.010000000000000009.
+                // Without a default, empty means off; stepping back down to 0 empties it again, like the duration field.
+                // (Join Raid "ID flag" at 0 would flag every joiner in a raid.)
+                if x == 0.0 && default.get_value().is_null() { return set(Value::Null) }
                 set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!((x * 1e6).round() / 1e6) } else { json!(x as i64) })
             };
             let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
