@@ -4,7 +4,7 @@ This runs TommyBot with Docker on a Linux server next to other services. The das
 
 ## 1. Cloudflare Tunnel
 
-1. In the Cloudflare dashboard, go to **Zero Trust > Networks > Tunnels > Create a tunnel**, pick **Cloudflared**, and name it `tommybot`.
+1. In the Cloudflare dashboard, go to **Networking > Tunnels > Create a tunnel**, pick **Cloudflared**, and name it `tommybot`.
 2. Copy the token from the install command: the long string after `--token`, not the tunnel ID. Skip installing the connector; Docker runs it.
 3. Add a **published application** route: subdomain `tommybot`, your domain, service URL `http://dashboard:8080`. Delete any existing DNS record for that name first.
 
@@ -67,6 +67,24 @@ TOMMYBOT_TAG=a1b2c3d
 ```
 
 To build on the server instead, use `docker compose up -d --build`.
+
+## MCP server (optional)
+
+The `mcp` service lets Claude read TommyBot: version, log lines from the last 24 hours (secrets masked), guild config and its history, cases, and the raid and join gate logs. It cannot change anything. It holds no Discord token and no Docker socket, logs in to Postgres as `tommybot_mcp` (which sees only the `mcp_*` views, read-only), and mounts the log files read-only.
+
+1. In `.env`, add `mcp` to the profiles and set two secrets (`openssl rand -hex 32` for each works; the password goes into a URL, so letters and digits only):
+
+   ```bash
+   COMPOSE_PROFILES=tunnel,mcp
+   MCP_TOKEN=<64 hex characters>
+   MCP_DB_PASSWORD=<letters and digits>
+   ```
+
+2. Make the `tommybot-mcp` package public on GitHub once, like the others, then `git pull && docker compose pull && docker compose up -d`. The bot sets the role's password at start, so it restarts too.
+3. In Cloudflare, add a published application route to the same tunnel: subdomain `mcp`, service URL `http://mcp:8090`.
+4. Claude Code: `claude mcp add --transport http tommybot https://mcp.example.com/mcp --header "Authorization: Bearer <MCP_TOKEN>"`.
+
+Every tool call is logged with its arguments (`docker compose logs mcp`). Anyone with `MCP_TOKEN` can read everything above, so keep it out of chats and repositories; change it in `.env` and run `docker compose up -d mcp` to revoke it. The dashboard's Update button does not update `mcp`: use the pull command above.
 
 ## Database backup
 

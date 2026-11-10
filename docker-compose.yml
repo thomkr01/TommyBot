@@ -40,6 +40,8 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       # Also log to files here, read by the MCP server.
       LOG_DIR: /logs
+      # Lets the MCP server's read-only database role log in (migration 2700).
+      MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:-}
       # Links in the welcome message.
       DASHBOARD_URL: ${DASHBOARD_URL:-}
       SUPPORT_URL: ${SUPPORT_URL:-}
@@ -91,6 +93,27 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # The compose file and .env, so it recreates the containers exactly as configured.
       - .:/project:ro
+
+  # Read-only MCP server for Claude (status, logs, config, cases). Off unless COMPOSE_PROFILES includes
+  # mcp; see DEPLOY.md. No Discord token and no Docker socket: it reads views as tommybot_mcp and the log files.
+  mcp:
+    image: ghcr.io/thomkr01/tommybot-mcp:${TOMMYBOT_TAG:-latest}
+    build:
+      context: .
+      target: mcp
+    profiles: [mcp]
+    restart: unless-stopped
+    <<: *logging
+    depends_on:
+      # The bot runs the migration and sets the role's password.
+      bot:
+        condition: service_started
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      MCP_DATABASE_URL: postgres://tommybot_mcp:${MCP_DB_PASSWORD:-}@postgres:5432/tommybot
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - logs:/logs:ro
 
   # Cloudflare Tunnel to the dashboard. Off unless COMPOSE_PROFILES=tunnel; see DEPLOY.md.
   cloudflared:
