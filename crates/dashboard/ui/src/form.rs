@@ -123,28 +123,12 @@ fn show(v: &Value) -> String {
     }
 }
 
-/// Display name for a channel/role id. An id the loaded server list lacks was deleted in Discord;
-/// anything else (not loaded yet, not an id) comes back as given.
+/// Display name for a channel/role id (falls back to the id).
 pub fn name_of(dc: &Value, key: &str, id: &str) -> String {
-    let list = if key == "roles" { "roles" } else { "channels" };
     items(dc, key)
         .into_iter()
         .find(|(i, _)| i == id)
-        .map_or_else(
-            || {
-                if dc[list].is_array() && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
-                    (if key == "roles" {
-                        "@deleted-role"
-                    } else {
-                        "#deleted-channel"
-                    })
-                    .to_string()
-                } else {
-                    id.to_string()
-                }
-            },
-            |(_, l)| l,
-        )
+        .map_or_else(|| id.to_string(), |(_, l)| l)
 }
 
 /// Wording for the stored option values; anything else just gets a capital letter.
@@ -1033,9 +1017,6 @@ mod raid_tests {
         let dc = serde_json::json!({"roles": [{"id": "1", "name": "@everyone"}, {"id": "2", "name": "Member"}]});
         assert_eq!(name_of(&dc, "roles", "1"), "@everyone");
         assert_eq!(name_of(&dc, "roles", "2"), "@Member");
-        assert_eq!(name_of(&dc, "roles", "3"), "@deleted-role");
-        assert_eq!(name_of(&serde_json::json!(null), "roles", "3"), "3");
-        assert_eq!(name_of(&dc, "roles", "the quarantine role"), "the quarantine role");
     }
 
     #[test]
