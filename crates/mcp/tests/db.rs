@@ -75,6 +75,7 @@ async fn read_only_role_and_tools() {
         "SELECT content FROM reports LIMIT 1",
         "SELECT answers FROM appeals LIMIT 1",
         "SELECT 1 FROM mcp_writes LIMIT 1",
+        "SELECT 1 FROM mcp_tokens LIMIT 1",
     ] {
         assert!(
             sqlx::query(sql).execute(&db).await.is_err(),

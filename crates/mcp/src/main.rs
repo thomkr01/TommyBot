@@ -65,7 +65,7 @@ fn oauth_from_env() -> anyhow::Result<Option<tommybot_mcp::oauth::OAuth>> {
     }))
 }
 
-/// Writes through the dashboard, on only with `MCP_WRITE_TOKEN` (the same value the dashboard has).
+/// Writes through the dashboard, on only with `MCP_WRITE_TOKEN` (made on the dashboard's MCP tokens page).
 fn writes_from_env() -> anyhow::Result<Option<tommybot_mcp::writes::Writes>> {
     let Some(token) = std::env::var("MCP_WRITE_TOKEN")
         .ok()

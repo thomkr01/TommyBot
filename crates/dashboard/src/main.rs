@@ -53,8 +53,6 @@ pub struct AppState {
     pub totp: Shared<i64, auth::TotpAttempts>,
     /// Per-session request buckets.
     pub rate: Shared<String, auth::Bucket>,
-    /// `MCP_WRITE_TOKEN`: lets the MCP server propose changes (`mcp.rs`). None turns that off.
-    pub mcp_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -200,13 +198,6 @@ async fn main() -> anyhow::Result<()> {
         secure: base.starts_with("https://"),
         totp: Default::default(),
         rate: Default::default(),
-        mcp_token: std::env::var("MCP_WRITE_TOKEN").ok().filter(|t| {
-            let ok = t.len() >= 32;
-            if !ok && !t.is_empty() {
-                tracing::warn!("MCP_WRITE_TOKEN is shorter than 32 characters, MCP writes are off");
-            }
-            ok
-        }),
         discord: discord::Discord {
             http: reqwest::Client::new(),
             client_id: env("DISCORD_CLIENT_ID")?,
@@ -255,7 +246,6 @@ mod tests {
             secure: false,
             totp: Default::default(),
             rate: Default::default(),
-            mcp_token: None,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

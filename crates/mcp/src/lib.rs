@@ -55,18 +55,23 @@ pub fn router(st: State) -> Router {
         .with_state(st)
 }
 
-fn authorized(st: &State, h: &HeaderMap) -> bool {
-    h.get("authorization")
+/// Which login the call came with, for the dashboard's audit trail; None when refused.
+fn authorized(st: &State, h: &HeaderMap) -> Option<&'static str> {
+    let t = h
+        .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| {
-            constant_time_eq::constant_time_eq(t.as_bytes(), st.token.as_bytes())
-                || st.oauth.as_ref().is_some_and(|o| o.access_ok(t))
-        })
+        .and_then(|v| v.strip_prefix("Bearer "))?;
+    if constant_time_eq::constant_time_eq(t.as_bytes(), st.token.as_bytes()) {
+        Some("static token")
+    } else if st.oauth.as_ref().is_some_and(|o| o.access_ok(t)) {
+        Some("claude.ai")
+    } else {
+        None
+    }
 }
 
 async fn mcp(S(st): S<State>, h: HeaderMap, Json(req): Json<Value>) -> Response {
-    if !authorized(&st, &h) {
+    let Some(via) = authorized(&st, &h) else {
         let mut res = (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "unauthorized"})),
@@ -77,7 +82,7 @@ async fn mcp(S(st): S<State>, h: HeaderMap, Json(req): Json<Value>) -> Response 
                 .insert("www-authenticate", o.challenge_header().parse().unwrap());
         }
         return res;
-    }
+    };
     // Notifications and responses carry no id and get no answer.
     let Some(id) = req.get("id").cloned() else {
         return StatusCode::ACCEPTED.into_response();
@@ -116,7 +121,7 @@ async fn mcp(S(st): S<State>, h: HeaderMap, Json(req): Json<Value>) -> Response 
             tracing::info!(tool = name, "mcp call");
             let a = &params["arguments"];
             let res = match &st.writes {
-                Some(w) if writes::NAMES.contains(&name) => w.call(name, a).await,
+                Some(w) if writes::NAMES.contains(&name) => w.call(name, a, via).await,
                 _ => tools::call(&st, name, a).await,
             };
             Ok(match res {

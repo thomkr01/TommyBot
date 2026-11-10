@@ -1,12 +1,14 @@
-//! Writes from the MCP server (specs/mcp-plan.md, PR 4). The MCP server proposes a change, the bot DMs the
-//! owner what it does and a one-time code, and the change runs only when that code comes back. Claude never
-//! sees the code, so text from Discord cannot talk it into a change. The change then runs through the normal
-//! dashboard route as the bot owner, so every check there (level, TOTP step-up, versions, limits) applies.
+//! Writes from the MCP server (specs/mcp-plan.md, PR 4). The MCP server proposes a change with a token
+//! made on the MCP tokens page, the bot DMs the owner what it does and a one-time code, and the change runs
+//! only when that code comes back. Claude never sees the code, so text from Discord cannot talk it into a
+//! change. The change then runs through the normal dashboard route as the bot owner, so every check there
+//! (level, TOTP step-up, versions, limits) applies.
 use crate::{access, api::Res, auth::Sess, diff, store, ApiError, AppState};
 use axum::{
     body::Body,
     extract::{Path, State},
     http::{HeaderMap, Method, Request},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -20,6 +22,8 @@ const TTL_MINUTES: i32 = 5;
 const MAX_TRIES: i32 = 3;
 /// Open changes at once, so a looping client cannot flood the owner's DMs.
 const MAX_OPEN: i64 = 5;
+/// Live tokens at once; one per client is the idea.
+const MAX_TOKENS: i64 = 10;
 
 /// Everything the MCP server can reach: name, method and path below `/api/guilds/{guild}/`. Update,
 /// purge, backups and antinuke revert are left out on purpose (Thomas, 2026-11-10).
@@ -37,34 +41,164 @@ pub const ACTIONS: &[(&str, &str, &str)] = &[
 ];
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
+    let service = Router::new()
         .route("/api/mcp/propose", post(propose))
         .route("/api/mcp/confirm", post(confirm))
         .route("/api/mcp/score/{guild}", get(score))
+        // The MCP server calls from inside the compose network; Cloudflare marks everything from the internet.
+        .route_layer(axum::middleware::from_fn(
+            |req: Request<Body>, next: axum::middleware::Next| async move {
+                if req.headers().contains_key("cf-connecting-ip") {
+                    return ApiError::NotFound.into_response();
+                }
+                next.run(req).await
+            },
+        ));
+    Router::new()
+        .merge(service)
+        .route("/api/mcp-tokens", get(tokens).post(token_create))
+        .route("/api/mcp-tokens/{id}/revoke", post(token_revoke))
 }
 
 fn bad(m: impl Into<String>) -> ApiError {
     ApiError::BadRequest(m.into())
 }
 
-/// The MCP server's token from `MCP_WRITE_TOKEN`; without one these routes do not exist.
-fn service(st: &AppState, h: &HeaderMap) -> Result<(), ApiError> {
-    let want = st.mcp_token.as_deref().ok_or(ApiError::NotFound)?;
-    // The MCP server calls from inside the compose network; Cloudflare marks everything from the internet.
-    if h.contains_key("cf-connecting-ip") {
+// ---- Token management (dashboard session, bot owner) ----
+
+/// Only the bot owner manages tokens; making or revoking one also needs a fresh 2FA code.
+async fn owner(st: &AppState, s: &Sess, step_up: bool) -> Result<(), ApiError> {
+    if !crate::update::is_bot_owner(st, s).await {
+        return Err(ApiError::Forbidden(
+            "only the bot owner can manage MCP tokens",
+        ));
+    }
+    if step_up && !s.stepped_up {
+        return Err(ApiError::StepUp);
+    }
+    Ok(())
+}
+
+pub fn token_hash(token: &str) -> Vec<u8> {
+    Sha256::digest(token).to_vec()
+}
+
+async fn tokens(State(st): State<AppState>, s: Sess) -> Res {
+    owner(&st, &s, false).await?;
+    let rows: Option<Value> = sqlx::query_scalar(
+        "select jsonb_agg(jsonb_build_object('id', id, 'name', name, 'created_at', created_at,
+            'last_used_at', last_used_at, 'revoked_at', revoked_at) order by revoked_at nulls first, id desc)
+         from mcp_tokens",
+    )
+    .fetch_one(&st.db)
+    .await?;
+    Ok(Json(rows.unwrap_or_else(|| json!([]))))
+}
+
+#[derive(Deserialize)]
+struct NewToken {
+    name: String,
+}
+
+/// The token is in this answer only; the database keeps its hash.
+async fn token_create(State(st): State<AppState>, s: Sess, Json(b): Json<NewToken>) -> Res {
+    owner(&st, &s, true).await?;
+    let name = b.name.trim();
+    if name.is_empty()
+        || name.chars().count() > 40
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+    {
+        return Err(bad(
+            "name: 1 to 40 letters, digits, spaces, dots, dashes or underscores",
+        ));
+    }
+    let live: i64 = sqlx::query_scalar("select count(*) from mcp_tokens where revoked_at is null")
+        .fetch_one(&st.db)
+        .await?;
+    if live >= MAX_TOKENS {
+        return Err(bad(format!(
+            "{live} tokens are live; revoke one you no longer use first"
+        )));
+    }
+    let token = format!("tbmcp_{}", crate::auth::token());
+    let id: i64 = sqlx::query_scalar(
+        "insert into mcp_tokens (name, token_hash, created_by) values ($1, $2, $3) returning id",
+    )
+    .bind(name)
+    .bind(token_hash(&token))
+    .bind(s.user_id)
+    .fetch_one(&st.db)
+    .await?;
+    tracing::info!(id, name, "mcp token created");
+    Ok(Json(json!({"id": id, "name": name, "token": token})))
+}
+
+/// Revoking also closes the changes this token proposed that still wait for a code.
+async fn token_revoke(State(st): State<AppState>, s: Sess, Path(id): Path<i64>) -> Res {
+    owner(&st, &s, true).await?;
+    let mut tx = st.db.begin().await?;
+    let done = sqlx::query(
+        "update mcp_tokens set revoked_at = now() where id = $1 and revoked_at is null",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if done == 0 {
         return Err(ApiError::NotFound);
     }
+    sqlx::query("update mcp_writes set status = 'revoked', body = null where token_id = $1 and status = 'pending'")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    tracing::info!(id, "mcp token revoked");
+    Ok(Json(json!({"ok": true})))
+}
+
+// ---- Calls from the MCP server ----
+
+/// The token that called, and the name it gets in the audit trail and the DM.
+struct Client {
+    token_id: i64,
+    name: String,
+}
+
+/// A live token from the MCP tokens page. Only its hash is stored and the lookup is by hash, so the time
+/// it takes says nothing about the token. `x-mcp-via` (which login reached the MCP server) is only a label.
+async fn service(st: &AppState, h: &HeaderMap) -> Result<Client, ApiError> {
     let got = h
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    // Comparing digests keeps the time independent of where the strings differ.
-    if Sha256::digest(got) == Sha256::digest(want) {
-        Ok(())
+        .filter(|t| t.len() >= 32)
+        .ok_or(ApiError::Unauthorized)?;
+    let (token_id, name): (i64, String) = sqlx::query_as(
+        "update mcp_tokens set last_used_at = now() where token_hash = $1 and revoked_at is null returning id, name",
+    )
+    .bind(token_hash(got))
+    .fetch_optional(&st.db)
+    .await?
+    .ok_or_else(|| {
+        tracing::warn!("mcp call refused: unknown or revoked token");
+        ApiError::Unauthorized
+    })?;
+    let via: String = h
+        .get("x-mcp-via")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ' '))
+        .take(20)
+        .collect();
+    let name = if via.is_empty() {
+        name
     } else {
-        Err(ApiError::Unauthorized)
-    }
+        format!("{name} via {via}")
+    };
+    Ok(Client { token_id, name })
 }
 
 /// Method and path for an action. `target` is a section name or an id, never free text in the path.
@@ -135,7 +269,15 @@ fn cut(s: &str, max: usize) -> String {
     }
 }
 
+/// Strips what would let a name or value break out of its markup in the DM.
+fn plain(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '*' | '`' | '_' | '~' | '|' | '<' | '@' | '\n'))
+        .collect()
+}
+
 fn dm_text(
+    client: &str,
     id: i64,
     guild: i64,
     action: &str,
@@ -163,9 +305,11 @@ fn dm_text(
         Some(t) => format!("{action} {t}"),
         None => action.to_string(),
     };
+    let fence = "`".repeat(3);
     format!(
-        "**Claude wants to make a change** (#{id}): `{what}` in server {guild}.\n```\n{}\n```\nCode: **{code}** (valid {TTL_MINUTES} min). Give it to Claude only if this is what you want.",
-        cut(&lines, 1500).replace("```", "'''")
+        "**Claude wants to make a change** (#{id}, token {}): `{what}` in server {guild}.\n{fence}\n{}\n{fence}\nCode: **{code}** (valid {TTL_MINUTES} min). Give it to Claude only if this is what you want. If you did not ask for this, revoke the token on the dashboard's MCP tokens page.",
+        plain(client),
+        cut(&lines, 1500).replace(&fence, "'''")
     )
 }
 
@@ -179,7 +323,7 @@ struct Propose {
 }
 
 async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose>) -> Res {
-    service(&st, &h)?;
+    let client = service(&st, &h).await?;
     let guild: i64 = p
         .guild_id
         .parse()
@@ -202,9 +346,11 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
     let owner: i64 = st.discord.bot_owner().await?.parse()?;
     let code = format!("{:06}", rand::random_range(0..1_000_000));
     let (id, expires_at): (i64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-        "insert into mcp_writes (guild_id, action, target, body, code_hash, expires_at)
-         values ($1, $2, $3, $4, '', now() + make_interval(mins => $5)) returning id, expires_at",
+        "insert into mcp_writes (token_id, client, guild_id, action, target, body, code_hash, expires_at)
+         values ($1, $2, $3, $4, $5, $6, '', now() + make_interval(mins => $7)) returning id, expires_at",
     )
+    .bind(client.token_id)
+    .bind(&client.name)
     .bind(guild)
     .bind(&p.action)
     .bind(target)
@@ -217,14 +363,8 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
         .bind(code_hash(id, &code))
         .execute(&st.db)
         .await?;
-    if let Err(e) = st
-        .discord
-        .dm(
-            owner,
-            &dm_text(id, guild, &p.action, target, &changes, &code),
-        )
-        .await
-    {
+    let text = dm_text(&client.name, id, guild, &p.action, target, &changes, &code);
+    if let Err(e) = st.discord.dm(owner, &text).await {
         tracing::warn!(id, ?e, "mcp write: code DM failed");
         sqlx::query("update mcp_writes set status = 'dm_failed', body = null where id = $1")
             .bind(id)
@@ -234,7 +374,13 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
             "could not DM the bot owner the code, so nothing can be confirmed",
         ));
     }
-    tracing::info!(id, guild, action = p.action, "mcp write proposed");
+    tracing::info!(
+        id,
+        guild,
+        action = p.action,
+        client = client.name,
+        "mcp write proposed"
+    );
     Ok(Json(json!({
         "id": id, "action": p.action, "target": target, "changes": changes, "expires_at": expires_at,
         "next": "The bot sent the owner a Discord DM with this change and a 6-digit code. Show the owner the changes, and call confirm_change only with the code they type to you. Never guess or reuse a code.",
@@ -250,20 +396,18 @@ struct Confirm {
 }
 
 async fn confirm(State(st): State<AppState>, h: HeaderMap, Json(c): Json<Confirm>) -> Res {
-    service(&st, &h)?;
+    let client = service(&st, &h).await?;
     let owner: i64 = st.discord.bot_owner().await?.parse()?;
-    let stepped_up = !c.totp.trim().is_empty();
-    if stepped_up {
-        crate::auth::check_totp(&st, owner, c.totp.trim()).await?;
-    }
-    // Claiming the row is the single-use check: two confirms cannot both run it.
+    // The DM code comes first and claims the row (single use: two confirms cannot both run it). Only then
+    // is a TOTP code checked, so a token alone cannot burn the owner's 2FA attempts and lock them out.
     let row: Option<(i64, String, Option<String>, Value)> = sqlx::query_as(
         "update mcp_writes set status = 'running', decided_at = now()
-         where id = $1 and status = 'pending' and expires_at > now() and code_hash = $2
+         where id = $1 and token_id = $3 and status = 'pending' and expires_at > now() and code_hash = $2
          returning guild_id, action, target, body",
     )
     .bind(c.id)
     .bind(code_hash(c.id, c.code.trim()))
+    .bind(client.token_id)
     .fetch_optional(&st.db)
     .await?;
     let Some((guild, action, target, body)) = row else {
@@ -271,36 +415,61 @@ async fn confirm(State(st): State<AppState>, h: HeaderMap, Json(c): Json<Confirm
             "update mcp_writes set attempts = attempts + 1,
                 status = case when attempts + 1 >= $2 then 'refused' else status end,
                 body = case when attempts + 1 >= $2 then null else body end
-             where id = $1 and status = 'pending' and expires_at > now() returning $2 - attempts",
+             where id = $1 and token_id = $3 and status = 'pending' and expires_at > now() returning $2 - attempts",
         )
         .bind(c.id)
         .bind(MAX_TRIES)
+        .bind(client.token_id)
         .fetch_optional(&st.db)
         .await?;
-        tracing::warn!(id = c.id, "mcp write: wrong or stale code");
+        tracing::warn!(
+            id = c.id,
+            client = client.name,
+            "mcp write: wrong or stale code"
+        );
         return Err(match left {
             Some(n) if n > 0 => bad(format!("wrong code, {n} tries left")),
             _ => bad("no open change with this id: it expired, was used, or got too many wrong codes. Propose it again."),
         });
     };
+    let reopen = || async {
+        sqlx::query("update mcp_writes set status = 'pending', decided_at = null where id = $1")
+            .bind(c.id)
+            .execute(&st.db)
+            .await
+    };
+    let stepped_up = !c.totp.trim().is_empty();
+    if stepped_up {
+        if let Err(e) = crate::auth::check_totp(&st, owner, c.totp.trim()).await {
+            reopen().await?;
+            return Err(e);
+        }
+    }
     let (method, path) = route(&action, guild, target.as_deref())?;
     let (status, out) = run(&st, owner, stepped_up, method, &path, &body).await?;
-    let step_up = out["error"] == "step_up_required";
-    let state = match () {
-        _ if step_up => "pending",
-        _ if (200..300).contains(&status) => "done",
-        _ => "failed",
+    if out["error"] == "step_up_required" {
+        reopen().await?;
+        return Err(bad("this change also needs a code from the owner's authenticator app: ask for it and confirm again with the same code and totp"));
+    }
+    let state = if (200..300).contains(&status) {
+        "done"
+    } else {
+        "failed"
     };
-    sqlx::query("update mcp_writes set status = $2, http_status = $3, body = case when $2 = 'pending' then body end where id = $1")
+    sqlx::query("update mcp_writes set status = $2, http_status = $3, body = null where id = $1")
         .bind(c.id)
         .bind(state)
         .bind(status as i32)
         .execute(&st.db)
         .await?;
-    tracing::info!(id = c.id, guild, action, status, "mcp write {state}");
-    if step_up {
-        return Err(bad("this change also needs a code from the owner's authenticator app: ask for it and confirm again with the same code and totp"));
-    }
+    tracing::info!(
+        id = c.id,
+        guild,
+        action,
+        status,
+        client = client.name,
+        "mcp write {state}"
+    );
     Ok(Json(
         json!({"status": status, "ok": state == "done", "result": out}),
     ))
@@ -308,7 +477,8 @@ async fn confirm(State(st): State<AppState>, h: HeaderMap, Json(c): Json<Confirm
 
 /// The security score, read through the dashboard like the page does.
 async fn score(State(st): State<AppState>, h: HeaderMap, Path(guild): Path<i64>) -> Res {
-    service(&st, &h)?;
+    let client = service(&st, &h).await?;
+    tracing::info!(guild, client = client.name, "mcp score");
     let owner: i64 = st.discord.bot_owner().await?.parse()?;
     let (status, out) = run(
         &st,
@@ -369,7 +539,7 @@ mod tests {
         for (name, m, p) in ACTIONS {
             assert!(matches!(*m, "PUT" | "POST"), "{name}");
             for no in [
-                "update", "purge", "backup", "revert", "rescue", "panic", "delete", "import",
+                "update", "purge", "backup", "revert", "rescue", "panic", "delete", "import", "mcp",
             ] {
                 assert!(!p.contains(no), "{name} reaches {no}");
             }
@@ -395,17 +565,26 @@ mod tests {
     }
 
     #[test]
-    fn dm_is_short_and_keeps_its_code_block() {
+    fn dm_is_short_and_keeps_its_markup() {
         let long = json!([{"path": "a", "old": "x".repeat(3000), "new": "```"}]);
-        let t = dm_text(3, 9, "config_section", Some("automod"), &long, "123456");
+        let t = dm_text(
+            "Mac**`@everyone",
+            3,
+            9,
+            "config_section",
+            Some("automod"),
+            &long,
+            "123456",
+        );
         assert!(t.chars().count() < 1900 && t.contains("**123456**"));
         assert_eq!(t.matches("```").count(), 2);
+        assert!(t.contains("token Maceveryone)"));
         assert_eq!(cut("æøå", 2), "æø…");
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres. Discord is a local mock.
     #[tokio::test]
-    async fn change_needs_the_dm_code_once_and_totp_where_the_page_does() {
+    async fn change_needs_a_live_token_the_dm_code_once_and_totp_where_the_page_does() {
         use std::sync::{Arc, Mutex};
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
@@ -454,14 +633,17 @@ mod tests {
             secure: false,
             totp: Default::default(),
             rate: Default::default(),
-            mcp_token: Some("t".repeat(40)),
         };
-        let call = |path: &str, auth: &str, body: Value| {
-            let req = Request::post(path)
-                .header("authorization", format!("Bearer {auth}"))
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap();
+        // A call as the MCP server (auth = token) or as a dashboard session (sess).
+        let send = |path: String, auth: Option<String>, sess: Option<Sess>, body: Value| {
+            let mut req = Request::post(path).header("content-type", "application/json");
+            if let Some(a) = auth {
+                req = req.header("authorization", format!("Bearer {a}"));
+            }
+            let mut req = req.body(Body::from(body.to_string())).unwrap();
+            if let Some(s) = sess {
+                req.extensions_mut().insert(s);
+            }
             let app = crate::router(st.clone(), "/nonexistent");
             async move {
                 let res = app.oneshot(req).await.unwrap();
@@ -475,7 +657,51 @@ mod tests {
                 )
             }
         };
-        let tok = "t".repeat(40);
+        let sess = |user: i64, stepped_up: bool| Sess {
+            id: String::new(),
+            user_id: user,
+            username: "t".into(),
+            access_token: String::new(),
+            stepped_up,
+            csrf: String::new(),
+        };
+
+        // Making a token: bot owner only, and only after 2FA. The token is shown once and not stored.
+        let make = json!({"name": "Mac"});
+        let p = |s: &str| s.to_string();
+        assert_eq!(
+            send(
+                p("/api/mcp-tokens"),
+                None,
+                Some(sess(owner + 1, true)),
+                make.clone()
+            )
+            .await
+            .0,
+            403
+        );
+        let (code, r) = send(
+            p("/api/mcp-tokens"),
+            None,
+            Some(sess(owner, false)),
+            make.clone(),
+        )
+        .await;
+        assert_eq!((code, r["error"].as_str()), (403, Some("step_up_required")));
+        let (code, r) = send(p("/api/mcp-tokens"), None, Some(sess(owner, true)), make).await;
+        assert_eq!(code, 200, "{r}");
+        let tok = r["token"].as_str().unwrap().to_string();
+        let tok_id = r["id"].as_i64().unwrap();
+        let stored: Vec<u8> = sqlx::query_scalar("select token_hash from mcp_tokens where id = $1")
+            .bind(tok_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(stored, token_hash(&tok));
+        assert!(!String::from_utf8_lossy(&stored).contains(&tok[6..]));
+
+        let call =
+            |path: &str, auth: &str, body: Value| send(path.into(), Some(auth.into()), None, body);
         let last_code = || {
             let d = dms.lock().unwrap();
             let t = d.last().unwrap();
@@ -485,20 +711,33 @@ mod tests {
         let section = json!({"guild_id": g.to_string(), "action": "config_section", "target": "joingate",
             "body": {"value": {"enabled": true}, "expected_version": 0}});
         assert_eq!(
-            call("/api/mcp/propose", "wrong", section.clone()).await.0,
+            call("/api/mcp/propose", &"w".repeat(40), section.clone())
+                .await
+                .0,
             401
         );
-        let (code, p) = call("/api/mcp/propose", &tok, section).await;
-        assert_eq!(code, 200, "{p}");
+        let from_net = Request::post("/api/mcp/propose")
+            .header("authorization", format!("Bearer {tok}"))
+            .header("cf-connecting-ip", "1.2.3.4")
+            .body(Body::empty())
+            .unwrap();
+        let res = crate::router(st.clone(), "/nonexistent")
+            .oneshot(from_net)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 404, "not reachable through the tunnel");
+        let (code, pr) = call("/api/mcp/propose", &tok, section).await;
+        assert_eq!(code, 200, "{pr}");
         assert!(
-            p["changes"].as_array().is_some_and(|c| !c.is_empty()),
-            "{p}"
+            pr["changes"].as_array().is_some_and(|c| !c.is_empty()),
+            "{pr}"
         );
         assert!(
-            !p.to_string().contains(&last_code()),
+            !pr.to_string().contains(&last_code()),
             "the code never goes back to Claude"
         );
-        let id = p["id"].as_i64().unwrap();
+        assert!(dms.lock().unwrap().last().unwrap().contains("token Mac"));
+        let id = pr["id"].as_i64().unwrap();
         let (code, r) = call(
             "/api/mcp/confirm",
             &tok,
@@ -516,22 +755,18 @@ mod tests {
         assert_eq!((code, r["ok"].as_bool()), (200, Some(true)), "{r}");
         let (v, cfg) = store::current(&db, g).await.unwrap();
         assert_eq!((v, cfg["joingate"]["enabled"].as_bool()), (1, Some(true)));
-        assert_eq!(
-            call(
-                "/api/mcp/confirm",
-                &tok,
-                json!({"id": id, "code": last_code()})
-            )
-            .await
-            .0,
-            400,
-            "single use"
-        );
+        let again = call(
+            "/api/mcp/confirm",
+            &tok,
+            json!({"id": id, "code": last_code()}),
+        )
+        .await;
+        assert_eq!(again.0, 400, "single use");
 
         // Anti-nuke needs TOTP step-up on the page, so it does here too.
         let an = json!({"guild_id": g.to_string(), "action": "config_section", "target": "antinuke",
             "body": {"value": {"enabled": false}, "expected_version": 1}});
-        let id = call("/api/mcp/propose", &tok, an).await.1["id"]
+        let id = call("/api/mcp/propose", &tok, an.clone()).await.1["id"]
             .as_i64()
             .unwrap();
         let (code, r) = call(
@@ -552,6 +787,18 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+        // A wrong DM code never reaches the 2FA check, so it cannot lock the owner out.
+        let (code, _) = call(
+            "/api/mcp/confirm",
+            &tok,
+            json!({"id": id, "code": "999999", "totp": "000000"}),
+        )
+        .await;
+        assert_eq!(code, 400);
+        assert!(
+            !st.totp.lock().unwrap().contains_key(&owner),
+            "2FA attempts untouched"
+        );
         let (code, r) = call(
             "/api/mcp/confirm",
             &tok,
@@ -560,14 +807,57 @@ mod tests {
         .await;
         assert_eq!((code, r["ok"].as_bool()), (200, Some(true)), "{r}");
 
-        let status: Vec<(String, bool)> = sqlx::query_as(
-            "select status, body is null from mcp_writes where guild_id = $1 order by id",
+        // Revoking closes the token and what it still has waiting.
+        let id = call("/api/mcp/propose", &tok, an).await.1["id"]
+            .as_i64()
+            .unwrap();
+        let revoke = format!("/api/mcp-tokens/{tok_id}/revoke");
+        assert_eq!(
+            send(revoke.clone(), None, Some(sess(owner, false)), json!({}))
+                .await
+                .0,
+            403
+        );
+        assert_eq!(
+            send(revoke, None, Some(sess(owner, true)), json!({}))
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            call(
+                "/api/mcp/confirm",
+                &tok,
+                json!({"id": id, "code": last_code()})
+            )
+            .await
+            .0,
+            401
+        );
+        let mut get = Request::get("/api/mcp-tokens").body(Body::empty()).unwrap();
+        get.extensions_mut().insert(sess(owner, false));
+        let res = crate::router(st.clone(), "/nonexistent")
+            .oneshot(get)
+            .await
+            .unwrap();
+        let b = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let list = String::from_utf8_lossy(&b);
+        assert!(
+            list.contains("\"Mac\"") && list.contains("revoked_at") && !list.contains(&tok[6..]),
+            "{list}"
+        );
+
+        let rows: Vec<(String, String, bool)> = sqlx::query_as(
+            "select status, client, body is null from mcp_writes where guild_id = $1 order by id",
         )
         .bind(g)
         .fetch_all(&db)
         .await
         .unwrap();
-        assert_eq!(status, [("done".into(), true), ("done".into(), true)]);
+        let want = |s: &str| (s.to_string(), "Mac".to_string(), true);
+        assert_eq!(rows, [want("done"), want("done"), want("revoked")]);
         for t in ["mcp_writes", "guild_config"] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "delete from {t} where guild_id = $1"
@@ -577,6 +867,11 @@ mod tests {
             .await
             .unwrap();
         }
+        sqlx::query("delete from mcp_tokens where id = $1")
+            .bind(tok_id)
+            .execute(&db)
+            .await
+            .unwrap();
         sqlx::query("delete from dash_totp where user_id = $1")
             .bind(owner)
             .execute(&db)

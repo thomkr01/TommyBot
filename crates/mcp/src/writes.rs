@@ -9,6 +9,7 @@ pub const NAMES: &[&str] = &["propose_change", "confirm_change", "score"];
 pub struct Writes {
     /// The dashboard inside the compose network, e.g. `http://dashboard:8080`.
     pub base: String,
+    /// Made on the dashboard's MCP tokens page (`MCP_WRITE_TOKEN`).
     pub token: String,
     pub http: reqwest::Client,
 }
@@ -58,7 +59,7 @@ pub fn list() -> Vec<Value> {
 }
 
 impl Writes {
-    pub async fn call(&self, name: &str, a: &Value) -> Result<Value> {
+    pub async fn call(&self, name: &str, a: &Value, via: &str) -> Result<Value> {
         let req = match name {
             "propose_change" => self
                 .http
@@ -83,6 +84,7 @@ impl Writes {
         };
         let res = req
             .bearer_auth(&self.token)
+            .header("x-mcp-via", via)
             .send()
             .await
             .context("dashboard unreachable")?;
