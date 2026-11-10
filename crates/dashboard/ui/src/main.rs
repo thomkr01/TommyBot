@@ -460,6 +460,8 @@ fn App() -> impl IntoView {
             }
         });
     });
+    // 2FA on request, for protected changes made in Discord (the bot checks this step-up).
+    let step_up = RwSignal::new(false);
     let (nav_open, set_nav_open) = signal(false);
     window_event_listener(leptos::ev::keydown, move |e| {
         if e.key() == "Escape" {
@@ -501,9 +503,10 @@ fn App() -> impl IntoView {
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
                     <summary aria-label="account menu">{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
-                    <div><a href="#/">"Servers"</a><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
+                    <div><a href="#/">"Servers"</a><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
                 </details>
             </header>
+            <StepUp need=step_up enrolled />
             <div class="shell">
                 <Show when=move || nav_open.get()><div class="scrim" on:click=move |_| set_nav_open.set(false)></div></Show>
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>

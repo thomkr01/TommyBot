@@ -262,7 +262,7 @@ fn user_ids(v: &str) -> Vec<i64> {
 async fn edit_trusted_admins(
     app: &App,
     gid: Id<GuildMarker>,
-    level: &Level,
+    (level_user, level): (u64, &Level),
     op: &Op,
 ) -> Result<String> {
     let (Op::Set(_, v) | Op::Add(_, v) | Op::Remove(_, v)) = op else {
@@ -270,6 +270,11 @@ async fn edit_trusted_admins(
     };
     if !matches!(level, Level::Owner | Level::ExtraOwner) {
         return Ok("Only the owner and Extra Owners can change Trusted Admins".into());
+    }
+    // Trusted Admins bypass every system, so adding one needs a fresh 2FA like every protected
+    // change. Removing does not: it is how a hacked TA is cut off fast.
+    if !matches!(op, Op::Remove(..)) && !fresh_2fa(app, level_user).await? {
+        return Ok(needs_2fa(gid.get()));
     }
     let ids = user_ids(v);
     if ids.is_empty() {
@@ -368,6 +373,23 @@ pub fn may_edit(level: &Level, section: &str) -> bool {
 }
 
 const GREY: u32 = 0x2B2D31;
+
+/// Whether `user` confirmed their 2FA code on the dashboard in the last few minutes (its step-up).
+pub(crate) async fn fresh_2fa(app: &App, user: u64) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM dash_session WHERE user_id = $1 AND step_up_until > now() AND expires_at > now())",
+    )
+    .bind(user as i64)
+    .fetch_one(&app.pool)
+    .await?)
+}
+
+pub(crate) fn needs_2fa(gid: u64) -> String {
+    format!(
+        "This change needs 2FA. Open the {}, choose Confirm 2FA in the account menu, then try again within 10 minutes.",
+        dashboard_link(gid)
+    )
+}
 
 fn dashboard_link(gid: u64) -> String {
     match std::env::var("DASHBOARD_URL")
@@ -717,7 +739,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         return Ok(true);
     };
     if matches!(row.kind, Kind::Users) {
-        let text = edit_trusted_admins(app, gid, &level, &op).await?;
+        let text = edit_trusted_admins(app, gid, (msg.author.id.get(), &level), &op).await?;
         send(app, msg, &text, None, vec![]).await?;
         return Ok(true);
     }
