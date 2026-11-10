@@ -499,13 +499,35 @@ pub(crate) async fn grant(
     user: Id<UserMarker>,
     v: &VerificationCfg,
 ) -> Result<()> {
+    // Verifying is open to anyone, so it never hands out a role with kick/ban/admin-like rights,
+    // whoever put that role in the config.
+    let info = app.guild_info(gid).await?;
+    let roles: Vec<_> = v
+        .roles
+        .iter()
+        .copied()
+        .filter(|r| {
+            let safe = info
+                .role_perms
+                .get(r)
+                .is_none_or(|p| p & tommybot_antinuke::DANGEROUS_PERMS == 0);
+            if !safe {
+                tracing::warn!(
+                    guild = gid.get(),
+                    role = r.get(),
+                    "verification role has dangerous permissions, not granted"
+                );
+            }
+            safe
+        })
+        .collect();
     if v.verify.replace_roles || v.verify.quarantine_on_join {
         app.http
             .update_guild_member(gid, user)
-            .roles(&v.roles)
+            .roles(&roles)
             .await?;
     } else {
-        for r in &v.roles {
+        for r in &roles {
             app.http.add_guild_member_role(gid, user, *r).await?;
         }
     }

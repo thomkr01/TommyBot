@@ -1,5 +1,5 @@
 //! Public Commands page: every bot command and message variable, as the bot published them at startup.
-use crate::common::{api, Head};
+use crate::common::{api, Access, Head};
 use leptos::{prelude::*, task::spawn_local};
 use serde_json::Value;
 
@@ -24,6 +24,11 @@ fn hit(c: &Value, q: &str) -> bool {
 pub fn Commands() -> impl IntoView {
     let data = RwSignal::new(Value::Null);
     let (q, set_q) = signal(String::new());
+    let access = use_context::<Access>();
+    let guilds = use_context::<ReadSignal<Vec<Value>>>();
+    let denied = move |name: &str| {
+        access.is_some_and(|a| a.pages.with(|p| p["commands_denied"].as_array().is_some_and(|d| d.iter().any(|n| n == name))))
+    };
     spawn_local(async move {
         if let Ok(v) = api("GET", "/api/commands", None).await {
             data.set(v)
@@ -59,9 +64,10 @@ pub fn Commands() -> impl IntoView {
                 let line = |label: &'static str, v: String| (!v.is_empty()).then(|| view! { <p><b>{label}</b>" "<code>{v}</code></p> });
                 let aliases = c["aliases"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(", ")).unwrap_or_default();
                 let slash = c["slash"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join("  ·  ")).unwrap_or_default();
+                let no = denied(&s(&c["name"]));
                 view! {
-                    <details class="card">
-                        <summary><code>{format!("{p}{}", s(&c["name"]))}</code><span>{s(&c["what"])}</span><span class="chip">{s(&c["who"])}</span></summary>
+                    <details class="card" class:na=no>
+                        <summary><code>{format!("{p}{}", s(&c["name"]))}</code><span>{s(&c["what"])}</span><span class="chip">{s(&c["who"])}</span>{no.then(|| view! { <span class="chip warn" title="Your permit on this server does not include this command">"No access"</span> })}</summary>
                         {line("Usage", format!("{p}{}", s(&c["usage"])))}
                         <ul>{c["args"].as_array().into_iter().flatten().map(|a| view! { <li><code>{s(&a[0])}</code>" "{s(&a[1])}</li> }).collect_view()}</ul>
                         {line("Example", format!("{p}{}", s(&c["example"])))}
@@ -93,6 +99,10 @@ pub fn Commands() -> impl IntoView {
     };
     view! {
         <Head guild=String::new() page="TommyBot".into() big="Commands".into() />
+        {move || access.and_then(|a| a.pages.with(|p| p["guild"].as_str().map(str::to_string))).map(|g| {
+            let name = guilds.and_then(|l| l.get().into_iter().find(|x| x["id"] == g.as_str())).and_then(|x| x["name"].as_str().map(str::to_string)).unwrap_or_else(|| "your last server".into());
+            view! { <p class="muted">{format!("Commands your permit does not include on {name} are greyed out.")}</p> }
+        })}
         <div class="stack cmds">
             <input placeholder="Filter: [name, alias or word]" aria-label="filter commands" prop:value=q on:input=move |e| set_q.set(event_target_value(&e)) />
             <p class="muted">{move || format!("Default prefix {}. Add -h after any command for its help in Discord.", s(&data.get()["prefix"]))}</p>

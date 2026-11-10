@@ -599,6 +599,12 @@ fn hash(key: &str) -> String {
 
 async fn rescue_status(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Owner, false).await?;
+    // The key makes its holder an Extra Owner, so an Extra Owner must not mint one for later.
+    if !crate::api::is_discord_owner(&st, &s, guild).await? {
+        return Err(ApiError::Forbidden(
+            "only the server owner can manage the rescue key",
+        ));
+    }
     let has_key: bool =
         sqlx::query_scalar("select exists(select 1 from rescue_key where guild_id = $1)")
             .bind(guild)
@@ -609,6 +615,12 @@ async fn rescue_status(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
 
 async fn rescue_regenerate(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Owner, true).await?;
+    // The key makes its holder an Extra Owner, so an Extra Owner must not mint one for later.
+    if !crate::api::is_discord_owner(&st, &s, guild).await? {
+        return Err(ApiError::Forbidden(
+            "only the server owner can manage the rescue key",
+        ));
+    }
     let key = auth::token();
     let secret = crate::otp::new_secret();
     sqlx::query(

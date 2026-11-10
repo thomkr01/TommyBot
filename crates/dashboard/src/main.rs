@@ -117,6 +117,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .route("/api/previews", get(api::previews))
         .route("/api/commands", get(api::commands))
         .route(&format!("{g}/config"), get(api::get_config))
+        .route(&format!("{g}/access"), get(api::page_access))
         .route(
             &format!("{g}/config/{{section}}"),
             put(api::put_section).layer(DefaultBodyLimit::max(256 * 1024)),

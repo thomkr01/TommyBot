@@ -47,17 +47,22 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             dc.set(v);
         }
     });
+    let access = expect_context::<Access>();
     let save = move |_| {
         let (g, p, v) = (guild.clone(), cfg.get_untracked(), version.get_untracked());
         orig.set(p.clone());
         run_save(
             async move {
-                api(
+                let r = api(
                     "PUT",
                     &format!("/api/guilds/{g}/permits"),
                     Some(json!({"expected_version": v, "value": p})),
                 )
-                .await
+                .await;
+                if r.is_ok() {
+                    access.tick.update(|n| *n += 1);
+                }
+                r
             },
             version,
             msg,

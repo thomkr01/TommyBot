@@ -189,7 +189,8 @@ fn Tabs(
     items: &'static [(&'static str, &'static str)],
     active: String,
 ) -> impl IntoView {
-    view! { <div class="tabs">{items.iter().map(|(p, t)| view! { <a class:on=*p == active href=format!("#/{guild}/{p}")>{*t}</a> }).collect_view()}</div> }
+    let access = expect_context::<Access>();
+    view! { <div class="tabs">{move || items.iter().filter(|(p, _)| access.of(p.split('/').next().unwrap_or(p)) != "hidden").map(|(p, t)| view! { <a class:on=*p == active href=format!("#/{guild}/{p}")>{*t}</a> }).collect_view()}</div> }
 }
 
 #[component]
@@ -430,6 +431,9 @@ fn App() -> impl IntoView {
         index: RwSignal::new(vec![]),
     };
     provide_context(search);
+    // Per-page access from the server, refetched on every page change and after a permit save.
+    let access = Access { pages: RwSignal::new(Value::Null), tick: RwSignal::new(0) };
+    provide_context(access);
     let pages = StoredValue::new(
         TOP.iter()
             .chain(NAV.iter().flat_map(|(_, i)| i.iter()))
@@ -442,6 +446,19 @@ fn App() -> impl IntoView {
             .first()
             .cloned()
             .filter(|g| g.bytes().all(|b| b.is_ascii_digit()))
+    });
+    Effect::new(move |_| {
+        access.tick.track();
+        route.track();
+        let Some(g) = guild.get() else { return };
+        spawn_local(async move {
+            if let Ok(v) = api("GET", &format!("/api/guilds/{g}/access"), None).await {
+                // A late answer for a server the user already left must not overwrite the new one.
+                if guild.get_untracked().as_deref() == Some(g.as_str()) {
+                    access.pages.set(v);
+                }
+            }
+        });
     });
     let (nav_open, set_nav_open) = signal(false);
     window_event_listener(leptos::ev::keydown, move |e| {
@@ -498,7 +515,7 @@ fn App() -> impl IntoView {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
                             let hits = search::counts(search);
-                            let link = |p: &str, t: &str| { let n: usize = hits.iter().filter(|(k, _)| *k == p || k.starts_with(&format!("{p}/"))).map(|(_, n)| n).sum(); let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{(n > 0).then(|| view! { <span class="chip hits">{n}</span> })}</a> } };
+                            let link = |p: &str, t: &str| { if access.of(p) == "hidden" { return ().into_any(); } let n: usize = hits.iter().filter(|(k, _)| *k == p || k.starts_with(&format!("{p}/"))).map(|(_, n)| n).sum(); let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{(n > 0).then(|| view! { <span class="chip hits">{n}</span> })}</a> }.into_any() };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -508,7 +525,7 @@ fn App() -> impl IntoView {
                             view! {
                                 <a class="srv" href="#/" title="Switch server">{icon}{name}<button class="refresh" on:click=move |e| { e.prevent_default(); e.stop_propagation(); spawn_local(load_guilds()) }>"refresh server"</button></a>
                                 {TOP.iter().map(|(p, t)| link(p, t)).collect_view()}
-                                {NAV.iter().map(|(grp, items)| view! { <details open=OPEN_GROUPS.contains(grp) || items.iter().any(|(p, _)| *p == page)><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
+                                {NAV.iter().filter(|(_, items)| items.iter().any(|(p, _)| access.of(p) != "hidden")).map(|(grp, items)| view! { <details open=OPEN_GROUPS.contains(grp) || items.iter().any(|(p, _)| *p == page)><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
                             }.into_any()
                         }
                     }}
@@ -584,7 +601,13 @@ fn App() -> impl IntoView {
                                 ("antinuke_filters", _) => sec("antinuke", "limits"),
                                 _ => sec(p, ""),
                             };
-                            { let (page_name, big) = title(p); let head = match big { Some(b) => view! { <Head guild=g.clone() page=page_name big=b /> }.into_any(), None => view! { <Head guild=g.clone() page=page_name /> }.into_any() }; view! { {head}{page} }.into_any() }
+                            { let (page_name, big) = title(p); let head = match big { Some(b) => view! { <Head guild=g.clone() page=page_name big=b /> }.into_any(), None => view! { <Head guild=g.clone() page=page_name /> }.into_any() };
+                              let page = match access.of(p).as_str() {
+                                  "hidden" => view! { <div class="card empty"><h2>"No access"</h2><p>"Your permit does not give access to this page. Ask a server owner if you need it."</p></div> }.into_any(),
+                                  "read" => view! { <p class="card info" role="note">"You can view this page, but your permit does not let you change it."</p><fieldset class="ro" disabled>{page}</fieldset> }.into_any(),
+                                  _ => page,
+                              };
+                              view! { {head}{page} }.into_any() }
                         }
                     }}
                 </main>
