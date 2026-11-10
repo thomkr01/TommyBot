@@ -553,12 +553,12 @@ fn App() -> impl IntoView {
                 <button class="ghost menu-btn" aria-label="menu" aria-expanded=move || nav_open.get().to_string() on:click=move |_| set_nav_open.update(|o| *o = !*o)>{icons::icon("menu")}</button>
                 <a class="logo" href="#/"><img src="/logo.svg" alt="" width="32" height="32" />"TommyBot"</a><Show when=move || guild.get().is_some()><SearchBox guild pages=pages.get_value() /></Show><span class="sp"></span>
                 <a class="ghost" href="#/commands">"Commands"</a>
-                <Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="ghost" href="#/update">"Update"</a><a class="ghost" href="#/mcp-tokens">"MCP"</a></Show>
+                <Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="ghost" href="#/update">"Update"</a></Show>
                 <Bell route />
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
                     <summary aria-label="account menu">{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
-                    <div><a href="#/">"Servers"</a><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
+                    <div><a href="#/">"Servers"</a><Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a href="#/mcp-tokens">"MCP tokens"</a></Show><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
                 </details>
             </header>
             <StepUp need=step_up enrolled />
