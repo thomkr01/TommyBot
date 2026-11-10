@@ -1,0 +1,25 @@
+# Code-only graph: tree-sitter parsing, no LLM, no API key.
+name: Graphify
+
+on:
+  pull_request:
+    paths-ignore: [ '**.md' ]
+  workflow_dispatch:
+
+jobs:
+  graph:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: pipx install graphifyy
+      - run: graphify update .
+        env:
+          GRAPHIFY_BACKEND: none
+      - uses: actions/upload-artifact@v7
+        with:
+          name: graphify-out
+          path: |
+            graphify-out/graph.html
+            graphify-out/GRAPH_REPORT.md
+            graphify-out/graph.json
+          retention-days: 14
