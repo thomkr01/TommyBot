@@ -5,6 +5,10 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Added
+- A Yes/No question ("Do you want to proceed?", 10 seconds) before ban, kick, timeout, warn, quarantine, unquarantine and unban when the target is typed as a raw id or a name. A mention or a slash command pick never asks. Only the moderator who ran the command can answer. The Confirm switch turns it off. (#136)
+- Members get a DM before a warn, timeout, quarantine, kick, ban, softban or tempban, and after an unquarantine, untimeout or unban worked. TommyBot waits at most 3 seconds for the DM and punishes whatever happens to it. (#136)
+- Result messages list the reason, the moderator, the details of the action (duration, soft ban, hack ban, no avatar, voice, DM sent), who was punished and who was not, with the reason. (#136)
+- `kick ?na` kicks only members without an avatar, and `kick ?vc` only members in a voice channel. (#136)
 - A switch, on by default, that writes "Did not verify within the time limit" to the audit log when verification kicks, bans or quarantines a member. (#135)
 - If the verification channel is deleted, TommyBot makes a new one with the same name, category, position and permissions and posts the panel again, at most 3 times in 10 minutes. The owner gets a DM saying who deleted it. That person is quarantined; the owner, Extra Owners and Trusted Admins get one warning first, and the Discord server owner only a DM. (#135)
 - Every join gate punishment is logged in the Join Gate log with the filters that matched, the bot and who added it, and the error if Discord refused. The dashboard lists the last 30 days under Join Gate › Join Gate Log. (#135)
@@ -18,6 +22,9 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - Dashboard Notes page has a Sweep server button behind a confirm dialog. (#134)
 
 ### Changed
+- The "always DM punished members" switch is on by default, also for existing servers, and one switch covers every punishment DM. `?dm` still forces a DM when it is off. (#136)
+- Automatic punishments from warn thresholds DM the member first too. (#136)
+- A target like `name#0` finds the same member as the name or the id. (#136)
 - The verification Help message names the roles you get after passing, before the time limit line. (#135)
 - The verification time limit stands still while a member is timed out, also when they join while timed out. If TommyBot missed the timeout update, the member gets the full time limit again after the timeout. (#135)
 - Log setup in the dashboard makes a reused public log category private, and the owner gets one DM a day per channel when TommyBot holds back a log because the channel is public. (#135)
