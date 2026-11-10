@@ -216,6 +216,16 @@ impl LogConfig {
         }
     }
 
+    /// Every channel a log can go to.
+    pub fn channels(&self) -> std::collections::BTreeSet<Id<ChannelMarker>> {
+        self.fallback
+            .into_iter()
+            .chain(self.routes.values().copied())
+            .chain(self.events.values().copied())
+            .chain(self.custom.iter().map(|c| c.channel))
+            .collect()
+    }
+
     /// Drops a deleted channel from every route, so its logs fall back to the general channel.
     /// Returns whether anything pointed at it.
     pub fn forget(&mut self, channel: Id<ChannelMarker>) -> bool {
@@ -290,6 +300,7 @@ mod tests {
             }],
             ..Default::default()
         };
+        assert_eq!(cfg.channels().into_iter().collect::<Vec<_>>(), [kept, gone]);
         assert!(cfg.forget(gone));
         assert_eq!(
             cfg.target(LogKind::Role, Some(LogEvent::RoleDelete)),

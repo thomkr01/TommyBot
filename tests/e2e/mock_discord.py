@@ -32,7 +32,11 @@ class H(BaseHTTPRequestHandler):
         elif p.startswith("/channels/") and p.count("/") == 2:
             self.reply({"id": p.split("/")[2], "guild_id": GUILD["id"], "type": 0})
         elif p.endswith("/channels"):
-            self.reply([{"id": "300000000000000001", "name": "general", "type": 0, "position": 0}])
+            self.reply([
+                {"id": "300000000000000001", "name": "general", "type": 0, "position": 0},
+                # a public category the log setup reuses; it must turn private
+                {"id": "300000000000000002", "name": "Logs", "type": 4, "position": 1},
+            ])
         elif p.endswith("/roles"):
             self.reply([{"id": GUILD["id"], "name": "@everyone", "position": 0, "permissions": "0"}])
         elif p.endswith("/auto-moderation/rules"):

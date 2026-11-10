@@ -79,6 +79,15 @@ pub async fn purge_left(app: std::sync::Arc<App>) {
             Ok(_) => {}
             Err(e) => tracing::warn!(?e, "purging removed servers failed"),
         }
+        // The insert trigger only prunes servers whose Join Gate still acts.
+        let old = sqlx::query(
+            "DELETE FROM joingate_actions WHERE created_at < now() - interval '30 days'",
+        )
+        .execute(&app.pool)
+        .await;
+        if let Err(e) = old {
+            tracing::warn!(?e, "pruning old join gate records failed");
+        }
     }
 }
 

@@ -8,6 +8,9 @@ const DANGEROUS: u64 = crate::DANGEROUS_PERMS;
 const ADMINISTRATOR: u64 = 0x8;
 /// What @everyone and main roles must not have: [`DANGEROUS`] plus Mention @everyone.
 const EVERYONE_DANGEROUS: u64 = DANGEROUS | (1 << 17);
+const VIEW: u64 = 1 << 10;
+/// View Channel, Send Messages and Embed Links: what the bot needs in a log channel.
+const BOT_LOG: u64 = VIEW | (1 << 11) | (1 << 14);
 
 /// Discord's numbers from the guild object.
 pub struct GuildSafety {
@@ -35,6 +38,8 @@ pub struct Setup {
     pub main_roles: Vec<u64>,
     /// Members whose own channel overwrites may grant anything: owner, extra owners, the bot.
     pub trusted: Vec<u64>,
+    /// Every channel a log goes to.
+    pub log_channels: Vec<u64>,
 }
 
 /// Ordered from fine to worst.
@@ -92,6 +97,9 @@ fn set(setting: &'static str) -> Option<Fix> {
         move_under_bot: false,
     })
 }
+
+/// The [`Fix::setting`] that hides a log channel with [`private_overwrites`].
+pub const PRIVATE: &str = "private_channel";
 
 /// The safer value a setting fix writes: (Discord field, value).
 pub fn setting_fix(setting: &str) -> Option<(&'static str, u8)> {
@@ -238,6 +246,71 @@ pub fn move_under_bot(
     let below = mid.iter().skip(1).map(|r| r.position).chain([q.position]);
     std::iter::once((q.id, top.position.min(bot_top - 1)))
         .chain(mid.iter().map(|r| r.id).zip(below))
+        .collect()
+}
+
+/// Whether @everyone, or a main role every member gets, can view `c` (Administrator sees all).
+pub fn is_public(c: &ChannelImg, roles: &[RoleImg], guild: u64, main_roles: &[u64]) -> bool {
+    let perms = |id| {
+        roles
+            .iter()
+            .find(|r| r.id == id)
+            .map_or(0, |r| r.permissions)
+    };
+    let ow = |id| {
+        c.overwrites
+            .iter()
+            .find(|o| o.is_role && o.target == id)
+            .map_or((0, 0), |o| (o.allow, o.deny))
+    };
+    let sees = |base: u64, ows: &[(u64, u64)]| {
+        base & ADMINISTRATOR != 0 || ows.iter().fold(base, |p, (a, d)| (p & !d) | a) & VIEW != 0
+    };
+    sees(perms(guild), &[ow(guild)])
+        || main_roles
+            .iter()
+            .any(|&r| sees(perms(guild) | perms(r), &[ow(guild), ow(r)]))
+}
+
+/// The overwrites that make `c` private: @everyone and the main roles are denied View Channel
+/// (their other bits kept), the bot member gets View, Send and Embed Links. Empty when @everyone
+/// is already denied and no main role is let back in.
+pub fn private_overwrites(
+    c: &ChannelImg,
+    guild: u64,
+    bot: u64,
+    main_roles: &[u64],
+) -> Vec<OverwriteImg> {
+    let find = |id, is_role| {
+        c.overwrites
+            .iter()
+            .find(|o| o.target == id && o.is_role == is_role)
+            .cloned()
+            .unwrap_or(OverwriteImg {
+                target: id,
+                is_role,
+                allow: 0,
+                deny: 0,
+            })
+    };
+    let everyone = find(guild, true);
+    let mains: Vec<_> = main_roles.iter().map(|&r| find(r, true)).collect();
+    if everyone.deny & VIEW != 0 && mains.iter().all(|o| o.allow & VIEW == 0) {
+        return vec![];
+    }
+    let hide = |o: OverwriteImg| OverwriteImg {
+        allow: o.allow & !VIEW,
+        deny: o.deny | VIEW,
+        ..o
+    };
+    let me = find(bot, false);
+    std::iter::once(hide(everyone))
+        .chain(mains.into_iter().map(hide))
+        .chain([OverwriteImg {
+            allow: me.allow | BOT_LOG,
+            deny: me.deny & !BOT_LOG,
+            ..me
+        }])
         .collect()
 }
 
@@ -532,6 +605,31 @@ pub fn checks(
             None,
         );
     }
+    for c in channels
+        .iter()
+        .filter(|c| setup.log_channels.contains(&c.id))
+        .filter(|c| is_public(c, roles, g.id, &setup.main_roles))
+    {
+        // Overwrites cannot hide a channel from Administrator; that needs the role changed.
+        let fixable = !private_overwrites(c, g.id, 0, &setup.main_roles).is_empty();
+        row(
+            &format!("log_channel_public_{}", c.id),
+            Severity::Bad,
+            "Log channel is public",
+            format!(
+                "Every member can read #{}, and logs show deleted messages and staff actions. TommyBot does not post logs there until it is private.{}",
+                c.name,
+                if fixable { "" } else { " @everyone or a main role has Administrator, so take that away first." }
+            ),
+            fixable.then(|| Fix {
+                label: "Make private",
+                role_id: None,
+                channel_id: Some(c.id.to_string()),
+                setting: Some(PRIVATE),
+                move_under_bot: false,
+            }),
+        );
+    }
     let ok = |good: bool| if good { Severity::Ok } else { Severity::Warn };
     let fix = |good: bool, s| if good { None } else { set(s) };
     row(
@@ -608,6 +706,7 @@ mod tests {
             main_roles: vec![99],
             modules: vec![],
             trusted: vec![],
+            log_channels: vec![],
         }
     }
 
@@ -943,5 +1042,63 @@ mod tests {
         assert!(overwrite_targets(&channels, &roles, 1, &main)
             .iter()
             .any(|(c, o)| (c.id, o.target) == (13, 2)));
+    }
+
+    #[test]
+    fn public_log_channels_are_flagged_and_made_private() {
+        const EVERYONE: u64 = 1;
+        let roles = [role(EVERYONE, 0, false, VIEW), role(99, 1, false, 0)];
+        let hidden = |deny| OverwriteImg {
+            target: EVERYONE,
+            is_role: true,
+            allow: 0,
+            deny,
+        };
+        let channels = [
+            chan(20, 0, None, vec![]),
+            chan(21, 0, None, vec![hidden(VIEW)]),
+            // Hidden from @everyone, but the main role 99 is let back in.
+            chan(22, 0, None, vec![hidden(VIEW), ow(99, true, VIEW)]),
+            // Not a log channel.
+            chan(23, 0, None, vec![]),
+        ];
+        let setup = Setup {
+            log_channels: vec![20, 21, 22],
+            ..setup(None, true)
+        };
+        let rows = checks(&SAFE, &roles, &channels, 4, &setup);
+        let flagged: Vec<_> = rows
+            .iter()
+            .filter(|r| r.id.starts_with("log_channel_public_"))
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(flagged, ["log_channel_public_20", "log_channel_public_22"]);
+        let r = sev(&rows, "log_channel_public_20").unwrap();
+        assert_eq!(r.severity, Severity::Bad);
+        assert_eq!(
+            serde_json::to_value(&r.fix).unwrap(),
+            serde_json::json!({"label": "Make private", "channel_id": "20", "setting": PRIVATE})
+        );
+        // Administrator sees through overwrites: flagged, but no fix button.
+        let admin = [role(EVERYONE, 0, false, ADMINISTRATOR)];
+        let rows = checks(&SAFE, &admin, &channels, 4, &setup);
+        let r = sev(&rows, "log_channel_public_21").unwrap();
+        assert!(r.fix.is_none() && r.detail.contains("Administrator"));
+        // An @everyone without View and no overwrites is private already.
+        let closed = [role(EVERYONE, 0, false, 0)];
+        assert!(!is_public(&channels[0], &closed, EVERYONE, &[]));
+        // The fix: @everyone and main roles denied View, the bot let in; nothing once private.
+        let fix = private_overwrites(&channels[2], EVERYONE, 7, &[99]);
+        assert_eq!(
+            fix.iter()
+                .map(|o| (o.target, o.allow, o.deny))
+                .collect::<Vec<_>>(),
+            [(EVERYONE, 0, VIEW), (99, 0, 0x800 | VIEW), (7, BOT_LOG, 0)]
+        );
+        let mut fixed = channels[2].clone();
+        fixed.overwrites = fix;
+        assert!(!is_public(&fixed, &roles, EVERYONE, &[99]));
+        assert!(private_overwrites(&fixed, EVERYONE, 7, &[99]).is_empty());
+        assert!(private_overwrites(&channels[1], EVERYONE, 7, &[99]).is_empty());
     }
 }

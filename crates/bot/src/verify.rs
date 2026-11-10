@@ -1,5 +1,8 @@
 //! Member verification: a button (or image captcha) in one channel hands out the main roles.
 //! Web mode hands the member to the dashboard's /verify page, which queues a `verify_grant` job.
+
+pub mod deleted;
+
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
 use serde::Deserialize;
@@ -12,6 +15,7 @@ use tommybot_logging::{
     embed::{ALERT, DONE, GREEN, NO, RED, YES},
     Log, LogKind,
 };
+use twilight_http::request::AuditLogReason;
 use twilight_model::{
     application::interaction::{modal::ModalInteractionComponent, Interaction, InteractionData},
     channel::message::{
@@ -19,6 +23,7 @@ use twilight_model::{
         Embed, MessageFlags,
     },
     channel::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
+    gateway::payload::incoming::MemberUpdate,
     guild::Permissions,
     http::{
         attachment::Attachment,
@@ -127,8 +132,18 @@ fn period(ms: i64) -> String {
     }
 }
 
-/// Steps shown by the Help button, adapted to the mode.
-fn help_steps(v: &VerifyCfg) -> String {
+/// What the Help button shows; also the dashboard preview.
+pub(crate) fn help_embed(cfg: &VerificationCfg) -> Embed {
+    EmbedBuilder::new()
+        .color(GREEN)
+        .title("🧩 Verification Help")
+        .description(help_steps(cfg))
+        .build()
+}
+
+/// Steps shown by the Help button, adapted to the mode, the roles a pass gives and the time limit.
+fn help_steps(cfg: &VerificationCfg) -> String {
+    let v = &cfg.verify;
     let mut steps = vec!["Press the **Verify** button.".to_string()];
     steps.extend(match v.mode {
         VerifyMode::Button => vec!["You get access right away.".into()],
@@ -144,6 +159,10 @@ fn help_steps(v: &VerifyCfg) -> String {
             "Press **Answer** and type the characters.".into(),
         ],
     });
+    if !cfg.roles.is_empty() {
+        let roles: Vec<_> = cfg.roles.iter().map(|r| format!("<@&{r}>")).collect();
+        steps.push(format!("After you pass, you get: {}", roles.join(", ")));
+    }
     if v.on_fail != FailAction::Nothing {
         steps.push(format!("Finish within {}.", period(v.time_limit_ms)));
     }
@@ -162,6 +181,7 @@ pub async fn on_join(
     user: Id<UserMarker>,
     suspicious: bool,
     is_bot: bool,
+    timeout_until: Option<i64>,
 ) {
     let Ok(cfg) = app.cfg(gid.get()).await else {
         return;
@@ -183,12 +203,19 @@ pub async fn on_join(
     if v.verify.on_fail == FailAction::Nothing {
         return;
     }
-    let at = now_secs() + v.verify.time_limit_ms / 1000;
+    // A timeout survives a kick or ban, so a member can come back still timed out.
+    let now = now_secs();
+    let (at, paused) = paused_deadline(
+        now,
+        now + v.verify.time_limit_ms / 1000,
+        timeout_until,
+        None,
+    );
     if let Err(e) = jobs::enqueue(
         &app.pool,
         gid.get() as i64,
-        "verify_deadline",
-        serde_json::json!({ "user": user.get() }),
+        DEADLINE,
+        deadline_job(user, paused),
         at,
     )
     .await
@@ -197,7 +224,53 @@ pub async fn on_join(
     }
 }
 
-static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const DEADLINE: &str = "verify_deadline";
+
+fn deadline_job(user: Id<UserMarker>, paused_until: Option<i64>) -> serde_json::Value {
+    serde_json::json!({ "user": user.get(), "paused_until": paused_until })
+}
+
+/// The time limit stands still while a member is timed out (they cannot press Verify).
+/// `deadline` is when the job runs now and `paused_until` the timeout end it was last moved past.
+/// Returns the new run time and the timeout end it now waits behind, if any.
+fn paused_deadline(
+    now: i64,
+    deadline: i64,
+    timeout_until: Option<i64>,
+    paused_until: Option<i64>,
+) -> (i64, Option<i64>) {
+    // Time left: counted from the timeout end while paused, from now otherwise.
+    let left = (deadline - paused_until.map_or(now, |p| p.max(now))).max(0);
+    let active = timeout_until.filter(|&t| t > now);
+    (active.unwrap_or(now) + left, active)
+}
+
+/// Moves a waiting verification deadline when a timeout starts, changes or is lifted early.
+pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
+    let cfg = app.cfg(m.guild_id.get()).await?;
+    let v = &cfg.verification;
+    if !v.enabled
+        || v.verify.on_fail == FailAction::Nothing
+        || m.roles.iter().any(|r| v.roles.contains(r))
+    {
+        return Ok(());
+    }
+    let g = m.guild_id.get() as i64;
+    let Some((id, run_at, payload)) =
+        jobs::of_user(&app.pool, g, DEADLINE, m.user.id.get()).await?
+    else {
+        return Ok(());
+    };
+    let old = payload["paused_until"].as_i64();
+    let timeout = m.communication_disabled_until.map(|t| t.as_secs());
+    let (at, paused) = paused_deadline(now_secs(), run_at, timeout, old);
+    if (at, paused) != (run_at, old) {
+        jobs::reschedule(&app.pool, id, at, deadline_job(m.user.id, paused)).await?;
+    }
+    Ok(())
+}
+
+pub(super) static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// First join after setup with no verification channel (`s 12`): create one that unverified
 /// members can read but verified ones do not see, save it and post the button.
@@ -234,8 +307,13 @@ async fn ensure_channel(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         .await?
         .model()
         .await?;
+    adopt(app, gid, ch.id).await
+}
+
+/// Saves `ch` as the verification channel and posts the button in it.
+pub(super) async fn adopt(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>) -> Result<()> {
     let saved = crate::settings::save(app, gid, app.me.get(), &["verification"], |doc| {
-        doc["verification"]["channel"] = serde_json::json!(ch.id.to_string());
+        doc["verification"]["channel"] = serde_json::json!(ch.to_string());
         Ok(())
     })
     .await?;
@@ -287,6 +365,12 @@ pub async fn web_grant(
     grant(app, gid, user, v).await
 }
 
+/// The audit log reason at the time limit, when `audit_reason` is on.
+fn audit_reason(v: &VerifyCfg) -> Option<&'static str> {
+    v.audit_reason
+        .then_some("Did not verify within the time limit")
+}
+
 /// Applies the fail action to a member who never verified.
 pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
@@ -298,15 +382,42 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
     if !v.enabled || member.roles.iter().any(|r| v.roles.contains(r)) {
         return Ok(());
     }
+    let now = now_secs();
+    let timeout = member.communication_disabled_until.map(|t| t.as_secs());
+    if let (at, Some(paused)) =
+        paused_deadline(now, now + v.verify.time_limit_ms / 1000, timeout, None)
+    {
+        // The timeout update was missed (the bot was down): the full limit after the timeout.
+        jobs::enqueue(
+            &app.pool,
+            gid.get() as i64,
+            DEADLINE,
+            deadline_job(user, Some(paused)),
+            at,
+        )
+        .await?;
+        return Ok(());
+    }
+    let reason = audit_reason(&v.verify);
     match v.verify.on_fail {
         FailAction::Nothing => return Ok(()),
         FailAction::Kick => {
-            app.http.remove_guild_member(gid, user).await?;
+            let kick = app.http.remove_guild_member(gid, user);
+            match reason {
+                Some(r) => kick.reason(r).await?,
+                None => kick.await?,
+            };
         }
         FailAction::Ban => {
-            app.http.create_ban(gid, user).await?;
+            let ban = app.http.create_ban(gid, user);
+            match reason {
+                Some(r) => ban.reason(r).await?,
+                None => ban.await?,
+            };
         }
-        FailAction::Quarantine => crate::antinuke::quarantine(app, gid, user).await?,
+        FailAction::Quarantine => {
+            crate::antinuke::quarantine_because(app, gid, user, reason).await?
+        }
     }
     send_log(
         app,
@@ -711,11 +822,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
     match &i.data {
         Some(InteractionData::MessageComponent(c)) if c.custom_id == HELP => {
             let cfg = app.cfg(gid.get()).await?;
-            let help = EmbedBuilder::new()
-                .color(GREEN)
-                .title("🧩 Verification Help")
-                .description(help_steps(&cfg.verification.verify))
-                .build();
+            let help = help_embed(&cfg.verification);
             client
                 .create_response(i.id, &i.token, &embed_reply(help))
                 .await?;
@@ -934,6 +1041,82 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn help_names_the_roles_and_the_time_limit() {
+        let mut c = cfg(VerifyMode::Captcha, VerifyTarget::Everyone);
+        c.verify.on_fail = FailAction::Kick;
+        let steps = help_steps(&c);
+        assert!(
+            steps.contains("**4.** After you pass, you get: <@&1>"),
+            "{steps}"
+        );
+        assert!(
+            steps.ends_with("**5.** Finish within 2 minutes."),
+            "{steps}"
+        );
+        c.roles = vec![Id::new(1), Id::new(2)];
+        assert!(help_steps(&c).contains("you get: <@&1>, <@&2>"));
+        // No roles: no role line; no fail action: no time limit line.
+        c.roles.clear();
+        c.verify.on_fail = FailAction::Nothing;
+        let steps = help_steps(&c);
+        assert!(
+            !steps.contains("you get") && !steps.contains("Finish within"),
+            "{steps}"
+        );
+        assert!(steps.ends_with("**3.** Press **Answer** and type the characters."));
+    }
+
+    #[test]
+    fn audit_reason_is_on_unless_switched_off() {
+        let saved: VerificationCfg = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(saved.verify.audit_reason);
+        let off: VerificationCfg =
+            serde_json::from_value(serde_json::json!({"audit_reason": false})).unwrap();
+        assert!(!off.verify.audit_reason);
+        assert_eq!(
+            audit_reason(&saved.verify),
+            Some("Did not verify within the time limit")
+        );
+        assert_eq!(audit_reason(&off.verify), None);
+    }
+
+    #[test]
+    fn time_limit_pauses_while_timed_out() {
+        let (now, deadline) = (1_000, 1_120);
+        // No timeout: nothing moves.
+        assert_eq!(paused_deadline(now, deadline, None, None), (deadline, None));
+        assert_eq!(
+            paused_deadline(now, deadline, Some(900), None),
+            (deadline, None)
+        );
+        // Timed out until 1300 with 120 s left: the 120 s start at 1300.
+        assert_eq!(
+            paused_deadline(now, deadline, Some(1_300), None),
+            (1_420, Some(1_300))
+        );
+        // Extended to 1500 while paused: still 120 s left, now after 1500.
+        assert_eq!(
+            paused_deadline(1_100, 1_420, Some(1_500), Some(1_300)),
+            (1_620, Some(1_500))
+        );
+        // Lifted early at 1100: the 120 s run from now.
+        assert_eq!(
+            paused_deadline(1_100, 1_420, None, Some(1_300)),
+            (1_220, None)
+        );
+        // Ran out by itself: the clock runs again, the run time stays.
+        assert_eq!(
+            paused_deadline(1_350, 1_420, None, Some(1_300)),
+            (1_420, None)
+        );
+        // Already late: no time left, nothing negative.
+        assert_eq!(
+            paused_deadline(1_200, 1_100, Some(1_300), None),
+            (1_300, Some(1_300))
+        );
     }
 
     #[test]

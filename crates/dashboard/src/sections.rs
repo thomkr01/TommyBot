@@ -12,6 +12,7 @@ use axum::{
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tommybot_antinuke::security::{private_overwrites, synced_children};
 use tommybot_logging::LogEvent;
 
 pub fn routes() -> Router<AppState> {
@@ -690,20 +691,56 @@ const ESSENTIAL: [&str; 2] = ["tommybot-logs", "mod-logs"];
 /// Staff-facing channels, kept in their own "Staff" category instead of "Logs".
 const STAFF_CHANNELS: [&str; 2] = ["reports", "appeals"];
 
+/// The overwrite PUTs, as (channel, target, body), that make the reused category `id` and its
+/// synced channels private; none when it already is. The children get the same overwrites so they stay synced.
+fn privatize(
+    guild: i64,
+    channels: &Value,
+    id: &str,
+    bot: &str,
+    main: &[u64],
+) -> Vec<(u64, u64, Value)> {
+    let img = crate::recovery::live_image(guild, &json!([]), channels);
+    let Some(cat) = img.channels.iter().find(|c| c.id.to_string() == id) else {
+        return vec![];
+    };
+    let ows = private_overwrites(cat, guild as u64, bot.parse().unwrap_or_default(), main);
+    std::iter::once(cat)
+        .chain(synced_children(&img.channels, cat))
+        .flat_map(|c| {
+            ows.iter()
+                .map(|o| (c.id, o.target, crate::ops::overwrite_body(o)))
+        })
+        .collect()
+}
+
 /// The private category `name`: the existing one, so a later run adds to it, or a new one.
-/// Hidden from @everyone (its role id is the guild id); the bot (its user id is the app id)
-/// keeps View Channel, Send Messages and Embed Links. Staff see it through their roles.
+/// Hidden from @everyone (its role id is the guild id) and the main roles; the bot (its user id
+/// is the app id) keeps View Channel, Send Messages and Embed Links. Staff see it through their
+/// roles. A reused category that anyone can see is made private first.
 async fn category(
     st: &AppState,
     guild: i64,
     channels: &Value,
     name: &str,
+    main: &[u64],
 ) -> Result<String, ApiError> {
     let existing = channels
         .as_array()
         .into_iter()
         .flatten()
         .find_map(|c| (c["type"] == 4 && c["name"] == name).then(|| own(&c["id"]))?);
+    if let Some(id) = &existing {
+        for (ch, target, body) in privatize(guild, channels, id, &st.discord.client_id, main) {
+            st.discord
+                .call(
+                    Method::PUT,
+                    &format!("/channels/{ch}/permissions/{target}"),
+                    Some(body),
+                )
+                .await?;
+        }
+    }
     create(
         st,
         guild,
@@ -762,10 +799,16 @@ async fn log_channels(
             "Logs"
         }
     };
+    let main: Vec<u64> = config["lockdown"]["main_roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str()?.parse().ok())
+        .collect();
     let mut parents = vec![];
     for cat in ["Logs", "Staff"] {
         if todo.iter().any(|(_, name)| category_of(name) == cat) {
-            parents.push((cat, category(st, guild, &channels, cat).await?));
+            parents.push((cat, category(st, guild, &channels, cat, &main).await?));
         }
     }
     let mut created = vec![];
@@ -808,6 +851,34 @@ mod tests {
         assert!(log.fallback.is_some());
         assert_eq!(log.routes.len(), 9);
         assert!(at(&config, &["appeals", "channel"]).is_string());
+    }
+
+    #[test]
+    fn a_reused_public_category_and_its_synced_channels_turn_private() {
+        let public = json!([
+            {"id": "10", "name": "Logs", "type": 4, "permission_overwrites": [{"id": "99", "type": 0, "allow": "1024", "deny": "0"}]},
+            {"id": "11", "name": "mod-logs", "type": 0, "parent_id": "10", "permission_overwrites": [{"id": "99", "type": 0, "allow": "1024", "deny": "0"}]},
+            {"id": "12", "name": "chat", "type": 0, "parent_id": "10", "permission_overwrites": []}
+        ]);
+        let puts = privatize(1, &public, "10", "7", &[99]);
+        let hit: Vec<_> = puts
+            .iter()
+            .map(|(c, t, b)| (*c, *t, b["deny"].as_str().unwrap()))
+            .collect();
+        // @everyone and the main role 99 lose View, the bot is let in; the synced child follows, chat (not synced) does not.
+        assert_eq!(
+            hit,
+            [
+                (10, 1, "1024"),
+                (10, 99, "1024"),
+                (10, 7, "0"),
+                (11, 1, "1024"),
+                (11, 99, "1024"),
+                (11, 7, "0")
+            ]
+        );
+        let private = json!([{"id": "10", "name": "Logs", "type": 4, "permission_overwrites": [{"id": "1", "type": 0, "allow": "0", "deny": "1024"}]}]);
+        assert!(privatize(1, &private, "10", "7", &[99]).is_empty());
     }
 
     #[test]

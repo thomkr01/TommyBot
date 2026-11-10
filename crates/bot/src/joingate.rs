@@ -8,9 +8,10 @@ use tommybot_automod::{
 use tommybot_core::{
     cases::{self, NewCase},
     jobs,
+    permits::Level,
 };
 use tommybot_logging::{
-    embed::{duration, ALERT, ARROW, DONE, ORANGE, YES},
+    embed::{duration, ALERT, ARROW, DONE, NO, ORANGE, RED, YES},
     Log, LogKind,
 };
 use twilight_model::{
@@ -26,7 +27,7 @@ use crate::{
     lockdown, reply, verify,
 };
 
-use crate::automod::{action_failed, now_ms, warn_actions};
+use crate::automod::{now_ms, warn_actions};
 
 pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     let (gid, user) = (m.guild_id, &m.member.user);
@@ -37,7 +38,16 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             JoinLock::Kick => Action::Kick,
             JoinLock::Ban => Action::Ban,
         };
-        return punish(app, &cfg, gid, user.id.get(), action, "join lock").await;
+        return punish(
+            app,
+            &cfg,
+            gid,
+            user.id.get(),
+            action,
+            "join lock",
+            Detail::default(),
+        )
+        .await;
     }
     // One invites call per join: only when something shows the result.
     let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
@@ -67,6 +77,17 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         Some(a) => app.is_immune(gid, a).await.unwrap_or(true),
         None => true,
     };
+    // Only asked when the exception is on: no audit entry, or a failed lookup, means no exception.
+    let vouched = match adder {
+        Some(a) if cfg.joingate.exclude_trusted_bots => match app.guild_info(gid).await {
+            Ok(info) => app
+                .level(gid, info.owner, a)
+                .await
+                .is_ok_and(|l| vouches(&l)),
+            Err(_) => false,
+        },
+        _ => false,
+    };
     let j = Joiner {
         invite: invite.as_ref().map(|i| i.0.as_str()),
         id: user.id.get(),
@@ -77,9 +98,11 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             .public_flags
             .is_some_and(|f| f.contains(UserFlags::VERIFIED_BOT)),
         added_by_authorized: authorized,
+        added_by_owner: vouched,
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
-    verify::on_join(app, gid, user.id, suspicious, user.bot).await;
+    let timeout = m.member.communication_disabled_until.map(|t| t.as_secs());
+    verify::on_join(app, gid, user.id, suspicious, user.bot, timeout).await;
     let hits = gate(&j, &cfg.joingate, now);
     if let Some(action) = harshest(&hits) {
         let why = if hits.iter().any(|h| h.0 == Filter::AccountAge) {
@@ -88,7 +111,13 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         } else {
             "join gate".into()
         };
-        punish(app, &cfg, gid, j.id, action, &why).await?;
+        let filters: Vec<&str> = hits.iter().map(|h| h.0.name()).collect();
+        let detail = Detail {
+            filters: &filters,
+            is_bot: user.bot,
+            adder: adder.map(|a| a.get()),
+        };
+        punish(app, &cfg, gid, j.id, action, &why, detail).await?;
         // The bot filter also punishes whoever added it.
         if let (Some(adder), true) = (adder, hits.iter().any(|h| h.0 == Filter::UnauthorizedBot)) {
             punish(
@@ -98,6 +127,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
                 adder.get(),
                 action,
                 "adding a bot without permission",
+                Detail::default(),
             )
             .await?;
         }
@@ -244,7 +274,16 @@ async fn join_raid(
         lockdown::lock(app, gid, kind).await?;
     }
     for id in out.flagged {
-        punish(app, cfg, gid, id, raid.action, "join raid").await?;
+        punish(
+            app,
+            cfg,
+            gid,
+            id,
+            raid.action,
+            "join raid",
+            Detail::default(),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -302,8 +341,88 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         m.user.id.get(),
         action,
         "username filter",
+        Detail::default(),
     )
     .await
+}
+
+/// Bots added by the owner or an Extra Owner may skip the account filters; Trusted Admins and
+/// other admins do not count, so one taken-over admin account cannot let a bot in.
+fn vouches(level: &Level) -> bool {
+    matches!(level, Level::Owner | Level::ExtraOwner)
+}
+
+/// What the Join Gate log and records add to the reason: the filters that matched and, for a
+/// bot, who added it.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct Detail<'a> {
+    pub filters: &'a [&'a str],
+    pub is_bot: bool,
+    pub adder: Option<u64>,
+}
+
+/// The Join Gate log of one punishment; `failed` is Discord's refusal.
+pub(crate) fn gate_log(
+    user: u64,
+    action: Action,
+    why: &str,
+    d: Detail,
+    failed: Option<&str>,
+) -> Log {
+    let mut log = Log::new("Join Gate", if failed.is_some() { RED } else { ORANGE })
+        .user("Member", user)
+        .line("Action", &format!("`{action:?}`"))
+        .line("Reason", why);
+    if !d.filters.is_empty() {
+        log = log.line("Filters", &d.filters.join(", "));
+    }
+    if d.is_bot {
+        let by = d
+            .adder
+            .map_or("an unknown member".into(), |a| format!("<@{a}>"));
+        log = log.line("Bot", &format!("Yes, added by {by}"));
+    }
+    match failed {
+        Some(e) => log.text(&format!("{NO} **Failed:** {e}")),
+        None => log,
+    }
+}
+
+/// Saves the punishment for the dashboard's Join Gate records.
+async fn record(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: u64,
+    (action, why, d): (Action, &str, Detail<'_>),
+    failed: Option<&str>,
+) {
+    let saved = sqlx::query(
+        "INSERT INTO joingate_actions (guild_id, user_id, is_bot, adder_id, filters, reason, action, ok, error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(gid.get() as i64)
+    .bind(user as i64)
+    .bind(d.is_bot)
+    .bind(d.adder.map(|a| a as i64))
+    .bind(serde_json::json!(d.filters))
+    .bind(why)
+    .bind(format!("{action:?}"))
+    .bind(failed.is_none())
+    .bind(failed)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = saved {
+        tracing::warn!(?e, "saving the join gate record failed");
+    }
+}
+
+/// With no log channel at all, the owner hears once that Join Gate acts without a log.
+async fn no_log_channel(app: &App, gid: Id<GuildMarker>) {
+    static TOLD: std::sync::Mutex<std::collections::BTreeSet<u64>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if TOLD.lock().unwrap().insert(gid.get()) {
+        reply::dm_owner(app, gid, "TommyBot's Join Gate punished a member, but your server has no log channel, so only the Join Gate Log on the dashboard shows it. Pick a log channel on the dashboard.").await;
+    }
 }
 
 /// A punishment Discord refused (role too low, permission missing) is shown to staff, not
@@ -315,6 +434,7 @@ pub(crate) async fn punish(
     user: u64,
     action: Action,
     why: &str,
+    detail: Detail<'_>,
 ) -> Result<()> {
     let uid = Id::new(user);
     let punishing = !matches!(action, Action::Log | Action::Timeout(..=-1));
@@ -389,19 +509,143 @@ pub(crate) async fn punish(
                     .map_err(Into::into),
             };
             if let Err(e) = done {
-                action_failed(app, gid, user, &format!("{action:?}"), &e).await;
+                // Logged like a success, so a refused kick still shows up in the Join Gate log.
+                let reason = crate::http_err::why(&e);
+                finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await?;
                 return Err(e);
             }
         }
     }
+    finish(app, cfg, gid, user, (action, why, detail), None).await
+}
+
+/// Records and logs a punishment, done or `failed`.
+async fn finish(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    user: u64,
+    what: (Action, &str, Detail<'_>),
+    failed: Option<&str>,
+) -> Result<()> {
+    record(app, gid, user, what, failed).await;
+    if cfg.logging.target(LogKind::JoinGate, None).is_none() {
+        no_log_channel(app, gid).await;
+    }
+    let (action, why, detail) = what;
     send_log(
         app,
         gid.get(),
         LogKind::JoinGate,
-        Log::new("Join Gate", ORANGE)
-            .user("Member", user)
-            .line("Action", &format!("`{action:?}`"))
-            .line("Reason", why),
+        gate_log(user, action, why, detail, failed),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_owner_and_extra_owners_vouch_for_bots() {
+        assert!(vouches(&Level::Owner));
+        assert!(vouches(&Level::ExtraOwner));
+        assert!(!vouches(&Level::TrustedAdmin));
+        assert!(!vouches(&Level::None));
+    }
+
+    #[test]
+    fn gate_log_names_filters_bot_and_failure() {
+        let d = Detail {
+            filters: &["No Avatar", "Suspicious Account"],
+            is_bot: true,
+            adder: Some(5),
+        };
+        let e = gate_log(9, Action::Kick, "join gate", d, Some("Missing Permissions")).build();
+        let text = serde_json::to_string(&e).unwrap();
+        for part in [
+            "No Avatar, Suspicious Account",
+            "added by <@5>",
+            "Missing Permissions",
+            "Kick",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        assert_eq!(e.color, Some(RED));
+        let human = gate_log(9, Action::Ban, "join raid", Detail::default(), None).build();
+        let text = serde_json::to_string(&human).unwrap();
+        assert!(!text.contains("Filters") && !text.contains("Bot") && !text.contains("Failed"));
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn records_keep_the_newest_thousand() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(6_100_000_000 + std::process::id() as u64);
+        let g = gid.get() as i64;
+        // 1000 old-enough rows in one go, then a row older than 30 days.
+        sqlx::query("INSERT INTO joingate_actions (guild_id, user_id, reason, action, ok) SELECT $1, n, 'x', 'Kick', true FROM generate_series(1, 1000) n")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE joingate_actions SET created_at = now() - interval '31 days' WHERE guild_id = $1 AND user_id = 500")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let d = Detail {
+            filters: &["No Avatar"],
+            is_bot: true,
+            adder: Some(7),
+        };
+        record(
+            &app,
+            gid,
+            2000,
+            (Action::Kick, "join gate", d),
+            Some("Missing Permissions"),
+        )
+        .await;
+        let users: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM joingate_actions WHERE guild_id = $1 ORDER BY id",
+        )
+        .bind(g)
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+        // The oldest row and the 31-day-old one are gone, the new one is in.
+        assert_eq!(users.len(), 999);
+        assert!(!users.contains(&1) && !users.contains(&500) && users.contains(&2000));
+        let (filters, ok, error): (serde_json::Value, bool, Option<String>) = sqlx::query_as(
+            "SELECT filters, ok, error FROM joingate_actions WHERE guild_id = $1 AND user_id = 2000",
+        )
+        .bind(g)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (filters, ok, error.as_deref()),
+            (
+                serde_json::json!(["No Avatar"]),
+                false,
+                Some("Missing Permissions")
+            )
+        );
+        sqlx::query("DELETE FROM joingate_actions WHERE guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
 }
