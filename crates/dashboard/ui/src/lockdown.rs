@@ -54,6 +54,9 @@ pub fn LockdownManage(guild: String) -> impl IntoView {
     let chans = RwSignal::new(Vec::<Value>::new());
     let g = StoredValue::new(guild);
     let load = move || {
+        if g.is_disposed() {
+            return;
+        }
         spawn_local(async move {
             match api(
                 "GET",
@@ -371,6 +374,9 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
     let (picking, loaded) = (RwSignal::new(false), RwSignal::new(false));
     let g = StoredValue::new(guild);
     let load = move || {
+        if g.is_disposed() {
+            return;
+        }
         spawn_local(async move {
             match api(
                 "GET",

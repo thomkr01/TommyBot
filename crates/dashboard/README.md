@@ -7,3 +7,5 @@ Add `<DASHBOARD_URL>/auth/callback` as an OAuth2 redirect in the Discord develop
 
 Saves append a `guild_config` version and `NOTIFY config_changed, '<guild_id>'`; the bot should `LISTEN` and reload that guild.
 Access comes from `extra_owners`, `trusted_admins` and permits holding `dashboard_view` / `dashboard_edit` (Discord Manage Server is ignored).
+
+Before changing the UI, read [ui/PITFALLS.md](ui/PITFALLS.md): two Leptos mistakes that compile fine but break the page.

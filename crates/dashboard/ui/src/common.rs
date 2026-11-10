@@ -179,7 +179,12 @@ fn run(
     stay: bool,
 ) {
     spawn_local(async move {
-        match fut.await {
+        let r = fut.await;
+        // The page that started this may be gone, and reading its signals would panic.
+        if msg.text.is_disposed() {
+            return;
+        }
+        match r {
             Ok(v) => ok(v),
             Err(e) if e == "step_up_required" => need.set(true),
             Err(e) => {
@@ -242,7 +247,7 @@ pub fn Toast(msg: Msg) -> impl IntoView {
         let (mine, shown) = (shown.get(), shown.clone());
         set_timeout(
             move || {
-                if shown.get() == mine && !msg.stay.get_untracked() {
+                if shown.get() == mine && msg.stay.try_get_untracked() == Some(false) {
                     msg.clear()
                 }
             },

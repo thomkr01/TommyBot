@@ -39,6 +39,8 @@ fs.mkdirSync(out, { recursive: true });
     const name = h.replace(/[^\w]+/g, '_');
     await page.screenshot({ path: `${out}/${name}.png` });
     if (errors.length || text.length < 40) failed.push(`${h}: ${errors.join(' | ') || 'blank page'}`);
+    // A ">" in an unbraced view! attribute ends the tag, and the rest of the code shows up as page text.
+    if (/move \||on:\w+=/i.test(text)) failed.push(`${h}: source code shown as text`);
   }
   // Embed builder: the bot posts the embed, then edits the same message.
   const embeds = links[0].replace(/^(#\/\d+\/).*/, '$1embeds');
@@ -93,6 +95,20 @@ fs.mkdirSync(out, { recursive: true });
   await page.goto(`${base}/#/update`);
   await page.waitForSelector('text=The updater is not running', { timeout: 5000 }).catch(() => failed.push('update: no updater notice'));
   if (!(await page.locator('header a[href="#/update"]').count())) failed.push('update: no header link for the bot owner');
+  // Number fields: a ">" inside a view! attribute once ended the tag and printed the code as text.
+  await page.goto(`${base}/${links[0].replace(/^(#\/\d+\/).*/, '$1automod')}`);
+  await page.waitForSelector('.step input', { timeout: 5000 }).catch(() => failed.push('automod: no number field'));
+  if (/num\(\)/i.test(await page.innerText('body'))) failed.push('automod: number field shows source code');
+  // Leaving a page while its requests run (or fail, as while the dashboard restarts) must not read disposed signals.
+  for (const mode of ['slow', 'fail']) {
+    errors.length = 0;
+    await page.route('**/api/**', async (r) => { await new Promise((ok) => setTimeout(ok, 800)); mode === 'slow' ? r.continue() : r.abort(); });
+    for (const h of links) { await page.evaluate((x) => (location.hash = x), h); await page.waitForTimeout(1200); }
+    await page.waitForTimeout(2000);
+    await page.unroute('**/api/**');
+    const crash = errors.filter((e) => /disposed|unreachable|panicked/.test(e));
+    if (crash.length) failed.push(`page switch (${mode}): ${crash[0]}`);
+  }
   await browser.close();
   if (failed.length) { console.log('FAIL\n' + failed.join('\n')); process.exit(1); }
   console.log('PASS');

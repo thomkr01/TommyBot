@@ -332,6 +332,9 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                     .ok()
                     .and_then(|t| t.as_string())
                     .unwrap_or_default();
+                if version.is_disposed() {
+                    return;
+                }
                 let Ok(f) = serde_json::from_str::<Value>(&text) else {
                     return msg.err("This file is not valid JSON");
                 };
