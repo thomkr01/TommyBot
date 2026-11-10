@@ -362,6 +362,28 @@ pub async fn web_grant(
             tracing::warn!(?e, "alt log failed");
         }
     }
+    self_grant(app, gid, user, v).await
+}
+
+/// [`grant`] for a member verifying themselves. Someone quarantined after they had roles (anti-nuke,
+/// a rate limit, staff) must not get out by passing verification; only a join quarantine saves none.
+async fn self_grant(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    v: &VerificationCfg,
+) -> Result<()> {
+    let saved: Option<Vec<i64>> = sqlx::query_scalar(
+        "SELECT saved_roles FROM quarantines WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get() as i64)
+    .fetch_optional(&app.pool)
+    .await?;
+    anyhow::ensure!(
+        saved.is_none_or(|r| r.is_empty()),
+        "quarantined member tried to verify out of quarantine"
+    );
     grant(app, gid, user, v).await
 }
 
@@ -499,13 +521,42 @@ pub(crate) async fn grant(
     user: Id<UserMarker>,
     v: &VerificationCfg,
 ) -> Result<()> {
+    // Verifying is open to anyone, so it never hands out a permit role or one with kick/ban/admin-like rights,
+    // whoever put that role in the config.
+    let info = app.guild_info(gid).await?;
+    let permit_roles: Vec<i64> = sqlx::query_scalar(
+        "SELECT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id WHERE p.guild_id = $1",
+    )
+    .bind(gid.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    let roles: Vec<_> = v
+        .roles
+        .iter()
+        .copied()
+        .filter(|r| {
+            let safe = !permit_roles.contains(&(r.get() as i64))
+                && info
+                    .role_perms
+                    .get(r)
+                    .is_none_or(|p| p & tommybot_antinuke::DANGEROUS_PERMS == 0);
+            if !safe {
+                tracing::warn!(
+                    guild = gid.get(),
+                    role = r.get(),
+                    "verification role holds a permit or dangerous permissions, not granted"
+                );
+            }
+            safe
+        })
+        .collect();
     if v.verify.replace_roles || v.verify.quarantine_on_join {
         app.http
             .update_guild_member(gid, user)
-            .roles(&v.roles)
+            .roles(&roles)
             .await?;
     } else {
-        for r in &v.roles {
+        for r in &roles {
             app.http.add_guild_member_role(gid, user, *r).await?;
         }
     }
@@ -872,7 +923,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                         .await?;
                 }
                 Step::Grant => {
-                    grant(app, gid, user, &cfg.verification).await?;
+                    self_grant(app, gid, user, &cfg.verification).await?;
                     let done = passed_embed(&guild_name(app, gid).await);
                     client
                         .create_response(i.id, &i.token, &embed_reply(done))
@@ -987,7 +1038,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             };
             if solved {
                 let cfg = app.cfg(gid.get()).await?;
-                grant(app, gid, user, &cfg.verification).await?;
+                self_grant(app, gid, user, &cfg.verification).await?;
                 let edit = i.message.is_some();
                 let kind = if edit {
                     InteractionResponseType::UpdateMessage

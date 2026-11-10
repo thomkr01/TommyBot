@@ -341,3 +341,19 @@ pub fn focus_on_open(r: NodeRef<leptos::html::Div>) {
         }
     });
 }
+
+/// The server's per-page access (`full`, `read` or `hidden`) and the bot commands the user lacks,
+/// for the last server opened. Only a hint: the API and the bot check every call.
+#[derive(Clone, Copy)]
+pub struct Access {
+    pub pages: RwSignal<Value>,
+    /// Bumped after a permit save so the access is fetched again.
+    pub tick: RwSignal<u32>,
+}
+
+impl Access {
+    /// Unknown pages and a not yet loaded answer count as `full`; the server still refuses.
+    pub fn of(&self, page: &str) -> String {
+        self.pages.with(|p| p["pages"][page].as_str().unwrap_or("full").to_string())
+    }
+}

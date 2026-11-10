@@ -45,6 +45,101 @@ pub const SECTIONS: &[&str] = &[
     "channel_profiles",
 ];
 
+/// What a dashboard page shows the user: everything, a greyed-out read-only view, or nothing.
+/// Only a hint for the UI; every API route still checks on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAccess {
+    Full,
+    Read,
+    Hidden,
+}
+
+/// Page names as the UI routes them (`#/<guild>/<page>`).
+pub const PAGES: &[&str] = &[
+    "wizard",
+    "overview",
+    "misc",
+    "permits",
+    "logging",
+    "backups",
+    "channel_setup",
+    "lockdown",
+    "lockdown_settings",
+    "appeal_list",
+    "appeals",
+    "appeal_blacklist",
+    "automod",
+    "filters",
+    "discord_automod",
+    "whitelist",
+    "automod_panic",
+    "antinuke",
+    "antinuke_filters",
+    "antinuke_panic",
+    "joingate",
+    "joingate_log",
+    "joinraid",
+    "raid_log",
+    "verification",
+    "cases",
+    "notes",
+    "report_list",
+    "report_blacklist",
+    "tickets",
+    "catch",
+    "revert",
+    "history",
+    "embeds",
+    "rescue",
+];
+
+/// Mirrors the checks of the routes each page calls (`api::staff`, `require`, `write_bar`).
+pub fn page(page: &str, l: Level, perms: &[String]) -> PageAccess {
+    use PageAccess::*;
+    let has = |want: &[&str]| l >= Level::Admin || perms.iter().any(|p| want.contains(&p.as_str()));
+    let need = |min: Level| if l >= min { Full } else { Read };
+    if l == Level::None {
+        return Hidden;
+    }
+    match page {
+        "cases" | "raid_log" | "joingate_log" if has(&["cases"]) => Full,
+        "notes" if has(&["notes_manage"]) => Full,
+        "notes" if has(&["notes_view"]) => Read,
+        "report_list" | "report_blacklist" if has(&["reports"]) => Full,
+        "appeal_list" if has(&["appeals"]) => Full,
+        "cases" | "raid_log" | "joingate_log" | "notes" | "report_list" | "report_blacklist"
+        | "appeal_list" => Hidden,
+        "rescue" if l < Level::Owner => Hidden,
+        "revert" if l < Level::Editor => Hidden,
+        // Pages whose buttons are mostly for reading; the server refuses the few writes.
+        "overview" | "history" | "backups" | "lockdown" | "channel_setup" => Full,
+        "permits" | "revert" => need(Level::Admin),
+        "antinuke" | "antinuke_filters" => need(write_bar("antinuke").0),
+        "automod_panic" | "antinuke_panic" => need(write_bar("panic").0),
+        "lockdown_settings" => need(write_bar("lockdown").0),
+        "appeal_blacklist" | "appeals" => need(write_bar("appeals").0),
+        s if SECTIONS.contains(&s) => need(write_bar(s).0),
+        _ => need(Level::Editor),
+    }
+}
+
+/// Whether a bot command needing `perm` is open to the user, as the bot's `commands` list decides.
+pub fn command(perm: &str, l: Level, perms: &[String]) -> bool {
+    let custom = tommybot_core::permits::Level::Custom {
+        rank: 0,
+        perms: perms.to_vec(),
+        whitelist: vec![],
+        limits: Default::default(),
+    };
+    match perm {
+        "" => true,
+        "*" => l > Level::None,
+        "owner" => l == Level::Owner,
+        p => l >= Level::Admin || custom.has(p),
+    }
+}
+
 pub struct Facts<'a> {
     pub discord_owner: bool,
     pub extra_owner: bool,
@@ -70,6 +165,33 @@ pub fn level(f: &Facts) -> Level {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pages_follow_permits() {
+        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(page("cases", Level::Viewer, &[]), PageAccess::Hidden);
+        assert_eq!(
+            page("cases", Level::Viewer, &p(&["cases"])),
+            PageAccess::Full
+        );
+        assert_eq!(
+            page("notes", Level::Viewer, &p(&["notes_view"])),
+            PageAccess::Read
+        );
+        assert_eq!(page("automod", Level::Viewer, &[]), PageAccess::Read);
+        assert_eq!(page("automod", Level::Editor, &[]), PageAccess::Full);
+        assert_eq!(page("antinuke", Level::Admin, &[]), PageAccess::Read);
+        assert_eq!(page("misc", Level::Admin, &[]), PageAccess::Read);
+        assert_eq!(page("permits", Level::Editor, &[]), PageAccess::Read);
+        assert_eq!(page("rescue", Level::Admin, &[]), PageAccess::Hidden);
+        assert_eq!(page("cases", Level::Admin, &[]), PageAccess::Full);
+        assert!(PAGES
+            .iter()
+            .all(|s| page(s, Level::Owner, &[]) == PageAccess::Full));
+        assert!(PAGES
+            .iter()
+            .all(|s| page(s, Level::None, &[]) == PageAccess::Hidden));
+    }
 
     #[test]
     fn every_section_has_a_write_bar() {

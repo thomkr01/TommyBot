@@ -416,6 +416,9 @@ async fn act(
     if !actor.has("reports") {
         return Ok(refused("You need the Manage Reports permit"));
     }
+    if let Some(why) = crate::commands::gated(app, gid, actor_id, &actor, "reports").await? {
+        return Ok(refused(why));
+    }
     let row: Option<(i64, i64, i64)> = sqlx::query_as(
         "SELECT target_id, channel_id, message_id FROM reports WHERE id=$1 AND guild_id=$2",
     )

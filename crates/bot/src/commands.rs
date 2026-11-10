@@ -879,9 +879,21 @@ pub async fn revert_cmd(
     (actor_id, actor): (Id<UserMarker>, &permits::Level),
     target: Id<UserMarker>,
     since_s: i64,
+    owners: bool,
 ) -> Result<String> {
     if !actor.has("revert") {
         return Ok("Cannot revert: no permit".into());
+    }
+    // Owner, Extra Owner and TA actions are undone only when an Owner or Extra Owner asks for it.
+    let owner = app.guild_info(gid).await?.owner;
+    if app.level(gid, owner, target).await?.immune() {
+        let may = matches!(actor, permits::Level::Owner | permits::Level::ExtraOwner);
+        if !may {
+            return Ok(format!("Cannot revert <@{target}>: only an Owner or Extra Owner can undo what an Owner, Extra Owner or Trusted Admin did"));
+        }
+        if !owners {
+            return Ok(format!("<@{target}> is an Owner, Extra Owner or Trusted Admin. Nothing was reverted: run it again with `include_owners: True` to undo their actions too."));
+        }
     }
     if let Some(msg) = gated(app, gid, actor_id, actor, "revert").await? {
         return Ok(msg);

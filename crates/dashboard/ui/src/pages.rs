@@ -376,17 +376,18 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             }
         })
     };
-    let revert = move |_| {
-        let (g, ids) = (guild.clone(), picked.get_untracked());
-        if ids.is_empty() {
-            return msg.err("Select at least one action");
-        }
+    // Actions by an Owner, Extra Owner or TA that the server held back; owners may confirm them.
+    let held = RwSignal::new(Vec::<Value>::new());
+    let can_include = RwSignal::new(false);
+    let gs = StoredValue::new(guild.clone());
+    let send = move |ids: Vec<i64>, owners: bool| {
+        let g = gs.get_value();
         run_act(
             async move {
                 api(
                     "POST",
                     &format!("/api/guilds/{g}/revert"),
-                    Some(json!({"ids": ids})),
+                    Some(json!({"ids": ids, "owners": owners})),
                 )
                 .await
             },
@@ -401,16 +402,33 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                             .collect()
                     })
                     .unwrap_or_default();
+                let kept = v["protected"].as_array().cloned().unwrap_or_default();
                 report.set(format!(
-                    "Done: {}\nFailed: {}\nSkipped: {}\nRe-invite these users manually: {}",
+                    "Done: {}\nFailed: {}\nSkipped: {}\nRe-invite these users manually: {}{}",
                     v["done"],
                     fails.join("; "),
                     v["skipped"],
-                    v["reinvite"]
+                    v["reinvite"],
+                    if kept.is_empty() { String::new() } else { format!("\nNot reverted, done by an Owner, Extra Owner or Trusted Admin: {}", kept.len()) }
                 ));
+                can_include.set(v["can_include"].as_bool().unwrap_or(false));
+                held.set(kept);
                 msg.clear();
             },
         );
+    };
+    let revert = move |_| {
+        let ids = picked.get_untracked();
+        if ids.is_empty() {
+            return msg.err("Select at least one action");
+        }
+        send(ids, false)
+    };
+    let include = move |_| {
+        let ids: Vec<i64> = held.get_untracked().iter().filter_map(Value::as_i64).collect();
+        if confirm(&format!("Also revert {} action(s) done by an Owner, Extra Owner or Trusted Admin?", ids.len())) {
+            send(ids, true)
+        }
     };
     view! {
         <div class="row">
@@ -430,6 +448,9 @@ pub fn Revert(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             }
         </For>
         <button on:click=revert>"Revert selected"</button>
+        <Show when=move || can_include.get() && !held.get().is_empty()>
+            <button class="ghost" on:click=include>"Also revert the Owner / Extra Owner / TA actions"</button>
+        </Show>
         <pre>{move || report.get()}</pre>
         <StepUp need enrolled />
     }

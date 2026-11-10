@@ -867,7 +867,7 @@ pub fn catalog() -> serde_json::Value {
                 .collect();
             serde_json::json!({
                 "name": c.0, "aliases": c.1, "category": cat(c.0), "usage": c.3, "what": c.4,
-                "example": if c.5.is_empty() { c.3 } else { c.5 }, "who": who(c.2),
+                "example": if c.5.is_empty() { c.3 } else { c.5 }, "who": who(c.2), "perm": c.2,
                 "args": args(c.3).iter().map(|(a, w)| serde_json::json!([a, w])).collect::<Vec<_>>(),
                 "slash": slash,
             })
@@ -1159,8 +1159,22 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         let Some(c) = lookup(&first) else {
             return Ok(false);
         };
-        let e = help_embed(c, &pfx, &msg.author.name);
-        send(app, msg, "", Some(e), vec![]).await?;
+        let owner = app.guild_info(gid).await?.owner;
+        let level = app.level(gid, owner, msg.author.id).await?;
+        if allowed(&level, c.2) {
+            send(
+                app,
+                msg,
+                "",
+                Some(help_embed(c, &pfx, &msg.author.name)),
+                vec![],
+            )
+            .await?;
+        } else if !(level == Level::None && cfg.misc.ignore_no_permit) {
+            // Only commands the member can use are explained, the same as `commands` lists.
+            let text = format!("{NO} You don't have access to `{pfx}{}`. Do `{pfx}commands` to see what you can use.", c.0);
+            send(app, msg, &text, None, vec![]).await?;
+        }
         return Ok(true);
     }
     let Some(&(name, _, perm, ..)) = lookup(&first) else {

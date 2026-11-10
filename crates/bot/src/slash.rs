@@ -55,6 +55,8 @@ pub enum Cmd {
     Revert {
         target: Id<UserMarker>,
         since_s: i64,
+        /// `include_owners`: also undo an immune member; only Owner and Extra Owner may.
+        owners: bool,
     },
     Backup(BackupCmd),
     Ext(ModCmd, Option<String>),
@@ -245,6 +247,7 @@ pub fn parse(
             return Ok(Cmd::Revert {
                 target: user(o, "actor").ok_or("missing actor")?,
                 since_s: dur(o, "since")?.ok_or("missing since")?,
+                owners: flag(o, "include_owners"),
             })
         }
         _ => return Err("Unknown command".into()),
@@ -374,7 +377,11 @@ pub fn definitions() -> Vec<Command> {
         guild_only(
             chat("revert", "Undo a member's recent logged actions")
                 .option(UserBuilder::new("actor", "Whose actions to undo").required(true))
-                .option(StringBuilder::new("since", "How far back, e.g. 2h").required(true)),
+                .option(StringBuilder::new("since", "How far back, e.g. 2h").required(true))
+                .option(BooleanBuilder::new(
+                    "include_owners",
+                    "Also undo an Owner, Extra Owner or Trusted Admin (owners only)",
+                )),
         ),
         guild_only(
             chat("backups", "Server backups")
@@ -583,9 +590,11 @@ async fn run(
                 .ok_or(anyhow::anyhow!("no channel"))?;
             crate::lockdown::update(app, gid, ch, (actor_id, &actor), &text).await
         }
-        Cmd::Revert { target, since_s } => {
-            commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s).await
-        }
+        Cmd::Revert {
+            target,
+            since_s,
+            owners,
+        } => commands::revert_cmd(app, gid, (actor_id, &actor), target, since_s, owners).await,
         Cmd::Backup(b) => commands::backup_cmd(app, gid, (actor_id, &actor), b).await,
         Cmd::Ext(c, reason) => {
             let ch = i
@@ -789,7 +798,8 @@ mod tests {
             parse("revert", &r, None),
             Ok(Cmd::Revert {
                 target: u,
-                since_s: 7200
+                since_s: 7200,
+                owners: false
             })
         );
         assert_eq!(

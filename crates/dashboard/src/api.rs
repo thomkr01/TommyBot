@@ -31,7 +31,11 @@ pub(crate) async fn permit_perms(
         .bind(guild).bind(&roles).fetch_all(&st.db).await?.concat())
 }
 
-async fn is_discord_owner(st: &AppState, s: &Sess, guild: i64) -> Result<bool, ApiError> {
+pub(crate) async fn is_discord_owner(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+) -> Result<bool, ApiError> {
     Ok(st.discord.guild_owner(guild).await? == s.user_id.to_string())
 }
 
@@ -155,6 +159,40 @@ pub async fn guilds(State(st): State<AppState>, s: Sess) -> Res {
         }
     }
     Ok(Json(json!(out)))
+}
+
+/// The user's access per dashboard page, fetched again on every page change so permit edits show at once.
+pub async fn page_access(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+    let level = level_of(&st, &s, guild).await?;
+    let perms = if level >= Level::Admin {
+        vec![]
+    } else {
+        permit_perms(&st, &s, guild).await?
+    };
+    let mut pages: serde_json::Map<String, Value> = access::PAGES
+        .iter()
+        .map(|p| (p.to_string(), json!(access::page(p, level, &perms))))
+        .collect();
+    if level == Level::Owner && !is_discord_owner(&st, &s, guild).await? {
+        pages.insert("rescue".into(), json!(access::PageAccess::Hidden));
+    }
+    let cmds = sqlx::query_scalar::<_, Option<Value>>(
+        "select messages->'commands'->'commands' from bot_previews",
+    )
+    .fetch_optional(&st.db)
+    .await?
+    .flatten()
+    .unwrap_or_default();
+    let denied: Vec<&str> = cmds
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| !access::command(c["perm"].as_str().unwrap_or("owner"), level, &perms))
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    Ok(Json(
+        json!({"guild": guild.to_string(), "level": level, "pages": pages, "commands_denied": denied}),
+    ))
 }
 
 pub async fn get_config(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -323,6 +361,7 @@ pub async fn put_permits(
         ));
     }
     store::write_permits(&mut tx, guild, &b.value).await?;
+    keep_exemptions(&mut tx, guild, level, &old).await?;
     let (_, mut config) = store::current(&st.db, guild).await?;
     config["permits"] = store::read_permits(&mut tx, guild).await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
@@ -338,6 +377,54 @@ pub async fn put_permits(
     )
     .await;
     Ok(Json(json!({"version": version})))
+}
+
+/// Permits whose whitelist exempts their roles from anti-nuke, as (name, roles, flags).
+fn antinuke_exempt(p: &Value) -> Vec<Value> {
+    fn sorted<'a>(v: &'a Value, keep: &dyn Fn(&str) -> bool) -> Vec<&'a str> {
+        let mut v: Vec<&str> = v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|s| keep(s))
+            .collect();
+        v.sort();
+        v
+    }
+    let mut out: Vec<Value> = p["custom"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let flags = sorted(&c["whitelist"], &|f| {
+                f == "all" || f == "antinuke" || f.starts_with("wl_")
+            });
+            (!flags.is_empty()).then(|| json!([c["name"], sorted(&c["roles"], &|_| true), flags]))
+        })
+        .collect();
+    out.sort_by_key(|v| v.to_string());
+    out
+}
+
+/// Anti-nuke is Owner-only (write_bar), so below Owner the permits that exempt roles from it must stay
+/// as they were: no new flag, and no role added to or removed from such a permit.
+async fn keep_exemptions(
+    tx: &mut sqlx::PgConnection,
+    guild: i64,
+    level: Level,
+    before: &Value,
+) -> Result<(), ApiError> {
+    if level >= Level::Owner {
+        return Ok(());
+    }
+    let after = store::read_permits(tx, guild).await?;
+    if antinuke_exempt(before) != antinuke_exempt(&after) {
+        return Err(ApiError::Forbidden(
+            "only owners can change anti-nuke whitelist flags or the roles of permits that have them",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn history(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
@@ -405,6 +492,7 @@ pub async fn rollback(
             ));
         }
         store::write_permits(&mut tx, guild, p).await?;
+        keep_exemptions(&mut tx, guild, level, &cur).await?;
     }
     let version = store::commit(&mut tx, guild, b.expected_version, &old, s.user_id).await?;
     tx.commit().await?;
@@ -557,7 +645,7 @@ pub async fn import(
     now["permits"] = store::read_permits(&mut tx, guild).await?;
     let (new, cleared) = import_config(&b.config, &now)?;
     let (min, step_up) = import_bar(&new, &now);
-    require(&st, &s, guild, min, step_up).await?;
+    let level = require(&st, &s, guild, min, step_up).await?;
     let web = ["verification", "lockdown"]
         .iter()
         .any(|k| new.get(*k) != now.get(*k));
@@ -571,6 +659,7 @@ pub async fn import(
     }
     if new["permits"] != now["permits"] {
         store::write_permits(&mut tx, guild, &new["permits"]).await?;
+        keep_exemptions(&mut tx, guild, level, &now["permits"]).await?;
     }
     let version = store::commit(&mut tx, guild, b.expected_version, &new, s.user_id).await?;
     tx.commit().await?;
@@ -784,6 +873,17 @@ mod logging_validate_tests {
         // Importing the result again changes nothing and clears nothing.
         let (again, cleared) = import_config(&new, &new).unwrap();
         assert_eq!((again, cleared.len()), (new, 0));
+    }
+
+    #[test]
+    fn antinuke_exemptions_ignore_other_flags_and_order() {
+        let a = json!({"custom": [{"name": "Mods", "roles": ["2", "1"], "whitelist": ["automod", "wl_ban"]}]});
+        let b = json!({"custom": [{"name": "Mods", "roles": ["1", "2"], "whitelist": ["wl_ban"]}, {"name": "X", "roles": ["3"], "whitelist": ["words"]}]});
+        assert_eq!(antinuke_exempt(&a), antinuke_exempt(&b));
+        let c = json!({"custom": [{"name": "Mods", "roles": ["1", "2", "9"], "whitelist": ["wl_ban"]}]});
+        assert_ne!(antinuke_exempt(&a), antinuke_exempt(&c));
+        let d = json!({"custom": [{"name": "Mods", "roles": ["1", "2"], "whitelist": ["wl_ban", "all"]}]});
+        assert_ne!(antinuke_exempt(&a), antinuke_exempt(&d));
     }
 
     #[test]

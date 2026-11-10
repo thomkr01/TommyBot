@@ -494,6 +494,9 @@ async fn actions(
 #[derive(Deserialize)]
 struct RevertBody {
     ids: Vec<i64>,
+    /// Also undo what an Owner, Extra Owner or Trusted Admin did; only owners may.
+    #[serde(default)]
+    owners: bool,
 }
 
 async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<()> {
@@ -538,14 +541,27 @@ async fn revert(
     Path(guild): Path<i64>,
     Json(b): Json<RevertBody>,
 ) -> Res {
-    require(&st, &s, guild, Level::Admin, true).await?;
+    let level = require(&st, &s, guild, Level::Admin, true).await?;
     // Newest first so later changes are undone before the ones they depend on.
-    let rows: Vec<(i64, Value)> = sqlx::query_as(
-        "select id, inverse from action_log where guild_id = $1 and id = any($2) and not reverted and inverse is not null
+    let rows: Vec<(i64, i64, Value)> = sqlx::query_as(
+        "select id, actor_id, inverse from action_log where guild_id = $1 and id = any($2) and not reverted and inverse is not null
          order by created_at desc, id desc")
         .bind(guild).bind(&b.ids).fetch_all(&st.db).await?;
-    let (mut done, mut failed, mut skipped, mut reinvite) = (0, vec![], vec![], vec![]);
-    for (id, raw) in rows {
+    let mut immune: Vec<i64> = sqlx::query_scalar(
+        "select user_id from extra_owners where guild_id = $1 union select user_id from trusted_admins where guild_id = $1",
+    )
+    .bind(guild)
+    .fetch_all(&st.db)
+    .await?;
+    immune.extend(st.discord.guild_owner(guild).await?.parse::<i64>().ok());
+    let (mut done, mut failed, mut skipped, mut reinvite, mut protected) =
+        (0, vec![], vec![], vec![], vec![]);
+    for (id, actor, raw) in rows {
+        // An owner's or TA's actions are undone only when an owner confirms it.
+        if immune.contains(&actor) && !(b.owners && level >= Level::Owner) {
+            protected.push(id);
+            continue;
+        }
         let inv: Inverse = match serde_json::from_value(raw) {
             Ok(i) => i,
             Err(e) => {
@@ -586,7 +602,8 @@ async fn revert(
         .await;
     }
     Ok(Json(
-        json!({"done": done, "failed": failed, "skipped": skipped, "reinvite": reinvite}),
+        json!({"done": done, "failed": failed, "skipped": skipped, "reinvite": reinvite,
+            "protected": protected, "can_include": level >= Level::Owner}),
     ))
 }
 
@@ -599,6 +616,12 @@ fn hash(key: &str) -> String {
 
 async fn rescue_status(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Owner, false).await?;
+    // The key makes its holder an Extra Owner, so an Extra Owner must not mint one for later.
+    if !crate::api::is_discord_owner(&st, &s, guild).await? {
+        return Err(ApiError::Forbidden(
+            "only the server owner can manage the rescue key",
+        ));
+    }
     let has_key: bool =
         sqlx::query_scalar("select exists(select 1 from rescue_key where guild_id = $1)")
             .bind(guild)
@@ -609,6 +632,12 @@ async fn rescue_status(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
 
 async fn rescue_regenerate(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Owner, true).await?;
+    // The key makes its holder an Extra Owner, so an Extra Owner must not mint one for later.
+    if !crate::api::is_discord_owner(&st, &s, guild).await? {
+        return Err(ApiError::Forbidden(
+            "only the server owner can manage the rescue key",
+        ));
+    }
     let key = auth::token();
     let secret = crate::otp::new_secret();
     sqlx::query(
