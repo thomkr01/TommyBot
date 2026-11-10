@@ -1274,30 +1274,30 @@ mod tests {
 
     /// A valid value for a schema field, by its kind.
     fn sample(fd: &Value) -> Value {
-    match fd["kind"].as_str().unwrap() {
-                "bool" => json!(true),
-                "int" => fd.get("min").cloned().unwrap_or(json!(5)),
-                "float" | "pct" => json!(0.5),
-                "text" | "color" => json!("x"),
-                "list" => json!(["1"]),
-                "choice" => fd["options"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|o| o.as_str() != Some(""))
-                    .unwrap()
-                    .clone(),
-                "channel" | "role" | "category" => json!("1"),
-                "form" => json!([{"label": "x"}]),
-                "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
-                "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
-                "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
-                "snippets" => json!([{"name": "x", "content": "y"}]),
-                "profiles" => {
-                    json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
-                }
-                _ => json!(["1"]),
+        match fd["kind"].as_str().unwrap() {
+            "bool" => json!(true),
+            "int" => fd.get("min").cloned().unwrap_or(json!(5)),
+            "float" | "pct" => json!(0.5),
+            "text" | "color" => json!("x"),
+            "list" => json!(["1"]),
+            "choice" => fd["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o.as_str() != Some(""))
+                .unwrap()
+                .clone(),
+            "channel" | "role" | "category" => json!("1"),
+            "form" => json!([{"label": "x"}]),
+            "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
+            "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
+            "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
+            "snippets" => json!([{"name": "x", "content": "y"}]),
+            "profiles" => {
+                json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
             }
+            _ => json!(["1"]),
+        }
     }
 
     #[test]
@@ -1328,7 +1328,9 @@ mod tests {
         let mut bad = vec![];
         for sec in schema() {
             for fd in sec["fields"].as_array().unwrap() {
-                if !matches!(fd["kind"].as_str(), Some("int" | "float" | "pct")) || !fd["default"].is_null() {
+                if !matches!(fd["kind"].as_str(), Some("int" | "float" | "pct"))
+                    || !fd["default"].is_null()
+                {
                     continue;
                 }
                 let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
@@ -1344,7 +1346,11 @@ mod tests {
                 }
             }
         }
-        assert!(bad.is_empty(), "number fields that cannot be emptied:\n{}", bad.join("\n"));
+        assert!(
+            bad.is_empty(),
+            "number fields that cannot be emptied:\n{}",
+            bad.join("\n")
+        );
     }
 
     /// A section saved with only some fields (a server that never set the rest) still loads:
@@ -1367,6 +1373,10 @@ mod tests {
                 }
             }
         }
-        assert!(bad.is_empty(), "sections that need every field:\n{}", bad.join("\n"));
+        assert!(
+            bad.is_empty(),
+            "sections that need every field:\n{}",
+            bad.join("\n")
+        );
     }
 }
