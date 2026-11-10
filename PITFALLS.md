@@ -41,6 +41,10 @@ A DM before a punishment must not hold the punishment back, and a DM to a bot is
 **Discord's own rendering quirks.** (5ec560a, #92)
 A mention of the @everyone role renders as `@@everyone`, so write plain `@everyone`. Discord lists each mentioned user once per message, so mention spam counts one ping per user per message. Discord merges audit log entries, so the bot's deletion of someone else's message can show no Responsible.
 
+**A saved id can point at something deleted in Discord.** (#147)
+Auto Setup answered "internal error" because the saved Quarantine role had been deleted in Discord: the PATCH got 404 and the whole setup stopped. Config keeps ids after the role or channel is gone (deleted by hand, or a backup restore).
+*Avoid:* treat a 404 on a saved id as "missing" and make it again (`sections::create` checks an existing id first). Never let a 404 on reuse fail a whole setup.
+
 **Raw requests need a real User-Agent.** (live tests, 11-09)
 Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010.
 
