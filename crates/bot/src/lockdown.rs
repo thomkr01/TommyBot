@@ -101,7 +101,7 @@ pub async fn lock_for(
     kind: LockKind,
     secs: Option<i64>,
 ) -> Result<bool> {
-    if lock_thread(app, &kind, true).await? {
+    if lock_thread(app, gid, &kind, true).await? {
         return Ok(true);
     }
     let active = store::locks(&app.pool, gid.get()).await?;
@@ -230,12 +230,23 @@ pub async fn resume(app: &App) -> Result<()> {
 
 /// Threads cannot have permission overwrites, so a channel lock there locks the thread itself.
 /// Returns false when `kind` is not a thread's channel lock.
-async fn lock_thread(app: &App, kind: &LockKind, locked: bool) -> Result<bool> {
+async fn lock_thread(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: &LockKind,
+    locked: bool,
+) -> Result<bool> {
     let LockKind::Channel(c) = *kind else {
         return Ok(false);
     };
     let c = Id::new(c);
-    if !app.http.channel(c).await?.model().await?.kind.is_thread() {
+    let ch = app.http.channel(c).await?.model().await?;
+    // A typed `<#id>` can point anywhere; never touch a channel of another server.
+    anyhow::ensure!(
+        ch.guild_id == Some(gid),
+        "<#{c}> is not a channel of this server"
+    );
+    if !ch.kind.is_thread() {
         return Ok(false);
     }
     app.http.update_thread(c).locked(locked).await?;
@@ -282,7 +293,7 @@ async fn announce(app: &App, gid: Id<GuildMarker>, log: Log) {
 /// Lifts the active locks that overlap `which`, or all of them; returns how many were lifted.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
     if let Some(k) = which {
-        if lock_thread(app, k, false).await? {
+        if lock_thread(app, gid, k, false).await? {
             return Ok(1);
         }
     }
@@ -391,6 +402,9 @@ pub async fn update(
 ) -> Result<String> {
     if !actor.has("lock_updates") {
         return Ok("Cannot post lock updates: no permit".into());
+    }
+    if let Some(why) = crate::commands::gated(app, gid, actor_id, actor, "lock_updates").await? {
+        return Ok(why);
     }
     let locks = store::locks(&app.pool, gid.get()).await?;
     if locks.is_empty() {
@@ -655,6 +669,22 @@ pub async fn overview(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
     Ok(log.build())
 }
 
+/// The first lock permit `kind` needs that `actor` lacks.
+fn missing(actor: &tommybot_core::permits::Level, kind: &LockKind) -> Option<&'static str> {
+    let (channels, roles, joins) = kind.covers();
+    [
+        (
+            channels || matches!(kind, LockKind::Channel(_)),
+            "lock_channels",
+        ),
+        (roles, "lock_staff_roles"),
+        (joins.is_some(), "lock_joins"),
+    ]
+    .into_iter()
+    .find(|(on, p)| *on && !actor.has(p))
+    .map(|(_, p)| p)
+}
+
 /// Lock or unlock the server; shared by the prefix and slash commands. `kind` overrides the dashboard's lock type.
 pub async fn command(
     app: &App,
@@ -667,8 +697,22 @@ pub async fn command(
     if !actor.has("lockdown") {
         return Ok(fail(lift, "Cannot lock: no permit".into()));
     }
+    if let Some(why) = crate::commands::gated(app, gid, actor_id, actor, "lockdown").await? {
+        return Ok(fail(lift, why));
+    }
     let start = Instant::now();
     if lift {
+        // Lifting a lock needs the same permit as setting it.
+        let lifts = match &kind {
+            Some(k) => vec![k.clone()],
+            None => active(app, gid).await?,
+        };
+        if let Some(p) = lifts.iter().find_map(|k| missing(actor, k)) {
+            return Ok(fail(
+                lift,
+                format!("Cannot unlock: you lack the {p} permit"),
+            ));
+        }
         // Named before the locks are gone, for the Type line.
         let name = match &kind {
             Some(k) => type_name(k),
@@ -689,16 +733,7 @@ pub async fn command(
         None => app.cfg(gid.get()).await?.lockdown_prefs.kind(),
     };
     let name = lock_name(&kind);
-    let (channels, roles, joins) = kind.covers();
-    let needs = [
-        (
-            channels || matches!(kind, LockKind::Channel(_)),
-            "lock_channels",
-        ),
-        (roles, "lock_staff_roles"),
-        (joins.is_some(), "lock_joins"),
-    ];
-    if let Some((_, p)) = needs.iter().find(|(on, p)| *on && !actor.has(p)) {
+    if let Some(p) = missing(actor, &kind) {
         return Ok(fail(
             lift,
             format!("Cannot lock {name}: you lack the {p} permit"),

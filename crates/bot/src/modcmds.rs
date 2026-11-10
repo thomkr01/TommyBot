@@ -603,7 +603,34 @@ pub async fn run(
     let target = cmd.target();
     if let Some(t) = cmd.target() {
         let target = Id::new(t);
-        let level = app.level(gid, owner, target).await?;
+        let mut level = app.level(gid, owner, target).await?;
+        // Quarantine took the member's roles, so judge a release by the roles it gives back.
+        if matches!(cmd, ModCmd::Unquarantine { .. } | ModCmd::Verify { .. }) {
+            let saved: Option<Vec<i64>> = sqlx::query_scalar(
+                "SELECT saved_roles FROM quarantines WHERE guild_id=$1 AND user_id=$2",
+            )
+            .bind(gid.get() as i64)
+            .bind(t as i64)
+            .fetch_optional(&app.pool)
+            .await?;
+            if let Some(roles) = saved {
+                let held = permits::resolve(
+                    &app.pool,
+                    gid.get() as i64,
+                    owner.get() as i64,
+                    t as i64,
+                    &roles,
+                )
+                .await?;
+                // Staff caught by anti-nuke or a rate limit go free only through an owner or TA.
+                if held != permits::Level::None && !actor.immune() {
+                    return plain(format!("Cannot release <@{t}>: their roles hold a permit, so only an owner or trusted admin can"));
+                }
+                if held.immune() {
+                    level = held;
+                }
+            }
+        }
         let above = target_above_bot(app, gid, target).await?;
         let actor_n = actor_id.get() as i64;
         if let Err(d) = permits::check(actor, perm, actor_n, &level, t as i64, above) {
@@ -611,6 +638,25 @@ pub async fn run(
         }
     } else if !actor.has(perm) {
         return plain(format!("Cannot use `{perm}`: no permit"));
+    }
+    // A case has its member as the target: nobody changes their own, or an owner's or TA's.
+    if let ModCmd::Unwarn { case } | ModCmd::CasesEdit { case, .. } | ModCmd::CaseSet { case, .. } =
+        &cmd
+    {
+        let member: Option<i64> =
+            sqlx::query_scalar("SELECT user_id FROM cases WHERE guild_id=$1 AND case_no=$2")
+                .bind(gid.get() as i64)
+                .bind(case)
+                .fetch_optional(&app.pool)
+                .await?;
+        if let Some(m) = member.filter(|m| *m > 0) {
+            if m as u64 == actor_id.get() {
+                return plain("You cannot change your own case");
+            }
+            if !actor.immune() && app.level(gid, owner, Id::new(m as u64)).await?.immune() {
+                return plain(format!("Cannot change case #{case}: <@{m}> is immune"));
+            }
+        }
     }
     if let Some(msg) = gated(app, gid, actor_id, actor, perm).await? {
         return plain(msg);
@@ -957,6 +1003,14 @@ pub async fn run(
                     [] => vec![channel.get()],
                     c => c.to_vec(),
                 };
+                for c in &channels {
+                    let ch = app.http.channel(Id::new(*c)).await?.model().await?;
+                    // A raw id can name another server's channel; the bot must not act there.
+                    anyhow::ensure!(
+                        ch.guild_id == Some(gid),
+                        "<#{c}> is not a channel of this server"
+                    );
+                }
                 for c in &channels {
                     app.http
                         .update_channel(Id::new(*c))

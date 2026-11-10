@@ -62,6 +62,14 @@ async fn decide(
             "You need the Review Appeals permit (and the ban or timeout permit to approve)".into(),
         ));
     }
+    let action = if act == "accept" {
+        kind.as_str()
+    } else {
+        "appeals"
+    };
+    if let Some(why) = crate::commands::gated(app, gid, actor_id, &actor, action).await? {
+        return Ok(Err(why));
+    }
     let user_id = Id::new(user as u64);
     // What the lift can be undone with, as in the dashboard's action log.
     let mut inverse = Some(serde_json::json!({"op": "ban", "user": user}));
