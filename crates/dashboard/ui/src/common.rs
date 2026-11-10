@@ -225,8 +225,8 @@ impl Msg {
 /// How long a toast stays up before it closes itself; matches the `.life` strip in style.css.
 const TOAST_LIFE: Duration = Duration::from_secs(3);
 
-/// Message that closes itself after [`TOAST_LIFE`] (or on click), red-edged for failures; keeps its
-/// last text while it fades out.
+/// Message that closes itself after [`TOAST_LIFE`] (or on click), with a strip along the bottom (red
+/// for failures); keeps its last text while it fades out.
 #[component]
 pub fn Toast(msg: Msg) -> impl IntoView {
     let text = Memo::new(move |prev: Option<&String>| {
@@ -235,6 +235,15 @@ pub fn Toast(msg: Msg) -> impl IntoView {
             prev.cloned().unwrap_or_default()
         } else {
             m
+        }
+    });
+    // Counts messages, so the strip restarts on each one and stays drawn while the toast fades out.
+    let life = Memo::new(move |n: Option<&u32>| {
+        let n = n.copied().unwrap_or(0);
+        if msg.get().is_empty() {
+            n
+        } else {
+            n + 1
         }
     });
     // Each message restarts the timer; a plain cell (not StoredValue) since it may fire after unmount.
@@ -254,7 +263,7 @@ pub fn Toast(msg: Msg) -> impl IntoView {
             TOAST_LIFE,
         );
     });
-    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}{move || (!msg.get().is_empty() && !msg.stay.get()).then(|| view! { <span class="life"></span> })}</p></AnimatedShow> }
+    view! { <AnimatedShow when=Signal::derive(move || !msg.get().is_empty()) hide_class="out" hide_delay=OUT><p class="toast" class:bad=move || msg.bad.get() role=move || if msg.bad.get() { "alert" } else { "status" } on:click=move |_| msg.clear()>{move || text.get()}{move || { life.track(); view! { <span class="life" class:stay=move || msg.stay.get()></span> } }}</p></AnimatedShow> }
 }
 
 /// Runs a save, recording the new version.
