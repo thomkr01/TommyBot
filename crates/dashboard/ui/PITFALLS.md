@@ -67,6 +67,38 @@ We did not switch every task to `spawn_local_scoped_with_cancellation`. It also 
 
 **Check:** the sweep switches through every page while each API response is held back 800 ms, then again while every request fails. Any panic fails the test.
 
+## 3. A hover rule beats the "selected" rule
+
+`nav a:not(.srv):hover` has a higher specificity than `nav a.on`, because `:not(.srv)` counts as a class. Under the mouse the selected link (the server on the server list, the open page in the menu) got the dark hover background while its text stayed dark: 1.1:1 contrast, almost invisible.
+
+**Rule:** a rule for a selected or active state lists its `:hover` variant with the same selectors as the hover rule: `nav a.on, nav a.on:not(.srv):hover { ... }`.
+
+**Check:** the `contrast` phase of `tests/e2e/deep.js` hovers every link and button on every page in light and dark mode and fails under 3:1.
+
+## 4. A page that reads a context signal is rebuilt when the signal is set again
+
+The page closure in `App` read `access.of(p)`. The access is fetched again on every page change, and setting a `RwSignal` notifies even when the value is the same, so every page was built twice and loaded its settings, schema and Discord data twice. The page was also built before the access answer came, so hidden pages started their requests anyway.
+
+**Rule:** read a value that is fetched again through a `Memo` (`page_access`), which only notifies when the value changes. Decide what to show before you build the page's components.
+
+## 5. A dropped browser promise hides a refusal
+
+`clipboard().write_text()` returns a promise. `let _ =` dropped it, the button said "Copied!" when the browser refused, and the refusal surfaced as an uncaught page error. That included the Rescue Key, which is shown once.
+
+**Rule:** await browser promises with `JsFuture` and show the result. Use `copy_text` and `copy_label` in `common.rs` for copy buttons.
+
+## 6. An emptied number field saved `null`
+
+Clearing a number field stored `null`, and almost every number setting is a plain `i64`/`u32`/`f64` in Rust, so the save was refused with "invalid type: null, expected i64". A float step also kept the float error (`0.01 + 1 - 1` gave `0.010000000000000009`).
+
+**Rule:** `Field` sets the field's default when a number input is emptied, and float steps are rounded like percent steps. A new number field gets a default (`dv`) unless `null` means something.
+
+## 7. A descendant selector styles more than the field title
+
+`.row label { flex:0 0 100%; font-weight:700 }` is meant for a field's title, but it also hit the Import button of every list field (a `<label>` around the file input). Import grew to the full row, turned bold, and the help text was drawn on top of it (Join Gate's Strict and Wildcard Words).
+
+**Rule:** a control that is a `<label>` or `<a>` inside a row resets what `.row label` sets, as `.io label, .io a` does now. A list field's box takes the full row so its help text goes below it.
+
 ## Where it was fixed (#143)
 
 - `form.rs`: the `-` button on number fields (`>=` in the attribute); the settings card's config/schema load; the preview flash frame callback; list import.

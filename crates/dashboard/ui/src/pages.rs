@@ -371,15 +371,13 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 
 #[component]
 fn Stat(label: &'static str, value: String) -> impl IntoView {
-    let copied = RwSignal::new(false);
+    let copied = RwSignal::new(None::<bool>);
     let v = value.clone();
     let copy = move |_| {
-        if let Some(w) = web_sys::window() {
-            let _ = w.navigator().clipboard().write_text(&v);
-            copied.set(true);
-        }
+        let v = v.clone();
+        spawn_local(async move { copied.set(Some(copy_text(&v).await)) });
     };
-    view! { <span class="stat"><span>{label}</span><b>{value}</b><button class="ghost copy" on:click=copy>{move || if copied.get() { "Copied!" } else { "Copy" }}</button></span> }
+    view! { <span class="stat"><span>{label}</span><b>{value}</b><button class="ghost copy" on:click=copy>{move || copy_label(copied.get())}</button></span> }
 }
 
 #[component]
@@ -497,6 +495,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let key = RwSignal::new(String::new());
     let qr = RwSignal::new(String::new());
     let shown = RwSignal::new(false);
+    let key_copied = RwSignal::new(None::<bool>);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let g = guild.clone();
     spawn_local(async move {
@@ -542,7 +541,7 @@ pub fn Rescue(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 <p><b>"Rescue Key (shown once, store it somewhere safe):"</b></p>
                 <div class="row"><pre class:blur=move || !shown.get()>{move || key.get()}</pre>
                     <button class="danger" on:click=move |_| shown.update(|v| *v = !*v)>{move || if shown.get() { "Hide" } else { "Show" }}</button>
-                    <button class="ghost" on:click=move |_| { if let Some(w) = web_sys::window() { let _ = w.navigator().clipboard().write_text(&key.get_untracked()); } }>"Copy"</button></div>
+                    <button class="ghost" on:click=move |_| { let k = key.get_untracked(); spawn_local(async move { key_copied.set(Some(copy_text(&k).await)) }) }>{move || copy_label(key_copied.get())}</button></div>
                 <p><b>"Scan this with Google Authenticator or Authy too: a rescue needs the key and its 6-digit code."</b></p>
                 <div class="qr" class:blur=move || !shown.get() inner_html=move || qr.get()></div>
                 <ul class="checks warn"><li>"View this rescue key alone!"</li><li>"Never share a screenshot of this QR code."</li><li>"Anyone with this rescue key can get dangerous TommyBot permissions."</li><li>"This rescue key is used ONLY when you lose physical owner account access."</li><li>"It grants TommyBot owner permissions, not Discord ownership."</li></ul>
