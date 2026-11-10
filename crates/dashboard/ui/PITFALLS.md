@@ -1,5 +1,7 @@
 # Dashboard UI pitfalls
 
+Pitfalls for the rest of the bot are in [PITFALLS.md](../../../PITFALLS.md) at the repo root.
+
 Two Leptos mistakes broke the dashboard in November 2026. Both compile without a warning, so read this before you change the UI. The e2e sweep (`tests/e2e/dashboard.js`) now checks for both.
 
 ## 1. A `>` in an attribute ends the tag
