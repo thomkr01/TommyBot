@@ -116,7 +116,7 @@ TOMMYBOT_TAG=a1b2c3d
 
 ## 6. MCP server for Claude (optional)
 
-The `mcp` service lets Claude read TommyBot: running version, log lines from the last 24 hours (secrets masked), guild config and its history, cases, and the raid and join gate logs. **It cannot change anything.** It holds no bot token and no Docker socket, logs in to Postgres as `tommybot_mcp` (which sees only the `mcp_*` views, read-only), and mounts the log files read-only. Two ways in:
+The `mcp` service lets Claude read TommyBot: running version, log lines from the last 24 hours (secrets masked), guild config and its history, cases, the raid and join gate logs, the action log, antinuke incidents and quarantines, automod strikes, appeals and reports (without the message or answers), notes, scheduled jobs and backups. **It cannot change anything.** It holds no bot token and no Docker socket, logs in to Postgres as `tommybot_mcp` (which sees only the `mcp_*` views, read-only), and mounts the log files read-only. Two ways in:
 
 - **Claude Code** (the `claude` command in a terminal) uses a fixed token, `MCP_TOKEN`.
 - **claude.ai** (web and apps, including Projects) logs in through Discord; only the user in `MCP_OWNER_ID` gets in.
