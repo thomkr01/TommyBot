@@ -184,11 +184,10 @@ pub fn router(st: AppState, dist: &str) -> Router {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let _log = tommybot_core::log::init(
+        "dashboard",
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+    );
     let env = |k: &str| std::env::var(k).map_err(|_| anyhow::anyhow!("{k} not set"));
     let base = env("DASHBOARD_URL")?;
     let db = tommybot_core::db::connect(&env("DATABASE_URL")?).await?;

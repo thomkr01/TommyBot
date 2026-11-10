@@ -5,6 +5,7 @@ pub mod db;
 pub mod duration;
 pub mod jobs;
 pub mod limits;
+pub mod log;
 pub mod models;
 pub mod notes;
 pub mod permits;
