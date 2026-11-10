@@ -2542,6 +2542,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tommybot-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "constant_time_eq",
+ "regex",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tommybot-core",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "totp-rs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

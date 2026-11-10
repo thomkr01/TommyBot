@@ -1,9 +1,9 @@
-# Build with `docker compose build`. Pick the image with --target: bot, dashboard or updater.
+# Build with `docker compose build`. Pick the image with --target: bot, dashboard, mcp or updater.
 
 FROM rust:1-bookworm AS builder
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p tommybot -p tommybot-dashboard
+RUN cargo build --release -p tommybot -p tommybot-dashboard -p tommybot-mcp
 
 FROM rust:1-bookworm AS ui
 RUN rustup target add wasm32-unknown-unknown \
@@ -37,6 +37,11 @@ COPY --from=ui /src/crates/dashboard/ui/dist /app/ui/dist
 ENV DASHBOARD_DIST=/app/ui/dist BIND=0.0.0.0:8080
 EXPOSE 8080
 CMD ["tommybot-dashboard"]
+
+FROM base AS mcp
+COPY --from=builder /src/target/release/tommybot-mcp /usr/local/bin/tommybot-mcp
+EXPOSE 8090
+CMD ["tommybot-mcp"]
 
 # Carries out updates started from the dashboard; see scripts/updater.sh.
 # psql from the Postgres image, the Docker CLI and compose plugin from Docker's: no package installs.

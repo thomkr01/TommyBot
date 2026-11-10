@@ -7,7 +7,24 @@ pub async fn connect(url: &str) -> Result<PgPool> {
         .connect(url)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
+    if let Some(pw) = std::env::var("MCP_DB_PASSWORD")
+        .ok()
+        .filter(|p| !p.is_empty())
+    {
+        set_mcp_password(&pool, &pw).await?;
+    }
     Ok(pool)
+}
+
+/// Lets the MCP server's read-only role (migration 2700) log in. A migration cannot read .env.
+pub async fn set_mcp_password(pool: &PgPool, pw: &str) -> Result<()> {
+    let sql: String =
+        sqlx::query_scalar("SELECT format('ALTER ROLE tommybot_mcp LOGIN PASSWORD %L', $1::text)")
+            .bind(pw)
+            .fetch_one(pool)
+            .await?;
+    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
+    Ok(())
 }
 
 /// Deletes every row stored for `guild` (migration 1501); the bot then falls back to defaults.
