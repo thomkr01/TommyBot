@@ -8,8 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tommybot_antinuke::{
-    contain_plan, gained_dangerous, has_dangerous, hold_violation, nuke_plan, plan_revert, Action,
-    ContainStep, Inverse, LogEntry, NukeCase, NukeStep, Verdict,
+    gained_dangerous, has_dangerous, hold_violation, nuke_plan, plan_revert, Action, Inverse,
+    LogEntry, NukeCase, NukeStep, Verdict,
 };
 use tommybot_automod::heat::{Breakdown, HeatCfg};
 use tommybot_core::{
@@ -639,6 +639,13 @@ pub(crate) struct Contained {
     pub bot_role: Option<bool>,
 }
 
+impl Contained {
+    /// Quarantined or kicked: the nuker can do no more.
+    fn stopped(&self) -> bool {
+        matches!(self.applied, Applied::Quarantined | Applied::Kicked)
+    }
+}
+
 const BOT_ROLE_REASON: &str = "Anti-nuke: this bot nuked the server";
 
 /// Quarantines a nuker. A bot first loses its managed role's permissions (the role cannot be
@@ -653,10 +660,9 @@ async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Resu
         });
     }
     let role = bot_role(app, gid, actor).await;
+    let found = role.as_ref().ok().copied().flatten();
     let done = contain_bot(
-        role.as_ref()
-            .map(|r| *r)
-            .map_err(|e| anyhow::anyhow!("{e}")),
+        role,
         |(id, _)| async move {
             app.http
                 .update_role(gid, id)
@@ -678,17 +684,17 @@ async fn contain(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Resu
     )
     .await?;
     // Logged only once the bot stays: a kick deletes its managed role, leaving nothing to restore.
-    if let (Applied::Quarantined, Some(true), Ok(Some((id, perms)))) =
-        (done.applied, done.bot_role, role)
+    if let (Applied::Quarantined, Some(true), Some((id, perms))) =
+        (done.applied, done.bot_role, found)
     {
         record_bot_role(app, gid, id, perms).await?;
     }
     Ok(done)
 }
 
-/// A bot's contain steps from [`contain_plan`]; a failed step, or a failed lookup of its role,
-/// ends in a kick.
-async fn contain_bot<R: Copy, C, Q, K>(
+/// A bot loses its managed role's permissions, then is quarantined. A failed step, or a failed
+/// lookup of its role, ends in a kick.
+async fn contain_bot<R, C, Q, K>(
     role: Result<Option<R>>,
     clear: impl FnOnce(R) -> C,
     quarantine: impl FnOnce() -> Q,
@@ -699,33 +705,19 @@ where
     Q: Future<Output = Result<()>>,
     K: Future<Output = Result<()>>,
 {
-    let (mut clear, mut quarantine) = (Some(clear), Some(quarantine));
-    let (role, mut bot_role, mut failed) = match role {
-        Ok(r) => (r, r.map(|_| false), None),
-        Err(e) => (None, None, Some(e)),
-    };
-    if failed.is_none() {
-        for step in contain_plan(role.is_some()) {
-            let r = match (step, role) {
-                (ContainStep::ClearBotRole, Some(r)) => match clear.take() {
-                    Some(f) => f(r).await.map(|()| bot_role = Some(true)),
-                    None => Ok(()),
-                },
-                (ContainStep::ClearBotRole, None) => Ok(()),
-                (ContainStep::Quarantine, _) => match quarantine.take() {
-                    Some(f) => f().await,
-                    None => Ok(()),
-                },
-            };
-            if let Err(e) = r {
-                failed = Some(e);
-                break;
-            }
+    let mut bot_role = None;
+    let steps: Result<()> = async {
+        if let Some(r) = role? {
+            bot_role = Some(false);
+            clear(r).await?;
+            bot_role = Some(true);
         }
+        quarantine().await
     }
-    let applied = match failed {
-        None => Applied::Quarantined,
-        Some(e) => {
+    .await;
+    let applied = match steps {
+        Ok(()) => Applied::Quarantined,
+        Err(e) => {
             tracing::warn!(?e, "containing a bot failed, kicking it");
             kick().await?;
             Applied::Kicked
@@ -820,8 +812,7 @@ pub(crate) async fn revert_and_report(
             NukeStep::Report => {
                 let sum = sum.as_ref().context("the revert runs before the report")?;
                 let case = open_case(app, gid, actor, why).await?;
-                let contained = matches!(done.applied, Applied::Quarantined | Applied::Kicked);
-                let nuke = record_nuke(app, gid, actor, &sum.done, contained).await?;
+                let nuke = record_nuke(app, gid, actor, &sum.done, done.stopped()).await?;
                 let log = report_log((case, &nuke), actor.get(), done, why, sum);
                 send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
                 crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;
@@ -865,13 +856,7 @@ pub(crate) fn report_log(
         .text(&action)
         .line("Reason", why)
         .section("More Details:")
-        .line(
-            "Action Applied",
-            &mark(matches!(
-                done.applied,
-                Applied::Quarantined | Applied::Kicked
-            )),
-        );
+        .line("Action Applied", &mark(done.stopped()));
     if let Some(cleared) = done.bot_role {
         log = log.line("Bot Role Cleansing", &mark(cleared));
     }

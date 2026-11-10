@@ -154,23 +154,6 @@ pub fn nuke_plan(auto_quarantine: bool) -> Vec<NukeStep> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContainStep {
-    /// Set the nuking bot's own managed role to no permissions (it cannot be taken off the bot).
-    ClearBotRole,
-    Quarantine,
-}
-
-/// How a nuker is contained. A bot keeps its managed role, so that role is emptied first; when a
-/// step fails for a bot, the caller kicks it instead.
-pub fn contain_plan(has_bot_role: bool) -> Vec<ContainStep> {
-    if has_bot_role {
-        vec![ContainStep::ClearBotRole, ContainStep::Quarantine]
-    } else {
-        vec![ContainStep::Quarantine]
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Webhook {
     pub id: u64,
@@ -242,15 +225,7 @@ mod tests {
     fn nuke_reverts_without_panic_and_reports_before_panic() {
         use NukeStep::*;
         assert_eq!(nuke_plan(false), vec![Revert, Report]);
-        let p = nuke_plan(true);
-        assert_eq!(p, vec![Contain, Revert, Report, Panic]);
-    }
-
-    #[test]
-    fn a_bot_role_is_cleared_before_quarantine() {
-        use ContainStep::*;
-        assert_eq!(contain_plan(true), vec![ClearBotRole, Quarantine]);
-        assert_eq!(contain_plan(false), vec![Quarantine]);
+        assert_eq!(nuke_plan(true), vec![Contain, Revert, Report, Panic]);
     }
 
     #[test]
