@@ -363,11 +363,14 @@ async fn send_dm(app: &App, user: Id<UserMarker>, text: &str, embeds: &[Embed]) 
             "send DM",
         )
     };
-    tokio::time::timeout(DM_WAIT, send)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
+    match tokio::time::timeout(DM_WAIT, send).await {
+        Ok(sent) => sent.is_some(),
+        Err(_) => {
+            // Rate limits during an attack can hold a DM this long; owner alerts must not vanish unseen.
+            tracing::warn!(user = user.get(), "DM gave up after {DM_WAIT:?}");
+            false
+        }
+    }
 }
 
 /// DMs the server owner that an attack started, so they hear about it even when nobody watches

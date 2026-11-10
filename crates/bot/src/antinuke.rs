@@ -500,21 +500,23 @@ async fn record_quarantine(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>
     Ok(())
 }
 
-/// Quarantine without a revert, for a command-rate-limit breach.
+/// Quarantine without a revert (a command-rate-limit breach, a deleted verification channel).
+/// A bot also loses its managed role's permissions, as in a nuke.
 pub(crate) async fn quarantine_actor(
     app: &App,
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     why: &str,
-) -> Result<()> {
-    quarantine(app, gid, actor).await?;
+) -> Result<Contained> {
+    let done = contain(app, gid, actor).await?;
     let case = open_case(app, gid, actor, why).await?;
     let log = Log::new("Anti Nuke", ALERT)
         .line("CASE", &format!("`{case}`"))
         .user("Responsible", actor.get())
-        .text(&format!("{YES} **Quarantined**"))
+        .text(&action_text(done))
         .line("Reason", why);
-    send_log(app, gid.get(), LogKind::AntiNuke, log).await
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
+    Ok(done)
 }
 
 async fn open_case(
@@ -856,6 +858,19 @@ async fn report(
     Ok(())
 }
 
+/// What happened to the nuker, as the log's action line.
+fn action_text(done: Contained) -> String {
+    match (done.applied, done.bot_role) {
+        (Applied::Quarantined, Some(true)) => format!("{YES} **Quarantined**, bot role cleared"),
+        (Applied::Quarantined, _) => format!("{YES} **Quarantined**"),
+        (Applied::Kicked, _) => format!("{YES} **Kicked** (the bot could not be quarantined)"),
+        (Applied::Failed, _) => {
+            format!("{NO} **NOT quarantined** (check that the bot's role is on top)")
+        }
+        (Applied::Off, _) => format!("{NO} **Not quarantined** (auto quarantine is off)"),
+    }
+}
+
 /// The log after a nuke is stopped and reverted.
 pub(crate) fn report_log(
     (case, nuke): (i32, &str),
@@ -864,15 +879,7 @@ pub(crate) fn report_log(
     why: &str,
     sum: &RevertSummary,
 ) -> Log {
-    let action = match (done.applied, done.bot_role) {
-        (Applied::Quarantined, Some(true)) => format!("{YES} **Quarantined**, bot role cleared"),
-        (Applied::Quarantined, _) => format!("{YES} **Quarantined**"),
-        (Applied::Kicked, _) => format!("{YES} **Kicked** (the bot could not be quarantined)"),
-        (Applied::Failed, _) => {
-            format!("{NO} **NOT quarantined** (check that the bot's role is on top)")
-        }
-        (Applied::Off, _) => format!("{NO} **Not quarantined** (auto quarantine is off)"),
-    };
+    let action = action_text(done);
     let reinvite = if sum.reinvite.is_empty() {
         "None".into()
     } else {
