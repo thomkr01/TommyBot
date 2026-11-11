@@ -444,7 +444,7 @@ pub fn schema() -> Vec<Value> {
         ),
         hp(
             ti(dv(fg("Auto slowmode", "auto_slowmode.min_users", "int"), 4), "Minimum members"),
-            "Members who sent messages in the last 30 seconds. Bots, webhooks and members with Manage Messages, Manage Channels or Administrator don't count, as Discord lets them skip slowmode.",
+            "Members who sent messages in the last 30 seconds. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator don't count, as Discord lets them skip slowmode. Members who have these only in this channel still count.",
         ),
         hp(
             ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode"),
