@@ -61,7 +61,15 @@ fn oauth_from_env() -> anyhow::Result<Option<tommybot_mcp::oauth::OAuth>> {
         client_secret,
         discord_api: var("DISCORD_API_BASE")
             .unwrap_or_else(|| "https://discord.com/api/v10".into()),
-        http: reqwest::Client::new(),
+        // A hung Discord call would otherwise hold an OAuth request forever.
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent(concat!(
+                "DiscordBot (https://github.com/thomkr01/TommyBot, ",
+                env!("CARGO_PKG_VERSION"),
+                ")"
+            ))
+            .build()?,
     }))
 }
 

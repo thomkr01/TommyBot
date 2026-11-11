@@ -30,7 +30,17 @@ use crate::{
 
 use crate::automod::{now_ms, warn_actions};
 
-pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
+pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
+    if spammer {
+        // Discord does not document the flag: one line per process shows it really arrives.
+        static SEEN: std::sync::Once = std::sync::Once::new();
+        SEEN.call_once(|| {
+            tracing::info!(
+                user = m.user.id.get(),
+                "first join with Discord's spammer flag"
+            )
+        });
+    }
     let (gid, user) = (m.guild_id, &m.member.user);
     let cfg = app.cfg(gid.get()).await?;
     let now = now_ms();
@@ -107,6 +117,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             .is_some_and(|f| f.contains(UserFlags::VERIFIED_BOT)),
         added_by_authorized: authorized,
         added_by_owner: vouched,
+        spammer,
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     let timeout = m.member.communication_disabled_until.map(|t| t.as_secs());
@@ -311,7 +322,7 @@ async fn join_raid(
 }
 
 /// The cured names, one per line, as `GateCfg::name_matches` reads them.
-fn names(raw: &[Option<&String>]) -> String {
+pub(crate) fn names(raw: &[Option<&String>]) -> String {
     raw.iter()
         .flatten()
         .map(|n| filters::cure(n))

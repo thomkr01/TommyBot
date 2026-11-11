@@ -810,14 +810,8 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
 }
 
-/// Bounds that keep the heat model meaningful: a max to reach, decay below 100%/s, no negative weights.
+/// No negative heat weights. Max and decay have their ranges in `limits`.
 fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
-    if h.max <= 0.0 {
-        return Err("heat max must be above 0");
-    }
-    if !(0.0..1.0).contains(&h.decay_per_sec) {
-        return Err("heat decay must be at least 0 and below 1");
-    }
     let weights = serde_json::to_value(h).unwrap_or_default();
     if weights
         .as_object()
@@ -1035,9 +1029,11 @@ mod logging_validate_tests {
     fn heat_bounds() {
         let heat = |h| validate("automod", &json!({"heat": h}));
         assert!(heat(json!({})).is_ok());
-        assert!(heat(json!({"max": 0})).is_err());
-        assert!(heat(json!({"decay_per_sec": 1})).is_err());
-        assert!(heat(json!({"decay_per_sec": -0.1})).is_err());
+        let ranged = |h| limits::check("automod", &json!({"heat": h}), &json!({}));
+        assert!(ranged(json!({"max": 0})).is_err());
+        assert!(ranged(json!({"decay_per_sec": 1})).is_err());
+        assert!(ranged(json!({"decay_per_sec": 0})).is_err());
+        assert!(ranged(json!({"decay_per_sec": -0.1})).is_err());
         assert!(heat(json!({"per_emoji": -1})).is_err());
     }
 

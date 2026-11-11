@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
 use tommybot_automod::discord_api::{Api, DiscordAutomodCfg};
 use tommybot_automod::{
-    heat::{ChannelActivity, HeatState, UserHistory},
+    heat::{ChannelActivity, ChannelHeat, HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
     lockdown::{LockdownPrefs, MentionWatch},
 };
@@ -148,6 +148,12 @@ pub struct App {
     pub pings: Mutex<HashMap<(u64, u64), MentionWatch>>,
     /// Last message per channel, for the inactive channel filter.
     pub channels: Mutex<HashMap<u64, ChannelActivity>>,
+    /// Pooled heat per channel for auto slowmode; its own lock, never taken under `heat`.
+    pub slow: Mutex<HashMap<u64, ChannelHeat>>,
+    /// Channels with an `auto_slowmode` row, so a channel update needs no query otherwise.
+    pub slow_active: Mutex<HashSet<u64>>,
+    /// Discord's spammer flag per (guild, user) and when it was read (ms), for the verify button.
+    pub spam_flags: Mutex<HashMap<(u64, u64), (bool, i64)>>,
     /// Name pair last punished by the post-join username check, so unrelated member updates do not repeat it.
     pub punished_names: Mutex<HashMap<(u64, u64), String>>,
     /// Last public command per (guild, member), in ms.
@@ -222,6 +228,9 @@ impl App {
             mentions: Default::default(),
             pings: Default::default(),
             channels: Default::default(),
+            slow: Default::default(),
+            slow_active: Default::default(),
+            spam_flags: Default::default(),
             punished_names: Default::default(),
             cmd_cooldown: Default::default(),
             crowd: Default::default(),

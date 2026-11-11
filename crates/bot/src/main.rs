@@ -34,6 +34,7 @@ mod scheduler;
 mod settings;
 mod setup;
 mod slash;
+mod slowmode;
 mod targets;
 mod tickets;
 mod timeout_roles;
@@ -45,7 +46,10 @@ mod whitelist;
 use anyhow::Result;
 use std::sync::Arc;
 use tommybot_core::{config::Config, db};
-use twilight_gateway::{EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
+use twilight_gateway::{
+    error::ReceiveMessageError, Event, EventTypeFlags, Intents, Message, Shard, ShardId,
+};
+use twilight_model::gateway::event::GatewayEventDeserializer;
 
 /// Loads the ids of the application emojis that `tools/emojis.mjs upload` uploaded.
 async fn load_emojis(http: &twilight_http::Client) -> Result<()> {
@@ -115,6 +119,9 @@ async fn main() -> Result<()> {
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
     }
+    if let Err(e) = slowmode::restore(&app).await {
+        tracing::warn!(?e, "loading the auto slowmode channels failed");
+    }
     tokio::spawn({
         let app = app.clone();
         async move {
@@ -168,28 +175,80 @@ async fn main() -> Result<()> {
     let stop = shutdown_signal();
     tokio::pin!(stop);
     loop {
-        let event = tokio::select! {
+        let msg = tokio::select! {
             _ = &mut stop => break,
-            e = shard.next_event(EventTypeFlags::all()) => e,
+            m = next_message(&mut shard) => m,
+        };
+        let Some(msg) = msg else { break };
+        let Some(event) = msg.map_or_else(|e| Some(Err(e)), to_event) else {
+            continue;
         };
         match event {
-            Some(Ok(event)) => {
+            Ok((event, extra)) => {
                 if let Some(d) = shard.latency().average() {
                     metrics::LATENCY_MS
                         .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
                 }
-                tokio::spawn(events::handle(app.clone(), event));
+                tokio::spawn(events::handle(app.clone(), event, extra));
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 tracing::warn!(?e, "gateway error");
                 metrics::GATEWAY_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            None => break,
         }
     }
     tracing::info!("shutting down");
     events::shutdown(&app).await;
     Ok(())
+}
+
+/// The next websocket message. Read raw (not `next_event`) so `to_event` sees the JSON before twilight parses it.
+fn next_message<S: twilight_gateway::StreamExt + Unpin>(
+    s: &mut S,
+) -> impl std::future::Future<Output = Option<S::Item>> + '_ {
+    std::future::poll_fn(move |cx| std::pin::Pin::new(&mut *s).poll_next(cx))
+}
+
+/// What twilight-gateway 0.18 `next_event` does with one message (`stream.rs`), plus the raw spam flag.
+/// None: an event type or opcode twilight skips.
+fn to_event(msg: Message) -> Option<Result<(Event, events::Extra), ReceiveMessageError>> {
+    match msg {
+        Message::Close(frame) => Some(Ok((Event::GatewayClose(frame), events::Extra::default()))),
+        Message::Text(json) => {
+            let extra = events::Extra {
+                spammer: spam_flag(&json),
+            };
+            twilight_gateway::parse(json, EventTypeFlags::all())
+                .transpose()
+                .map(|r| r.map(|e| (e.into(), extra)))
+        }
+    }
+}
+
+/// Discord's undocumented "likely spammer" user flag (`1 << 20`) on a GUILD_MEMBER_ADD frame.
+/// twilight's `UserFlags` drops unknown bits, so it is read from the raw JSON.
+fn spam_flag(json: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Frame {
+        t: Option<String>,
+        d: Data,
+    }
+    #[derive(serde::Deserialize)]
+    struct Data {
+        user: User,
+    }
+    #[derive(serde::Deserialize)]
+    struct User {
+        public_flags: Option<u64>,
+    }
+    // Cheap check first: every frame passes here, only joins get parsed. twilight's own scan, so
+    // whitespace or key order Discord might send does not hide a join.
+    GatewayEventDeserializer::from_json(json)
+        .is_some_and(|d| d.event_type() == Some("GUILD_MEMBER_ADD"))
+        && serde_json::from_str::<Frame>(json).is_ok_and(|f| {
+            f.t.as_deref() == Some("GUILD_MEMBER_ADD")
+                && f.d.user.public_flags.unwrap_or(0) & tommybot_automod::join::SPAMMER_FLAG != 0
+        })
 }
 
 /// Resolves on Ctrl-C or, on Unix, SIGTERM (what `docker stop` sends).
@@ -206,4 +265,49 @@ async fn shutdown_signal() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn join(flags: &str) -> String {
+        format!(
+            r#"{{"op":0,"s":5,"t":"GUILD_MEMBER_ADD","d":{{"guild_id":"1","joined_at":"2026-01-01T00:00:00.000000+00:00","roles":[],"deaf":false,"mute":false,"flags":0,"user":{{"id":"2","username":"a","discriminator":"0","avatar":null{flags}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn spam_flag_reads_bit_20() {
+        assert!(spam_flag(&join(r#","public_flags":1048576"#)));
+        assert!(spam_flag(&join(r#","public_flags":1048832"#)));
+        assert!(!spam_flag(&join(r#","public_flags":0"#)));
+        assert!(!spam_flag(&join(r#","public_flags":256"#)));
+        assert!(!spam_flag(&join(r#","public_flags":null"#)));
+        assert!(!spam_flag(&join("")));
+        let other =
+            join(r#","public_flags":1048576"#).replace("GUILD_MEMBER_ADD", "GUILD_MEMBER_UPDATE");
+        assert!(!spam_flag(&other));
+        let spaced = join(r#","public_flags":1048576"#).replace(r#""t":"#, r#""t": "#);
+        assert!(spaced.contains(r#""t": "GUILD_MEMBER_ADD""#));
+        assert!(spam_flag(&spaced));
+    }
+
+    #[test]
+    fn join_frame_still_parses_to_member_add() {
+        let json = join(r#","public_flags":1048576"#);
+        let Some(Ok((Event::MemberAdd(m), extra))) = to_event(Message::Text(json.clone())) else {
+            panic!("not a MemberAdd");
+        };
+        assert!(extra.spammer);
+        assert_eq!((m.guild_id.get(), m.user.id.get()), (1, 2));
+        let old = twilight_gateway::parse(json, EventTypeFlags::all())
+            .unwrap()
+            .map(Event::from);
+        assert_eq!(old, Some(Event::MemberAdd(m)));
+        assert!(matches!(
+            to_event(Message::Close(None)),
+            Some(Ok((Event::GatewayClose(None), _)))
+        ));
+    }
 }

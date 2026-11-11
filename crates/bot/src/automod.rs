@@ -74,6 +74,22 @@ const INSTANT: [&str; 5] = [
 ];
 
 async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
+    let mut slow = None;
+    let r = check_message(app, m, edit, &mut slow).await;
+    // After the punishment: a slowmode start (several Discord calls) must not hold it back.
+    if let (Some(gid), Some(cfg)) = (m.guild_id, slow) {
+        crate::slowmode::start(app, gid, m.channel_id, &cfg).await;
+    }
+    r
+}
+
+/// `slow` gets the auto slowmode settings when this message tripped one.
+async fn check_message(
+    app: &App,
+    m: &Message,
+    edit: bool,
+    slow: &mut Option<tommybot_automod::heat::AutoSlowmodeCfg>,
+) -> Result<()> {
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
@@ -268,6 +284,10 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         let triggered = state.apply(&b, now, &heat_cfg) && !(edit && b.parts.is_empty());
         (triggered, triggered && state.claim(now), b, crowd)
     };
+    // Threads and spam-whitelisted channels or members never count towards an auto slowmode.
+    if !edit && !facts.whitelist.spam && parent == m.channel_id {
+        *slow = crate::slowmode::feed(app, am, gid, m, &breakdown, &heat_cfg, now).await;
+    }
     if let Some(posts) = &crowd {
         punish_crowd(app, &cfg, gid, m, posts, now).await;
     }

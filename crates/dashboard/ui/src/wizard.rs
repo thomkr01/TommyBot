@@ -164,6 +164,10 @@ pub const AUTOMOD: &[Card] = &[
                     "Monitor new lines in messages",
                 ),
                 ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
+                (
+                    "automod.auto_slowmode.enabled",
+                    "Slow down channels that flood",
+                ),
             ],
             |_, _| show("automod_timeout"),
         ))
@@ -273,6 +277,7 @@ pub const JOINGATE: &[Card] = &[Card {
     ("joingate.unverified_bot.enabled", "Discord unverified bots added by anyone"),
     ("joingate.invite_in_name.enabled", "Accounts with invite links in usernames"),
     ("joingate.suspicious.enabled", "Accounts TommyBot deems suspicious"),
+    ("joingate.spammer.enabled", "Accounts Discord flags as likely spammers"),
     ("joingate.username_filter.enabled", "Accounts that have certain names"),
     ("joingate.username_strict", "Strict words"),
     ("joingate.username_terms", "Wildcard words"),
