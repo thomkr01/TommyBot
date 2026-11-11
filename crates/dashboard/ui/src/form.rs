@@ -478,7 +478,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         "color" => view! { <input type="color" prop:value=move || show(&get()) on:change=move |e| set(json!(event_target_value(&e))) /> }.into_any(),
         "choice" => {
             let opts = f["options"].as_array().cloned().unwrap_or_default();
-            let none = f["none_label"].as_str().unwrap_or("off").to_string();
+            let none = f["none_label"].as_str().unwrap_or("Off").to_string();
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
                 {opts.iter().map(|o| { let v = show(o); let l = if v.is_empty() { none.clone() } else { opt_label(&v) };
                     view! { <option value=v.clone() prop:selected=move || show(&get()) == v>{l}</option> } }).collect_view()}
@@ -634,7 +634,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
     let action = (path.starts_with("automod.filters.") && tail == "action").then(|| view! { <span class="muted">{move || {
         let a = get();
         let a = a.as_str().unwrap_or("");
-        format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "strike system" } else { a }, action_desc(a))
+        format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "Strike system" } else { a }, action_desc(a))
     }}</span> });
     let raid = (path == "joinraid.active_ms")
         .then(|| view! { <b class="muted">{move || raid_summary(&val.get())}</b> });

@@ -59,6 +59,10 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
         )
         .await;
     }
+    // Before the other checks, so a failed join gate step cannot let a quarantined member back in.
+    if let Err(e) = crate::antinuke::requarantine_rejoin(app, gid, user.id).await {
+        tracing::warn!(?e, "quarantining a rejoined member failed");
+    }
     // One invites call per join: only when something shows the result.
     let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
         || cfg.logging.target(LogKind::Member, None).is_some()
@@ -354,7 +358,8 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         // A timeout fires another update and a role change keeps the name: act once per bad name pair.
         timed_out || !bad || seen.insert(key, names.clone()) == Some(names)
     };
-    if skip {
+    // Owner, Extra Owners and Trusted Admins are immune to every bot action, here too.
+    if skip || app.is_immune(m.guild_id, m.user.id).await? {
         return Ok(());
     }
     punish(

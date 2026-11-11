@@ -82,6 +82,7 @@ pub const PAGES: &[&str] = &[
     "raid_log",
     "verification",
     "cases",
+    "mod_stats",
     "notes",
     "report_list",
     "report_blacklist",
@@ -102,6 +103,9 @@ pub fn page(page: &str, l: Level, perms: &[String]) -> PageAccess {
         return Hidden;
     }
     match page {
+        // Before `has`, which lets every trusted admin through.
+        "mod_stats" if mod_stats(l, perms) => Full,
+        "mod_stats" => Hidden,
         "cases" | "raid_log" | "joingate_log" if has(&["cases"]) => Full,
         "notes" if has(&["notes_manage"]) => Full,
         "notes" if has(&["notes_view"]) => Read,
@@ -126,6 +130,11 @@ pub fn page(page: &str, l: Level, perms: &[String]) -> PageAccess {
         s if SECTIONS.contains(&s) => need(write_bar(s).0),
         _ => need(Level::Editor),
     }
+}
+
+/// Moderator stats show what colleagues did: owners, and roles an owner gave View Mod Stats (Thomas 2026-11-11).
+pub fn mod_stats(l: Level, perms: &[String]) -> bool {
+    l == Level::Owner || (l > Level::None && perms.iter().any(|p| p == "mod_stats"))
 }
 
 /// Whether a bot command needing `perm` is open to the user, as the bot's `commands` list decides.
@@ -191,6 +200,15 @@ mod tests {
         assert_eq!(page("permits", Level::Editor, &[]), PageAccess::Read);
         assert_eq!(page("rescue", Level::Admin, &[]), PageAccess::Hidden);
         assert_eq!(page("cases", Level::Admin, &[]), PageAccess::Full);
+        for l in [Level::Viewer, Level::Editor, Level::Admin] {
+            assert_eq!(page("mod_stats", l, &p(&["cases"])), PageAccess::Hidden);
+            assert_eq!(page("mod_stats", l, &p(&["mod_stats"])), PageAccess::Full);
+        }
+        assert_eq!(
+            page("mod_stats", Level::None, &p(&["mod_stats"])),
+            PageAccess::Hidden
+        );
+        assert_eq!(page("mod_stats", Level::Owner, &[]), PageAccess::Full);
         assert_eq!(
             page("channel_setup", Level::Editor, &[]),
             PageAccess::Hidden

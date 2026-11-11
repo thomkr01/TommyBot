@@ -185,6 +185,14 @@ impl Discord {
         app_owner(app.as_ref()).ok_or_else(|| anyhow::anyhow!("application has no owner"))
     }
 
+    /// The bot's own user id; for older applications it is not the application id.
+    pub async fn bot_user(&self) -> Result<i64> {
+        let me = self.memo_get("/users/@me".into()).await?;
+        me.as_ref()
+            .and_then(|u| u["id"].as_str()?.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("bot user not found"))
+    }
+
     /// The member's role ids, or None when they are not in the guild.
     pub async fn member(&self, guild: i64, user: &str) -> Result<Option<Vec<String>>> {
         let m = self

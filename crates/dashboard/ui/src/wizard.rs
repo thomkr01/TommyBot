@@ -289,7 +289,7 @@ pub const JOINRAID: &[Card] = &[Card {
     ..boxed(card("Anti raid status", "If you want to keep your server safe and secure from bad raids, this is your saviour.", &[
     ("joinraid.enabled", "Enable Join Raid"),
     ("joinraid.count", "Joins that count as a raid"),
-    ("joinraid.span_ms", "Within (milliseconds)"),
+    ("joinraid.span_ms", "Within"),
     ("joinraid.lock", "Lock when a raid starts"),
 ], |_, _| view! { {show("raid")}{show("raid_report")} }.into_any()))
 }];

@@ -246,8 +246,8 @@ const TIPS: &[(&str, &str, &str)] = &[
     ("antinuke", "per_minute", "How many times one account may do this action (for example ban or delete a channel) before TommyBot stops it."),
     ("antinuke", "per_hour", "How many times one account may do this action (for example ban or delete a channel) before TommyBot stops it."),
     ("antinuke", "heat", "How much of the limit one action uses. 100 % means one action counts as reaching the limit."),
-    ("joinraid", "count", "If this many members join within this time, TommyBot treats it as a raid."),
-    ("joinraid", "span_ms", "If this many members join within this time, TommyBot treats it as a raid."),
+    ("joinraid", "count", "How many members must join within the join history time before TommyBot treats it as a raid."),
+    ("joinraid", "span_ms", "The time window TommyBot counts joins in. If the minimum trigger is reached within it, it is a raid."),
     ("joinraid", "id_flag_min", "Raid accounts are often made at the same moment. TommyBot looks for many joins whose accounts were created close together."),
     ("lockdown", "main_roles", "The roles normal members have. Lockdown takes the chat permissions away from these roles."),
     ("whitelist", "partner_channels", "Channels where invite links from other servers are allowed."),
@@ -464,7 +464,7 @@ pub fn schema() -> Vec<Value> {
             ),
             page,
         );
-        action["none_label"] = json!("strike system");
+        action["none_label"] = json!("Strike system");
         let use_it = if *k == "mentions" {
             "Consider mentions found in messages"
         } else if *k == "attachments" {
@@ -756,23 +756,20 @@ pub fn schema() -> Vec<Value> {
         ),
     ]);
     let raid = vec![
-        fg("General", "enabled", "bool"),
+        ti(fg("General", "enabled", "bool"), "Use the join raid module"),
         ti(dv(f("count", "int"), 10), "Minimum trigger (accounts)"),
-        ti(
-            dv(f("span_ms", "int"), 3 * 3_600_000),
-            "Join history (milliseconds)",
-        ),
-        f("suspicious_only", "bool"),
-        ti(
-            dv(f("active_ms", "int"), 1_800_000),
-            "Trigger duration (milliseconds)",
-        ),
-        f("string_patterns", "list"),
+        ti(dv(f("span_ms", "int"), 3 * 3_600_000), "Join history"),
+        ti(f("suspicious_only", "bool"), "Suspicious accounts only"),
+        ti(dv(f("active_ms", "int"), 1_800_000), "Trigger duration"),
+        ti(f("string_patterns", "list"), "Flag names matching"),
         ti(
             f("flag_younger_than_ms", "int"),
-            "Flag accounts younger than (milliseconds)",
+            "Flag accounts younger than",
         ),
-        f("flag_no_avatar", "bool"),
+        ti(
+            f("flag_no_avatar", "bool"),
+            "Flag accounts without an avatar",
+        ),
         hp(
             ti(
                 f("flag_spammer", "bool"),
@@ -798,7 +795,7 @@ pub fn schema() -> Vec<Value> {
         // Same as RaidCfg::default; the field is not optional, so emptying it must not save null.
         ti(
             dv(fg("ID flag", "id_margin_ms", "int"), 60 * 60_000),
-            "Margin (milliseconds)",
+            "Margin",
         ),
         dv(
             choice(

@@ -164,7 +164,8 @@ pub async fn guilds(State(st): State<AppState>, s: Sess) -> Res {
 /// The user's access per dashboard page, fetched again on every page change so permit edits show at once.
 pub async fn page_access(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     let level = level_of(&st, &s, guild).await?;
-    let perms = if level >= Level::Admin {
+    // Trusted admins too: View Mod Stats is the one permit their level does not imply.
+    let perms = if level == Level::Owner {
         vec![]
     } else {
         permit_perms(&st, &s, guild).await?
@@ -401,15 +402,18 @@ fn antinuke_exempt(p: &Value) -> Vec<Value> {
             let flags = sorted(&c["whitelist"], &|f| {
                 f == "all" || f == "antinuke" || f.starts_with("wl_")
             });
-            (!flags.is_empty()).then(|| json!([c["name"], sorted(&c["roles"], &|_| true), flags]))
+            // View Mod Stats shows what colleagues did, so trusted admins may not grant it either.
+            let stats = sorted(&c["perms"], &|p| p == "mod_stats");
+            (!flags.is_empty() || !stats.is_empty())
+                .then(|| json!([c["name"], sorted(&c["roles"], &|_| true), flags, stats]))
         })
         .collect();
     out.sort_by_key(|v| v.to_string());
     out
 }
 
-/// Anti-nuke is Owner-only (write_bar), so below Owner the permits that exempt roles from it must stay
-/// as they were: no new flag, and no role added to or removed from such a permit.
+/// Anti-nuke is Owner-only (write_bar), so below Owner the permits that exempt roles from it, or that
+/// hold View Mod Stats, must stay as they were: no new flag, and no role added to or removed from them.
 async fn keep_exemptions(
     tx: &mut sqlx::PgConnection,
     guild: i64,
@@ -422,7 +426,7 @@ async fn keep_exemptions(
     let after = store::read_permits(tx, guild).await?;
     if antinuke_exempt(before) != antinuke_exempt(&after) {
         return Err(ApiError::Forbidden(
-            "only owners can change anti-nuke whitelist flags or the roles of permits that have them",
+            "only owners can change anti-nuke whitelist flags, View Mod Stats, or the roles of permits that have them",
         ));
     }
     Ok(())
@@ -888,6 +892,17 @@ mod logging_validate_tests {
         assert_ne!(antinuke_exempt(&a), antinuke_exempt(&c));
         let d = json!({"custom": [{"name": "Mods", "roles": ["1", "2"], "whitelist": ["wl_ban", "all"]}]});
         assert_ne!(antinuke_exempt(&a), antinuke_exempt(&d));
+        let stats =
+            json!({"custom": [{"name": "S", "roles": ["4"], "perms": ["cases", "mod_stats"]}]});
+        assert_ne!(
+            antinuke_exempt(&json!({"custom": []})),
+            antinuke_exempt(&stats)
+        );
+        let more = json!({"custom": [{"name": "S", "roles": ["4", "5"], "perms": ["mod_stats"]}]});
+        assert_ne!(antinuke_exempt(&stats), antinuke_exempt(&more));
+        let other =
+            json!({"custom": [{"name": "S", "roles": ["4"], "perms": ["mod_stats", "ban"]}]});
+        assert_eq!(antinuke_exempt(&stats), antinuke_exempt(&other));
     }
 
     #[test]
