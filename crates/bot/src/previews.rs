@@ -248,6 +248,17 @@ fn messages() -> Value {
             "components": [{"type": 1, "components": [{"type": 2, "style": 4, "label": "Ban here", "custom_id": format!("bansync:1234567890:{MEMBER}")}]}],
         },
         "bansync_copy": log(commands::mod_log_embed((4153, "ban"), (YOU, MEMBER), None, Some(&format!("{} Your Other Server (1234567890): Raiding", crate::bansync::PREFIX)))),
+        "raider_alert": {
+            "embeds": [crate::raiders::alert_log(MEMBER, "raid", "Joined 40 servers with alt accounts").time().build()],
+            "components": crate::raiders::alert_rows(MEMBER),
+        },
+        "raider_action": log(crate::raiders::action_log(MEMBER, "nuke", "Quarantine", None)),
+        "raider_removal": log(crate::raiders::lift_log(MEMBER, "Unbanned.")),
+        "raider_listed_dm": {"content": crate::raiders::listed_text(MEMBER, Some(("member", false)), 3, &[
+            ("Your Server".into(), Some(1200), (1_234_567_890, "auto_nuke".into(), "n7Kd2x".into(), json!({"case": 4152, "count": 5, "filter": "anti-nuke"}), 1_762_000_000)),
+            ("Another Server".into(), Some(340), (1_234_567_891, "auto_raid".into(), "ab12cd34ef_1234567891".into(), json!({"count": 12, "filter": "join raid"}), 1_762_000_100)),
+            ("Third Server".into(), None, (1_234_567_892, "auto_spam".into(), "1300000000000000000".into(), json!({"count": 4, "filter": "coordinated spam"}), 1_762_000_200)),
+        ])},
         "nuke_quarantined": nuke(Applied::Quarantined, None),
         "nuke_no_quarantine": nuke(Applied::Off, None),
         "nuke_bot_cleared": nuke(Applied::Quarantined, Some(true)),

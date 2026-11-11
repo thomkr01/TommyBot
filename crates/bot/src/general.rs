@@ -180,6 +180,14 @@ const CMDS: &[Cmd] = &[
         "",
     ),
     (
+        "raiderlist",
+        &[],
+        "*",
+        "raiderlist",
+        "Raider List settings",
+        "",
+    ),
+    (
         "verification",
         &["v"],
         "*",
@@ -386,6 +394,14 @@ const CMDS: &[Cmd] = &[
         "closecase CASE",
         "Switch a case off or on",
         "closecase 4151",
+    ),
+    (
+        "raider",
+        &[],
+        "*",
+        "raider check MEMBER | report MEMBER CATEGORY REASON",
+        "Look up a user on the Raider List, or report one (owner or Extra Owner, needs a ban, kick or quarantine case here)",
+        "raider report @member raid Joined with 40 alts",
     ),
     (
         "ncases",
@@ -630,6 +646,7 @@ const ARGS: &[(&str, &str)] = &[
     ("?t", "Starts the type, see TYPE"),
     ("TYPE", "lock/unlock: server (sc), blind, role (r), channel (c), kick (k), ban (b) or all (s); cases: b, ub, k, timeout, wa, q or uq"),
     ("CASE", "A case number, e.g. 4151"),
+    ("CATEGORY", "Raider List category: nuke, raid, scam or spam"),
     ("COUNT", "How many messages to delete, up to 1000"),
     ("N", "The number shown next to a setting in the panel"),
     ("VALUE", "The new value for setting N"),
@@ -708,6 +725,7 @@ const CATEGORIES: [(&str, &[&str]); 4] = [
             "joinraid",
             "verification",
             "bansync",
+            "raiderlist",
             "misc",
             "whitelist",
             "tshoot",
@@ -738,6 +756,7 @@ const CATEGORIES: [(&str, &[&str]); 4] = [
             "modcases",
             "editc",
             "closecase",
+            "raider",
             "ncases",
             "notes",
             "backups",
@@ -1201,6 +1220,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
             | "serverinfo"
             | "config"
             | "ncases"
+            | "raider"
             | "tshoot"
     ) {
         return Ok(false);
@@ -1450,6 +1470,7 @@ async fn answer(
             }
         }
         "ncases" => embed(ncases(app, gid, arg).await?),
+        "raider" => text(&crate::raiders::command(app, gid, invoker, level, &words[1..]).await?),
         "tshoot" if arg == Some("lockdown") => {
             if allowed(level, "owner") {
                 embed(tshoot_lockdown(app, gid).await?)

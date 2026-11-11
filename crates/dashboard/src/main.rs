@@ -11,6 +11,7 @@ mod lockdown;
 mod mcp;
 mod ops;
 mod otp;
+mod raiders;
 mod records;
 mod recovery;
 mod schema;
@@ -147,6 +148,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(appeals::routes())
         .merge(records::routes())
         .merge(bansync::routes())
+        .merge(raiders::routes())
         .merge(verify::routes())
         .merge(embeds::routes())
         .merge(update::routes())

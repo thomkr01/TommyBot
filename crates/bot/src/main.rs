@@ -27,6 +27,7 @@ mod prefix;
 mod previews;
 mod purge;
 mod qr;
+mod raiders;
 mod reply;
 mod reports;
 mod scheduler;

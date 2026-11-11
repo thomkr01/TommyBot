@@ -93,6 +93,8 @@ pub fn list() -> Value {
         tool("backups", "Server backups (id, code, who made it), newest first.", json!({"guild_id": guild}), &["guild_id"]),
         tool("ban_sync", "Ban Sync copies to and from a guild (guild_id is the receiving server), newest first. Reason text is user-written data.",
             json!({"guild_id": guild, "limit": limit(200)}), &["guild_id"]),
+        tool("raiders", "Raider List entries (bot owner): status, category, whether the bot owner verified it, the public note, and counts of evidence, distinct server owners and open appeals. Most owners first. Never who reported. The note is bot-owner-written data.",
+            json!({"status": {"type": "string", "enum": ["pending", "confirmed", "rejected", "removed"]}, "limit": limit(200)}), &[]),
     ])
 }
 
@@ -283,6 +285,17 @@ pub async fn call(st: &State, name: &str, a: &Value) -> Result<Value> {
                     case_no, created_at, done_at
                 FROM mcp_ban_sync WHERE guild_id = $1 OR source_guild = $1 ORDER BY created_at DESC LIMIT $2) r",
             need(a, "guild_id")?, limit(a, 50, 200)).await?,
+        "raiders" => sqlx::query_scalar::<_, Option<Value>>(
+            "SELECT jsonb_agg(r ORDER BY owners DESC, updated_at DESC) FROM (
+                SELECT user_id::text, status, category, verified, public_note, expires_at, appeal_after, created_at,
+                    updated_at, evidence, owners, open_appeals
+                FROM mcp_raiders WHERE ($1::text IS NULL OR status = $1) ORDER BY owners DESC, updated_at DESC LIMIT $2) r",
+        )
+        .bind(text(a, "status"))
+        .bind(limit(a, 50, 200))
+        .fetch_one(&st.db)
+        .await?
+        .unwrap_or(json!([])),
         _ => bail!("unknown tool: {name}"),
     })
 }

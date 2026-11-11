@@ -535,6 +535,10 @@ async fn accept_appeal(
         },
     )
     .await?;
+    // The dashboard unbans as the bot, so the bot cannot tell staff lifted a Raider List ban.
+    if kind == "ban" {
+        tommybot_core::raiders::allow(&mut *tx, guild, user, s.user_id).await?;
+    }
     Ok(())
 }
 

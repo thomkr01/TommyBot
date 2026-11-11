@@ -185,6 +185,40 @@ impl Discord {
         Ok(g.and_then(|g| g["name"].as_str().map(String::from)))
     }
 
+    /// The server's name and approximate member count, or None when the bot is not in it.
+    pub async fn guild_size(&self, guild: i64) -> Result<Option<(String, u64)>> {
+        let g = self
+            .memo_get(format!("/guilds/{guild}?with_counts=true"))
+            .await?;
+        Ok(g.map(|g| {
+            let name = g["name"].as_str().unwrap_or_default().to_string();
+            (name, g["approximate_member_count"].as_u64().unwrap_or(0))
+        }))
+    }
+
+    /// The bot's own user id.
+    pub async fn bot_id(&self) -> Result<String> {
+        let me = self.memo_get("/users/@me".into()).await?;
+        me.as_ref()
+            .and_then(|m| m["id"].as_str())
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("bot user not found"))
+    }
+
+    /// When the bot joined `guild` (its member's `joined_at`), or None when it is not in it.
+    pub async fn bot_joined(&self, guild: i64) -> Result<Option<String>> {
+        let id = self.bot_id().await?;
+        let m = self
+            .memo_get(format!("/guilds/{guild}/members/{id}"))
+            .await?;
+        Ok(m.and_then(|m| m["joined_at"].as_str().map(String::from)))
+    }
+
+    /// A Discord user (name, avatar, bot flag), or None for an unknown id.
+    pub async fn user(&self, id: i64) -> Result<Option<serde_json::Value>> {
+        self.memo_get(format!("/users/{id}")).await
+    }
+
     /// The user id of the bot application's owner (the team owner for a team app).
     pub async fn bot_owner(&self) -> Result<String> {
         let app = self.memo_get("/applications/@me".into()).await?;

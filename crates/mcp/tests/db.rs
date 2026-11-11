@@ -149,6 +149,42 @@ async fn read_only_role_and_tools() {
         tool(&st, t, json!({"guild_id": g.to_string()})).await;
     }
     tool(&st, "jobs", json!({})).await;
+    sqlx::query("INSERT INTO raiders (user_id, status, category) VALUES ($1, 'pending', 'raid') ON CONFLICT DO NOTHING")
+        .bind(g)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO raider_evidence (user_id, source_guild, source_owner, kind, ref, reporter_id) VALUES ($1, 1, 2, 'report', '1', 3)")
+        .bind(g)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let raiders = tool(&st, "raiders", json!({"status": "pending"})).await;
+    let r = raiders
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["user_id"].as_str() == Some(g.to_string().as_str()))
+        .unwrap();
+    assert_eq!(
+        (r["evidence"].as_i64(), r["owners"].as_i64()),
+        (Some(1), Some(1))
+    );
+    assert!(r.get("reporter_id").is_none() && r.get("detail").is_none());
+    assert!(sqlx::query("SELECT 1 FROM raider_evidence LIMIT 1")
+        .execute(&st.db)
+        .await
+        .is_err());
+    sqlx::query("DELETE FROM raider_evidence WHERE user_id = $1")
+        .bind(g)
+        .execute(&admin)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM raiders WHERE user_id = $1")
+        .bind(g)
+        .execute(&admin)
+        .await
+        .unwrap();
     let notes = tool(
         &st,
         "notes",

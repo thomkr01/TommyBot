@@ -1,6 +1,6 @@
 # TommyBot Privacy Policy
 
-Last updated: 2026-11-08
+Last updated: 2026-11-11
 
 This policy explains what TommyBot ("the bot") stores, why, and how long it is kept. The bot is free and open source. Its code is at [github.com/thomkr01/TommyBot](https://github.com/thomkr01/TommyBot).
 
@@ -27,6 +27,12 @@ The bot keeps data in a PostgreSQL database. It stores:
 | **Server backups** (roles, channels, permission overwrites, as JSON). | `/backup` and nuke recovery. | A new backup is taken every 3 hours. Only the 10 most recent per server are kept. |
 | **Server owners** (the server ID and the user ID of its Discord owner). | To find the other servers with the same owner for Ban Sync. The owner is checked with Discord again before every copy. | Updated when the owner changes, deleted when the bot leaves the server. |
 | **Ban Sync copies** (the receiving and sending server IDs, the banned user's ID, the reason (at most 400 characters), what made the ban, the result and the case number). | So a ban is copied only once, an unban lifts only the copies Ban Sync made, and staff see every copy in the Log tab. | Removed with the receiving server's data: 30 days after the bot is removed, or when the owner deletes it. |
+| **Raider List entries** (`raiders`: the user's ID, the status, the category, whether the bot owner verified it, a public note of at most 200 characters, who reviewed it and when, and when a scam listing ends or the next appeal opens). | So servers that use the Raider List can act on confirmed raider accounts when they join. | Confirmed entries stay until the bot owner removes them; scam entries end 14 days after their last evidence. Rejected entries are deleted after 30 days, and pending entries nobody reviewed after 90 days. |
+| **Raider List evidence** (`raider_evidence`: the user's ID, the server and its owner's ID, what caught them, the case or incident number, counts and timestamps, and for a report the reporter's ID). Never message text. | So the bot owner can check an entry, and so one owner with many servers counts once. Only the bot owner sees it. | Deleted with its entry (pending 90 days, rejected 30 days, scam 14 days after the last evidence); kept while an entry is confirmed. |
+| **Raider List reviews** (`raider_reviews`: who decided, the user's ID, the old and new status, the note and the time). | A record of every review decision. | Kept for good. |
+| **Raider List appeals** (`raider_appeals`: the user's ID, their appeal text of at most 1,000 characters, the result, who decided and when). | So a listed user can ask to be taken off the list. | Kept with the entry's review history. |
+| **Raider List actions** (`raider_actions`: the server ID, the user's ID, what the list did there and the case number). | So staff see the list's matches in their server, and a removal lifts only what the list did. | Removed with the server's data: 30 days after the bot is removed, or when the owner deletes it. |
+| **Raider List exceptions** (`raider_allow`: the server ID, the user's ID, the staff member who let them in and when). | So the list never acts again on someone staff allowed in that server. | Removed with the server's data: 30 days after the bot is removed, or when the owner deletes it. |
 | **Join Gate records** (the punished user's ID, whether it is a bot and who added it, the filters that matched, the action, and Discord's error if it failed). | To show staff every Join Gate action on the dashboard. | 30 days, and at most the 1,000 newest per server. |
 | **Nuke incident records** (who was quarantined and what was reverted). | Recovery history after an attack. | Until deletion is requested. |
 | **Dashboard sessions** (your Discord user ID and username, your Discord OAuth access token, a CSRF token, and a step-up timestamp). | To keep you signed in to the dashboard. | 7 days from sign-in, then expired. |
