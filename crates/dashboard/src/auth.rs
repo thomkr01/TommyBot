@@ -103,6 +103,8 @@ fn cookie(name: &'static str, val: String, secure: bool) -> Cookie<'static> {
         .build()
 }
 
+/// A dashboard session. The MCP write path (`mcp.rs`) puts one in the request's extensions instead of a cookie.
+#[derive(Clone)]
 pub struct Sess {
     pub id: String,
     pub user_id: i64,
@@ -115,6 +117,10 @@ pub struct Sess {
 impl FromRequestParts<AppState> for Sess {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, ApiError> {
+        // Only code in this process can set extensions; a client cannot.
+        if let Some(s) = parts.extensions.get::<Sess>() {
+            return Ok(s.clone());
+        }
         let jar = CookieJar::from_headers(&parts.headers);
         let sid = jar
             .get("sid")
@@ -288,21 +294,7 @@ pub async fn totp_verify(
     let step = crate::otp::step(&secret, &c.code)?;
     // A wrong DM code counts as a miss, so it shares the TOTP lockout.
     let step = step.filter(|_| confirmed || dm_code.as_deref() == Some(c.dm_code.as_str()));
-    {
-        let mut m = st.totp.lock().unwrap();
-        let a = m.entry(s.user_id).or_default();
-        if a.locked(Instant::now()) {
-            tracing::warn!(
-                user = s.user_id,
-                "dashboard 2FA locked after too many wrong codes"
-            );
-            return Err(ApiError::TooMany);
-        }
-        if !a.accept(step, Instant::now()) {
-            tracing::warn!(user = s.user_id, "dashboard 2FA code rejected");
-            return Err(ApiError::Forbidden("invalid code"));
-        }
-    }
+    attempt(&st, s.user_id, step)?;
     sqlx::query("update dash_totp set confirmed = true, dm_code = null where user_id = $1")
         .bind(s.user_id)
         .execute(&st.db)
@@ -313,6 +305,33 @@ pub async fn totp_verify(
         .execute(&st.db)
         .await?;
     Ok(Json(json!({"stepped_up": true})))
+}
+
+/// Counts a TOTP attempt: refuses while locked out, and refuses a miss or a replayed step.
+fn attempt(st: &AppState, user: i64, step: Option<u64>) -> Result<(), ApiError> {
+    let mut m = st.totp.lock().unwrap();
+    let a = m.entry(user).or_default();
+    if a.locked(Instant::now()) {
+        tracing::warn!(user, "dashboard 2FA locked after too many wrong codes");
+        return Err(ApiError::TooMany);
+    }
+    if !a.accept(step, Instant::now()) {
+        tracing::warn!(user, "dashboard 2FA code rejected");
+        return Err(ApiError::Forbidden("invalid code"));
+    }
+    Ok(())
+}
+
+/// A code from a confirmed enrollment, with the same lockout and replay guard as `totp_verify`.
+pub async fn check_totp(st: &AppState, user: i64, code: &str) -> Result<(), ApiError> {
+    let secret = sqlx::query_scalar::<_, String>(
+        "select secret from dash_totp where user_id = $1 and confirmed",
+    )
+    .bind(user)
+    .fetch_optional(&st.db)
+    .await?
+    .ok_or(ApiError::Forbidden("totp not enrolled"))?;
+    attempt(st, user, crate::otp::step(&secret, code)?)
 }
 
 #[cfg(test)]
