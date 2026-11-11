@@ -1154,13 +1154,25 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
             .bind(target.get() as i64)
             .fetch_optional(&app.pool)
             .await?;
-    if saved.is_none() {
+    let Some((saved,)) = saved else {
         return Ok(());
-    }
+    };
     let cfg = app.cfg(gid.get()).await?;
     let whitelisted = cfg.antinuke.quarantine_whitelist.contains(&actor)
         || app.whitelisted(gid, actor, "quarantine").await?;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
+        return Ok(());
+    }
+    // A join quarantine (verification, nothing saved) keeps the joiner held, but an autorole bot
+    // or staff touching them is normal work, not a nuke (Thomas, 11-11).
+    if saved.is_empty() {
+        if e.action_type == A::MemberRoleUpdate {
+            let roles: Vec<_> = cfg.antinuke.quarantine_role.into_iter().collect();
+            app.http
+                .update_guild_member(gid, target)
+                .roles(&roles)
+                .await?;
+        }
         return Ok(());
     }
     if e.action_type != A::MemberRoleUpdate {

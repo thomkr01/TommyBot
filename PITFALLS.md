@@ -83,6 +83,10 @@ Past the limit every audit entry returned `Quarantine` again, and each one is it
 The ticket-category exemption read the category that the `ChannelCreate` task stores. When the audit task ran first, the lookup missed and a ticket bot's channels counted towards its limit.
 *Avoid:* do not rely on the order of two events. `note_parent` stores every channel (also "no category"), so a miss means "not seen yet", and `parent_of` waits up to 0.5 s for it.
 
+**A join quarantine counted as a nuke target.** (race review follow-up, 11-11)
+Verification's "quarantine on join" writes a quarantine row with no saved roles. The quarantine hold treated it like an anti-nuke quarantine, so an autorole bot giving a joiner its role was quarantined and lost its role permissions on every join.
+*Avoid:* a row with empty `saved_roles` is a join quarantine. The hold undoes the role change but punishes nobody. Code that reads `quarantines` must tell the two kinds apart.
+
 **Long work under a global lock.** (#100)
 Similarity compared whole 4000-character messages (quadratic) while holding the global heat lock.
 *Avoid:* bound the input (first 500 characters) and keep work under shared locks short.
