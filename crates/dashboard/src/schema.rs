@@ -434,6 +434,27 @@ pub fn schema() -> Vec<Value> {
             "joinraid",
             ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
         ),
+        hp(
+            ti(fg("Auto slowmode", "auto_slowmode.enabled", "bool"), "Use the auto slowmode"),
+            "Gives a flooding channel a slowmode and puts the old one back when it is calm. Needs Anti Spam on and Manage Channels in the channel. Threads, spam-whitelisted and locked channels are skipped.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.channel_pct", "int"), 300), "Trigger (% of max heat)"),
+            "All messages in the channel add their heat to one pool. 300 means three members' worth of max heat.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.min_users", "int"), 4), "Minimum members"),
+            "Members who sent messages in the last 30 seconds. Bots, webhooks and members with Manage Messages, Manage Channels or Administrator don't count, as Discord lets them skip slowmode.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode"),
+            "A slowmode staff set that is as high or higher is left alone.",
+        ),
+        ti(dv(fg("Auto slowmode", "auto_slowmode.min_on_secs", "int"), 60), "Minimum time on"),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.calm_secs", "int"), 120), "Calm time"),
+            "Off once the pool stayed under half the trigger this long. Changing the slowmode by hand ends it, unless you set exactly the auto value in Discord.",
+        ),
     ];
     for (k, page, title) in FILTERS {
         let mut action = pg(

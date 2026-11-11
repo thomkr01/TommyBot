@@ -268,6 +268,10 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
         let triggered = state.apply(&b, now, &heat_cfg) && !(edit && b.parts.is_empty());
         (triggered, triggered && state.claim(now), b, crowd)
     };
+    // Threads and spam-whitelisted channels or members never count towards an auto slowmode.
+    if !edit && !facts.whitelist.spam && parent == m.channel_id {
+        crate::slowmode::feed(app, am, gid, m, &breakdown, &heat_cfg, now).await;
+    }
     if let Some(posts) = &crowd {
         punish_crowd(app, &cfg, gid, m, posts, now).await;
     }

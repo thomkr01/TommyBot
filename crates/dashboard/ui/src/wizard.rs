@@ -164,6 +164,10 @@ pub const AUTOMOD: &[Card] = &[
                     "Monitor new lines in messages",
                 ),
                 ("automod.filters.zalgo.enabled", "Monitor zalgo in messages"),
+                (
+                    "automod.auto_slowmode.enabled",
+                    "Slow down channels that flood",
+                ),
             ],
             |_, _| show("automod_timeout"),
         ))

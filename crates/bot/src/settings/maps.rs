@@ -2,7 +2,7 @@
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
-use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE};
+use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, SLOW_USERS};
 use tommybot_core::warn::Action as WarnAction;
 use twilight_model::id::{marker::RoleMarker, Id};
 
@@ -161,6 +161,13 @@ pub(super) static HEAT: Module = Module {
         r!("10a", "Status", "automod.auto_lockdown.enabled", Kind::Bool, |c| on(c.automod.auto_lockdown.enabled)),
         r!("10b", "Mentions", "automod.auto_lockdown.mention_count", Kind::Int(1, 1000), |c| c.automod.auto_lockdown.mention_count.to_string()),
         r!("10c", "Under", "automod.auto_lockdown.mention_window_ms", Kind::Ms, |c| ms(c.automod.auto_lockdown.mention_window_ms)),
+        group!("11", "Auto Slowmode"),
+        r!("11a", "Status", "automod.auto_slowmode.enabled", Kind::Bool, |c| on(c.automod.auto_slowmode.enabled)),
+        r!("11b", "Trigger", "automod.auto_slowmode.channel_pct", Kind::Int(SLOW_PCT.0, SLOW_PCT.1), |c| format!("{}% of max heat", c.automod.auto_slowmode.channel_pct)),
+        r!("11c", "Minimum Members", "automod.auto_slowmode.min_users", Kind::Int(SLOW_USERS.0, SLOW_USERS.1), |c| c.automod.auto_slowmode.min_users.to_string()),
+        r!("11d", "Slowmode", "automod.auto_slowmode.slowmode_secs", Kind::Int(SLOW_SECS.0, SLOW_SECS.1), |c| embed::duration(c.automod.auto_slowmode.slowmode_secs.into())),
+        r!("11e", "Minimum Time On", "automod.auto_slowmode.min_on_secs", Kind::Int(SLOW_ON.0, SLOW_ON.1), |c| embed::duration(c.automod.auto_slowmode.min_on_secs.into())),
+        r!("11f", "Calm Time", "automod.auto_slowmode.calm_secs", Kind::Int(SLOW_CALM.0, SLOW_CALM.1), |c| embed::duration(c.automod.auto_slowmode.calm_secs.into())),
     ],
 };
 

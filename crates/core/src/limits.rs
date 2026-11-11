@@ -5,7 +5,17 @@ use serde_json::Value;
 pub const NUKE_MINUTE: (i64, i64) = (2, 50);
 pub const NUKE_HOUR: (i64, i64) = (2, 500);
 pub const NUKE_HEAT: (i64, i64) = (1, 100);
+pub use tommybot_automod::heat::{SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, SLOW_USERS};
 pub use tommybot_automod::join::MIN_AGE_MS;
+
+/// Auto slowmode card: field and range.
+const SLOWMODE: [(&str, (i64, i64)); 5] = [
+    ("channel_pct", SLOW_PCT),
+    ("min_users", SLOW_USERS),
+    ("slowmode_secs", SLOW_SECS),
+    ("min_on_secs", SLOW_ON),
+    ("calm_secs", SLOW_CALM),
+];
 
 /// The range of the number at `path` (below the section, e.g. `limits.Ban.per_hour`), if it has one.
 pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
@@ -14,6 +24,7 @@ pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
         ("antinuke", ["limits", _, "per_hour"]) => Some(NUKE_HOUR),
         ("antinuke", ["limits", _, "heat"]) => Some(NUKE_HEAT),
         ("joingate", ["min_age_override_ms"]) => Some(MIN_AGE_MS),
+        ("automod", ["auto_slowmode", k]) => SLOWMODE.iter().find(|s| s.0 == *k).map(|s| s.1),
         _ => None,
     }
 }
@@ -32,6 +43,11 @@ pub fn check(section: &str, doc: &Value, old: &Value) -> Result<(), String> {
             }
         }
         "joingate" => found.push(("min_age_override_ms".into(), &doc["min_age_override_ms"])),
+        "automod" => {
+            for (k, _) in SLOWMODE {
+                found.push((format!("auto_slowmode.{k}"), &doc["auto_slowmode"][k]));
+            }
+        }
         _ => {}
     }
     for (path, v) in found {
@@ -78,6 +94,15 @@ mod tests {
         assert!(check("joingate", &age(4_999), &Value::Null).is_err());
         assert!(check("joingate", &age(8_640_000_000), &Value::Null).is_ok());
         assert!(check("joingate", &age(8_640_000_001), &Value::Null).is_err());
+        let slow = |k: &str, v: i64| json!({"auto_slowmode": {k: v}});
+        assert!(check("automod", &slow("slowmode_secs", 21_600), &Value::Null).is_ok());
+        assert!(check("automod", &slow("slowmode_secs", 21_601), &Value::Null).is_err());
+        assert!(check("automod", &slow("channel_pct", 99), &Value::Null).is_err());
+        assert!(check("automod", &json!({}), &Value::Null).is_ok());
+        assert_eq!(
+            for_path("automod", "auto_slowmode.min_users"),
+            Some((1, 50))
+        );
         assert!(check("joingate", &json!({}), &Value::Null).is_ok());
         // A value saved before the limits may stay; changing it must fit.
         let old = nuke("heat", json!(0));

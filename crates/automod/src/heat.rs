@@ -298,6 +298,140 @@ impl ChannelActivity {
     }
 }
 
+/// Auto slowmode: a channel whose pooled heat floods gets a slowmode until it is calm again.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct AutoSlowmodeCfg {
+    pub enabled: bool,
+    /// Trigger: the channel's pooled heat reaching this % of max heat.
+    pub channel_pct: u32,
+    /// Different members who added to the pool in the last 30 s.
+    pub min_users: u32,
+    pub slowmode_secs: u32,
+    pub min_on_secs: u32,
+    /// Off once the pool stayed under half the trigger this long.
+    pub calm_secs: u32,
+}
+
+impl Default for AutoSlowmodeCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel_pct: 300,
+            min_users: 4,
+            slowmode_secs: 5,
+            min_on_secs: 60,
+            calm_secs: 120,
+        }
+    }
+}
+
+pub const SLOW_PCT: (i64, i64) = (100, 5_000);
+pub const SLOW_USERS: (i64, i64) = (1, 50);
+/// Discord's maximum slowmode is 6 hours.
+pub const SLOW_SECS: (i64, i64) = (1, 21_600);
+pub const SLOW_ON: (i64, i64) = (10, 3_600);
+pub const SLOW_CALM: (i64, i64) = (10, 3_600);
+
+impl AutoSlowmodeCfg {
+    /// Every value pulled inside its range: config also arrives from the prefix panel and MCP.
+    pub fn clamped(self) -> Self {
+        let fit = |v: u32, (lo, hi): (i64, i64)| v.clamp(lo as u32, hi as u32);
+        Self {
+            channel_pct: fit(self.channel_pct, SLOW_PCT),
+            min_users: fit(self.min_users, SLOW_USERS),
+            slowmode_secs: fit(self.slowmode_secs, SLOW_SECS),
+            min_on_secs: fit(self.min_on_secs, SLOW_ON),
+            calm_secs: fit(self.calm_secs, SLOW_CALM),
+            ..self
+        }
+    }
+
+    fn trigger(&self, h: &HeatCfg) -> f64 {
+        h.max * f64::from(self.channel_pct) / 100.0
+    }
+}
+
+/// One channel's pooled heat for auto slowmode.
+#[derive(Debug, Default)]
+pub struct ChannelHeat {
+    heat: HeatState,
+    /// (ms, member) of the latest posts, newest last.
+    users: VecDeque<(i64, u64)>,
+    /// When the pool last fell (or will fall) under half the trigger.
+    calm_since: i64,
+    /// A slowmode was claimed and not released yet.
+    on: bool,
+    /// When the last one was released; the flap guard counts from here.
+    off_ms: i64,
+    /// Last failure log, so a channel the bot cannot slow logs once an hour.
+    pub warned_ms: i64,
+}
+
+impl ChannelHeat {
+    const WINDOW_MS: i64 = 30_000;
+    const KEEP: usize = 100;
+
+    /// Adds a message's heat; true once per flip, when the slowmode should start.
+    pub fn on_message(
+        &mut self,
+        now: i64,
+        user: u64,
+        b: &Breakdown,
+        cfg: &AutoSlowmodeCfg,
+        h: &HeatCfg,
+    ) -> bool {
+        self.heat.apply(b, now, h);
+        self.users.retain(|&(t, _)| now - t < Self::WINDOW_MS);
+        if self.users.len() >= Self::KEEP {
+            self.users.pop_front();
+        }
+        self.users.push_back((now, user));
+        let (trigger, value) = (cfg.trigger(h), self.heat.value);
+        if value >= trigger / 2.0 {
+            self.calm_since = now.saturating_add(fall_ms(value, trigger / 2.0, h.decay_per_sec));
+        }
+        let mut users: Vec<u64> = self.users.iter().map(|u| u.1).collect();
+        users.sort_unstable();
+        users.dedup();
+        let guard_ms = i64::from(cfg.min_on_secs + cfg.calm_secs) * 1000;
+        let start = !self.on
+            && value >= trigger
+            && users.len() >= cfg.min_users as usize
+            && (self.off_ms == 0 || now - self.off_ms >= guard_ms);
+        self.on |= start;
+        start
+    }
+
+    /// The pool has stayed under half the trigger for `calm_secs`.
+    pub fn is_calm(&self, now: i64, cfg: &AutoSlowmodeCfg, h: &HeatCfg) -> bool {
+        self.heat.decayed(now, h) < cfg.trigger(h) / 2.0
+            && now - self.calm_since >= i64::from(cfg.calm_secs) * 1000
+    }
+
+    /// Ends a claimed slowmode (turned off, or starting it failed); the flap guard starts here.
+    pub fn release(&mut self, now: i64) {
+        if self.on {
+            self.on = false;
+            self.off_ms = now;
+        }
+    }
+
+    /// Nothing worth keeping: no slowmode and no heat for 10 minutes.
+    pub fn idle(&self, now: i64) -> bool {
+        !self.on && now - self.heat.at_ms > 600_000
+    }
+}
+
+/// Ms until `v` decays under `to`.
+fn fall_ms(v: f64, to: f64, decay: f64) -> i64 {
+    match decay {
+        d if d >= 1.0 => 0,
+        d if d <= 0.0 => i64::MAX,
+        d => ((to / v).ln() / (1.0 - d).ln() * 1000.0).ceil() as i64,
+    }
+}
+
 /// A user's running heat. Decay is applied lazily when read.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HeatState {
@@ -707,5 +841,88 @@ mod tests {
         assert_eq!(on(&mut c, 1, 40, "https://x.example", 0.0, 300_000), None);
         assert_eq!(on(&mut c, 1, 41, "https://x.example", 0.0, 300_001), None);
         assert!(on(&mut c, 1, 42, "https://x.example", 0.0, 300_002).is_some());
+    }
+
+    fn hot(total: f64) -> Breakdown {
+        Breakdown {
+            parts: vec![("message", total)],
+        }
+    }
+
+    /// Index of the message that started a slowmode, if one did.
+    fn flood(c: &mut ChannelHeat, users: u64, every_ms: i64, from: i64, n: i64) -> Option<i64> {
+        let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
+        let b = heat(
+            &msg("hello there, how is everyone doing"),
+            &UserHistory::default(),
+            &h,
+        );
+        (0..n).find(|&i| c.on_message(from + i * every_ms, i as u64 % users, &b, &cfg, &h))
+    }
+
+    #[test]
+    fn one_member_spamming_never_slows_the_channel() {
+        let mut c = ChannelHeat::default();
+        let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
+        assert!((0..200).all(|i| !c.on_message(i * 50, 7, &hot(100.0), &cfg, &h)));
+    }
+
+    #[test]
+    fn four_members_flooding_start_it_once() {
+        let mut c = ChannelHeat::default();
+        // Four members, a message every 250 ms between them.
+        let first = flood(&mut c, 4, 250, 1, 40).expect("a flood starts it");
+        assert!(first >= 3, "needs four members");
+        assert_eq!(flood(&mut c, 4, 250, 20_000, 200), None, "once per flip");
+    }
+
+    #[test]
+    fn normal_chat_stays_under_the_trigger() {
+        let mut c = ChannelHeat::default();
+        // Six members, one message every two seconds, for ten minutes.
+        assert_eq!(flood(&mut c, 6, 2_000, 1, 300), None);
+    }
+
+    #[test]
+    fn calm_after_the_pool_stays_low_and_flap_guard() {
+        let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
+        let mut c = ChannelHeat::default();
+        let t = flood(&mut c, 4, 250, 1, 40).unwrap() * 250 + 1;
+        assert!(!c.is_calm(t, &cfg, &h), "still hot");
+        // From ~600 the pool needs about 18 s to fall under 150, then 120 s of calm.
+        assert!(!c.is_calm(t + 100_000, &cfg, &h));
+        assert!(c.is_calm(t + 140_000, &cfg, &h));
+        c.release(t + 140_000);
+        let back = t + 150_000;
+        assert_eq!(flood(&mut c, 4, 250, back, 400), None, "flap guard");
+        assert!(flood(&mut c, 4, 250, t + 140_000 + 180_000, 40).is_some());
+        // A fresh channel (also after a restart) is calm.
+        assert!(ChannelHeat::default().is_calm(1_700_000_000_000, &cfg, &h));
+    }
+
+    #[test]
+    fn slowmode_values_are_clamped() {
+        let c = AutoSlowmodeCfg {
+            enabled: true,
+            channel_pct: 0,
+            min_users: 0,
+            slowmode_secs: u32::MAX,
+            min_on_secs: 0,
+            calm_secs: 1_000_000,
+        }
+        .clamped();
+        assert_eq!(
+            (
+                c.enabled,
+                c.channel_pct,
+                c.min_users,
+                c.slowmode_secs,
+                c.min_on_secs,
+                c.calm_secs
+            ),
+            (true, 100, 1, 21_600, 10, 3_600)
+        );
+        let d = AutoSlowmodeCfg::default();
+        assert_eq!(d.clone().clamped().channel_pct, d.channel_pct);
     }
 }
