@@ -266,40 +266,35 @@ async fn preview(
         }
         "rollback" => {
             let v = target.and_then(|t| t.parse().ok()).unwrap_or(-1);
-            json!(diff::diff(
-                &config,
-                &crate::api::version(st, guild, v).await?
-            ))
+            // Live permits, not the copy in the last version: a rescue claim adds an Extra Owner without one.
+            let mut now = config;
+            let mut c = st.db.acquire().await?;
+            now["permits"] = store::read_permits(&mut c, guild).await?;
+            json!(diff::diff(&now, &crate::api::version(st, guild, v).await?))
+        }
+        // What gets posted is the stored embed, not the request, so the DM shows that.
+        "embed_post" => {
+            let id: i64 = target.and_then(|t| t.parse().ok()).unwrap_or(-1);
+            let (name, embed, channel): (String, Value, Option<i64>) = sqlx::query_as(
+                "select name, embed, channel_id from embeds where id = $1 and guild_id = $2",
+            )
+            .bind(id)
+            .bind(guild)
+            .fetch_optional(&st.db)
+            .await?
+            .ok_or_else(|| bad("no embed with this id in this server"))?;
+            json!({"name": name, "channel": channel.map(|c| c.to_string()), "embed": embed, "repost": body["repost"]})
         }
         _ => body.clone(),
     })
 }
 
-/// At most `max` characters, cut on a char boundary.
-fn cut(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_string(),
-    }
-}
+/// The most a DM shows of a change. Discord allows 2000 characters per message, and the rest is the header.
+const DM_MAX: usize = 1500;
 
-/// Strips what would let a name or value break out of its markup in the DM.
-fn plain(s: &str) -> String {
-    s.chars()
-        .filter(|c| !matches!(c, '*' | '`' | '_' | '~' | '|' | '<' | '@' | '\n'))
-        .collect()
-}
-
-fn dm_text(
-    client: &str,
-    id: i64,
-    guild: i64,
-    action: &str,
-    target: Option<&str>,
-    changes: &Value,
-    code: &str,
-) -> String {
-    let lines = match changes.as_array() {
+/// The change as the DM shows it: one line per changed path, or the request itself.
+fn lines(changes: &Value) -> String {
+    match changes.as_array() {
         Some(a) if a.is_empty() => "(no change)".to_string(),
         Some(a) => a
             .iter()
@@ -314,7 +309,30 @@ fn dm_text(
             .collect::<Vec<_>>()
             .join("\n"),
         None => changes.to_string(),
-    };
+    }
+}
+
+fn preview_hash(changes: &Value) -> Vec<u8> {
+    Sha256::digest(changes.to_string()).to_vec()
+}
+
+/// Strips what would let a name or value break out of its markup in the DM.
+fn plain(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '*' | '`' | '_' | '~' | '|' | '<' | '@' | '\n'))
+        .collect()
+}
+
+/// `lines` is never cut: the owner approves only what the DM shows, so `propose` refuses a longer change.
+fn dm_text(
+    client: &str,
+    id: i64,
+    guild: i64,
+    action: &str,
+    target: Option<&str>,
+    lines: &str,
+    code: &str,
+) -> String {
     let what = match target {
         Some(t) => format!("{action} {t}"),
         None => action.to_string(),
@@ -323,7 +341,7 @@ fn dm_text(
     format!(
         "**Claude wants to make a change** (#{id}, token {}): `{what}` in server {guild}.\n{fence}\n{}\n{fence}\nCode: **{code}** (valid {TTL_MINUTES} min). Give it to Claude only if this is what you want. If you did not ask for this, revoke the token on the dashboard's MCP tokens page.",
         plain(client),
-        cut(&lines, 1500).replace(&fence, "'''")
+        lines.replace(&fence, "'''")
     )
 }
 
@@ -354,11 +372,18 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
         )));
     }
     let changes = preview(&st, guild, &p.action, target, &body).await?;
+    let shown = lines(&changes);
+    let n = shown.chars().count();
+    if n > DM_MAX {
+        return Err(bad(format!(
+            "this change is {n} characters as a DM, more than the {DM_MAX} the owner can review in one: split it into smaller proposals"
+        )));
+    }
     let owner: i64 = st.discord.bot_owner().await?.parse()?;
     let code = format!("{:06}", rand::random_range(0..1_000_000));
     let (id, expires_at): (i64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-        "insert into mcp_writes (token_id, client, guild_id, action, target, body, code_hash, expires_at)
-         values ($1, $2, $3, $4, $5, $6, '', now() + make_interval(mins => $7)) returning id, expires_at",
+        "insert into mcp_writes (token_id, client, guild_id, action, target, body, code_hash, preview_hash, expires_at)
+         values ($1, $2, $3, $4, $5, $6, '', $8, now() + make_interval(mins => $7)) returning id, expires_at",
     )
     .bind(client.token_id)
     .bind(&client.name)
@@ -367,6 +392,7 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
     .bind(target)
     .bind(&body)
     .bind(TTL_MINUTES)
+    .bind(preview_hash(&changes))
     .fetch_one(&st.db)
     .await?;
     sqlx::query("update mcp_writes set code_hash = $2 where id = $1")
@@ -374,7 +400,7 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
         .bind(code_hash(id, &code))
         .execute(&st.db)
         .await?;
-    let text = dm_text(&client.name, id, guild, &p.action, target, &changes, &code);
+    let text = dm_text(&client.name, id, guild, &p.action, target, &shown, &code);
     if let Err(e) = st.discord.dm(owner, &text).await {
         tracing::warn!(id, ?e, "mcp write: code DM failed");
         sqlx::query("update mcp_writes set status = 'dm_failed', body = null where id = $1")
@@ -406,22 +432,25 @@ struct Confirm {
     totp: String,
 }
 
+/// guild, action, target, body and the hash of what the DM showed.
+type Claimed = (i64, String, Option<String>, Value, Option<Vec<u8>>);
+
 async fn confirm(State(st): State<AppState>, h: HeaderMap, Json(c): Json<Confirm>) -> Res {
     let client = service(&st, &h).await?;
     let owner: i64 = st.discord.bot_owner().await?.parse()?;
     // The DM code comes first and claims the row (single use: two confirms cannot both run it). Only then
     // is a TOTP code checked, so a token alone cannot burn the owner's 2FA attempts and lock them out.
-    let row: Option<(i64, String, Option<String>, Value)> = sqlx::query_as(
+    let row: Option<Claimed> = sqlx::query_as(
         "update mcp_writes set status = 'running', decided_at = now()
          where id = $1 and token_id = $3 and status = 'pending' and expires_at > now() and code_hash = $2
-         returning guild_id, action, target, body",
+         returning guild_id, action, target, body, preview_hash",
     )
     .bind(c.id)
     .bind(code_hash(c.id, c.code.trim()))
     .bind(client.token_id)
     .fetch_optional(&st.db)
     .await?;
-    let Some((guild, action, target, body)) = row else {
+    let Some((guild, action, target, body, shown)) = row else {
         let left: Option<i32> = sqlx::query_scalar(
             "update mcp_writes set attempts = attempts + 1,
                 status = case when attempts + 1 >= $2 then 'refused' else status end,
@@ -455,6 +484,15 @@ async fn confirm(State(st): State<AppState>, h: HeaderMap, Json(c): Json<Confirm
             reopen().await?;
             return Err(e);
         }
+    }
+    // Only what the owner reviewed may run: the stored embed, a live permit or the config may have moved since.
+    let now = preview(&st, guild, &action, target.as_deref(), &body).await;
+    if shown.is_none_or(|h| now.as_ref().map(preview_hash).ok() != Some(h)) {
+        sqlx::query("update mcp_writes set status = 'stale', body = null where id = $1")
+            .bind(c.id)
+            .execute(&st.db)
+            .await?;
+        return Err(bad("the server changed since this was proposed, so it is not what the owner reviewed: propose it again"));
     }
     let (method, path) = route(&action, guild, target.as_deref())?;
     let (status, out) = match run(&st, owner, stepped_up, method, &path, &body).await {
@@ -585,21 +623,28 @@ mod tests {
     }
 
     #[test]
-    fn dm_is_short_and_keeps_its_markup() {
-        let long = json!([{"path": "a", "old": "x".repeat(3000), "new": "```"}]);
+    fn dm_fits_discord_and_keeps_its_markup() {
+        let full = json!([{"path": "a", "old": "x".repeat(DM_MAX - 20), "new": "```"}]);
+        let shown = lines(&full);
+        assert!(shown.chars().count() <= DM_MAX);
         let t = dm_text(
-            "Mac**`@everyone",
-            3,
-            9,
+            &"Mac**`@everyone".repeat(5),
+            i64::MAX,
+            i64::MAX,
             "config_section",
-            Some("automod"),
-            &long,
+            Some("discord_automod"),
+            &shown,
             "123456",
         );
-        assert!(t.chars().count() < 1900 && t.contains("**123456**"));
+        assert!(t.chars().count() <= 2000 && t.contains("**123456**"));
+        assert!(t.contains(&"x".repeat(DM_MAX - 20)), "never cut");
         assert_eq!(t.matches("```").count(), 2);
-        assert!(t.contains("token Maceveryone)"));
-        assert_eq!(cut("æøå", 2), "æø…");
+        assert!(t.contains("token Maceveryone"));
+        assert_eq!(lines(&json!([])), "(no change)");
+        assert_ne!(
+            preview_hash(&json!({"embed": {"title": "a"}})),
+            preview_hash(&json!({"embed": {"title": "b"}}))
+        );
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres. Discord is a local mock.
@@ -827,6 +872,46 @@ mod tests {
         .await;
         assert_eq!((code, r["ok"].as_bool()), (200, Some(true)), "{r}");
 
+        // A change too long for one DM is refused, never cut: the owner approves only what the DM shows.
+        let before = dms.lock().unwrap().len();
+        let huge = json!({"guild_id": g.to_string(), "action": "note_add",
+            "body": {"user_id": "1", "text": "x".repeat(DM_MAX + 1)}});
+        let (code, r) = call("/api/mcp/propose", &tok, huge).await;
+        assert_eq!(code, 400);
+        assert!(r["error"].as_str().unwrap().contains("split it"), "{r}");
+        assert_eq!(dms.lock().unwrap().len(), before, "no DM for it");
+
+        // embed_post shows the stored embed, and runs only if it is still what the DM showed.
+        let eid: i64 = sqlx::query_scalar(
+            "insert into embeds (guild_id, name, embed, updated_by) values ($1, 'rules', $2, 1) returning id",
+        )
+        .bind(g)
+        .bind(json!({"title": "Be nice"}))
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let post = json!({"guild_id": g.to_string(), "action": "embed_post", "target": eid.to_string(), "body": {}});
+        let (code, pr) = call("/api/mcp/propose", &tok, post).await;
+        assert_eq!(code, 200, "{pr}");
+        assert!(dms.lock().unwrap().last().unwrap().contains("Be nice"));
+        sqlx::query("update embeds set embed = $2 where id = $1")
+            .bind(eid)
+            .bind(json!({"title": "@everyone free nitro"}))
+            .execute(&db)
+            .await
+            .unwrap();
+        let (code, r) = call(
+            "/api/mcp/confirm",
+            &tok,
+            json!({"id": pr["id"], "code": last_code()}),
+        )
+        .await;
+        assert_eq!(code, 400);
+        assert!(
+            r["error"].as_str().unwrap().contains("propose it again"),
+            "{r}"
+        );
+
         // Revoking closes the token and what it still has waiting.
         let id = call("/api/mcp/propose", &tok, an).await.1["id"]
             .as_i64()
@@ -877,8 +962,11 @@ mod tests {
         .await
         .unwrap();
         let want = |s: &str| (s.to_string(), "Mac".to_string(), true);
-        assert_eq!(rows, [want("done"), want("done"), want("revoked")]);
-        for t in ["mcp_writes", "guild_config"] {
+        assert_eq!(
+            rows,
+            [want("done"), want("done"), want("stale"), want("revoked")]
+        );
+        for t in ["mcp_writes", "guild_config", "embeds"] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "delete from {t} where guild_id = $1"
             )))
