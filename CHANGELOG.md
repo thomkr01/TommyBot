@@ -18,6 +18,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - The dashboard no longer crashes ("reactive value that has already been disposed") when you leave a page while it is still loading or saving, for example during an Update. (#143)
 
 ### Added
+- Ban Sync (off by default): a ban in one of your servers is copied to your other servers with the same Discord owner, as an alert with a Ban here button or as a ban. Only the Discord owner can change it, with 2FA, and an import never turns it on. The dashboard page has Settings (with the servers in the group, Import existing bans and Send the rest) and a Log tab; the MCP server has a `ban_sync` read tool.
 - View in Backups opens a page for that backup: the channels as a tree in Discord order (click a channel to see its permissions, Compact hides the icons), the server name, verification level and explicit media filter, the webhooks, and the roles in their colours (click one to see its permissions). Load and Delete are on the same page. (#164)
 - The dashboard shows only what your permits allow: pages without access are hidden, read-only pages are greyed out with a note, and the Commands page greys out commands you cannot use. `COMMAND -h` no longer explains commands you cannot use. (#146)
 - An info icon on 21 hard settings opens a plain-language explanation on hover, focus or tap. (#160)
