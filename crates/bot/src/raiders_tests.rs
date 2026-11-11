@@ -543,7 +543,7 @@ async fn expiry_and_removal_lift_only_what_the_list_did() {
     let z = t.u(4);
     t.list(z, "removed", "raid", None).await;
     sqlx::query(
-        "INSERT INTO raider_actions (guild_id, user_id, action, case_no) VALUES ($1, $2, 'ban', 1)",
+        "INSERT INTO raider_actions (guild_id, user_id, action, case_no, unbanning) VALUES ($1, $2, 'ban', 1, true)",
     )
     .bind(t.g(0).get() as i64)
     .bind(z.get() as i64)
@@ -557,6 +557,24 @@ async fn expiry_and_removal_lift_only_what_the_list_did() {
         .count("SELECT count(*) FROM cases WHERE guild_id = $1 AND kind = 'unban'")
         .await;
     assert_eq!((unbans, t.acted(0, z).await), (2, None));
+    // Staff unbanned by a path the list never heard of: no unban case in the bot's name.
+    let w = t.u(5);
+    t.list(w, "removed", "raid", None).await;
+    sqlx::query(
+        "INSERT INTO raider_actions (guild_id, user_id, action, case_no) VALUES ($1, $2, 'ban', 1)",
+    )
+    .bind(t.g(0).get() as i64)
+    .bind(w.get() as i64)
+    .execute(&t.app.pool)
+    .await
+    .unwrap();
+    lift_job(&t.app, t.g(0), &json!({"user": w.get().to_string()}))
+        .await
+        .unwrap();
+    let unbans = t
+        .count("SELECT count(*) FROM cases WHERE guild_id = $1 AND kind = 'unban'")
+        .await;
+    assert_eq!((unbans, t.acted(0, w).await), (2, None));
     t.forget().await;
 }
 

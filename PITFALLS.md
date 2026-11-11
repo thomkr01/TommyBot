@@ -110,6 +110,14 @@ Push guarded itself with a static `HashSet` of guilds, so a second dashboard pro
 The Raider List lift held `SELECT … FOR UPDATE` on its action row while it unbanned, so a slow Discord held the lock for the length of the HTTP timeout, and a second run waited instead of finding the work done. Root cause: the lock was used to make the case and the notice happen once, which a claim does without waiting.
 *Avoid:* read without a lock, make the Discord call (it must be safe to repeat: the unban checks the ban is still the list's), then claim with `DELETE … ` and act on `rows_affected() == 1`; only the claimer writes the case and the log. A lift that gives up after its last try posts "Raider List removal failed" to the mod log (`raiders::lift_gave_up`). Searched for the same pattern: `appeals` decide locks one appeal row across its unban (a person's click, left as is), and `backup::track_created` locks the newest backup across one Discord GET for its read-modify-write (left as is: it needs the lock and the GET is short).
 
+**Advisory locks on raw ids share one key space.** (Raider List review, 11-11)
+`report` locked the reporting owner's user id and then `add` locked the reported user's id, both as plain `pg_advisory_xact_lock(id)`. Owner A reporting B while owner B reports A took the same two keys in opposite order and Postgres killed one as a deadlock.
+*Avoid:* give each kind of lock its own key, `pg_advisory_xact_lock(hashtextextended('<kind>:' || id, 0))` (as `raider_user:`, `raider_owner:`, `channel_drafts:` do). Searched: the other raw locks (`cases::create`, ticket numbers, config saves) all take one guild id per transaction, so they cannot cross; left as is.
+
+**"It is gone, so an earlier try of mine removed it" needs proof.** (Raider List review, 11-11)
+The lift took a missing ban to mean an earlier try had unbanned, and wrote an unban case in the bot's name even when staff had unbanned by a path the list never saw.
+*Avoid:* record the intent (`raider_actions.unbanning = true`) just before the Discord call, and only a retry that finds that mark writes the missed case.
+
 ## 3. Automod
 
 **Three throwaway servers are three owners.** (Raider List review, 11-11)

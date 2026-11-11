@@ -62,6 +62,8 @@ CREATE TABLE raider_actions (
     user_id BIGINT NOT NULL,
     action TEXT NOT NULL CHECK (action IN ('alert', 'quarantine', 'kick', 'ban')),
     case_no INT,
+    -- Set just before the lift asks Discord to unban, so a retry that finds no ban knows it was ours.
+    unbanning BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (guild_id, user_id)
 );

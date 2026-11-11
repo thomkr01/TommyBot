@@ -264,11 +264,20 @@ async fn auto_list(app: &App, user: Id<UserMarker>) -> Result<()> {
     .bind(RAIDER_MIN_DAYS)
     .fetch_one(&app.pool)
     .await?;
-    if owners < RAIDER_AUTO_OWNERS || app.http.user(user).await?.model().await?.bot {
+    if owners < RAIDER_AUTO_OWNERS {
         return Ok(());
     }
+    // A deleted account (404) is never listed; any other error retries.
+    match app.http.user(user).await {
+        Err(e) if http_err::gone(&e) => return Ok(()),
+        r => {
+            if r?.model().await?.bot {
+                return Ok(());
+            }
+        }
+    }
     let mut tx = app.pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('raider_user:' || $1, 0))")
         .bind(u)
         .execute(&mut *tx)
         .await?;
@@ -793,14 +802,14 @@ fn turned_on(newest_first: &[bool]) -> bool {
 pub async fn lift_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(need(p, "user")?);
     let (g, u) = (gid.get() as i64, user.get() as i64);
-    let row: Option<(String, Option<i32>)> = sqlx::query_as(
-        "SELECT action, case_no FROM raider_actions WHERE guild_id = $1 AND user_id = $2",
+    let row: Option<(String, bool)> = sqlx::query_as(
+        "SELECT action, unbanning FROM raider_actions WHERE guild_id = $1 AND user_id = $2",
     )
     .bind(g)
     .bind(u)
     .fetch_optional(&app.pool)
     .await?;
-    let Some((action, case_no)) = row else {
+    let Some((action, unbanning)) = row else {
         return Ok(());
     };
     let removed: bool = sqlx::query_scalar(
@@ -816,7 +825,7 @@ pub async fn lift_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> 
     // deleting it afterwards, so only one run writes the case and the notice.
     let lift = app.cfg(gid.get()).await?.raider_list.lift_on_removal;
     let (result, unbanned) = match action.as_str() {
-        "ban" if lift => unban(app, gid, user, case_no.is_some()).await?,
+        "ban" if lift => unban(app, gid, user, unbanning).await?,
         "quarantine" if lift => {
             // Only a quarantine made since the list acted is the list's to release.
             let ours: bool = sqlx::query_scalar(
@@ -889,17 +898,17 @@ pub(crate) fn lift_log(user: u64, result: &str) -> Log {
         .text("The bot owner took this account off the Raider List.")
 }
 
-/// Unbans when the ban is still the one the list made; true when it unbanned. `banned`: the
-/// list's ban worked (its row has a case), so a missing ban means an earlier try of this lift
-/// unbanned and stopped before its case, which this try then writes.
+/// Unbans when the ban is still the one the list made; true when it unbanned. `unbanning`: an
+/// earlier try of this lift asked Discord to unban, so a missing ban is that try's work and this
+/// try writes the case it did not get to.
 async fn unban(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
-    banned: bool,
+    unbanning: bool,
 ) -> Result<(&'static str, bool)> {
     let Some(ban) = http_err::ban(&app.http, gid, user).await? else {
-        return Ok(if banned {
+        return Ok(if unbanning {
             ("Unbanned (by an earlier try of this removal).", true)
         } else {
             ("Not banned any more, nothing to undo.", false)
@@ -908,6 +917,11 @@ async fn unban(
     if !ban.reason.as_deref().is_some_and(|r| r.starts_with(PREFIX)) {
         return Ok(("Kept: the ban was made again by hand.", false));
     }
+    sqlx::query("UPDATE raider_actions SET unbanning = true WHERE guild_id = $1 AND user_id = $2")
+        .bind(gid.get() as i64)
+        .bind(user.get() as i64)
+        .execute(&app.pool)
+        .await?;
     let why = format!("{PREFIX} removed from the list");
     let audit = commands::audit_reason(Some(&why), app.me);
     match app.http.delete_ban(gid, user).reason(&audit).await {

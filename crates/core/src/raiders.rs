@@ -73,7 +73,7 @@ pub struct Evidence<'a> {
 pub async fn add(tx: &mut PgConnection, e: &Evidence<'_>) -> Result<bool> {
     // One user's evidence is written one at a time, so two owners' evidence in parallel both see
     // each other in the owner count.
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('raider_user:' || $1, 0))")
         .bind(e.user)
         .execute(&mut *tx)
         .await?;
@@ -173,7 +173,9 @@ pub async fn report(pool: &PgPool, r: &Report<'_>) -> Result<Result<(), String>>
     }
     let (no, kind) = case.unwrap_or_default();
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    // Its own key space: a raw id would share locks with the user lock in `add`, so two owners
+    // reporting each other at once would deadlock.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('raider_owner:' || $1, 0))")
         .bind(r.owner)
         .execute(&mut *tx)
         .await?;
