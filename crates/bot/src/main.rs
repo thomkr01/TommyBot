@@ -31,6 +31,7 @@ mod scheduler;
 mod settings;
 mod setup;
 mod slash;
+mod slowmode;
 mod targets;
 mod tickets;
 mod timeout_roles;
@@ -94,6 +95,9 @@ async fn main() -> Result<()> {
 
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
+    }
+    if let Err(e) = slowmode::restore(&app).await {
+        tracing::warn!(?e, "loading the auto slowmode channels failed");
     }
     tokio::spawn({
         let app = app.clone();

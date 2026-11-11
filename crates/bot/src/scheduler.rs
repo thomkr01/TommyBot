@@ -136,12 +136,13 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             crate::antinuke::revert_and_report(app, gid, actor, why, since).await?
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
+        "slowmode_off" => crate::slowmode::off(app, gid, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())
 }
 
-const ONE_TARGET: [&str; 3] = ["unban", "timeout_renew", "delete_message"];
+const ONE_TARGET: [&str; 4] = ["unban", "timeout_renew", "delete_message", "slowmode_off"];
 
 /// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
 async fn round(app: &App, heavy: bool) {
