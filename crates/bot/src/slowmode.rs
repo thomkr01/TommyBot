@@ -190,10 +190,11 @@ async fn try_start(
         "<#{ch}> is not a channel of this server"
     );
     let (prior, set) = (c.rate_limit_per_user.unwrap_or(0), cfg.slowmode_secs as u16);
+    let off_at = now_secs() + i64::from(cfg.min_on_secs);
     if !raises(prior, set) {
+        requeue_stuck(app, gid.get(), ch.get(), off_at).await?;
         return Ok(Started::Nothing);
     }
-    let off_at = now_secs() + i64::from(cfg.min_on_secs);
     if !claim(app, gid.get(), ch.get(), prior, set, off_at).await? {
         return Ok(Started::Owned);
     }
@@ -264,6 +265,29 @@ async fn claim(app: &App, guild: u64, ch: u64, prior: u16, set: u16, off_at: i64
     tx.commit().await?;
     app.slow_active.lock().unwrap().insert(ch);
     Ok(true)
+}
+
+/// A row whose off job gave up while its slowmode is still on would keep that slowmode for good:
+/// [`claim`] never runs for it, because the channel already looks slow enough. It gets a new off job.
+async fn requeue_stuck(app: &App, guild: u64, ch: u64, off_at: i64) -> Result<()> {
+    let mut tx = app.pool.begin().await?;
+    let stuck: Option<i32> = sqlx::query_scalar(
+        "SELECT set_secs FROM auto_slowmode WHERE channel_id = $1 AND guild_id = $2
+           AND NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE kind = $3 AND payload->>'channel' = $4)
+         FOR UPDATE",
+    )
+    .bind(ch as i64)
+    .bind(guild as i64)
+    .bind(KIND)
+    .bind(ch.to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(set) = stuck {
+        let payload = json!({"channel": ch, "set_secs": set});
+        jobs::enqueue(&mut *tx, guild as i64, KIND, payload, off_at).await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Pending -> on, unless staff changed the slowmode meanwhile. None: the row is gone;
@@ -525,6 +549,16 @@ mod tests {
         assert_eq!((rows_of(a).await, jobs_of(a).await), (1, 1));
         assert!(app.slow_active.lock().unwrap().contains(&a));
         assert_eq!(mark_on(&app, a).await.unwrap(), Some(None));
+        // A stuck row (its off job gave up) gets one new off job, and only one.
+        sqlx::query("DELETE FROM scheduled_jobs WHERE kind = $1 AND payload->>'channel' = $2")
+            .bind(KIND)
+            .bind(a.to_string())
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        requeue_stuck(&app, g, a, at).await.unwrap();
+        requeue_stuck(&app, g, a, at).await.unwrap();
+        assert_eq!(jobs_of(a).await, 1);
         // Rolled back after a failed start, or ended by staff: row and job are gone.
         drop_rows(&app, &[a]).await.unwrap();
         assert_eq!((rows_of(a).await, jobs_of(a).await), (0, 0));

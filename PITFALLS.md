@@ -93,7 +93,7 @@ Events run in parallel tasks and Discord sends a channel update for every edit (
 
 **A claim row without its job blocked the channel for good.** (auto slowmode review, 11-11)
 An `auto_slowmode` row is claimed with `ON CONFLICT DO NOTHING`. When its `slowmode_off` job gave up after its retries (Discord down, a missing permission retried until the last attempt), the row stayed and every later start found "already owned". Also: a failed start deleted row and job even when the PATCH might have landed, the not-calm re-queue made a job for a row staff had already removed, and a 403 was retried until the job gave up.
-*Avoid:* a claim takes over a row with no pending job (`DELETE … WHERE NOT EXISTS (job)` in the claim's transaction, so a parallel claim conflicts instead of doubling it). Treat 50001/50013 as final (`http_err::forbidden_any`): end the claim and log it. Re-queue only while the row exists, under `FOR UPDATE`. Scope a job's rows to its own guild (`AND guild_id = $2`).
+*Avoid:* a claim takes over a row with no pending job (`DELETE … WHERE NOT EXISTS (job)` in the claim's transaction, so a parallel claim conflicts instead of doubling it). Treat 50001/50013 as final (`http_err::forbidden_any`): end the claim and log it. Re-queue only while the row exists, under `FOR UPDATE`. Scope a job's rows to its own guild (`AND guild_id = $2`). A start that stops early because the channel already shows the auto value also gives a stuck row a new off job (`requeue_stuck`), since the takeover in the claim never runs then.
 
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
