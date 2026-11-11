@@ -71,6 +71,26 @@ A restart between a temp ban and its unban job made the ban permanent. Same for 
 `main.rs` spawns a task per event, so messages already in flight after a trigger each added a strike. One burst could reach the strike cap and send several DMs, cases and logs.
 *Avoid:* claim the punishment (`HeatState::claim`, one per 10 s). Anything that must happen once needs an atomic claim: `DELETE … RETURNING`, `WHERE status='open'`, `SKIP LOCKED`.
 
+**Anti-nuke tripped once per event, not once per nuke.** (race review, 11-11)
+Past the limit every audit entry returned `Quarantine` again, and each one is its own task, so a 20-channel nuke started about 16 quarantine-and-revert runs at once. They read the same unreverted rows, so the backup recreated the same deleted channel several times (the copy has a new id, so the next run still saw the original as missing), and opened as many cases and owner alerts.
+*Avoid:* one run per (guild, actor) (`App::nuke_runs`). A later event only logs its row and asks the running run to revert once more; the run frees its claim in the same step that finds nothing new, so no action falls between two runs. The `nuke_revert` guard job is due after 120 s, and a run under rate limits can take longer: the scheduler skips a guard whose run is still alive, and the job path takes the same claim. An actor an earlier run already quarantined only gets the revert, with no second case or alert. `panic::start` undoes its claim and its category exemptions when its `panic_end` job cannot be saved; otherwise mod commands stay locked with nothing to end them. The same applies to panic mode: `panic::start` checks and inserts `panic_runs` in one step, or a second start saves the already exempted overwrites as the old ones.
+
+**A run marked rows it never read.** (race review, 11-11)
+`revert_actor` read the actor's rows, worked for seconds, then marked every row since `since` as reverted. What the nuker did meanwhile was marked too and never undone, not even by `/revert`.
+*Avoid:* mark only the ids you read (`WHERE id = ANY($1)`). Never close work with a range condition when rows can arrive while it runs.
+
+**Two locks at once saved a locked server as the snapshot.** (race review, 11-11)
+`lock_for` checked for an active lock, then planned with several HTTP calls, then saved with `ON CONFLICT DO UPDATE`. Mention-spam lock calls it for every message past the limit, so a second call could plan after the first began applying, save locked permissions and overwrite the first snapshot. Unlock then restored the locked state.
+*Avoid:* lock and unlock of a guild run one at a time (`lockdown::exclusive`). An in-process lock is enough here only because the dashboard queues jobs and never writes `lock_snapshots`; a second writer process needs an advisory lock (see the Channel Setup entry below).
+
+**A gateway event and its audit entry run in their own tasks.** (race review, 11-11)
+The ticket-category exemption read the category that the `ChannelCreate` task stores. When the audit task ran first, the lookup missed and a ticket bot's channels counted towards its limit.
+*Avoid:* do not rely on the order of two events. `note_parent` stores every channel (also "no category"), so a miss means "not seen yet", and `parent_of` waits up to 0.5 s for it.
+
+**A join quarantine counted as a nuke target.** (race review follow-up, 11-11)
+Verification's "quarantine on join" writes a quarantine row with no saved roles. The quarantine hold treated it like an anti-nuke quarantine, so an autorole bot giving a joiner its role was quarantined and lost its role permissions on every join.
+*Avoid:* a row with empty `saved_roles` is a join quarantine. The hold undoes the role change but punishes nobody. Code that reads `quarantines` must tell the two kinds apart.
+
 **Long work under a global lock.** (#100)
 Similarity compared whole 4000-character messages (quadratic) while holding the global heat lock.
 *Avoid:* bound the input (first 500 characters) and keep work under shared locks short.
@@ -82,6 +102,7 @@ The config listener died after one DB hiccup, so dashboard changes never applied
 **A failed log must not stop protection.** (#100, #133)
 The timeout DM went out before the timeout worked, and a failed anti-nuke report stopped panic mode.
 *Avoid:* fixed order Contain → Revert → Report → Panic. Logs and DMs are side effects; their failure never skips the next protective step.
+The race review (11-11) found the same in Join Raid (a failed raid log or report job skipped the lockdown and every punishment, and one raider who had already left stopped the punish loop), in automod (the mention-lock log and lock came before the strike, the timeout log before the strike-cap lock) and in `warn_actions`. A loop that punishes several members logs a failure and goes on with the next.
 
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
@@ -204,5 +225,5 @@ Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` on
 - **The live script shares the bot's token** and its rate limits. Cache channel and role lookups and wait longer instead of polling hard (#142).
 - **Make scenarios clean up after themselves** so they can run again. The old nuke scenario kicked the attacker bot every run (#142).
 - **Cloud env vars are read at session start.** A variable added during a session needs a new session.
-- **Two DB tests used the same guild id.** (MCP writes, PR 4) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
+- **Two DB tests used the same guild id.** (MCP writes, PR 4; again in the race review, where `6_100_000_000` was already used twice in the bot crate) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
 - **`tests/e2e/run.sh` needs root Postgres, trunk and Playwright**; the gateway is not covered by the Discord mock.
