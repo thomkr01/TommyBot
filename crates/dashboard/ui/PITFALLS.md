@@ -145,6 +145,12 @@ The info card (`.tip .bubble`) is only `opacity:0` until hovered, so it still ta
 
 **Check:** on a 390 px viewport `document.documentElement.scrollWidth` equals the viewport width on every page.
 
+## 14. An effect on a new input runs before its `prop:value` is set
+
+Channel Setup's rename box focused and selected its text from an `Effect` on the input's `NodeRef`. The effect ran before `prop:value` was applied, so `select()` selected an empty box, the name was filled in afterwards, and typing added to the old name instead of replacing it. A `select()` in `on:focus` had the same problem.
+
+**Rule:** an effect that needs a new input's value sets it first (`i.set_value(..)`, then `focus()` and `select()`). No other page selected text on open.
+
 ## Where it was fixed (#143)
 
 - `form.rs`: the `-` button on number fields (`>=` in the attribute); the settings card's config/schema load; the preview flash frame callback; list import.

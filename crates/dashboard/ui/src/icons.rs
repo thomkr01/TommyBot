@@ -32,7 +32,7 @@ icons!(
     "globe", "sliders", "discord", "tag", "shield", "hand", "member_join", "glasses", "rocket",
     "qr_code", "moderator", "case", "note", "report", "ticket", "target", "settings", "restore",
     "history", "palette", "rescue_key", "chevron_right", "chat_shield", "announcement", "age_18",
-    "word_censor"
+    "word_censor", "trash", "category", "channel_voice", "channel_stage", "forum"
 );
 
 /// Every copy gets its own gradient and mask ids: with shared ids every copy paints with the
