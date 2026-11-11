@@ -59,7 +59,7 @@ async fn discord_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
     })
     .collect::<Vec<_>>();
     let roles = list(st.discord.call(Method::GET, &format!("/guilds/{guild}/roles"), None).await?).into_iter()
-        .map(|r| json!({"id": r["id"], "name": r["name"], "managed": r["managed"], "position": r["position"], "permissions": r["permissions"]}))
+        .map(|r| json!({"id": r["id"], "name": r["name"], "managed": r["managed"], "position": r["position"], "permissions": r["permissions"], "color": r["color"]}))
         .collect::<Vec<_>>();
     let info = st
         .discord

@@ -398,6 +398,20 @@ pub fn unstaffed(nodes: &[Node], live: &[ChannelImg], ctx: &Ctx) -> HashSet<Stri
         .collect()
 }
 
+/// Positions as the index inside the parent, the order the UI edits. Discord's own positions have
+/// gaps and ties; text-like channels sort above voice ones in a category.
+pub fn normalized(mut live: Vec<ChannelImg>) -> Vec<ChannelImg> {
+    let voice = |c: &ChannelImg| matches!(c.kind, 2 | 13);
+    live.sort_by_key(|c| (c.parent, c.kind == CATEGORY, voice(c), c.position, c.id));
+    let mut at: HashMap<(Option<u64>, bool), i64> = HashMap::new();
+    for c in &mut live {
+        let i = at.entry((c.parent, c.kind == CATEGORY)).or_default();
+        c.position = *i;
+        *i += 1;
+    }
+    live
+}
+
 /// The draft applied to the live channels. Category changes reach the channels synced with the
 /// category; a channel with its own overwrites (an exception) keeps them.
 pub fn desired(live: &[ChannelImg], draft: &Draft, ctx: &Ctx) -> Vec<Node> {
@@ -700,9 +714,16 @@ pub fn plan(live: &[ChannelImg], nodes: &[Node]) -> Vec<Step> {
             });
         }
     }
-    let moves: Vec<Move> = kept
+    // Positions are indexes inside a parent, so every sibling of a moved channel is sent too.
+    let group = |n: &Node| (n.parent.clone(), n.kind == CATEGORY);
+    let touched: HashSet<_> = kept
         .iter()
         .filter(|(n, _)| n.moved)
+        .map(|(n, _)| group(n))
+        .collect();
+    let moves: Vec<Move> = kept
+        .iter()
+        .filter(|(n, _)| n.moved || touched.contains(&group(n)))
         .map(|(n, c)| Move {
             id: c.id,
             position: n.position,
@@ -795,7 +816,7 @@ async fn world(st: &AppState, guild: i64) -> Result<World, ApiError> {
             setup: l.setup,
             bot_pos: l.bot_pos,
         },
-        channels: l.image.channels,
+        channels: normalized(l.image.channels),
         raw: (l.roles, l.channels),
     })
 }
@@ -1373,6 +1394,35 @@ mod tests {
         let n = desired(&live, &draft(json!({"14": {"strip": ["5"]}})), &ctx);
         assert!(issues(&n, &ctx, &json!({})).is_empty());
         assert_eq!(node(&n, "14").img.overwrites, vec![ow(5, VIEW, 0)]);
+    }
+
+    #[test]
+    fn a_swap_sends_index_positions_for_the_whole_category() {
+        let ctx = ctx();
+        let mut raw = live();
+        raw[1].position = 40; // Discord positions have gaps
+        raw[2].position = 41;
+        let live = normalized(raw);
+        let pos = |id: u64| live.iter().find(|c| c.id == id).unwrap().position;
+        assert_eq!(
+            (pos(11), pos(12), pos(10), pos(20), pos(13)),
+            (0, 1, 0, 1, 0)
+        );
+        let n = desired(
+            &live,
+            &draft(json!({"12": {"position": 0}, "11": {"position": 1}})),
+            &ctx,
+        );
+        let Some(Step::Positions(m)) = plan(&live, &n)
+            .into_iter()
+            .find(|s| matches!(s, Step::Positions(_)))
+        else {
+            panic!("no positions step");
+        };
+        let mut got: Vec<_> = m.iter().map(|m| (m.id, m.position)).collect();
+        got.sort();
+        assert_eq!(got, [(11, 1), (12, 0)]);
+        assert!(plan(&live, &desired(&live, &Draft::default(), &ctx)).is_empty());
     }
 
     #[test]
