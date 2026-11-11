@@ -238,29 +238,29 @@ pub fn Ring(
     view! { <div class="ring" class:small=small style=move || format!("--p:{};--c:{}", pct.get(), c())><b>{move || format!("{}%", pct.get())}</b></div> }
 }
 
-/// (section, title, description, has a master switch, switch default when the key is missing).
-const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
-    ("automod", "Auto Mod", "Anti Spam, Anti Advertising, Anti Phishing and all the message filters.", true, false),
-    ("antinuke", "Anti Nuke", "The system that monitors your staff members and guards your server away from getting nuked.", true, true),
-    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true, false),
-    ("joinraid", "Join Raid", "The advanced system that monitors your server joins and reacts if a raid is targeting your server.", true, true),
-    ("verification", "Verification", "TommyBot's verification gate that your new members need to pass in order to get access to your server.", true, false),
+/// (section, title, description, has a master switch). A missing switch reads as off, like the bot.
+const SYSTEMS: [(&str, &str, &str, bool); 5] = [
+    ("automod", "Auto Mod", "Anti Spam, Anti Advertising, Anti Phishing and all the message filters.", true),
+    ("antinuke", "Anti Nuke", "The system that monitors your staff members and guards your server away from getting nuked.", true),
+    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true),
+    ("joinraid", "Join Raid", "The advanced system that monitors your server joins and reacts if a raid is targeting your server.", true),
+    ("verification", "Verification", "TommyBot's verification gate that your new members need to pass in order to get access to your server.", true),
 ];
 
 /// Master switch of a system: reads and writes its `enabled` key.
 /// `all` is the guild's config with its version, loaded once and shared by every switch: with a
 /// version each, the second switch flipped was refused with "config changed, reload".
 #[component]
-fn SystemToggle(guild: String, section: &'static str, default: bool, all: RwSignal<Option<Value>>) -> impl IntoView {
+fn SystemToggle(guild: String, section: &'static str, all: RwSignal<Option<Value>>) -> impl IntoView {
     // Greyed like the section's own page: a viewer could flip it, and only the server refused.
     let access = expect_context::<Access>();
-    let on = RwSignal::new(default);
+    let on = RwSignal::new(false);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Locked while the config loads and while a save runs, so the knob never shows a state the server does not have.
     let busy = RwSignal::new(true);
     Effect::new(move |_| {
         if let Some(v) = all.get() {
-            on.set(v["config"][section]["enabled"].as_bool().unwrap_or(default));
+            on.set(v["config"][section]["enabled"].as_bool().unwrap_or(false));
             busy.set(false);
         }
     });
@@ -370,7 +370,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         </For></div>
         <h2 style="text-align:center">"Quick Systems Overview"</h2>
         <div class="cards five">
-            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def all /> })}</div></div> }).collect_view()}
+            {SYSTEMS.iter().map(|(k, t, d, sw)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k all /> })}</div></div> }).collect_view()}
         </div>
         <Toast msg />
         <StepUp need enrolled />
