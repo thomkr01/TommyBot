@@ -27,16 +27,17 @@ icons!(
     "page_next",
     "checkbox_off",
     "modmail",
-    "info"
+    "info",
+    "setup_wizard", "sparkle", "fingerprint", "logs", "tray", "channel_text", "lock", "page", "ban",
+    "globe", "sliders", "discord", "tag", "shield", "hand", "member_join", "glasses", "rocket",
+    "qr_code", "moderator", "case", "note", "report", "ticket", "target", "settings", "restore",
+    "history", "palette", "rescue_key", "chevron_right", "chat_shield", "announcement", "age_18",
+    "word_censor"
 );
 
+/// Every copy gets its own gradient and mask ids: with shared ids every copy paints with the
+/// first one's, which draws nothing once that one is hidden (closed nav group, hidden tab).
 pub fn icon(name: &'static str) -> AnyView {
-    view! { <span class="i" aria-hidden="true" inner_html=svg(name)></span> }.into_any()
-}
-
-/// Like `icon`, but its gradient and mask ids are unique, for icons shown many times on one page:
-/// with shared ids every copy paints with the first one's, which draws nothing once that one is hidden.
-pub fn icon_unique(name: &'static str) -> AnyView {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);

@@ -96,6 +96,49 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
 ];
+/// Icon per sidebar page key, group name or Filters card, from the emoji set.
+fn page_icon(p: &str) -> &'static str {
+    match p {
+        "wizard" => "setup_wizard",
+        "overview" => "info",
+        "misc" => "sparkle",
+        "permits" => "fingerprint",
+        "logging" => "logs",
+        "backups" => "tray",
+        "channel_setup" => "channel_text",
+        "lockdown" => "lock",
+        "appeal_list" => "page",
+        "Auto Mod" => "ban",
+        "automod" | "antinuke" => "globe",
+        "filters" | "antinuke_filters" => "sliders",
+        "discord_automod" => "discord",
+        "whitelist" => "tag",
+        "automod_panic" | "antinuke_panic" => "shield",
+        "Anti Nuke" => "hand",
+        "Server Joins" => "member_join",
+        "joingate" => "glasses",
+        "joinraid" => "rocket",
+        "verification" => "qr_code",
+        "Moderation" => "moderator",
+        "cases" => "case",
+        "notes" => "note",
+        "report_list" => "report",
+        "tickets" => "ticket",
+        "catch" => "target",
+        "Tools" => "settings",
+        "revert" => "restore",
+        "history" => "history",
+        "embeds" => "palette",
+        "rescue" => "rescue_key",
+        "spam_text" => "chat_shield",
+        "invites" => "announcement",
+        "malicious" => "shield",
+        "nsfw" => "age_18",
+        "words" => "word_censor",
+        "links" => "link",
+        _ => "",
+    }
+}
 /// Groups that start open; the rest stay folded until visited.
 const OPEN_GROUPS: [&str; 4] = ["Auto Mod", "Anti Nuke", "Server Joins", "Moderation"];
 const LOCK_TABS: &[(&str, &str)] = &[("lockdown", "Manage"), ("lockdown_settings", "Settings")];
@@ -573,7 +616,7 @@ fn App() -> impl IntoView {
                             let g = g.clone();
                             let page = route.get().get(1).cloned().unwrap_or_default();
                             let hits = search::counts(search);
-                            let link = |p: &str, t: &str| { if access.of(p) == "hidden" { return ().into_any(); } let n: usize = hits.iter().filter(|(k, _)| *k == p || k.starts_with(&format!("{p}/"))).map(|(_, n)| n).sum(); let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{t.to_string()}{(n > 0).then(|| view! { <span class="chip hits">{n}</span> })}</a> }.into_any() };
+                            let link = |p: &str, t: &str| { if access.of(p) == "hidden" { return ().into_any(); } let n: usize = hits.iter().filter(|(k, _)| *k == p || k.starts_with(&format!("{p}/"))).map(|(_, n)| n).sum(); let on = page == p || (p == "appeal_list" && page.starts_with("appeal")) || (p == "report_list" && page.starts_with("report")) || (p == "lockdown" && page.starts_with("lockdown")); view! { <a class:on=on href=format!("#/{g}/{p}")>{icons::icon(page_icon(p))}<span>{t.to_string()}</span>{(n > 0).then(|| view! { <span class="chip hits">{n}</span> })}</a> }.into_any() };
                             let gi = guilds.get().into_iter().find(|x| x["id"] == g.as_str());
                             let name = gi.as_ref().and_then(|x| x["name"].as_str()).unwrap_or("Server").to_string();
                             let icon = match gi.as_ref().and_then(|x| x["icon"].as_str()) {
@@ -583,7 +626,7 @@ fn App() -> impl IntoView {
                             view! {
                                 <a class="srv" href="#/" title="Switch server">{icon}{name}<button class="refresh" on:click=move |e| { e.prevent_default(); e.stop_propagation(); spawn_local(load_guilds()) }>"refresh server"</button></a>
                                 {TOP.iter().map(|(p, t)| link(p, t)).collect_view()}
-                                {NAV.iter().filter(|(_, items)| items.iter().any(|(p, _)| access.of(p) != "hidden")).map(|(grp, items)| view! { <details open=OPEN_GROUPS.contains(grp) || items.iter().any(|(p, _)| *p == page)><summary>{*grp}</summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
+                                {NAV.iter().filter(|(_, items)| items.iter().any(|(p, _)| access.of(p) != "hidden")).map(|(grp, items)| view! { <details open=OPEN_GROUPS.contains(grp) || items.iter().any(|(p, _)| *p == page)><summary>{icons::icon(page_icon(grp))}<span>{*grp}</span></summary>{items.iter().map(|(p, t)| link(p, t)).collect_view()}</details> }).collect_view()}
                             }.into_any()
                         }
                     }}
@@ -651,7 +694,7 @@ fn App() -> impl IntoView {
                                 ("report_list", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><ReportList guild=g.clone() /> }.into_any(),
                                 ("report_blacklist", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><Blacklist guild=g.clone() base="reports" /> }.into_any(),
                                 ("appeals", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() />{sec("appeals", "")} }.into_any(),
-                                ("filters", None) => view! { <div class="stack">{FILTER_PAGES.iter().map(|(sub, t, d)| view! { <a class="card link" href=format!("#/{g}/filters/{sub}")><span class="ico"></span><span><h3>{*t}</h3><span class="muted">{*d}</span></span><span class="sp"></span>"›"</a> }).collect_view()}</div> }.into_any(),
+                                ("filters", None) => view! { <div class="stack">{FILTER_PAGES.iter().map(|(sub, t, d)| view! { <a class="card link" href=format!("#/{g}/filters/{sub}")><span class="ico">{icons::icon(page_icon(sub))}</span><span><h3>{*t}</h3><span class="muted">{*d}</span></span><span class="sp"></span>{icons::icon("chevron_right")}</a> }).collect_view()}</div> }.into_any(),
                                 ("filters", Some(sub)) => {
                                     let tabs = sub.starts_with("spam_").then(|| view! { <Tabs guild=g.clone() items=SPAM_TABS active=format!("filters/{sub}") /> });
                                     let name = FILTER_PAGES.iter().find(|(s, ..)| sub.starts_with(s) || (*s == "spam_text" && sub.starts_with("spam_"))).map_or("", |(_, t, _)| *t);

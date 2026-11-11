@@ -117,7 +117,9 @@ Each Overview switch loaded the config and kept its own version, so after one sw
 
 Every icon in `assets/icons` has fixed ids (`info-grad`, `info-cut`). With the info icon shown many times on a page, every copy paints with the first copy's gradient and mask, and draws nothing once that first copy is hidden (Chrome does not render a gradient from a `display:none` SVG).
 
-**Rule:** an icon that can appear more than once on a page uses `icons::icon_unique`, which numbers its ids.
+**Rule:** `icons::icon` numbers the ids of every copy, so every icon is safe to repeat. Never inline an `assets/icons` SVG another way (for example `include_str!` into `inner_html`) without the same numbering.
+
+The first fix added a separate `icon_unique` for the info icon only, while the arrows in sortable lists, the check rows on Overview and the sidebar icons (General, Filters and Panic Mode appear under both Auto Mod and Anti Nuke) still shared ids. Root cause: uniqueness was opt-in. It is now the only way `icon` works.
 
 ## 11. A transform on a parent moves its popup too
 
