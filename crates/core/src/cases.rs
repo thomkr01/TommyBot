@@ -56,8 +56,52 @@ pub async fn create(pool: &PgPool, c: NewCase<'_>) -> Result<i32> {
     .bind(case_no)
     .execute(&mut *tx)
     .await?;
+    record(
+        &mut tx,
+        ModAction {
+            guild_id: c.guild_id,
+            mod_id: c.mod_id,
+            kind: c.kind,
+            source: "bot",
+            target_id: Some(c.user_id),
+            case_no: Some(case_no),
+            audit_id: None,
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(case_no)
+}
+
+/// One staff action for moderator stats (`mod_actions`, append-only).
+pub struct ModAction<'a> {
+    pub guild_id: GuildId,
+    pub mod_id: UserId,
+    pub kind: &'a str,
+    /// `bot` (a case), `discord` (done in the Discord app), `appeal` or `dashboard`.
+    pub source: &'a str,
+    pub target_id: Option<UserId>,
+    pub case_no: Option<i32>,
+    /// The Discord audit log entry, so a replayed gateway event counts once.
+    pub audit_id: Option<i64>,
+}
+
+/// Records a staff action, inside the caller's transaction when it has one.
+pub async fn record(c: &mut sqlx::PgConnection, a: ModAction<'_>) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO mod_actions (guild_id, mod_id, kind, source, target_id, case_no, audit_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+    )
+    .bind(a.guild_id)
+    .bind(a.mod_id)
+    .bind(a.kind)
+    .bind(a.source)
+    .bind(a.target_id)
+    .bind(a.case_no)
+    .bind(a.audit_id)
+    .execute(c)
+    .await?;
+    Ok(())
 }
 
 /// Active, unexpired warn points for a user.

@@ -95,6 +95,14 @@ pub async fn purge_left(app: std::sync::Arc<App>) {
         if let Err(e) = old {
             tracing::warn!(?e, "pruning old join gate records failed");
         }
+        // Moderator stats keep one year (Thomas 2026-11-11).
+        let old =
+            sqlx::query("DELETE FROM mod_actions WHERE created_at < now() - interval '365 days'")
+                .execute(&app.pool)
+                .await;
+        if let Err(e) = old {
+            tracing::warn!(?e, "pruning old mod stats failed");
+        }
     }
 }
 

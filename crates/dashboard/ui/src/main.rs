@@ -25,7 +25,7 @@ use embeds::Embeds;
 use form::Section;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use permits::Permits;
-use records::{BanSyncGroup, BanSyncLog, CaseList, JoinGateLog, NoteList, RaidLog, ReportList, TicketLog};
+use records::{BanSyncGroup, BanSyncLog, CaseList, JoinGateLog, ModStats, NoteList, RaidLog, ReportList, TicketLog};
 /// The server list's empty state; its text is the marker that shows the help card.
 const NO_SERVERS: &str = "No servers";
 
@@ -80,6 +80,7 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
         "Moderation",
         &[
             ("cases", "Cases"),
+            ("mod_stats", "Mod Stats"),
             ("notes", "Notes"),
             ("report_list", "Reports"),
             ("tickets", "Tickets"),
@@ -122,6 +123,7 @@ fn page_icon(p: &str) -> &'static str {
         "verification" => "qr_code",
         "Moderation" => "moderator",
         "cases" => "case",
+        "mod_stats" => "analytics",
         "notes" => "note",
         "report_list" => "report",
         "tickets" => "ticket",
@@ -696,6 +698,7 @@ fn App() -> impl IntoView {
                                 ("joingate_log", _) => view! { <Tabs guild=g.clone() items=GATE_TABS active=p.clone() /><JoinGateLog guild=g.clone() /> }.into_any(),
                                 ("catch", _) => view! { <Catch guild=g.clone() enrolled /> }.into_any(),
                                 ("cases", _) => view! { <CaseList guild=g.clone() /> }.into_any(),
+                                ("mod_stats", _) => view! { <ModStats guild=g.clone() /> }.into_any(),
                                 ("notes", _) => view! { <NoteList guild=g.clone() /> }.into_any(),
                                 ("report_list", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><ReportList guild=g.clone() /> }.into_any(),
                                 ("report_blacklist", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><Blacklist guild=g.clone() base="reports" /> }.into_any(),

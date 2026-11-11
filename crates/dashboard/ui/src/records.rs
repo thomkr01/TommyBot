@@ -64,25 +64,26 @@ pub fn export_csv(
 }
 
 /// Every cell quoted; text starting with = + - @ gets a leading ' so spreadsheets do not run it as a formula.
-fn to_csv(cols: &[&str], rows: &[Value]) -> String {
-    let cell = |v: &Value| {
-        let t = match v {
-            Value::String(t) => t.clone(),
-            Value::Null => String::new(),
-            v => v.to_string(),
-        };
-        let t = if t.starts_with(['=', '+', '-', '@']) {
-            format!("'{t}")
-        } else {
-            t
-        };
-        format!("\"{}\"", t.replace('"', "\"\""))
+fn csv_cell(v: &Value) -> String {
+    let t = match v {
+        Value::String(t) => t.clone(),
+        Value::Null => String::new(),
+        v => v.to_string(),
     };
+    let t = if t.starts_with(['=', '+', '-', '@']) {
+        format!("'{t}")
+    } else {
+        t
+    };
+    format!("\"{}\"", t.replace('"', "\"\""))
+}
+
+fn to_csv(cols: &[&str], rows: &[Value]) -> String {
     let mut out = cols.join(",") + "\r\n";
     for r in rows {
         out += &cols
             .iter()
-            .map(|c| cell(&r[*c]))
+            .map(|c| csv_cell(&r[*c]))
             .collect::<Vec<_>>()
             .join(",");
         out += "\r\n";
@@ -229,6 +230,171 @@ pub fn CaseList(guild: String) -> impl IntoView {
             }
         </For>
         {pager(page, move || rows.get().len(), load)}
+    }
+}
+
+/// "3 days ago" for an age in seconds.
+fn ago(secs: f64) -> String {
+    let d = (secs / 86400.0).floor() as i64;
+    match d {
+        i64::MIN..=0 => "today".into(),
+        1 => "yesterday".into(),
+        d => format!("{d} days ago"),
+    }
+}
+
+/// The change against the period before: "new" when that one was empty.
+fn trend(now: i64, prev: i64) -> (String, &'static str) {
+    match (now, prev) {
+        (0, 0) => ("–".into(), "muted"),
+        (_, 0) => ("new".into(), "info"),
+        _ => {
+            let pct = (now - prev) * 100 / prev;
+            let cls = if pct > 0 { "warn" } else if pct < 0 { "muted" } else { "" };
+            (format!("{}{pct} %", if pct > 0 { "+" } else { "" }), cls)
+        }
+    }
+}
+
+/// Small bar row of a member's actions over the period, oldest first.
+fn bars(series: &[i64]) -> impl IntoView {
+    let max = series.iter().copied().max().unwrap_or(0).max(1) as f64;
+    let w = series.len().max(1) * 4;
+    let rects = series
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .map(|(i, n)| {
+            let h = (*n as f64 / max * 20.0).max(2.0);
+            view! { <rect x=(i * 4).to_string() y=format!("{:.1}", 20.0 - h) width="3" height=format!("{h:.1}") rx="1" /> }
+        })
+        .collect_view();
+    view! { <svg class="bars" viewBox=format!("0 0 {w} 20") preserveAspectRatio="none" aria-hidden="true">{rects}</svg> }
+}
+
+#[component]
+pub fn ModStats(guild: String) -> impl IntoView {
+    let data = RwSignal::new(Value::Null);
+    let open = RwSignal::new(None::<String>);
+    let detail = RwSignal::new(Vec::<Value>::new());
+    let (days, msg) = (RwSignal::new("30".to_string()), Msg::default());
+    let g = StoredValue::new(guild);
+    let load = move || {
+        if days.is_disposed() {
+            return;
+        }
+        let d = days.get_untracked();
+        let path = format!("/api/guilds/{}/mod_stats?days={d}", g.get_value());
+        spawn_local(async move {
+            let r = api("GET", &path, None).await;
+            // A slower answer for a period chip clicked earlier must not overwrite the newer one.
+            if days.try_get_untracked().as_deref() != Some(d.as_str()) {
+                return;
+            }
+            match r {
+                Ok(v) => {
+                    msg.clear();
+                    data.set(v)
+                }
+                Err(e) => msg.err(e),
+            }
+        });
+    };
+    load();
+    let names = RwSignal::new(std::collections::HashMap::<String, String>::new());
+    Effect::new(move || {
+        let ids: Vec<String> = data.with(|d| d["mods"].as_array().into_iter().flatten().map(|m| s(&m["mod_id"])).collect());
+        learn_names(g.get_value(), ids, names)
+    });
+    let name = move |id: &str| names.with(|n| n.get(id).cloned()).unwrap_or_else(|| id.to_string());
+    let show = move |id: String| {
+        if open.get_untracked().as_deref() == Some(&id) {
+            return open.set(None);
+        }
+        detail.set(vec![]);
+        open.set(Some(id.clone()));
+        let path = format!("/api/guilds/{}/mod_stats/{id}", g.get_value());
+        spawn_local(async move {
+            let r = api("GET", &path, None).await;
+            // Another row may have been opened meanwhile, or the page left.
+            if open.try_get_untracked().flatten().as_deref() != Some(id.as_str()) {
+                return;
+            }
+            match r {
+                Ok(v) => {
+                    let ids = v.as_array().into_iter().flatten().map(|r| s(&r["target_id"])).collect();
+                    learn_names(g.get_value(), ids, names);
+                    detail.set(v.as_array().cloned().unwrap_or_default())
+                }
+                Err(e) => {
+                    open.set(None);
+                    msg.err(e)
+                }
+            }
+        });
+    };
+    let kinds = move || data.with(|d| d["kinds"].as_array().into_iter().flatten().map(s).collect::<Vec<_>>());
+    let csv = move |_| {
+        let ks = kinds();
+        let mut out = format!("mod_id,name,{},total,previous,last_action\r\n", ks.join(","));
+        data.with_untracked(|d| {
+            for m in d["mods"].as_array().into_iter().flatten() {
+                let id = s(&m["mod_id"]);
+                let mut row = vec![json!(id), json!(name(&id))];
+                row.extend(ks.iter().map(|k| m["by_kind"][k].clone()));
+                row.extend([m["total"].clone(), m["prev_total"].clone(), m["last_at"].clone()]);
+                out += &row.iter().map(csv_cell).collect::<Vec<_>>().join(",");
+                out += "\r\n";
+            }
+        });
+        download("mod-stats.csv", &format!("data:text/csv;charset=utf-8,{}", enc(&out)));
+    };
+    let now = js_sys::Date::now();
+    let age = move |m: &Value| m["last_at"].as_str().map(|t| ago((now - js_sys::Date::parse(t)) / 1000.0)).unwrap_or_default();
+    let rows = move || {
+        let ks = kinds();
+        data.with(|d| d["mods"].as_array().cloned().unwrap_or_default()).into_iter().map(|m| {
+            let id = s(&m["mod_id"]);
+            let total = m["total"].as_i64().unwrap_or(0);
+            let (change, cls) = trend(total, m["prev_total"].as_i64().unwrap_or(0));
+            let series: Vec<i64> = m["series"].as_array().into_iter().flatten().filter_map(Value::as_i64).collect();
+            let (tip, key, who) = (id.clone(), id.clone(), id.clone());
+            let cells = ks.iter().map(|k| view! { <td>{m["by_kind"][k].as_i64().unwrap_or(0)}</td> }).collect_view();
+            let span = (ks.len() + 5).to_string();
+            view! {
+                <tr class="click" class:quiet=total == 0 on:click=move |_| show(key.clone())>
+                    <td><b title=tip>{move || name(&who)}</b></td>{cells}<td><b>{total}</b></td>
+                    <td class=cls>{change}</td><td class="muted">{age(&m)}</td><td>{bars(&series)}</td>
+                </tr>
+                <Show when={ let id = id.clone(); move || open.get().as_deref() == Some(&id) }>
+                    <tr class="detail"><td colspan=span.clone()>
+                        <Show when=move || !detail.get().is_empty() fallback=|| view! { <span class="muted">"Loading…"</span> }>
+                            <ul>{move || detail.get().into_iter().map(|r| {
+                                let t = s(&r["target_id"]);
+                                let case = r["case_no"].as_i64().map(|n| format!(" (case #{n})")).unwrap_or_default();
+                                let at = s(&r["at"]).chars().take(16).collect::<String>().replace('T', " ");
+                                view! { <li><span class="muted">{at}</span>" "<b>{s(&r["kind"])}</b>" "{move || name(&t)}{case}<span class="muted">{format!(" · {}", s(&r["source"]))}</span></li> }
+                            }).collect_view()}</ul>
+                        </Show>
+                    </td></tr>
+                </Show>
+            }
+        }).collect_view()
+    };
+    let empty = move || data.with(|d| d["mods"].as_array().is_some_and(|m| m.is_empty()));
+    view! {
+        <div class="card row">
+            {chips(days, &[("7", "7 days"), ("30", "30 days"), ("90", "90 days"), ("365", "1 year")], move || { open.set(None); load() })}
+            <button class="ghost" on:click=csv>"Export CSV"</button>
+            <Toast msg />
+        </div>
+        <p class="muted">"Actions per staff member in the period, against the period before. Bans, kicks and timeouts done in the Discord app count too. Staff with nothing in the period are dimmed. Click a row for their last 50 actions."</p>
+        <Show when=empty fallback=move || view! {
+            <div class="card scroll"><table class="permits stats">
+                <thead><tr><th>"Staff"</th>{move || kinds().into_iter().map(|k| view! { <th>{k}</th> }).collect_view()}<th>"Total"</th><th>"Change"</th><th>"Last action"</th><th>"Over time"</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table></div>
+        }><p class="card empty muted">"No staff actions recorded yet."</p></Show>
     }
 }
 
@@ -599,6 +765,17 @@ mod log_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mod_stats_texts() {
+        assert_eq!(ago(10.0), "today");
+        assert_eq!(ago(86400.0 * 1.5), "yesterday");
+        assert_eq!(ago(86400.0 * 45.0), "45 days ago");
+        assert_eq!(trend(0, 0).0, "–");
+        assert_eq!(trend(4, 0).0, "new");
+        assert_eq!(trend(14, 10), ("+40 %".into(), "warn"));
+        assert_eq!(trend(5, 10).0, "-50 %");
+    }
 
     #[test]
     fn csv_quotes_cells_and_defuses_formulas() {

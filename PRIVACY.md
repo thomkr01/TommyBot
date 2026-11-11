@@ -20,6 +20,7 @@ The bot keeps data in a PostgreSQL database. It stores:
 | **Moderation cases** (action type, target and moderator user IDs, reason, proof link you provide, points, expiry). | Warnings, bans, and history for `/case` and warn thresholds. | Until deletion is requested. Not removed automatically. |
 | **Staff notes** (member and moderator user IDs, the note text, when it was written) and **note edit history** (old and new text, who edited it and when). | Private notes staff keep about members; the history shows every earlier version on the dashboard. | Until staff remove the note (its history goes with it) or deletion is requested. |
 | **Action log** (each mutating action with the data needed to undo it). | `/revert` and audit history. | Until deletion is requested. Not removed automatically. |
+| **Moderator actions** (the staff member's and target's user IDs, the action type, where it was done: TommyBot, the Discord app, an appeal or the dashboard, the case number, and when). Includes bans, kicks and timeouts staff do in the Discord app, read from the server's audit log. | Moderator stats on the dashboard, so owners can see how active each staff member is. | 1 year, then removed automatically. |
 | **Automod strike state** (user IDs, strike counts and timestamps). | Keeps repeat-offender penalties working across restarts. | Until deletion is requested. |
 | **Quarantine and lockdown records** (saved role IDs, lock snapshots). | To restore roles and channel permissions when a quarantine or lock ends. | Removed when the quarantine or lock is released. |
 | **Scheduled jobs** (for example, a timed ban or timeout). | To run them after a restart. | Removed when the job runs. |
@@ -50,7 +51,7 @@ Only to run the features you turn on: moderation, logging, automod, anti-nuke, b
 
 - **Delete it from the dashboard.** A server owner can delete all of the server's stored data under Miscellaneous > Delete server data. This needs the authenticator code and the server's name typed in, and it cannot be undone. The bot stays in the server and goes back to its default settings.
 - **Remove the bot from your server.** This stops new data collection. All of the server's stored data is deleted automatically 30 days after the bot is removed, unless the bot is added back before then.
-- **Request deletion of your user ID.** Open an issue at [github.com/thomkr01/TommyBot/issues](https://github.com/thomkr01/TommyBot/issues) and say which user ID you want removed. Users can request deletion of their own user ID from stored cases, strike state, and dashboard records. Please do not post private personal data in a public issue; say you want to send it privately and a maintainer will reply.
+- **Request deletion of your user ID.** Open an issue at [github.com/thomkr01/TommyBot/issues](https://github.com/thomkr01/TommyBot/issues) and say which user ID you want removed. Users can request deletion of their own user ID from stored cases, moderator actions, strike state, and dashboard records. Please do not post private personal data in a public issue; say you want to send it privately and a maintainer will reply.
 - We aim to complete deletion requests within 30 days.
 - Backups for a server are deleted with that server's data.
 

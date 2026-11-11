@@ -30,7 +30,7 @@ icons!(
     "info",
     "setup_wizard", "sparkle", "fingerprint", "logs", "tray", "channel_text", "lock", "page", "ban",
     "globe", "sliders", "discord", "tag", "shield", "hand", "member_join", "glasses", "rocket",
-    "qr_code", "moderator", "case", "note", "report", "ticket", "target", "settings", "restore",
+    "qr_code", "moderator", "case", "analytics", "note", "report", "ticket", "target", "settings", "restore",
     "history", "palette", "rescue_key", "chevron_right", "chat_shield", "announcement", "age_18",
     "word_censor",
     "backup", "trash", "back", "channel_voice", "category", "channel_stage", "forum", "server", "verification", "nsfw_filter", "webhook", "role", "dropdown"

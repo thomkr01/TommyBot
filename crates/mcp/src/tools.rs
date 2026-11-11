@@ -75,6 +75,8 @@ pub fn list() -> Value {
         ),
         tool("action_log", "Moderation and antinuke actions the bot recorded (who did what, reverted or not), newest first.",
             json!({"guild_id": guild, "actor_id": {"type": "string"}, "limit": limit(200)}), &["guild_id"]),
+        tool("mod_actions", "Staff actions for moderator stats (bans, kicks, timeouts, warns, case edits and deletes; source bot, discord, appeal or dashboard), newest first, within the last `days` (default 30).",
+            json!({"guild_id": guild, "mod_id": {"type": "string"}, "days": {"type": "integer", "minimum": 1, "maximum": 365}, "limit": limit(500)}), &["guild_id"]),
         tool("nuke_incidents", "Antinuke incidents: how many were quarantined, reverted and failed, newest first.",
             json!({"guild_id": guild, "limit": limit(100)}), &["guild_id"]),
         tool("quarantines", "Members in antinuke quarantine now.", json!({"guild_id": guild}), &["guild_id"]),
@@ -220,6 +222,19 @@ pub async fn call(st: &State, name: &str, a: &Value) -> Result<Value> {
                 SELECT id, actor_id::text, action, target_id::text, case_no, reverted, created_at
                 FROM mcp_action_log WHERE guild_id = $1 AND ($2::text IS NULL OR actor_id = $2::bigint) ORDER BY id DESC LIMIT $3) r",
             need(a, "guild_id")?, id(a, "actor_id")?.map(|i| i.to_string()), limit(a, 50, 200)).await?,
+        "mod_actions" => sqlx::query_scalar::<_, Option<Value>>(
+            "SELECT jsonb_agg(r ORDER BY id DESC) FROM (
+                SELECT id, mod_id::text, kind, source, target_id::text, case_no, created_at FROM mcp_mod_actions
+                WHERE guild_id = $1 AND ($2::bigint IS NULL OR mod_id = $2) AND created_at >= now() - make_interval(days => $3)
+                ORDER BY id DESC LIMIT $4) r",
+        )
+        .bind(need(a, "guild_id")?)
+        .bind(id(a, "mod_id")?)
+        .bind(a["days"].as_i64().unwrap_or(30).clamp(1, 365) as i32)
+        .bind(limit(a, 100, 500))
+        .fetch_one(&st.db)
+        .await?
+        .unwrap_or(json!([])),
         "nuke_incidents" => one(st,
             "SELECT jsonb_agg(r ORDER BY created_at DESC) FROM (
                 SELECT case_id, quarantined, reverted, failed, created_at FROM mcp_nuke_incidents WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) r",

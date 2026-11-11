@@ -19,6 +19,7 @@ mod lockdown;
 mod metrics;
 mod modcmds;
 mod modslash;
+mod modstats;
 mod modview;
 mod native;
 mod panic;
