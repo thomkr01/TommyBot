@@ -117,7 +117,9 @@ Each Overview switch loaded the config and kept its own version, so after one sw
 
 Every icon in `assets/icons` has fixed ids (`info-grad`, `info-cut`). With the info icon shown many times on a page, every copy paints with the first copy's gradient and mask, and draws nothing once that first copy is hidden (Chrome does not render a gradient from a `display:none` SVG).
 
-**Rule:** an icon that can appear more than once on a page uses `icons::icon_unique`, which numbers its ids.
+**Rule:** `icons::icon` numbers the ids of every copy, so every icon is safe to repeat. Never inline an `assets/icons` SVG another way (for example `include_str!` into `inner_html`) without the same numbering.
+
+The first fix added a separate `icon_unique` for the info icon only, while the arrows in sortable lists, the check rows on Overview and the sidebar icons (General, Filters and Panic Mode appear under both Auto Mod and Anti Nuke) still shared ids. Root cause: uniqueness was opt-in. It is now the only way `icon` works.
 
 ## 11. A transform on a parent moves its popup too
 
@@ -134,6 +136,14 @@ Leptos's `AnimatedShow` starts a hide timer each time it reruns with `when` fals
 Same class of bug, also in #158: the page wrapper read the access level straight from the access signal, so every access answer (one per page change) rebuilt the open page and could throw away edits made before it arrived. It now reads a `Memo` of the level.
 
 **Rule:** when a reactive closure builds a whole page or form, read derived values through a `Memo`, not a signal that is set again with the same content.
+
+## 13. A hidden popup still makes the page wider
+
+The info card (`.tip .bubble`) is only `opacity:0` until hovered, so it still takes layout room. An info icon near the right edge on a phone (MCP tokens page, 390 px) put the hidden card past the screen, and the whole page scrolled sideways.
+
+**Rule:** `main` has `overflow-x:clip` (clip, not hidden, so vertical overflow and sticky parts keep working). A new popup that is hidden with opacity or a transform must also stay inside `main`, as `Tip`'s `place()` does when it is shown.
+
+**Check:** on a 390 px viewport `document.documentElement.scrollWidth` equals the viewport width on every page.
 
 ## Where it was fixed (#143)
 

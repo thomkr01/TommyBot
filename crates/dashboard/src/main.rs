@@ -7,6 +7,7 @@ mod diff;
 mod discord;
 mod embeds;
 mod lockdown;
+mod mcp;
 mod ops;
 mod otp;
 mod records;
@@ -144,6 +145,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(verify::routes())
         .merge(embeds::routes())
         .merge(update::routes())
+        .merge(mcp::routes())
         // Only routes, not the static UI: one page load fetches many assets.
         .route_layer(middleware::from_fn_with_state(st.clone(), auth::rate_limit))
         // Hash routing means the server never needs an index.html fallback; one would also hide

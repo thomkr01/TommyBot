@@ -188,7 +188,7 @@ fn filter_text(n: u64) -> (&'static str, &'static str) {
 }
 
 fn channel_icon(kind: u64) -> AnyView {
-    crate::icons::icon_unique(match kind {
+    crate::icons::icon(match kind {
         2 => "channel_voice",
         4 => "category",
         5 => "announcement",
@@ -268,9 +268,9 @@ fn BackupView(
         let (vl, vd) = verification_text(st["verification"].as_u64().unwrap_or(0));
         let (fl, fd) = filter_text(st["content_filter"].as_u64().unwrap_or(0));
         view! {
-            <div class="set"><b>{crate::icons::icon_unique("server")}" Server Name"</b><div>{st["name"].as_str().unwrap_or("").to_string()}</div></div>
-            <div class="set"><b>{crate::icons::icon_unique("verification")}" Verification Level"</b><div>{vl}<small>{vd}</small></div></div>
-            <div class="set"><b>{crate::icons::icon_unique("nsfw_filter")}" Explicit Media Content Filter"</b><div>{fl}<small>{fd}</small></div></div>
+            <div class="set"><b>{crate::icons::icon("server")}" Server Name"</b><div>{st["name"].as_str().unwrap_or("").to_string()}</div></div>
+            <div class="set"><b>{crate::icons::icon("verification")}" Verification Level"</b><div>{vl}<small>{vd}</small></div></div>
+            <div class="set"><b>{crate::icons::icon("nsfw_filter")}" Explicit Media Content Filter"</b><div>{fl}<small>{fd}</small></div></div>
         }
         .into_any()
     };
@@ -278,23 +278,23 @@ fn BackupView(
     view! {
         <div class="bk">
             <div class="bh">
-                <h1>{crate::icons::icon_unique("backup")}{code}</h1>
+                <h1>{crate::icons::icon("backup")}{code}</h1>
                 <span class="sp"></span>
-                <button class="go" on:click=move |_| load.run(id)>{crate::icons::icon_unique("restore")}"Load"</button>
-                <button class="danger" on:click=move |_| remove.run(id)>{crate::icons::icon_unique("trash")}"Delete"</button>
-                <button class="ghost" on:click=move |_| detail.set(None)>{crate::icons::icon_unique("back")}"Go back"</button>
+                <button class="go" on:click=move |_| load.run(id)>{crate::icons::icon("restore")}"Load"</button>
+                <button class="danger" on:click=move |_| remove.run(id)>{crate::icons::icon("trash")}"Delete"</button>
+                <button class="ghost" on:click=move |_| detail.set(None)>{crate::icons::icon("back")}"Go back"</button>
             </div>
             <div class="bgrid">
                 <div class="card">
                     <button class="ttl" aria-expanded=move || show_ch.get().to_string() on:click=move |_| show_ch.update(|o| *o = !*o)>
-                        {crate::icons::icon_unique("channel_text")}" Channels"<span class="sp"></span><span class="chev" class:shut=move || !show_ch.get()>{crate::icons::icon_unique("dropdown")}</span>
+                        {crate::icons::icon("channel_text")}" Channels"<span class="sp"></span><span class="chev" class:shut=move || !show_ch.get()>{crate::icons::icon("dropdown")}</span>
                     </button>
                     <div class:hide=move || !show_ch.get()><ChannelTree channels /></div>
                 </div>
                 <div class="card">
-                    <h3 class="ttl">{crate::icons::icon_unique("info")}" General Settings"</h3>
+                    <h3 class="ttl">{crate::icons::icon("info")}" General Settings"</h3>
                     {settings}
-                    <h3 class="ttl mt">{crate::icons::icon_unique("webhook")}" Webhooks"</h3>
+                    <h3 class="ttl mt">{crate::icons::icon("webhook")}" Webhooks"</h3>
                     <div class="chips">
                         {hooks.iter().map(|w| view! { <span class="hook" title=format!("#{}", w["channel"].as_str().unwrap_or("?"))>{w["name"].as_str().unwrap_or("").to_string()}</span> }).collect_view()}
                     </div>
@@ -303,7 +303,7 @@ fn BackupView(
             </div>
             <div class="card">
                 <button class="ttl" aria-expanded=move || show_roles.get().to_string() on:click=move |_| show_roles.update(|o| *o = !*o)>
-                    {crate::icons::icon_unique("role")}" Roles"<span class="sp"></span><span class="chev" class:shut=move || !show_roles.get()>{crate::icons::icon_unique("dropdown")}</span>
+                    {crate::icons::icon("role")}" Roles"<span class="sp"></span><span class="chev" class:shut=move || !show_roles.get()>{crate::icons::icon("dropdown")}</span>
                 </button>
                 <div class:hide=move || !show_roles.get()>
                     <div class="chips">
