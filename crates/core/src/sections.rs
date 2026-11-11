@@ -882,7 +882,10 @@ mod tests {
         let am: AutomodCfg =
             serde_json::from_value(json!({"heat": {"max": 0, "decay_per_sec": 4, "base": 3}}))
                 .unwrap();
-        assert_eq!((am.heat.max, am.heat.decay_per_sec, am.heat.base), (1.0, 0.99, 3.0));
+        assert_eq!(
+            (am.heat.max, am.heat.decay_per_sec, am.heat.base),
+            (1.0, 0.99, 3.0)
+        );
         let am: AutomodCfg = serde_json::from_value(json!({})).unwrap();
         assert_eq!((am.heat.max, am.heat.decay_per_sec), (100.0, 0.08));
     }
