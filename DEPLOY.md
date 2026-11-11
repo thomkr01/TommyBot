@@ -203,7 +203,7 @@ Each place that uses the MCP server gets its own token, made on the dashboard. O
    cd ~/tommybot && git pull && docker compose pull && docker compose up -d
    ```
 
-2. **(dashboard)** Open **MCP** in the top bar (only the bot owner sees it). Type a name, for example `VPS`, and click **Make token**. Confirm 2FA when asked. The token is shown once: click **Copy**.
+2. **(dashboard)** Click the round account button (your initial) at the top right and choose **MCP tokens** (only the bot owner sees it). Type a name, for example `VPS`, and click **Make token**. Confirm 2FA when asked. The token is shown once: click **Copy**.
 3. **(server)** Add it to `.env` without pasting it into a chat or a screenshot. Run `nano .env`, add a line `MCP_WRITE_TOKEN=` followed by the token, save and close. Then:
 
    ```bash
@@ -213,7 +213,7 @@ Each place that uses the MCP server gets its own token, made on the dashboard. O
 
    The log no longer says `writes off`. Reconnect the connector in claude.ai (or restart Claude Code) so the new tools show up.
 
-To turn writes off, click **Revoke** on the MCP page (2FA). This works at once, also closes the changes that token still had waiting for a code, and is the first thing to do if you get a DM you did not ask for. Then delete the `MCP_WRITE_TOKEN` line from `.env` and run `docker compose up -d mcp`. Every proposal is kept in the `mcp_writes` table with the token name, the action, when and the outcome; the request itself is removed once it no longer waits for a code.
+To turn writes off, click **Revoke** on the MCP tokens page (2FA). This works at once, also closes the changes that token still had waiting for a code, and is the first thing to do if you get a DM you did not ask for. Then delete the `MCP_WRITE_TOKEN` line from `.env` and run `docker compose up -d mcp`. Every proposal is kept in the `mcp_writes` table with the token name, the action, when and the outcome; the request itself is removed once it no longer waits for a code.
 
 ### 6.5 Keeping it safe
 
@@ -228,8 +228,8 @@ Every tool call is logged by name only (`docker compose logs mcp`); arguments ca
 | Dashboard or `mcp.` address shows a Cloudflare 502 page | The container is not running, or the route's service URL is wrong | `docker compose ps`; check the route is `http://dashboard:8080` or `http://mcp:8090` |
 | `mcp` keeps restarting, log says `MCP_OWNER_ID must be a Discord user id` | The placeholder was pasted literally | `sed -i 's/^MCP_OWNER_ID=.*/MCP_OWNER_ID=<your id>/' .env`, then `docker compose up -d mcp` |
 | `mcp` log says `MCP_TOKEN must be at least 32 characters` or `not set` | Missing or short token | Redo the `echo "MCP_TOKEN=..."` line, check with `grep MCP_ .env` |
-| `mcp` keeps restarting, log says `MCP_WRITE_TOKEN must be at least 32 characters` | Part of the token was lost when you pasted it | Make a new token on the MCP page (step 6.4), revoke the old one |
-| `propose_change` says `dashboard refused (401 Unauthorized)` | The token was revoked, mistyped, or made on another installation | Make a new token on the MCP page and put it in `.env` |
+| `mcp` keeps restarting, log says `MCP_WRITE_TOKEN must be at least 32 characters` | Part of the token was lost when you pasted it | Make a new token on the MCP tokens page (step 6.4), revoke the old one |
+| `propose_change` says `dashboard refused (401 Unauthorized)` | The token was revoked, mistyped, or made on another installation | Make a new token on the MCP tokens page and put it in `.env` |
 | `propose_change` says `dashboard refused (404 Not Found)` | The dashboard image is older than this feature | `git pull && docker compose pull && docker compose up -d` |
 | `propose_change` says `could not DM the bot owner` | Your DMs from the bot are closed | Allow DMs from server members in a server you share with the bot |
 | `mcp` log says `oauth off` | One of the three OAuth values is missing | Step 6.3.3; `grep MCP_ .env` shows which |
