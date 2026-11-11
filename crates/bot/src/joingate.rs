@@ -335,7 +335,8 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         // A timeout fires another update and a role change keeps the name: act once per bad name pair.
         timed_out || !bad || seen.insert(key, names.clone()) == Some(names)
     };
-    if skip {
+    // Owner, Extra Owners and Trusted Admins are immune to every bot action, here too.
+    if skip || app.is_immune(m.guild_id, m.user.id).await? {
         return Ok(());
     }
     punish(

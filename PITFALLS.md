@@ -20,6 +20,10 @@ The first live nuke test got 403 because TommyBot's role was tied with the attac
 The `quarantines` row survived a leave, but no join code read it, so a quarantined member who left and came back was a normal member again. Only verification with "quarantine on join" put the role back, and only because it quarantines every unverified joiner. Checked for the same gap in other state: timeouts survive a rejoin in Discord itself, strikes and warn points are stored per user, and join lock and join raid act on every join.
 *Avoid:* state that holds a member back must be re-applied on `MemberAdd`, not only while they stay. `antinuke::requarantine_rejoin` runs first in `joingate::on_join` and goes through `contain()`, so a re-added bot loses its managed role's permissions too.
 
+**The post-join username filter punished immune staff.** (Join Gate check, 11-11)
+Join Gate's username filter checks names again after join (the "POST join" switch) and called `punish` without a level check, so an Extra Owner or Trusted Admin who picked a nickname on the word list could be kicked or banned. At join time nobody is staff yet, so the gap only showed after join. The other automatic paths on existing members (automod, Discord AutoMod hits, reactions, threads) already go through `whitelisted()`.
+*Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first.
+
 **Not every member lookup error means "not a member".** (#97)
 All `guild_member` errors (5xx, timeouts) were read as "left the server". Staff then lost their permit level for that event, so automod or anti-nuke could act on them.
 *Avoid:* use `http_err::member()`. Only a 404 means not a member. Other errors propagate.
