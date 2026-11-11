@@ -535,6 +535,21 @@ pub(crate) async fn quarantine_actor(
     Ok(done)
 }
 
+/// A `quarantines` row exists: anti-nuke, staff or verification's join quarantine holds them.
+pub(crate) async fn quarantined(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Result<bool> {
+    let row: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM quarantines WHERE guild_id = $1 AND user_id = $2")
+            .bind(gid.get() as i64)
+            .bind(user.get() as i64)
+            .fetch_optional(&app.pool)
+            .await?;
+    Ok(row.is_some())
+}
+
 /// Leaving does not end a quarantine: a member who rejoins while their quarantine row exists is
 /// contained again. True when they were.
 pub(crate) async fn requarantine_rejoin(
@@ -542,13 +557,7 @@ pub(crate) async fn requarantine_rejoin(
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
 ) -> Result<bool> {
-    let held: Option<(i64,)> =
-        sqlx::query_as("SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2")
-            .bind(gid.get() as i64)
-            .bind(user.get() as i64)
-            .fetch_optional(&app.pool)
-            .await?;
-    if held.is_none() {
+    if !quarantined(app, gid, user).await? {
         return Ok(false);
     }
     let done = contain(app, gid, user).await?;

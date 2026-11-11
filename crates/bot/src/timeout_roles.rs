@@ -62,10 +62,18 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     Ok(())
 }
 
-/// Gives the removed roles back, or waits again if the timeout was extended.
+/// Gives the removed roles back, or waits again if the timeout was extended. Nothing for a
+/// quarantined member (the quarantine holds their roles), nor for a sticky roles job whose
+/// membership (`joined_at`, µs) is over.
 pub async fn restore(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(p["user"].as_u64().context("job payload has no user")?);
     let member = app.http.guild_member(gid, user).await?.model().await?;
+    let joined = member.joined_at.map(|t| t.as_micros());
+    if p["joined_at"].as_i64().is_some_and(|j| Some(j) != joined)
+        || crate::antinuke::quarantined(app, gid, user).await?
+    {
+        return Ok(());
+    }
     if let Some(t) = active(member.communication_disabled_until) {
         return jobs::enqueue(&app.pool, gid.get() as i64, KIND, p.clone(), t)
             .await

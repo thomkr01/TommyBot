@@ -51,7 +51,8 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     }
     // Before the other checks, so a failed join gate step cannot let a quarantined member back in.
     // A failed check counts as quarantined, so sticky roles never gives roles to a held member.
-    let mut acted = crate::antinuke::requarantine_rejoin(app, gid, user.id)
+    // `held`: still in the server but held back (quarantine, raid flag); `gone`: kicked or banned.
+    let mut held = crate::antinuke::requarantine_rejoin(app, gid, user.id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "quarantining a rejoined member failed");
@@ -112,8 +113,11 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     let timeout = m.member.communication_disabled_until.map(|t| t.as_secs());
     let verifying = verify::on_join(app, gid, user.id, suspicious, user.bot, timeout).await;
     let hits = gate(&j, &cfg.joingate, now);
+    let (mut gone, mut renamed) = (false, false);
     if let Some(action) = harshest(&hits) {
-        acted = true;
+        // Log, Warn, Rename and Timeout keep the member; a timeout holds the main roles itself.
+        gone = removes(action);
+        renamed = action == Action::Rename;
         let why = if hits.iter().any(|h| h.0 == Filter::AccountAge) {
             let min = duration(cfg.joingate.min_age_ms() / 1000);
             format!("join gate: accounts must be at least {min} old")
@@ -149,13 +153,26 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         }
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
-        acted |= join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
+        if join_raid(app, &cfg, gid, raid, &j, suspicious, now).await? {
+            held = true;
+            gone |= removes(raid.action);
+        }
     }
-    let restored = crate::sticky::on_join(app, m, acted, verifying).await;
-    if !acted {
+    // Gone: the row keeps the old membership's roles for their next join.
+    if gone {
+        return Ok(());
+    }
+    let restored = crate::sticky::on_join(app, m, held, verifying).await;
+    // After a gate rename the join-time name is stale: dehoisting it would undo the rename.
+    if !held && !renamed {
         crate::dehoist::on_join(app, gid, &m.member).await;
     }
     restored
+}
+
+/// The punishment takes the member out of the server.
+fn removes(action: Action) -> bool {
+    matches!(action, Action::Kick | Action::Ban)
 }
 
 /// The alert when a join raid starts: what happens next and the first flagged accounts.
@@ -540,14 +557,18 @@ pub(crate) async fn punish(
             )
             .await;
             match done {
-                Ok(true) => {}
-                // Skipped (owner, out of reach, cap): forget the name so the next update tries again.
-                Ok(false) => {
-                    app.punished_names
-                        .lock()
-                        .unwrap()
-                        .remove(&(gid.get(), user));
-                    return Ok(());
+                Ok(None) => {}
+                // Recorded and logged like a refusal, so staff see why the name stayed.
+                Ok(Some(skip)) => {
+                    // Past the cap: forget the name so the next update tries again.
+                    if skip == crate::dehoist::CAPPED {
+                        app.punished_names
+                            .lock()
+                            .unwrap()
+                            .remove(&(gid.get(), user));
+                    }
+                    let reason = format!("rename skipped: {skip}");
+                    return finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await;
                 }
                 Err(e) => {
                     let reason = crate::http_err::why(&e);
@@ -634,6 +655,19 @@ async fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_kick_and_ban_remove_the_joiner() {
+        assert!(removes(Action::Kick) && removes(Action::Ban));
+        for a in [
+            Action::Log,
+            Action::Rename,
+            Action::Warn,
+            Action::Timeout(0),
+        ] {
+            assert!(!removes(a), "{a:?}");
+        }
+    }
 
     #[test]
     fn only_the_owner_and_extra_owners_vouch_for_bots() {

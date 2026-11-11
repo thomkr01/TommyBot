@@ -100,17 +100,36 @@ async fn left(pool: &PgPool, g: i64, u: i64) -> Result<()> {
     Ok(())
 }
 
-/// A ban forgets the roles, so an unban and rejoin starts clean. A kick keeps them.
+/// A ban forgets the roles, so an unban and rejoin starts clean. A kick keeps them. The row stays
+/// as an empty tombstone of a membership newer than the old one, so a late update or sync page of
+/// the old membership cannot write the old roles back.
 pub async fn on_ban(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<()> {
-    forget(&app.pool, gid.get() as i64, user.get() as i64).await
+    let (g, u) = (gid.get() as i64, user.get() as i64);
+    sqlx::query(
+        "DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = $2 AND payload->>'user' = $3",
+    )
+    .bind(g)
+    .bind(KIND)
+    .bind(u.to_string())
+    .execute(&app.pool)
+    .await?;
+    if !app.cfg(gid.get()).await?.misc.sticky_roles {
+        return Ok(());
+    }
+    forget(&app.pool, g, u).await
 }
 
 async fn forget(pool: &PgPool, g: i64, u: i64) -> Result<()> {
-    sqlx::query("DELETE FROM member_roles WHERE guild_id = $1 AND user_id = $2")
-        .bind(g)
-        .bind(u)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO member_roles (guild_id, user_id, roles, joined_at, left_at)
+         VALUES ($1, $2, '{}', now(), now())
+         ON CONFLICT (guild_id, user_id) DO UPDATE SET roles = '{}', joined_at = now(),
+           left_at = now(), pending = false, updated_at = now()",
+    )
+    .bind(g)
+    .bind(u)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -153,30 +172,48 @@ async fn claim(
     Ok(old)
 }
 
-/// Last step of `joingate::on_join`. `acted`: an earlier step (join gate, join raid, a quarantine)
-/// already handled this joiner, so the saved roles wait for their next join. `verifying`: the roles
-/// are held until [`restore_pending`].
-pub async fn on_join(app: &App, m: &MemberAdd, acted: bool, verifying: bool) -> Result<()> {
+/// Last step of `joingate::on_join` for a joiner still in the server. `held`: an earlier step
+/// (quarantine, join raid) holds them back, so the row moves to this membership and the old list
+/// is dropped (a quarantine keeps its own saved roles). `verifying`: the roles are held until
+/// [`restore_pending`].
+pub async fn on_join(app: &App, m: &MemberAdd, held: bool, verifying: bool) -> Result<()> {
     let (gid, user) = (m.guild_id, m.member.user.id);
     let Some(joined) = m.member.joined_at.and_then(at) else {
         return Ok(());
     };
-    if acted || m.member.user.bot || !app.cfg(gid.get()).await?.misc.sticky_roles {
+    let cfg = app.cfg(gid.get()).await?;
+    if m.member.user.bot || !cfg.misc.sticky_roles {
         return Ok(());
     }
-    let saved = claim(
-        &app.pool,
-        gid.get() as i64,
-        user.get() as i64,
-        joined,
-        verifying,
-    )
-    .await?;
-    let Some(saved) = saved.filter(|s| !s.is_empty() && !verifying) else {
+    let (g, u) = (gid.get() as i64, user.get() as i64);
+    if held {
+        return claim(&app.pool, g, u, joined, false).await.map(drop);
+    }
+    // Read before the claim: a failure after it would lose the claimed roles.
+    let info = app.guild_info(gid).await?;
+    let permit = permits::permit_roles(&app.pool, g).await?;
+    let saved = claim(&app.pool, g, u, joined, verifying).await?;
+    let Some(saved) = saved.filter(|s| !s.is_empty()) else {
         return Ok(());
     };
+    let t = Target {
+        user,
+        joined: joined.timestamp_micros(),
+        tries: 0,
+    };
+    if verifying {
+        // Verified before the claim landed: `verify::grant` found nothing pending, so restore now.
+        let now = http_err::member(&app.http, gid, user).await?;
+        let verified =
+            now.is_some_and(|n| n.roles.iter().any(|r| cfg.verification.roles.contains(r)));
+        return if verified {
+            restore_pending(app, gid, user).await
+        } else {
+            Ok(())
+        };
+    }
     let timeout = m.member.communication_disabled_until.map(|t| t.as_secs());
-    restore(app, gid, user, &saved, timeout).await
+    restore_or_queue(app, gid, &t, &saved, timeout, (&info, &permit)).await
 }
 
 /// Called by `verify::grant` after it set the verification roles, so they cannot wipe these.
@@ -184,48 +221,134 @@ pub async fn restore_pending(app: &App, gid: Id<GuildMarker>, user: Id<UserMarke
     if !app.cfg(gid.get()).await?.misc.sticky_roles {
         return Ok(());
     }
-    let held: Option<Vec<i64>> = sqlx::query_scalar(
+    let info = app.guild_info(gid).await?;
+    let permit = permits::permit_roles(&app.pool, gid.get() as i64).await?;
+    let held: Option<(Vec<i64>, DateTime<Utc>)> = sqlx::query_as(
         "UPDATE member_roles SET pending = false, updated_at = now()
-         WHERE guild_id = $1 AND user_id = $2 AND pending RETURNING roles",
+         WHERE guild_id = $1 AND user_id = $2 AND pending RETURNING roles, joined_at",
     )
     .bind(gid.get() as i64)
     .bind(user.get() as i64)
     .fetch_optional(&app.pool)
     .await?;
     match held {
-        // A member cannot press Verify while timed out.
-        Some(roles) if !roles.is_empty() => restore(app, gid, user, &roles, None).await,
+        Some((roles, joined)) if !roles.is_empty() => {
+            let t = Target {
+                user,
+                joined: joined.timestamp_micros(),
+                tries: 0,
+            };
+            // A member cannot press Verify while timed out.
+            restore_or_queue(app, gid, &t, &roles, None, (&info, &permit)).await
+        }
         _ => Ok(()),
     }
 }
 
-/// The `sticky_restore` job: roles that were past the cap a minute ago.
+/// Whose roles go back: the member, the membership (`joined_at` in µs) the roles were claimed
+/// for, and how many job runs already had a failed add.
+#[derive(Clone, Copy)]
+struct Target {
+    user: Id<UserMarker>,
+    joined: i64,
+    tries: u64,
+}
+
+/// A failed role add is retried this many times (one job a minute), then dropped.
+const MAX_TRIES: u64 = 3;
+
+fn job(t: &Target, roles: &[u64]) -> Value {
+    json!({"user": t.user.get(), "roles": roles, "joined_at": t.joined, "tries": t.tries})
+}
+
+/// The roles are already claimed: a failed restore goes into a job instead of being lost.
+async fn restore_or_queue(
+    app: &App,
+    gid: Id<GuildMarker>,
+    t: &Target,
+    saved: &[i64],
+    timeout_until: Option<i64>,
+    ctx: (&GuildInfo, &[i64]),
+) -> Result<()> {
+    let Err(e) = restore(app, gid, t, saved, timeout_until, ctx).await else {
+        return Ok(());
+    };
+    tracing::warn!(?e, "giving back sticky roles failed, retrying in a minute");
+    let roles: Vec<u64> = saved.iter().map(|&r| r as u64).collect();
+    jobs::enqueue(
+        &app.pool,
+        gid.get() as i64,
+        KIND,
+        job(t, &roles),
+        now_secs() + 60,
+    )
+    .await
+    .map(drop)
+}
+
+/// The `sticky_restore` job: roles past the cap or a failed add. Membership is checked again
+/// here, at add time: a member who left and came back, was quarantined, was banned (the row is
+/// a tombstone then), or must verify again gets nothing from this job.
 pub async fn run_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(p["user"].as_u64().context("job payload has no user")?);
+    let joined = p["joined_at"]
+        .as_i64()
+        .context("job payload has no joined_at")?;
+    if !app.cfg(gid.get()).await?.misc.sticky_roles {
+        return Ok(());
+    }
     let Some(member) = http_err::member(&app.http, gid, user).await? else {
         return Ok(());
     };
+    let (g, u) = (gid.get() as i64, user.get() as i64);
+    let same = member.joined_at.map(|t| t.as_micros()) == Some(joined);
+    if !same || !due(&app.pool, g, u, joined).await? {
+        return Ok(());
+    }
     let roles: Vec<i64> = p["roles"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_i64)
         .collect();
+    let t = Target {
+        user,
+        joined,
+        tries: p["tries"].as_u64().unwrap_or(0),
+    };
+    let info = app.guild_info(gid).await?;
+    let permit = permits::permit_roles(&app.pool, g).await?;
     let timeout = member.communication_disabled_until.map(|t| t.as_secs());
-    restore(app, gid, user, &roles, timeout).await
+    // An error retries this job through the scheduler's attempt limit.
+    restore(app, gid, &t, &roles, timeout, (&info, &permit)).await
+}
+
+/// The row still belongs to the membership `joined` (µs), is not held for verification, and the
+/// member is not quarantined.
+async fn due(pool: &PgPool, g: i64, u: i64, joined: i64) -> Result<bool> {
+    let joined = DateTime::from_timestamp_micros(joined).context("bad joined_at")?;
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM member_roles WHERE guild_id = $1 AND user_id = $2
+                          AND joined_at = $3 AND left_at IS NULL AND NOT pending)
+            AND NOT EXISTS (SELECT 1 FROM quarantines WHERE guild_id = $1 AND user_id = $2)",
+    )
+    .bind(g)
+    .bind(u)
+    .bind(joined)
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Gives back the safe part of `saved`, checked against the roles as they are now.
 async fn restore(
     app: &App,
     gid: Id<GuildMarker>,
-    user: Id<UserMarker>,
+    t: &Target,
     saved: &[i64],
     timeout_until: Option<i64>,
+    (info, permit): (&GuildInfo, &[i64]),
 ) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
-    let info = app.guild_info(gid).await?;
-    let permit = permits::permit_roles(&app.pool, gid.get() as i64).await?;
     let saved: Vec<Id<RoleMarker>> = saved
         .iter()
         .filter_map(|&r| Id::new_checked(r as u64))
@@ -233,23 +356,11 @@ async fn restore(
     let (mut give, skipped) = restorable(
         gid,
         &saved,
-        &info,
-        &permit,
+        info,
+        permit,
         cfg.antinuke.quarantine_role,
         &cfg.misc.sticky_never,
     );
-    if !skipped.is_empty() {
-        let list: Vec<String> = skipped
-            .iter()
-            .map(|(r, why)| format!("<@&{r}> ({why})"))
-            .collect();
-        let log = Log::new("Sticky Roles", ORANGE)
-            .user("Member", user.get())
-            .line("Not given back", &list.join(", "));
-        if let Err(e) = send_log(app, gid.get(), LogKind::Member, log).await {
-            tracing::warn!(?e, "sticky roles log failed");
-        }
-    }
     // Added now, `timeout_roles` would take them away again a moment later.
     let main = &cfg.lockdown.main_roles;
     if let Some(until) = timeout_until
@@ -262,7 +373,8 @@ async fn restore(
             .map(|r| r.get())
             .collect();
         if !held.is_empty() {
-            let job = json!({"user": user.get(), "roles": held});
+            // joined_at: `timeout_roles::restore` skips it once this membership is over.
+            let job = json!({"user": t.user.get(), "roles": held, "joined_at": t.joined});
             jobs::enqueue(
                 &app.pool,
                 gid.get() as i64,
@@ -274,17 +386,55 @@ async fn restore(
             give.retain(|r| !main.contains(r));
         }
     }
-    add(app, gid, user, &give).await
+    let given = add(app, gid, t, &give).await?;
+    if let Some(log) = rejoin_log(t.user.get(), &given, &skipped) {
+        if let Err(e) = send_log(app, gid.get(), LogKind::Member, log).await {
+            tracing::warn!(?e, "sticky roles log failed");
+        }
+    }
+    if given.is_empty() {
+        return Ok(());
+    }
+    // Quarantined while the roles went on (anti-nuke or staff): put the quarantine back.
+    crate::antinuke::requarantine_rejoin(app, gid, t.user)
+        .await
+        .map(drop)
+}
+
+/// One Member log per restore: the roles given back and the ones skipped, with the reason.
+fn rejoin_log(user: u64, given: &[Id<RoleMarker>], skipped: &Skipped) -> Option<Log> {
+    if given.is_empty() && skipped.is_empty() {
+        return None;
+    }
+    let mut log =
+        Log::new("Sticky Roles", if given.is_empty() { ORANGE } else { DONE }).user("Member", user);
+    if !given.is_empty() {
+        let list: Vec<String> = given.iter().map(|r| format!("<@&{r}>")).collect();
+        let s = if given.len() == 1 { "" } else { "s" };
+        log = log.line(
+            &format!("Gave back {} role{s}", given.len()),
+            &list.join(", "),
+        );
+    }
+    if !skipped.is_empty() {
+        let list: Vec<String> = skipped
+            .iter()
+            .map(|(r, why)| format!("<@&{r}> ({why})"))
+            .collect();
+        log = log.line("Not given back", &list.join(", "));
+    }
+    Some(log)
 }
 
 /// Adds the roles one by one (a full role list would drop what another bot gave meanwhile), as
-/// far as the guild's cap allows; the rest waits a minute as a job, since the row was already claimed.
+/// far as the guild's cap allows. The rest, and adds that failed for another reason than 404,
+/// wait a minute as a job, since the row was already claimed. Returns the roles given.
 async fn add(
     app: &App,
     gid: Id<GuildMarker>,
-    user: Id<UserMarker>,
+    t: &Target,
     roles: &[Id<RoleMarker>],
-) -> Result<()> {
+) -> Result<Vec<Id<RoleMarker>>> {
     let n = take(
         &mut app.sticky_budget.lock().unwrap(),
         gid.get(),
@@ -292,45 +442,36 @@ async fn add(
         now_secs(),
     );
     let (now, later) = roles.split_at(n);
-    if !later.is_empty() {
-        let later: Vec<u64> = later.iter().map(|r| r.get()).collect();
-        let job = json!({"user": user.get(), "roles": later});
-        jobs::enqueue(&app.pool, gid.get() as i64, KIND, job, now_secs() + 60).await?;
-    }
-    let mut given = vec![];
+    let mut retry: Vec<u64> = later.iter().map(|r| r.get()).collect();
+    let (mut given, mut failed) = (vec![], false);
     for &r in now {
         match app
             .http
-            .add_guild_member_role(gid, user, r)
+            .add_guild_member_role(gid, t.user, r)
             .reason(REASON)
             .await
         {
-            Ok(_) => given.push(format!("<@&{r}>")),
+            Ok(_) => given.push(r),
             // The member left again or the role is gone.
             Err(e) if http_err::gone(&e) => {}
-            Err(e) => tracing::warn!(?e, role = r.get(), "giving back a sticky role failed"),
+            Err(e) => {
+                tracing::warn!(?e, role = r.get(), "giving back a sticky role failed");
+                if t.tries < MAX_TRIES {
+                    failed = true;
+                    retry.push(r.get());
+                }
+            }
         }
     }
-    if given.is_empty() {
-        return Ok(());
+    if !retry.is_empty() {
+        let next = Target {
+            tries: t.tries + u64::from(failed),
+            ..*t
+        };
+        let job = job(&next, &retry);
+        jobs::enqueue(&app.pool, gid.get() as i64, KIND, job, now_secs() + 60).await?;
     }
-    let log = Log::new("Sticky Roles", DONE)
-        .user("Member", user.get())
-        .line(
-            &format!(
-                "Gave back {} role{}",
-                given.len(),
-                if given.len() == 1 { "" } else { "s" }
-            ),
-            &given.join(", "),
-        );
-    if let Err(e) = send_log(app, gid.get(), LogKind::Member, log).await {
-        tracing::warn!(?e, "sticky roles log failed");
-    }
-    // Quarantined while the roles went on (anti-nuke or staff): put the quarantine back.
-    crate::antinuke::requarantine_rejoin(app, gid, user)
-        .await
-        .map(drop)
+    Ok(given)
 }
 
 /// How many of `want` role adds the guild may make this minute; takes them from its budget.
@@ -467,8 +608,10 @@ async fn sync(app: &App, gid: Id<GuildMarker>) -> Result<()> {
 }
 
 /// `roles` are Postgres array literals, one per member, since UNNEST cannot take an array of arrays.
-/// Roles change only for the same membership and when not held for verification; a listed member
-/// is never marked as left.
+/// Roles change only for the same membership and when not held for verification. A row of an
+/// older membership is taken over when the listed join is over 10 minutes old (a `MemberAdd`
+/// missed while the bot was offline; a younger join may still have its claim on the way). A
+/// listing older than the row (a ban tombstone written during the paging) changes nothing.
 async fn upsert(
     pool: &PgPool,
     g: i64,
@@ -480,9 +623,16 @@ async fn upsert(
         "INSERT INTO member_roles AS m (guild_id, user_id, roles, joined_at)
          SELECT $1, u, r::bigint[], j FROM unnest($2::bigint[], $3::text[], $4::timestamptz[]) AS t(u, r, j)
          ON CONFLICT (guild_id, user_id) DO UPDATE SET
-           roles = CASE WHEN m.joined_at = EXCLUDED.joined_at AND NOT m.pending
+           roles = CASE WHEN (m.joined_at = EXCLUDED.joined_at AND NOT m.pending)
+                          OR (m.joined_at < EXCLUDED.joined_at
+                              AND EXCLUDED.joined_at < now() - interval '10 minutes')
                         THEN EXCLUDED.roles ELSE m.roles END,
-           left_at = NULL, updated_at = now()",
+           pending = m.pending AND NOT (m.joined_at < EXCLUDED.joined_at
+                                        AND EXCLUDED.joined_at < now() - interval '10 minutes'),
+           joined_at = CASE WHEN EXCLUDED.joined_at < now() - interval '10 minutes'
+                            THEN GREATEST(m.joined_at, EXCLUDED.joined_at) ELSE m.joined_at END,
+           left_at = CASE WHEN m.joined_at <= EXCLUDED.joined_at THEN NULL ELSE m.left_at END,
+           updated_at = now()",
     )
     .bind(g)
     .bind(users)
@@ -573,6 +723,23 @@ mod tests {
         assert_eq!(take(&mut b, 1, 3, 120), 3); // next minute
     }
 
+    #[test]
+    fn rejoin_posts_one_log_with_both_lines() {
+        let skipped = vec![(id(21), "dangerous permissions")];
+        let text = |l: Log| serde_json::to_string(&l.build()).unwrap();
+        let both = text(rejoin_log(9, &[id(20)], &skipped).unwrap());
+        for part in [
+            "Gave back 1 role",
+            "<@&20>",
+            "Not given back",
+            "<@&21> (dangerous",
+        ] {
+            assert!(both.contains(part), "{part}: {both}");
+        }
+        assert!(!text(rejoin_log(9, &[], &skipped).unwrap()).contains("Gave back"));
+        assert!(rejoin_log(9, &[], &vec![]).is_none());
+    }
+
     /// Runs only when DATABASE_URL points at a scratch Postgres.
     async fn pool() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
@@ -611,8 +778,125 @@ mod tests {
     async fn member_roles_sql() {
         let Some(p) = pool().await else { return };
         claim_runs_once_and_old_updates_do_not_overwrite(&p).await;
-        ban_forgets_and_retention_keeps_members(&p).await;
+        ban_empties_and_retention_keeps_members(&p).await;
         sync_upserts_and_marks_only_unlisted(&p).await;
+        held_join_drops_the_old_list(&p).await;
+        ban_tombstone_blocks_old_membership(&p).await;
+        sync_takes_over_a_missed_join(&p).await;
+        jobs_run_only_for_the_claimed_membership(&p).await;
+    }
+
+    async fn joined_at(p: &PgPool, g: i64, u: i64) -> DateTime<Utc> {
+        sqlx::query_scalar(
+            "SELECT joined_at FROM member_roles WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(g)
+        .bind(u)
+        .fetch_one(p)
+        .await
+        .unwrap()
+    }
+
+    /// A quarantined or raid-flagged rejoin moves the row on; a later rejoin gets nothing from two
+    /// memberships ago.
+    async fn held_join_drops_the_old_list(p: &PgPool) {
+        let g = guild(4);
+        clean(p, g).await;
+        save(p, g, 1, &[5], t(100)).await.unwrap();
+        claim(p, g, 1, t(200), false).await.unwrap(); // held: list dropped
+        save(p, g, 1, &[6], t(200)).await.unwrap(); // the new membership saves again
+        assert_eq!(row(p, g, 1).await, Some((vec![6], false, false)));
+        assert_eq!(claim(p, g, 1, t(300), false).await.unwrap(), Some(vec![6]));
+        clean(p, g).await;
+    }
+
+    async fn ban_tombstone_blocks_old_membership(p: &PgPool) {
+        let g = guild(5);
+        clean(p, g).await;
+        save(p, g, 1, &[5], t(100)).await.unwrap();
+        forget(p, g, 1).await.unwrap();
+        assert_eq!(row(p, g, 1).await, Some((vec![], true, false)));
+        // A late update and a sync page of the banned membership write nothing back.
+        save(p, g, 1, &[5], t(100)).await.unwrap();
+        upsert(p, g, &[1], &["{5}".into()], &[t(100)])
+            .await
+            .unwrap();
+        assert_eq!(row(p, g, 1).await, Some((vec![], true, false)));
+        // Banned with no row yet: the tombstone still blocks the old membership.
+        forget(p, g, 2).await.unwrap();
+        save(p, g, 2, &[5], t(100)).await.unwrap();
+        assert_eq!(row(p, g, 2).await, Some((vec![], true, false)));
+        // Unbanned and rejoined: nothing to give back.
+        let now: DateTime<Utc> = sqlx::query_scalar("SELECT now() + interval '1 second'")
+            .fetch_one(p)
+            .await
+            .unwrap();
+        assert_eq!(claim(p, g, 1, now, false).await.unwrap(), Some(vec![]));
+        clean(p, g).await;
+    }
+
+    async fn sync_takes_over_a_missed_join(p: &PgPool) {
+        let g = guild(6);
+        clean(p, g).await;
+        save(p, g, 1, &[5], t(100)).await.unwrap(); // Muted, then left and rejoined offline
+        save(p, g, 2, &[5], t(100)).await.unwrap(); // rejoined a minute ago, claim on the way
+        claim(p, g, 3, t(100), true).await.unwrap();
+        sqlx::query("UPDATE member_roles SET pending = true WHERE guild_id = $1 AND user_id = 3")
+            .bind(g)
+            .execute(p)
+            .await
+            .unwrap();
+        let recent: DateTime<Utc> = sqlx::query_scalar("SELECT now() - interval '1 minute'")
+            .fetch_one(p)
+            .await
+            .unwrap();
+        let lists = ["{7}".to_string(), "{8}".into(), "{9}".into()];
+        upsert(p, g, &[1, 2, 3], &lists, &[t(500), recent, t(500)])
+            .await
+            .unwrap();
+        assert_eq!(row(p, g, 1).await, Some((vec![7], false, false)));
+        assert_eq!(joined_at(p, g, 1).await, t(500));
+        assert_eq!(row(p, g, 2).await, Some((vec![5], false, false)));
+        assert_eq!(joined_at(p, g, 2).await, t(100));
+        assert_eq!(row(p, g, 3).await, Some((vec![9], false, false)));
+        clean(p, g).await;
+    }
+
+    async fn jobs_run_only_for_the_claimed_membership(p: &PgPool) {
+        let g = guild(7);
+        clean(p, g).await;
+        let us = |s: i64| t(s).timestamp_micros();
+        claim(p, g, 1, t(100), false).await.unwrap();
+        assert!(due(p, g, 1, us(100)).await.unwrap());
+        assert!(!due(p, g, 1, us(99)).await.unwrap()); // another membership
+        assert!(!due(p, g, 2, us(100)).await.unwrap()); // no row
+        sqlx::query("UPDATE member_roles SET pending = true WHERE guild_id = $1")
+            .bind(g)
+            .execute(p)
+            .await
+            .unwrap();
+        assert!(!due(p, g, 1, us(100)).await.unwrap()); // must verify again
+        sqlx::query("UPDATE member_roles SET pending = false WHERE guild_id = $1")
+            .bind(g)
+            .execute(p)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 1, '{}')",
+        )
+        .bind(g)
+        .execute(p)
+        .await
+        .unwrap();
+        assert!(!due(p, g, 1, us(100)).await.unwrap()); // quarantined
+        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1")
+            .bind(g)
+            .execute(p)
+            .await
+            .unwrap();
+        forget(p, g, 1).await.unwrap();
+        assert!(!due(p, g, 1, us(100)).await.unwrap()); // banned
+        clean(p, g).await;
     }
 
     async fn claim_runs_once_and_old_updates_do_not_overwrite(p: &PgPool) {
@@ -638,7 +922,7 @@ mod tests {
         clean(p, g).await;
     }
 
-    async fn ban_forgets_and_retention_keeps_members(p: &PgPool) {
+    async fn ban_empties_and_retention_keeps_members(p: &PgPool) {
         let (g, off) = (guild(1), guild(2));
         clean(p, g).await;
         clean(p, off).await;
@@ -647,7 +931,7 @@ mod tests {
         }
         save(p, off, 1, &[5], t(100)).await.unwrap();
         forget(p, g, 1).await.unwrap();
-        assert_eq!(row(p, g, 1).await, None);
+        assert_eq!(row(p, g, 1).await, Some((vec![], true, false)));
         // 2 left 31 days ago, 3 is still a member.
         sqlx::query("UPDATE member_roles SET left_at = now() - interval '31 days' WHERE guild_id = $1 AND user_id = 2")
             .bind(g)

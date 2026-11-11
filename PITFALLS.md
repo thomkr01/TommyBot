@@ -26,7 +26,7 @@ The `quarantines` row survived a leave, but no join code read it, so a quarantin
 
 **The post-join username filter punished immune staff.** (Join Gate check, 11-11)
 Join Gate's username filter checks names again after join (the "POST join" switch) and called `punish` without a level check, so an Extra Owner or Trusted Admin who picked a nickname on the word list could be kicked or banned. At join time nobody is staff yet, so the gap only showed after join. The other automatic paths on existing members (automod, Discord AutoMod hits, reactions, threads) already go through `whitelisted()`.
-*Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first.
+*Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first. The one deliberate exception is auto-dehoist (and Join Gate's Rename through `dehoist::rename`): Thomas's D6 skips only the owner and Extra Owners, so Trusted Admins and mods are renamed too.
 
 **Member edits share one rate-limit bucket.** (auto-dehoist, 11-11)
 Nick changes, role adds, timeouts and kicks of members all use Discord's member bucket, so a burst of automatic renames or role restores slows the punishments of a raid.
@@ -102,6 +102,10 @@ The ticket-category exemption read the category that the `ChannelCreate` task st
 **Join-time steps race each other.** (sticky roles plan, 11-11)
 A `MemberUpdate` (from verification, another bot or the bot's own role adds) can run before or alongside the `MemberAdd` task, and a late update can come from the membership before. Saving roles "per user id" would let such an update overwrite the saved roles before the rejoin reads them.
 *Avoid:* key per-member state by membership: `member_roles` rows carry `joined_at`, an update writes only when its `joined_at` matches the row, and the rejoin claims the older row in one statement (`sticky::claim`), so a replayed `MemberAdd` gets nothing.
+
+**Membership was checked when roles were claimed, not when they were added.** (sticky roles review, 11-11)
+Sticky roles checked the member once, when the rejoin claimed the saved list, and then added roles later: from a job a minute on, after verification, or when a timeout ended. By then the member could have left and rejoined, been banned, quarantined or sent back to verification, and still got the old roles. Errors after the claim (a failed read, a refused add) dropped the claimed list, and a join where any step acted (even a Log hit) froze the row, so the next rejoin got roles from two memberships ago. Found the same gap in `timeout_roles::restore`, which gave main roles back to a quarantined member.
+*Avoid:* every delayed add carries the membership it was claimed for (`joined_at`) and checks again right before the add: same `joined_at`, setting on, no quarantine row, not pending (`sticky::due`). Do fallible reads before a claim, and put whatever a claim took and could not finish into a job. A ban leaves a tombstone row instead of deleting, so a late event of the old membership cannot write it back.
 
 **Member role adds share Discord's rate-limit bucket with punishments.** (sticky roles, 11-11)
 A mass rejoin (after a raid, or a re-invite) giving every member's roles back would fill the per-guild member bucket that timeouts, kicks and bans need right then.

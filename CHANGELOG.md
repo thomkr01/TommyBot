@@ -20,6 +20,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 
 ### Added
 - Sticky roles (Miscellaneous, off by default): a member who leaves and rejoins gets their roles back, so leaving no longer sheds a Muted role. Roles that are managed, not below the bot, dangerous, a permit role, the Quarantine role or on the "never" list are skipped, a ban forgets the roles, a member who has to verify gets them after verifying, and roles of members who left are deleted after 30 days. Migration 3500.
+- Rollback warning: a saved Join Gate "Rename" action makes an older bot version fail to parse the Join Gate section, so rolling back turns Join Gate off. Do not roll back below this version without switching Rename off first.
 - View in Backups opens a page for that backup: the channels as a tree in Discord order (click a channel to see its permissions, Compact hides the icons), the server name, verification level and explicit media filter, the webhooks, and the roles in their colours (click one to see its permissions). Load and Delete are on the same page. (#164)
 - The dashboard shows only what your permits allow: pages without access are hidden, read-only pages are greyed out with a note, and the Commands page greys out commands you cannot use. `COMMAND -h` no longer explains commands you cannot use. (#146)
 - An info icon on 21 hard settings opens a plain-language explanation on hover, focus or tap. (#160)

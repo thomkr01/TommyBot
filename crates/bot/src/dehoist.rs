@@ -60,7 +60,7 @@ pub(crate) async fn check(
         return Ok(());
     }
     // Quarantined members (also on the way in: rejoin, verification's quarantine on join) are left as is.
-    if quarantined(app, gid, user.id).await? {
+    if crate::antinuke::quarantined(app, gid, user.id).await? {
         return Ok(());
     }
     // Updates still carrying the old name (ours echoes back, others run alongside) rename once.
@@ -76,24 +76,18 @@ pub(crate) async fn check(
         last.insert(key, new.clone());
     }
     let r = rename(app, gid, user.id, roles, (name, &new), "Auto-dehoist").await;
-    if !matches!(r, Ok(true)) {
+    if !matches!(r, Ok(None)) {
         app.dehoisted.lock().unwrap().remove(&key);
     }
     r.map(drop)
 }
 
-async fn quarantined(app: &App, gid: Id<GuildMarker>, uid: Id<UserMarker>) -> Result<bool> {
-    let row: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM quarantines WHERE guild_id = $1 AND user_id = $2")
-            .bind(gid.get() as i64)
-            .bind(uid.get() as i64)
-            .fetch_optional(&app.pool)
-            .await?;
-    Ok(row.is_some())
-}
+/// [`rename`]'s skip reason when the guild's cap for that caller is used up.
+pub(crate) const CAPPED: &str = "rename cap reached";
 
-/// Sets the nick and logs it in the Member log; `Ok(false)` when skipped: the owner and Extra
-/// Owners, members at or above the bot (Discord would refuse) and the guild's rename cap.
+/// Sets the nick and logs it in the Member log. `Ok(Some(why))` when skipped: the owner and Extra
+/// Owners, members at or above the bot (Discord would refuse) and the rename cap. Each `reason`
+/// has its own cap, so auto-dehoist cannot use up Join Gate's renames.
 pub(crate) async fn rename(
     app: &App,
     gid: Id<GuildMarker>,
@@ -101,10 +95,10 @@ pub(crate) async fn rename(
     roles: &[Id<RoleMarker>],
     (old, new): (&str, &str),
     reason: &str,
-) -> Result<bool> {
+) -> Result<Option<&'static str>> {
     let info = app.guild_info(gid).await?;
     if crate::hierarchy::top_position(&info.roles, roles) >= info.bot_top {
-        return Ok(false);
+        return Ok(Some("their top role is not below the bot's"));
     }
     let ids: Vec<i64> = roles.iter().map(|r| r.get() as i64).collect();
     let g = gid.get() as i64;
@@ -116,15 +110,15 @@ pub(crate) async fn rename(
         &ids,
     );
     if matches!(level.await?, Level::Owner | Level::ExtraOwner) {
-        return Ok(false);
+        return Ok(Some("owner or Extra Owner"));
     }
     let allowed = app
         .rate_limiter
         .lock()
         .unwrap()
-        .allow(g, "rename", CAP, Instant::now());
+        .allow(g, reason, CAP, Instant::now());
     if !allowed {
-        return Ok(false);
+        return Ok(Some(CAPPED));
     }
     app.http
         .update_guild_member(gid, uid)
@@ -138,5 +132,5 @@ pub(crate) async fn rename(
     if let Err(e) = send_log(app, gid.get(), LogKind::Member, log).await {
         tracing::warn!(?e, "rename log failed");
     }
-    Ok(true)
+    Ok(None)
 }
