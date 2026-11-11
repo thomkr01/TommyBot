@@ -5,6 +5,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- A dashboard icon used more than once no longer goes blank when its first copy is hidden. (#163)
 - A bot that deletes the verification channel no longer keeps Administrator through its own bot role: that role is emptied and the bot quarantined, with a kick only as the fallback. The owner DM says when the bot was kicked. (#142)
 - A punishment DM that gives up after 3 seconds is logged as a warning. (#142)
 - The dashboard DM info box says that DMs for unban, untimeout and unquarantine come after the action. (#142)
@@ -17,7 +18,9 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ### Added
 - The dashboard shows only what your permits allow: pages without access are hidden, read-only pages are greyed out with a note, and the Commands page greys out commands you cannot use. `COMMAND -h` no longer explains commands you cannot use. (#146)
 - An info icon on 21 hard settings opens a plain-language explanation on hover, focus or tap. (#160)
-- An optional read-only MCP server so Claude can read the bot's data and logs, for the bot owner only: Claude Code logs in with a fixed token, claude.ai through Discord (redirects only to claude.ai and localhost, a login lasts at most 30 days). Bot and dashboard logs can also be written to hourly files in `LOG_DIR`. Setup is in DEPLOY.md, which is now a step-by-step guide from an empty server. (#149, #150, #155, #156, #161)
+- An optional MCP server so Claude can read the bot's data and logs, for the bot owner only: Claude Code logs in with a fixed token, claude.ai through Discord (redirects only to claude.ai and localhost, a login lasts at most 30 days). Bot and dashboard logs can also be written to hourly files in `LOG_DIR`. Setup is in DEPLOY.md, which is now a step-by-step guide from an empty server. (#149, #150, #155, #156, #161)
+- The MCP server can make changes for Claude with a token made on the dashboard's new MCP page (bot owner, 2FA to make or revoke, stored only as a hash, one per client): config sections, permits, config rollback, lockdown, notes, cases and embeds, plus the security score. Each change shows a diff and runs only after the owner types Claude the code the bot sent by DM; sections that need 2FA on the dashboard also need an authenticator code. Update, deleting server data, backups and anti-nuke revert stay out of reach. MCP logs now name the tool only, not its arguments. (#159)
+- Icons for every page and group in the dashboard sidebar and on the Filters cards. (#163)
 - On pages without a server (the server list, Commands, Update) the left menu lists every server you can manage. Click one to open it. The server you opened last is highlighted.
 - A Yes/No question ("Do you want to proceed?", 10 seconds) before ban, kick, timeout, warn, quarantine, unquarantine and unban when the target is typed as a raw id or a name. A mention or a slash command pick never asks. Only the moderator who ran the command can answer. The Confirm switch turns it off. (#136)
 - Members get a DM before a warn, timeout, quarantine, kick, ban, softban or tempban (not a hackban), and after an unquarantine, untimeout or unban worked. TommyBot waits at most 3 seconds for the DM and punishes whatever happens to it. (#136)

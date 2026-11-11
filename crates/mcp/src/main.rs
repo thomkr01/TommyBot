@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
         token,
         log_dir: std::env::var("LOG_READ_DIR").unwrap_or_else(|_| "/logs".into()),
         oauth: oauth_from_env()?,
+        writes: writes_from_env()?,
     };
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8090".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -61,5 +62,28 @@ fn oauth_from_env() -> anyhow::Result<Option<tommybot_mcp::oauth::OAuth>> {
         discord_api: var("DISCORD_API_BASE")
             .unwrap_or_else(|| "https://discord.com/api/v10".into()),
         http: reqwest::Client::new(),
+    }))
+}
+
+/// Writes through the dashboard, on only with `MCP_WRITE_TOKEN` (made on the dashboard's MCP tokens page).
+fn writes_from_env() -> anyhow::Result<Option<tommybot_mcp::writes::Writes>> {
+    let Some(token) = std::env::var("MCP_WRITE_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
+        tracing::info!("writes off (MCP_WRITE_TOKEN not set)");
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        token.len() >= 32,
+        "MCP_WRITE_TOKEN must be at least 32 characters"
+    );
+    Ok(Some(tommybot_mcp::writes::Writes {
+        base: std::env::var("DASHBOARD_INTERNAL_URL")
+            .unwrap_or_else(|_| "http://dashboard:8080".into()),
+        token,
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?,
     }))
 }

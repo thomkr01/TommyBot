@@ -22,7 +22,7 @@ TommyBot is a fast, all-in-one Discord security and moderation bot written in Ru
 - **Appeals, reports and cases**: ban and timeout appeals, a report button for members, a searchable case history, and staff notes with their full edit history (a server-wide sweep always asks first).
 - **Tickets, embeds and Discord AutoMod**: members DM TommyBot to open a ticket with any server they share with it, staff answer in a private channel (anonymous replies, snippets, greeting and closing messages, blacklist, full transcripts viewable on the dashboard); plus an embed builder and control of Discord's own AutoMod rules.
 - **Web dashboard**: log in with Discord, run the setup wizard and change every setting in the browser, protected by two-factor login. Each staff member sees only the pages their permits allow.
-- **MCP server for Claude (optional)**: lets the bot owner ask Claude about cases, settings and logs, read-only. See [DEPLOY.md](DEPLOY.md).
+- **MCP server for Claude (optional)**: lets the bot owner ask Claude about cases, settings and logs. With a token made on the dashboard, Claude can also propose changes, which run only after the owner confirms a code the bot sends by DM. See [DEPLOY.md](DEPLOY.md).
 
 ## Installation
 

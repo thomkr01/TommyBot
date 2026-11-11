@@ -424,5 +424,5 @@ pub fn Tip(#[prop(into)] text: Signal<String>) -> impl IntoView {
             let _ = t.class_list().add_1("below");
         }
     };
-    view! { <span class="tip" tabindex="0" role="note" aria-label=text on:mouseenter=move |e| place(&e) on:focus=move |e| place(&e)>{crate::icons::icon_unique("info")}<span class="bubble" aria-hidden="true">{text}</span></span> }
+    view! { <span class="tip" tabindex="0" role="note" aria-label=text on:mouseenter=move |e| place(&e) on:focus=move |e| place(&e)>{crate::icons::icon("info")}<span class="bubble" aria-hidden="true">{text}</span></span> }
 }

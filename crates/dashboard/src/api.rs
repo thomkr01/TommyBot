@@ -439,7 +439,7 @@ pub async fn history(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>
         .collect::<Vec<_>>())))
 }
 
-async fn version(st: &AppState, guild: i64, v: i32) -> Result<Value, ApiError> {
+pub(crate) async fn version(st: &AppState, guild: i64, v: i32) -> Result<Value, ApiError> {
     sqlx::query_scalar("select config from guild_config where guild_id = $1 and version = $2")
         .bind(guild)
         .bind(v)

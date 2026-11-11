@@ -111,6 +111,9 @@ async function matrix(browser) {
     ['POST', `${g}/embeds`, () => ({ name: 'e2e matrix', embed: { title: 'x' }, channel: null }), 'editor', false],
     ['POST', `${g}/embeds/999999/post`, () => ({}), 'editor', false],
     ['POST', `${g}/embeds/999999/delete`, () => ({}), 'editor', false],
+    // MCP tokens: the bot owner (the mock's app owner is x) after 2FA only
+    ['POST', '/api/mcp-tokens', () => ({ name: 'e2e matrix' }), 'discord', true],
+    ['POST', '/api/mcp-tokens/999999/revoke', () => ({}), 'discord', true],
     // last: wipes the server's data
     ['POST', `${g}/purge`, () => ({}), 'owner', true],
   ];
@@ -132,6 +135,7 @@ async function matrix(browser) {
         if (want && denied) fail('matrix', `${code}${up ? '+2FA' : ''} ${m} ${path.replace(g, '')} -> ${r.s} (expected allowed) ${r.t}`);
         // Undo what an allowed call changed for the next user.
         if (r.s < 300 && path.endsWith('/permits')) { sql('delete from trusted_admins where user_id = 999; delete from extra_owners where user_id = 999'); }
+        if (r.s < 300 && path === '/api/mcp-tokens') sql('delete from mcp_tokens');
         if (r.s < 300 && path.endsWith('/lockdown/lock')) await call(page, 'POST', `${g}/lockdown/unlock`, {});
         if (r.s < 300 && path.endsWith('/panic/start')) await call(page, 'POST', `${g}/panic/end`, {});
       }
