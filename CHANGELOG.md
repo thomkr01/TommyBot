@@ -5,10 +5,19 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- A bot that deletes the verification channel no longer keeps Administrator through its own bot role: that role is emptied and the bot quarantined, with a kick only as the fallback. The owner DM says when the bot was kicked. (#142)
+- A punishment DM that gives up after 3 seconds is logged as a warning. (#142)
+- The dashboard DM info box says that DMs for unban, untimeout and unquarantine come after the action. (#142)
+- Dashboard deep test fixes: Cancel resets dropdowns, roles no longer show as "@@everyone", the Changes bar no longer hides right after a page loads, Join Raid can be turned on before its first save, an emptied number field saves, decimal fields show 100 instead of 100.0, two Overview switches in a row no longer conflict, Copy no longer says "Copied!" when the browser refused, the phone header fits the screen, and the theme choice is kept. (#158, #160)
+- Auto Setup makes a saved role or channel again when it was deleted in Discord, and its steps stay green or red with the result left on the page. (#147, #151)
+- The toast is one piece with only the bottom strip. (#148)
 - Dashboard number fields show a plain box with - and + again instead of code text, and the - button works. (#143)
 - The dashboard no longer crashes ("reactive value that has already been disposed") when you leave a page while it is still loading or saving, for example during an Update. (#143)
 
 ### Added
+- The dashboard shows only what your permits allow: pages without access are hidden, read-only pages are greyed out with a note, and the Commands page greys out commands you cannot use. `COMMAND -h` no longer explains commands you cannot use. (#146)
+- An info icon on 21 hard settings opens a plain-language explanation on hover, focus or tap. (#160)
+- An optional read-only MCP server so Claude can read the bot's data and logs, for the bot owner only: Claude Code logs in with a fixed token, claude.ai through Discord (redirects only to claude.ai and localhost, a login lasts at most 30 days). Bot and dashboard logs can also be written to hourly files in `LOG_DIR`. Setup is in DEPLOY.md, which is now a step-by-step guide from an empty server. (#149, #150, #155, #156, #161)
 - On pages without a server (the server list, Commands, Update) the left menu lists every server you can manage. Click one to open it. The server you opened last is highlighted.
 - A Yes/No question ("Do you want to proceed?", 10 seconds) before ban, kick, timeout, warn, quarantine, unquarantine and unban when the target is typed as a raw id or a name. A mention or a slash command pick never asks. Only the moderator who ran the command can answer. The Confirm switch turns it off. (#136)
 - Members get a DM before a warn, timeout, quarantine, kick, ban, softban or tempban (not a hackban), and after an unquarantine, untimeout or unban worked. TommyBot waits at most 3 seconds for the DM and punishes whatever happens to it. (#136)
@@ -27,6 +36,9 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - Dashboard Notes page has a Sweep server button behind a confirm dialog. (#134)
 
 ### Changed
+- `/revert` and the Revert Center leave out what an Owner, Extra Owner or Trusted Admin did; only an Owner or Extra Owner can include it. Saving the whitelist panel and adding Trusted Admins in Discord need a fresh dashboard 2FA step-up (account menu › Confirm 2FA). (#146)
+- Permission checks are tighter: slowmode and lock refuse other servers' channels, unlocking needs the permit for each lock it lifts, releasing a quarantine checks the roles it gives back, a member cannot verify out of a non-join quarantine, verification never gives a permit role or a role with dangerous permissions, nobody can unwarn, close or edit their own case or an immune member's, and only owners can change anti-nuke whitelist flags or see the rescue key. (#146)
+- Dependencies: twilight 0.18, constant_time_eq 0.6, Postgres 18 and newer GitHub Actions. (#152, #153, #157)
 - The "always DM punished members" switch is on by default, also for existing servers, and one switch covers every punishment DM. `?dm` still forces a DM when it is off. (#136)
 - Automatic punishments from warn thresholds DM the member first too. (#136)
 - A target like `name#0` finds the same member as the name or the id. (#136)
