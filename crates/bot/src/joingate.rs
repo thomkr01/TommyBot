@@ -49,6 +49,10 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         )
         .await;
     }
+    // Before the other checks, so a failed join gate step cannot let a quarantined member back in.
+    if let Err(e) = crate::antinuke::requarantine_rejoin(app, gid, user.id).await {
+        tracing::warn!(?e, "quarantining a rejoined member failed");
+    }
     // One invites call per join: only when something shows the result.
     let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
         || cfg.logging.target(LogKind::Member, None).is_some()
@@ -243,14 +247,18 @@ async fn join_raid(
         }
     }
     if out.triggered {
-        jobs::replace(
+        // The report job must not hold back the lock and the punishments below.
+        if let Err(e) = jobs::replace(
             &app.pool,
             gid.get() as i64,
             "raid_end",
             serde_json::json!({ "until_ms": now + raid.active_ms, "started_ms": started, "code": code }),
             (now / 1000) + raid.active_ms / 1000,
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(?e, "queueing the raid report failed");
+        }
         let warned: Vec<_> = raid
             .warned_roles
             .iter()
@@ -263,7 +271,9 @@ async fn join_raid(
             .zip(names.iter().map(String::as_str))
             .collect();
         let log = raid_trigger_log(raid, &flagged, &code, crate::invites::raid_url(&code));
-        send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await?;
+        if let Err(e) = send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await {
+            tracing::warn!(?e, "join raid log failed");
+        }
         crate::reply::alert_owner(app, gid, "A join raid started").await;
     }
     let auto_lock = cfg.automod.auto_lockdown.enabled;
@@ -271,10 +281,13 @@ async fn join_raid(
         .then(|| raid.lock.clone())
         .flatten()
     {
-        lockdown::lock(app, gid, kind).await?;
+        if let Err(e) = lockdown::lock(app, gid, kind).await {
+            tracing::warn!(?e, "join raid lockdown failed");
+        }
     }
+    // One raider who already left (404) or a failed log must not let the rest go.
     for id in out.flagged {
-        punish(
+        let r = punish(
             app,
             cfg,
             gid,
@@ -283,7 +296,10 @@ async fn join_raid(
             "join raid",
             Detail::default(),
         )
-        .await?;
+        .await;
+        if let Err(e) = r {
+            tracing::warn!(?e, user = id, "punishing a raider failed");
+        }
     }
     Ok(())
 }
@@ -331,7 +347,8 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         // A timeout fires another update and a role change keeps the name: act once per bad name pair.
         timed_out || !bad || seen.insert(key, names.clone()) == Some(names)
     };
-    if skip {
+    // Owner, Extra Owners and Trusted Admins are immune to every bot action, here too.
+    if skip || app.is_immune(m.guild_id, m.user.id).await? {
         return Ok(());
     }
     punish(

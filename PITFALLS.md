@@ -16,6 +16,18 @@ Quarantining a nuking bot failed, because Discord does not let anyone take a bot
 The first live nuke test got 403 because TommyBot's role was tied with the attacker's. A role between the bot and the quarantine role also breaks quarantine.
 *Avoid:* the bot role must sit above every role it acts on, and the quarantine role right below the bot. The security score checks the second one (Move role fix). When a live test gets 403, check the role order first.
 
+**Tied role positions were compared as equal.**
+On a server whose roles were never reordered, every role sits at position 1 (Skytest: both bots, Quarantine, Member, Admins, Moderators). Discord breaks the tie by id, with the older role ranking higher, but TommyBot compared only the numbers. So `/kick` and `/ban` refused any target with a role, anti-nuke would not strip Admins from a nuker, lockdown and `tshoot lockdown` skipped every role, the security score read them all as level with the bot, and Auto Setup never moved the quarantine role. `security.rs` already ranked ties by id, but other code called it with raw positions.
+*Avoid:* rank roles once where they are read from Discord: `hierarchy::ranked()` in the bot, `ops::roles_of()` and `recovery::live_image()` in the dashboard, all built on `tommybot_core::roles::ranks()`. Every role list that is compared or written back goes through one of them. Never compare `Role::position` straight from Discord.
+
+**Leaving and rejoining ended a quarantine.** (sticky roles plan, 11-11)
+The `quarantines` row survived a leave, but no join code read it, so a quarantined member who left and came back was a normal member again. Only verification with "quarantine on join" put the role back, and only because it quarantines every unverified joiner. Checked for the same gap in other state: timeouts survive a rejoin in Discord itself, strikes and warn points are stored per user, and join lock and join raid act on every join.
+*Avoid:* state that holds a member back must be re-applied on `MemberAdd`, not only while they stay. `antinuke::requarantine_rejoin` runs first in `joingate::on_join` and goes through `contain()`, so a re-added bot loses its managed role's permissions too.
+
+**The post-join username filter punished immune staff.** (Join Gate check, 11-11)
+Join Gate's username filter checks names again after join (the "POST join" switch) and called `punish` without a level check, so an Extra Owner or Trusted Admin who picked a nickname on the word list could be kicked or banned. At join time nobody is staff yet, so the gap only showed after join. The other automatic paths on existing members (automod, Discord AutoMod hits, reactions, threads) already go through `whitelisted()`.
+*Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first.
+
 **Not every member lookup error means "not a member".** (#97)
 All `guild_member` errors (5xx, timeouts) were read as "left the server". Staff then lost their permit level for that event, so automod or anti-nuke could act on them.
 *Avoid:* use `http_err::member()`. Only a 404 means not a member. Other errors propagate.
@@ -79,6 +91,26 @@ A restart between a temp ban and its unban job made the ban permanent. Same for 
 `main.rs` spawns a task per event, so messages already in flight after a trigger each added a strike. One burst could reach the strike cap and send several DMs, cases and logs.
 *Avoid:* claim the punishment (`HeatState::claim`, one per 10 s). Anything that must happen once needs an atomic claim: `DELETE … RETURNING`, `WHERE status='open'`, `SKIP LOCKED`.
 
+**Anti-nuke tripped once per event, not once per nuke.** (race review, 11-11)
+Past the limit every audit entry returned `Quarantine` again, and each one is its own task, so a 20-channel nuke started about 16 quarantine-and-revert runs at once. They read the same unreverted rows, so the backup recreated the same deleted channel several times (the copy has a new id, so the next run still saw the original as missing), and opened as many cases and owner alerts.
+*Avoid:* one run per (guild, actor) (`App::nuke_runs`). A later event only logs its row and asks the running run to revert once more; the run frees its claim in the same step that finds nothing new, so no action falls between two runs. The `nuke_revert` guard job is due after 120 s, and a run under rate limits can take longer: the scheduler skips a guard whose run is still alive, and the job path takes the same claim. An actor an earlier run already quarantined only gets the revert, with no second case or alert. `panic::start` undoes its claim and its category exemptions when its `panic_end` job cannot be saved; otherwise mod commands stay locked with nothing to end them. The same applies to panic mode: `panic::start` checks and inserts `panic_runs` in one step, or a second start saves the already exempted overwrites as the old ones.
+
+**A run marked rows it never read.** (race review, 11-11)
+`revert_actor` read the actor's rows, worked for seconds, then marked every row since `since` as reverted. What the nuker did meanwhile was marked too and never undone, not even by `/revert`.
+*Avoid:* mark only the ids you read (`WHERE id = ANY($1)`). Never close work with a range condition when rows can arrive while it runs.
+
+**Two locks at once saved a locked server as the snapshot.** (race review, 11-11)
+`lock_for` checked for an active lock, then planned with several HTTP calls, then saved with `ON CONFLICT DO UPDATE`. Mention-spam lock calls it for every message past the limit, so a second call could plan after the first began applying, save locked permissions and overwrite the first snapshot. Unlock then restored the locked state.
+*Avoid:* lock and unlock of a guild run one at a time (`lockdown::exclusive`). An in-process lock is enough here only because the dashboard queues jobs and never writes `lock_snapshots`; a second writer process needs an advisory lock (see the Channel Setup entry below).
+
+**A gateway event and its audit entry run in their own tasks.** (race review, 11-11)
+The ticket-category exemption read the category that the `ChannelCreate` task stores. When the audit task ran first, the lookup missed and a ticket bot's channels counted towards its limit.
+*Avoid:* do not rely on the order of two events. `note_parent` stores every channel (also "no category"), so a miss means "not seen yet", and `parent_of` waits up to 0.5 s for it.
+
+**A join quarantine counted as a nuke target.** (race review follow-up, 11-11)
+Verification's "quarantine on join" writes a quarantine row with no saved roles. The quarantine hold treated it like an anti-nuke quarantine, so an autorole bot giving a joiner its role was quarantined and lost its role permissions on every join.
+*Avoid:* a row with empty `saved_roles` is a join quarantine. The hold undoes the role change but punishes nobody. Code that reads `quarantines` must tell the two kinds apart.
+
 **Long work under a global lock.** (#100)
 Similarity compared whole 4000-character messages (quadratic) while holding the global heat lock.
 *Avoid:* bound the input (first 500 characters) and keep work under shared locks short.
@@ -90,6 +122,7 @@ The config listener died after one DB hiccup, so dashboard changes never applied
 **A failed log must not stop protection.** (#100, #133)
 The timeout DM went out before the timeout worked, and a failed anti-nuke report stopped panic mode.
 *Avoid:* fixed order Contain → Revert → Report → Panic. Logs and DMs are side effects; their failure never skips the next protective step.
+The race review (11-11) found the same in Join Raid (a failed raid log or report job skipped the lockdown and every punishment, and one raider who had already left stopped the punish loop), in automod (the mention-lock log and lock came before the strike, the timeout log before the strike-cap lock) and in `warn_actions`. A loop that punishes several members logs a failure and goes on with the next.
 
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
@@ -101,6 +134,10 @@ Push decided "this channel follows its category" from live Discord (synced with 
 **A per-process flag does not stop a second writer.** (Channel Setup review, 11-11)
 Push guarded itself with a static `HashSet` of guilds, so a second dashboard process could push at the same time, and a draft PUT or DELETE during a push was overwritten by the push's write-back. A stale PUT after a push brought back `new-*` keys that were already created, and the next push created them twice.
 *Avoid:* hold a Postgres advisory lock for the whole run (`pg_try_advisory_xact_lock` in a transaction the run owns, so it is freed when the task ends or the process dies) and refuse other writers with 409 while it is held. Keys a run has used up are recorded (`next`) and refused when they come back. Run the steps in `tokio::spawn` and await the handle, so a dropped request does not stop a run half way; log what will happen before the first step and the result after, and record a failed save instead of returning with `?`.
+
+**A dropped sqlx transaction kept the push lock after the answer.** (Channel Setup lock, 11-11)
+`lock()` took `pg_try_advisory_xact_lock` in a sqlx transaction, and every handler let it drop on return. sqlx only queues the ROLLBACK on drop; it runs when the pooled connection is returned in a spawned task, so the lock outlived the response. The next PUT or Push that came in first got "a push is running" (about 1 in 60 runs of `draft_is_saved_discarded_and_pushed_only_when_safe`).
+*Avoid:* a transaction that holds an advisory lock which others try-lock ends with an awaited `rollback()` or `commit()` on every path before the answer, early returns included (`release()` in `dashboard/src/channels.rs`; the whole push runs in one task that releases at the end). Drop is only the fallback for a cancelled request or a dead process. Checked the other `pg_advisory_xact_lock` users (`bot/settings`, `bot/tickets`, `dashboard/store.rs`, `core/cases.rs`): they wait for the lock instead of trying it, so a late ROLLBACK only delays the next writer by a moment and nothing is refused.
 
 ## 3. Automod
 
@@ -155,6 +192,10 @@ sqlx stores a checksum, so editing an applied migration breaks every existing da
 Cargo mixed crates from different worktrees, and one branch's migration broke the others' tests. Four targets (about 7 GB each) filled the disk.
 *Avoid:* one `CARGO_TARGET_DIR` and one database per worktree (`su postgres -c "createdb X"`; `createdb -h localhost` hangs on a password prompt). Delete finished targets.
 
+**Saving a note without a change was stored as an edit.** (11-11)
+`notes::edit` always wrote a `note_edits` row and both callers logged a Modify, so pressing Save twice gave a "x → x" history line and a log.
+*Avoid:* an edit that changes nothing writes nothing (`old.text <> $3` in the SQL) and the callers skip the log when `old == text`.
+
 ## 6. Dashboard
 
 See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the two worst ones (#143): a `>` in a `view!` attribute ends the tag, and reading a signal after its page is gone crashes the whole dashboard. Also:
@@ -176,8 +217,11 @@ See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the t
 - **Role names from Discord already start with `@` for @everyone** (#158). The dashboard added its own `@` and showed `@@everyone`. *Avoid:* trim a leading `@` before adding one. Fixed in `form::items` (every role list and picker) and the `md.rs` role mentions; `recovery.rs` and the wizard's ticket pings already did. The bot itself never writes a role name after `@`.
 - **The toast looked like two pieces.** A coloured `border-left` on a rounded box curves at the corners, and the absolutely placed progress strip starts inside that border, so the two met as a hook. *Avoid:* one colour mark per box. Put strips and edges inside an `overflow:hidden` box with `left:0; right:0` and no border on that side. Also `cargo fmt` in `crates/dashboard/ui` reformats unrelated files; revert them before committing.
 
+- **A missing `enabled` key was read as on.** (UI review, 11-11) Overview's switches guessed their own defaults and showed Anti Nuke and Join Raid on for a server that never saved them, while the bot, the security score and the pages read them as off. The settings pages only ringed cards red when `enabled` was literally `false`, so a system that was never switched on showed no "Not in use" ring. *Avoid:* read a missing switch as the bot does (the schema default, off for every system); never keep a second copy of a default in the UI.
 - **The 2FA check ran before the DM code.** (MCP writes, PR 4, caught in review) `confirm` checked the TOTP code first, so anyone holding an MCP token could send wrong TOTP codes and lock the owner out of dashboard 2FA for 10 minutes. *Avoid:* when a request carries several secrets, check the one the caller must already hold (the DM code) first, and touch shared lockout counters only after it passes.
 - **An action ran something other than what was reviewed.** (Channel Setup review, 11-11) Push ran the draft stored at that moment, which another editor (or a late save) could have changed after the preview. *Avoid:* every reply carries a version of what it shows (`updated_at`), the action sends it back, and a mismatch is refused with 409.
+- **An approval showed less than it approved.** (Security review, 11-11) The MCP code DM cut the change at 1500 characters, so the end of a long change was approved unseen. The same class: `embed_post`'s DM showed only `{repost}` and not the embed it posts, a rollback's preview diffed the permits copy in the last config version instead of the live tables (a rescue-claimed Extra Owner was removed without showing), and the embed could be edited between the DM and the code. A `target` on an action without `{t}` in its path was never checked but went into the DM's inline code, so backticks and a fake block could reshape it (found in an edge-case check of #169). *Avoid:* an approval shows all of what runs or refuses (propose says "split it"); drop input an action does not use before it reaches the approval; preview what the action really reads (the stored embed, live permits); store a hash of what was shown and refuse at confirm (`stale`) when a fresh preview differs (migration 3100 `preview_hash`).
+- **A host allow list let any page on that host catch an OAuth code.** (Security review, 11-11) MCP OAuth took any path on claude.ai/claude.com, and a client id signed under that rule stays valid for 10 years. *Avoid:* compare host and path exactly (`REDIRECTS`), no query or port, and check the redirect again at `/authorize`, not only at registration.
 - **An empty list switched an authorization rule off.** (Channel Setup review, 11-11) "Only owners may hide a channel from staff" compared against the staff roles; a server without roles on the Admins and Moderators permits had none, so nothing ever counted as hidden and anyone could do it. *Avoid:* decide what an empty list means for the rule (here: every newly limited channel hides it from staff) and say in the refusal how to fix it.
 - **A filter meant for display also weakened the check.** (Channel Setup review, 11-11) Member overwrites were left out of the issue list so they would not make rows pulse, which also let a dangerous member overwrite through Push. *Avoid:* filter for display where it is shown; the list that decides keeps every row.
 - **A picker's filter is not validation.** (Channel Setup review, 11-11) The UI left the quarantine and main roles out of the role picker, but the server took any role id, and the UI's own list still offered roles the server would refuse. *Avoid:* the server validates with the same rule (`Ctx::pickable`) and sends the allowed ids, and the UI offers only those.
@@ -212,5 +256,6 @@ Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` on
 - **The live script shares the bot's token** and its rate limits. Cache channel and role lookups and wait longer instead of polling hard (#142).
 - **Make scenarios clean up after themselves** so they can run again. The old nuke scenario kicked the attacker bot every run (#142).
 - **Cloud env vars are read at session start.** A variable added during a session needs a new session.
-- **Two DB tests used the same guild id.** (MCP writes, PR 4) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
+- **Two DB tests used the same guild id.** (MCP writes, PR 4; again in the race review, where `6_100_000_000` was already used twice in the bot crate) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
+- **An e2e step waited for any row, not the one it made.** (11-11) The notes check waited for "a note is listed", which old notes from an earlier run already met, then the reload that put the new note on top swapped the card under the fill, so Save sent the old text. *Avoid:* wait for the exact value the step created.
 - **`tests/e2e/run.sh` needs root Postgres, trunk and Playwright**; the gateway is not covered by the Discord mock.

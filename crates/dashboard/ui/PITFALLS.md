@@ -163,6 +163,12 @@ Channel Setup's right panel is rebuilt from the server's reply after each change
 
 **Rule:** a reactive closure that rebuilds controls notes the focused control's `aria-label` before it builds and focuses the new control with that label in a `request_animation_frame` (`panel_focus`/`refocus` in `channels.rs`). Every control in such a panel needs a unique `aria-label`.
 
+## 17. A select that acts on `change` fires on every arrow key
+
+In Chrome on Windows and Linux, pressing an arrow key on a closed `<select>` changes its value and fires `change`. Channel Setup's "+ Role" picker added the role at once, so a keyboard user who arrowed through the list added every role on the way, and the first version of the new add-channel menu would have created a channel per key press.
+
+**Rule:** a select that creates or adds something only picks; a button next to it does the action (`kind to add` + "+ Add", `role to add` + "+ Role" in `channels.rs`). A select that only sets a value the user saves later (the settings forms) can keep `on:change`.
+
 ## Where it was fixed (#143)
 
 - `form.rs`: the `-` button on number fields (`>=` in the attribute); the settings card's config/schema load; the preview flash frame callback; list import.

@@ -139,7 +139,7 @@ pub(crate) async fn user_info(
         .unwrap()
         .get(&(gid.get(), uid.get()))
         .map_or(0.0, |(h, _)| h.decayed(now, &cfg.automod.heat));
-    let roles = app.http.roles(gid).await?.models().await?;
+    let roles = crate::hierarchy::ranked(gid, app.http.roles(gid).await?.models().await?);
     let color = roles
         .iter()
         .filter(|r| m.roles.contains(&r.id) && r.colors.primary_color != 0)
@@ -213,7 +213,7 @@ fn title_case(flag: &str) -> String {
 }
 
 pub(crate) async fn role_info(app: &App, gid: Id<GuildMarker>, rid: u64) -> Result<Option<Embed>> {
-    let roles = app.http.roles(gid).await?.models().await?;
+    let roles = crate::hierarchy::ranked(gid, app.http.roles(gid).await?.models().await?);
     let Some(r) = roles.into_iter().find(|r| r.id.get() == rid) else {
         return Ok(None);
     };
@@ -256,7 +256,7 @@ pub async fn server_page(app: &App, gid: Id<GuildMarker>, page: usize) -> Result
     let pages = 1 + g.roles.len().div_ceil(ROLES_PER_PAGE);
     let page = page.min(pages - 1);
     if page > 0 {
-        let mut roles = g.roles.clone();
+        let mut roles = crate::hierarchy::ranked(gid, g.roles.clone());
         roles.sort_by_key(|r| std::cmp::Reverse(r.position));
         let mut e = Log::new(&format!("{}'s Roles:", g.name), BLUE);
         for r in roles
@@ -362,7 +362,10 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
         .into_iter()
         .map(crate::backup::channel_img)
         .collect();
-    let roles: Vec<_> = g.roles.into_iter().map(crate::backup::role_img).collect();
+    let roles: Vec<_> = crate::hierarchy::ranked(gid, g.roles)
+        .into_iter()
+        .map(crate::backup::role_img)
+        .collect();
     let mut rows = checks(&safety, &roles, &channels, bot_top, &setup);
     let points = score(&rows);
     // Worst first; 12 rows with details stay under the embed's 4096 characters.

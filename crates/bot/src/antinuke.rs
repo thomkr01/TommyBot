@@ -141,18 +141,22 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         return Ok(());
     };
     // Ticket bots open and close channels all day; the gateway event names the category first.
-    if matches!(action, Action::ChannelCreate | Action::ChannelDelete)
-        && e.target_id
-            .and_then(|t| app.channel_parents.lock().unwrap().remove(&t.get()))
-            .is_some_and(|p| {
-                cfg.antinuke
-                    .ticket_categories
-                    .iter()
-                    .chain(&cfg.panic.whitelisted_categories)
-                    .any(|c| c.get() == p)
-            })
-    {
-        return Ok(());
+    let exempt_categories: Vec<u64> = cfg
+        .antinuke
+        .ticket_categories
+        .iter()
+        .chain(&cfg.panic.whitelisted_categories)
+        .map(|c| c.get())
+        .collect();
+    if let (Action::ChannelCreate | Action::ChannelDelete, Some(t)) = (action, e.target_id) {
+        if exempt_categories.is_empty() {
+            app.channel_parents.lock().unwrap().remove(&t.get());
+        } else if parent_of(app, t.get())
+            .await
+            .is_some_and(|p| exempt_categories.contains(&p))
+        {
+            return Ok(());
+        }
     }
     // A webhook on the webhook whitelist is exempt whatever its creator may do.
     let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?
@@ -199,6 +203,18 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         quarantine_and_revert(app, gid, actor, &why).await?;
     }
     Ok(())
+}
+
+/// The category of a created or deleted channel, as its gateway event noted it. Both events run
+/// as their own tasks, so the audit entry can come first: a miss waits up to 0.5 s for the other.
+async fn parent_of(app: &App, channel: u64) -> Option<u64> {
+    for _ in 0..5 {
+        if let Some(p) = app.channel_parents.lock().unwrap().remove(&channel) {
+            return p;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
 }
 
 /// Adds a staff action's heat %; true when the member just reached 100.
@@ -519,6 +535,33 @@ pub(crate) async fn quarantine_actor(
     Ok(done)
 }
 
+/// Leaving does not end a quarantine: a member who rejoins while their quarantine row exists is
+/// contained again. True when they were.
+pub(crate) async fn requarantine_rejoin(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Result<bool> {
+    let held: Option<(i64,)> =
+        sqlx::query_as("SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+            .bind(gid.get() as i64)
+            .bind(user.get() as i64)
+            .fetch_optional(&app.pool)
+            .await?;
+    if held.is_none() {
+        return Ok(false);
+    }
+    let done = contain(app, gid, user).await?;
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Member", user.get())
+        .text(&action_text(done))
+        .line("Reason", "Rejoined the server while quarantined");
+    if let Err(e) = send_log(app, gid.get(), LogKind::AntiNuke, log).await {
+        tracing::warn!(?e, "rejoin quarantine log failed");
+    }
+    Ok(true)
+}
+
 async fn open_case(
     app: &App,
     gid: Id<GuildMarker>,
@@ -561,8 +604,9 @@ pub(crate) async fn revert_actor(
     filters: Option<&BackupsCfg>,
 ) -> Result<RevertSummary> {
     let since = since_secs;
-    let rows: Vec<(serde_json::Value, i64)> = sqlx::query_as(
-        "SELECT inverse, EXTRACT(EPOCH FROM created_at)::BIGINT FROM action_log
+    // Only the rows read here are marked reverted at the end: the actor's newer actions are not undone yet.
+    let rows: Vec<(i64, serde_json::Value, i64)> = sqlx::query_as(
+        "SELECT id, inverse, EXTRACT(EPOCH FROM created_at)::BIGINT FROM action_log
          WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)",
     )
     .bind(gid.get() as i64)
@@ -570,9 +614,10 @@ pub(crate) async fn revert_actor(
     .bind(since)
     .fetch_all(&app.pool)
     .await?;
+    let mut ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
     let log: Vec<LogEntry> = rows
         .into_iter()
-        .filter_map(|(inv, at)| {
+        .filter_map(|(_, inv, at)| {
             Some(LogEntry {
                 actor: actor.get(),
                 at,
@@ -602,8 +647,8 @@ pub(crate) async fn revert_actor(
         }
     }
     // Deleted channels and roles have no logged inverse; they come back from the latest backup.
-    let gone: Vec<(i64,)> = sqlx::query_as(
-        "SELECT target_id FROM action_log WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted
+    let gone: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT id, target_id FROM action_log WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted
          AND action IN ('ChannelDelete','RoleDelete') AND target_id IS NOT NULL AND created_at >= to_timestamp($3)",
     )
     .bind(gid.get() as i64)
@@ -611,7 +656,8 @@ pub(crate) async fn revert_actor(
     .bind(since)
     .fetch_all(&app.pool)
     .await?;
-    let gone: std::collections::HashSet<u64> = gone.into_iter().map(|(id,)| id as u64).collect();
+    ids.extend(gone.iter().map(|g| g.0));
+    let gone: std::collections::HashSet<u64> = gone.into_iter().map(|(_, t)| t as u64).collect();
     let recreated = if gone.is_empty() {
         0
     } else {
@@ -622,10 +668,8 @@ pub(crate) async fn revert_actor(
                 0
             })
     };
-    sqlx::query("UPDATE action_log SET reverted = true WHERE guild_id=$1 AND actor_id=$2 AND created_at >= to_timestamp($3)")
-        .bind(gid.get() as i64)
-        .bind(actor.get() as i64)
-        .bind(since)
+    sqlx::query("UPDATE action_log SET reverted = true WHERE id = ANY($1)")
+        .bind(&ids)
         .execute(&app.pool)
         .await?;
     Ok(RevertSummary {
@@ -786,19 +830,135 @@ async fn quarantine_and_revert(
     actor: Id<UserMarker>,
     why: &str,
 ) -> Result<()> {
-    let since = now_secs() - 3600;
-    let payload = json!({"actor": actor.get(), "why": why, "since": since});
-    let guard = jobs::enqueue(
-        &app.pool,
-        gid.get() as i64,
-        "nuke_revert",
-        payload,
-        now_secs() + 120,
-    )
-    .await?;
-    let r = revert_and_report(app, gid, actor, why, since).await;
-    jobs::finish(&app.pool, guard).await?;
+    let key = (gid.get(), actor.get());
+    if !claim_nuke_run(app, key) {
+        // Every event past the limit lands here while the first run is busy; its action is
+        // logged, and the running revert picks it up before it ends.
+        return Ok(());
+    }
+    let r = async {
+        let since = now_secs() - 3600;
+        let payload = json!({"actor": actor.get(), "why": why, "since": since});
+        let guard = jobs::enqueue(
+            &app.pool,
+            gid.get() as i64,
+            "nuke_revert",
+            payload,
+            now_secs() + 120,
+        )
+        .await?;
+        // An actor an earlier run already quarantined only has late audit entries left: revert
+        // them without a second case and owner alert.
+        let full = !is_quarantined(app, gid, actor).await?;
+        let r = nuke_run(app, gid, actor, why, since, full).await;
+        jobs::finish(&app.pool, guard).await?;
+        r
+    }
+    .await;
+    app.nuke_runs.lock().unwrap().remove(&key);
     r
+}
+
+/// The `nuke_revert` guard job after a restart: the cut-off run again, under the same claim, so a
+/// live run started meanwhile is not doubled.
+pub(crate) async fn resume_nuke(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+    since: i64,
+) -> Result<()> {
+    let key = (gid.get(), actor.get());
+    if !claim_nuke_run(app, key) {
+        return Ok(());
+    }
+    let r = nuke_run(app, gid, actor, why, since, true).await;
+    app.nuke_runs.lock().unwrap().remove(&key);
+    r
+}
+
+/// True while a quarantine and revert for this actor runs in this process.
+pub(crate) fn nuke_running(app: &App, gid: u64, actor: u64) -> bool {
+    app.nuke_runs.lock().unwrap().contains_key(&(gid, actor))
+}
+
+async fn is_quarantined(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Result<bool> {
+    Ok(
+        sqlx::query("SELECT 1 FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+            .bind(gid.get() as i64)
+            .bind(actor.get() as i64)
+            .fetch_optional(&app.pool)
+            .await?
+            .is_some(),
+    )
+}
+
+/// One claimed run: the full contain, revert, report and panic, or only the revert, then again
+/// for every action that came in meanwhile.
+async fn nuke_run(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+    since: i64,
+    full: bool,
+) -> Result<()> {
+    let mut first = full;
+    loop {
+        let r = if first {
+            revert_and_report(app, gid, actor, why, since).await
+        } else {
+            let backups = app.cfg(gid.get()).await?.backups.clone();
+            revert_actor(app, gid, actor, since, Some(&backups))
+                .await
+                .map(|s| {
+                    tracing::info!(
+                        ops = s.ops,
+                        recreated = s.recreated,
+                        "reverted the nuker's later actions"
+                    )
+                })
+        };
+        if r.is_err() || !nuke_rerun(app, (gid.get(), actor.get())) {
+            return r;
+        }
+        first = false;
+    }
+}
+
+/// True when no quarantine and revert runs for this (guild, actor) yet; otherwise asks the running
+/// one to revert once more.
+fn claim_nuke_run(app: &App, key: (u64, u64)) -> bool {
+    claim_run(&mut app.nuke_runs.lock().unwrap(), key)
+}
+
+/// True when actions came in during the run (and clears that); false ends the run and frees the
+/// claim in the same step, so a later action starts a new run instead of being missed.
+fn nuke_rerun(app: &App, key: (u64, u64)) -> bool {
+    rerun(&mut app.nuke_runs.lock().unwrap(), key)
+}
+
+fn claim_run(runs: &mut HashMap<(u64, u64), bool>, key: (u64, u64)) -> bool {
+    match runs.get_mut(&key) {
+        Some(again) => {
+            *again = true;
+            false
+        }
+        None => {
+            runs.insert(key, false);
+            true
+        }
+    }
+}
+
+fn rerun(runs: &mut HashMap<(u64, u64), bool>, key: (u64, u64)) -> bool {
+    if runs.get(&key) == Some(&true) {
+        runs.insert(key, false);
+        true
+    } else {
+        runs.remove(&key);
+        false
+    }
 }
 
 pub(crate) async fn revert_and_report(
@@ -1021,13 +1181,25 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
             .bind(target.get() as i64)
             .fetch_optional(&app.pool)
             .await?;
-    if saved.is_none() {
+    let Some((saved,)) = saved else {
         return Ok(());
-    }
+    };
     let cfg = app.cfg(gid.get()).await?;
     let whitelisted = cfg.antinuke.quarantine_whitelist.contains(&actor)
         || app.whitelisted(gid, actor, "quarantine").await?;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
+        return Ok(());
+    }
+    // A join quarantine (verification, nothing saved) keeps the joiner held, but an autorole bot
+    // or staff touching them is normal work, not a nuke (Thomas, 11-11).
+    if saved.is_empty() {
+        if e.action_type == A::MemberRoleUpdate {
+            let roles: Vec<_> = cfg.antinuke.quarantine_role.into_iter().collect();
+            app.http
+                .update_guild_member(gid, target)
+                .roles(&roles)
+                .await?;
+        }
         return Ok(());
     }
     if e.action_type != A::MemberRoleUpdate {
@@ -1078,6 +1250,18 @@ pub(crate) async fn contained_since(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_nuke_run_per_actor_and_late_actions_rerun_it() {
+        let mut runs = HashMap::new();
+        let k = (1, 2);
+        assert!(claim_run(&mut runs, k));
+        assert!(!claim_run(&mut runs, k)); // a second event while it runs
+        assert!(claim_run(&mut runs, (1, 3))); // another actor runs on its own
+        assert!(rerun(&mut runs, k)); // that event is reverted once more
+        assert!(!rerun(&mut runs, k)); // nothing new: the claim is freed
+        assert!(claim_run(&mut runs, k)); // so a later action starts a new run
+    }
 
     #[test]
     fn quarantine_keeps_only_the_quarantine_role_and_managed_roles() {
@@ -1165,6 +1349,50 @@ mod tests {
         assert_eq!(watched(&entry(31, rename)), Some(Action::RoleUpdate));
         assert_eq!(watched(&entry(31, json!([]))), None);
         assert_eq!(watched(&entry(23, json!([]))), Some(Action::Unban));
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. A row the revert did not read
+    /// (here one without an inverse, as an action logged while it ran) stays unreverted.
+    #[tokio::test]
+    async fn revert_marks_only_the_rows_it_read() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(6_400_000_000 + std::process::id() as u64);
+        let actor = Id::new(42);
+        for (action, inv) in [
+            ("Kick", Some(json!(Inverse::Reinvite { user: 7 }))),
+            ("ChannelUpdate", None),
+        ] {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,7,$4)")
+                .bind(gid.get() as i64)
+                .bind(actor.get() as i64)
+                .bind(action)
+                .bind(inv)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+        let sum = revert_actor(&app, gid, actor, now_secs() - 60, None)
+            .await
+            .unwrap();
+        assert_eq!(sum.reinvite, vec![7]);
+        let left: Vec<(String,)> = sqlx::query_as(
+            "SELECT action FROM action_log WHERE guild_id=$1 AND NOT reverted ORDER BY id",
+        )
+        .bind(gid.get() as i64)
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!(left, vec![("ChannelUpdate".to_string(),)]);
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres.

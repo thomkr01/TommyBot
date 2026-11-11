@@ -238,29 +238,29 @@ pub fn Ring(
     view! { <div class="ring" class:small=small style=move || format!("--p:{};--c:{}", pct.get(), c())><b>{move || format!("{}%", pct.get())}</b></div> }
 }
 
-/// (section, title, description, has a master switch, switch default when the key is missing).
-const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
-    ("automod", "Auto Mod", "Anti Spam, Anti Advertising, Anti Phishing and all the message filters.", true, false),
-    ("antinuke", "Anti Nuke", "The system that monitors your staff members and guards your server away from getting nuked.", true, true),
-    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true, false),
-    ("joinraid", "Join Raid", "The advanced system that monitors your server joins and reacts if a raid is targeting your server.", true, true),
-    ("verification", "Verification", "TommyBot's verification gate that your new members need to pass in order to get access to your server.", true, false),
+/// (section, title, description, has a master switch). A missing switch reads as off, like the bot.
+const SYSTEMS: [(&str, &str, &str, bool); 5] = [
+    ("automod", "Auto Mod", "Anti Spam, Anti Advertising, Anti Phishing and all the message filters.", true),
+    ("antinuke", "Anti Nuke", "The system that monitors your staff members and guards your server away from getting nuked.", true),
+    ("joingate", "Join Gate", "All of the instant filters that scan new members and bots joining your server.", true),
+    ("joinraid", "Join Raid", "The advanced system that monitors your server joins and reacts if a raid is targeting your server.", true),
+    ("verification", "Verification", "TommyBot's verification gate that your new members need to pass in order to get access to your server.", true),
 ];
 
 /// Master switch of a system: reads and writes its `enabled` key.
 /// `all` is the guild's config with its version, loaded once and shared by every switch: with a
 /// version each, the second switch flipped was refused with "config changed, reload".
 #[component]
-fn SystemToggle(guild: String, section: &'static str, default: bool, all: RwSignal<Option<Value>>) -> impl IntoView {
+fn SystemToggle(guild: String, section: &'static str, title: &'static str, all: RwSignal<Option<Value>>) -> impl IntoView {
     // Greyed like the section's own page: a viewer could flip it, and only the server refused.
     let access = expect_context::<Access>();
-    let on = RwSignal::new(default);
+    let on = RwSignal::new(false);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Locked while the config loads and while a save runs, so the knob never shows a state the server does not have.
     let busy = RwSignal::new(true);
     Effect::new(move |_| {
         if let Some(v) = all.get() {
-            on.set(v["config"][section]["enabled"].as_bool().unwrap_or(default));
+            on.set(v["config"][section]["enabled"].as_bool().unwrap_or(false));
             busy.set(false);
         }
     });
@@ -289,7 +289,7 @@ fn SystemToggle(guild: String, section: &'static str, default: bool, all: RwSign
             msg,
             need,
             move |r| {
-                msg.ok(format!("{section} turned {}", if x { "on" } else { "off" }));
+                msg.ok(format!("{title} turned {}", if x { "on" } else { "off" }));
                 all.update(|a| {
                     if let Some(a) = a {
                         a["version"] = r["version"].clone();
@@ -299,7 +299,7 @@ fn SystemToggle(guild: String, section: &'static str, default: bool, all: RwSign
             },
         );
     };
-    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() || access.of(section) != "full" prop:checked=move || on.get() on:change=change /><Toast msg /> }
+    view! { <input type="checkbox" class="sw" aria-label=format!("Enable {title}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() || access.of(section) != "full" prop:checked=move || on.get() on:change=change /><Toast msg /> }
 }
 
 #[component]
@@ -340,37 +340,46 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             r.iter().filter(|x| x["severity"] == "ok").count() * 100 / r.len()
         }
     });
+    // Problems first, the serious ones (bad) before the minor ones; the server's order within each.
+    let problems = move || {
+        let mut v: Vec<Value> = rows.get().into_iter().filter(|r| r["severity"] != "ok").collect();
+        v.sort_by_key(|r| r["severity"] != "bad");
+        v
+    };
+    let passed = Memo::new(move |_| rows.get().into_iter().filter(|r| r["severity"] == "ok").collect::<Vec<_>>());
+    let g = guild.clone();
+    let row = move |r: Value| {
+        let (g, load) = (g.clone(), load.clone());
+        let class = match r["severity"].as_str() { Some("ok") => "ok", Some("warn") => "warn", _ => "err" };
+        let fix = r["fix"]["label"].as_str().map(|l| {
+            let body = r["fix"].clone();
+            let l = l.to_string();
+            // The fix route needs a Trusted Admin, like Roll back on History.
+            view! { <button disabled=move || access.rank() < 3 title=move || (access.rank() < 3).then_some("Needs a Trusted Admin or the owner") on:click=move |_| { let (g, body, load, l) = (g.clone(), body.clone(), load.clone(), l.clone());
+                if !confirm(&format!("{l}?")) { return }
+                run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(body)).await }, msg, need, move |_| { msg.ok(format!("Fixed: {l}. The check below now shows the new state, and the change is in the config history.")); load() }) }>{l.clone()}</button> }
+        });
+        let icon = match class { "ok" => "success", "warn" => "warning", _ => "error" };
+        view! { <div class="row note chk" class:bad={class == "err"}><div><b class=class>{crate::icons::icon(icon)}" "{s(&r["title"])}</b>" "<span class="muted">{s(&r["detail"])}</span></div>{fix}</div> }
+    };
     let (id, g2) = (guild.clone(), guild.clone());
     view! {
-        <div class="card"><div class="split">
-            <div>
-                <h2>"Details"</h2>
-                {move || guilds.get().into_iter().find(|x| x["id"] == id.as_str()).map(|x| view! {
-                    <Stat label="Server Name" value=s(&x["name"]) />
-                    <Stat label="Server ID" value=s(&x["id"]) />
-                    })}
-                {move || (!members.get().is_null()).then(|| view! { <Stat label="Members" value=s(&members.get()) /> })}
-            </div>
-        </div></div>
+        <div class="card facts"><h2>"Details"</h2>
+            {move || guilds.get().into_iter().find(|x| x["id"] == id.as_str()).map(|x| view! {
+                <Stat label="Server Name" value=s(&x["name"]) />
+                <Stat label="Server ID" value=s(&x["id"]) />
+                })}
+            {move || (!members.get().is_null()).then(|| view! { <Stat label="Members" value=s(&members.get()) copy=false /> })}
+        </div>
         <div class="card"><div class="row"><h2>"Security score"</h2><Ring pct small=true /></div>
-        <For each=move || rows.get() key=|r| s(&r["id"]) let:r>
-            {
-                let (g, load) = (guild.clone(), load.clone());
-                let class = match r["severity"].as_str() { Some("ok") => "ok", Some("warn") => "warn", _ => "err" };
-                let fix = r["fix"]["label"].as_str().map(|l| {
-                    let body = r["fix"].clone();
-                    let l = l.to_string();
-                    // The fix route needs a Trusted Admin, like Roll back on History.
-                    view! { <button disabled=move || access.rank() < 3 title=move || (access.rank() < 3).then_some("Needs a Trusted Admin or the owner") on:click=move |_| { let (g, body, load, l) = (g.clone(), body.clone(), load.clone(), l.clone());
-                        if !confirm(&format!("{l}?")) { return }
-                        run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(body)).await }, msg, need, move |_| { msg.ok(format!("Fixed: {l}. The check below now shows the new state, and the change is in the config history.")); load() }) }>{l.clone()}</button> }
-                });
-                view! { <div class="row note"><b class=class>{crate::icons::icon(if class == "ok" { "success" } else { "warning" })}" "{s(&r["title"])}</b><span class="muted">{s(&r["detail"])}</span>{fix}</div> }
-            }
-        </For></div>
+        <For each=problems key=|r| s(&r["id"]) children=row.clone() />
+        <Show when=move || { passed.with(|p| !p.is_empty()) }>
+            <details class="passed"><summary>{move || match passed.with(Vec::len) { 1 => "1 check passed".to_string(), n => format!("{n} checks passed") }}</summary>
+            <For each=move || passed.get() key=|r| s(&r["id"]) children=row.clone() /></details>
+        </Show></div>
         <h2 style="text-align:center">"Quick Systems Overview"</h2>
         <div class="cards five">
-            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def all /> })}</div></div> }).collect_view()}
+            {SYSTEMS.iter().map(|(k, t, d, sw)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k title=*t all /> })}</div></div> }).collect_view()}
         </div>
         <Toast msg />
         <StepUp need enrolled />
@@ -378,14 +387,14 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 }
 
 #[component]
-fn Stat(label: &'static str, value: String) -> impl IntoView {
+fn Stat(label: &'static str, value: String, #[prop(default = true)] copy: bool) -> impl IntoView {
     let copied = RwSignal::new(None::<bool>);
-    let v = value.clone();
+    let (v, show) = (value.clone(), copy);
     let copy = move |_| {
         let v = v.clone();
         spawn_local(async move { copied.set(Some(copy_text(&v).await)) });
     };
-    view! { <span class="stat"><span>{label}</span><b>{value}</b><button class="ghost copy" on:click=copy>{move || copy_label(copied.get())}</button></span> }
+    view! { <span class="stat"><span>{label}</span><b>{value}</b>{show.then(|| view! { <button class="ghost copy" on:click=copy>{move || copy_label(copied.get())}</button> })}</span> }
 }
 
 #[component]

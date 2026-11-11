@@ -133,7 +133,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let actor = Id::new(p["actor"].as_u64().context("job payload has no actor")?);
             let why = p["why"].as_str().unwrap_or_default();
             let since = p["since"].as_i64().context("job payload has no since")?;
-            crate::antinuke::revert_and_report(app, gid, actor, why, since).await?
+            crate::antinuke::resume_nuke(app, gid, actor, why, since).await?
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
         "ban_sync_share" => crate::bansync::share_job(app, gid, &job.payload).await?,
@@ -159,6 +159,15 @@ async fn round(app: &App, heavy: bool) {
     match jobs::claim_due(&app.pool, 50, heavy).await {
         Ok(due) => {
             for job in due {
+                // A guard whose run is still alive here: that run deletes the job when it ends,
+                // and the lease brings it back only if this process dies first.
+                if job.kind == "nuke_revert"
+                    && job.payload["actor"]
+                        .as_u64()
+                        .is_some_and(|a| crate::antinuke::nuke_running(app, job.guild_id as u64, a))
+                {
+                    continue;
+                }
                 let done = match dispatch(app, &job).await {
                     Ok(()) => {
                         metrics::JOBS_DONE.fetch_add(1, Relaxed);

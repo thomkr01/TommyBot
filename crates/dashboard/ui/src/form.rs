@@ -478,7 +478,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         "color" => view! { <input type="color" prop:value=move || show(&get()) on:change=move |e| set(json!(event_target_value(&e))) /> }.into_any(),
         "choice" => {
             let opts = f["options"].as_array().cloned().unwrap_or_default();
-            let none = f["none_label"].as_str().unwrap_or("off").to_string();
+            let none = f["none_label"].as_str().unwrap_or("Off").to_string();
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
                 {opts.iter().map(|o| { let v = show(o); let l = if v.is_empty() { none.clone() } else { opt_label(&v) };
                     view! { <option value=v.clone() prop:selected=move || show(&get()) == v>{l}</option> } }).collect_view()}
@@ -634,7 +634,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
     let action = (path.starts_with("automod.filters.") && tail == "action").then(|| view! { <span class="muted">{move || {
         let a = get();
         let a = a.as_str().unwrap_or("");
-        format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "strike system" } else { a }, action_desc(a))
+        format!("Trigger Action represents what TommyBot does once this filter triggers and the total heat accumulated for the member surpasses the total allowed heat. {} is {}.", if a.is_empty() { "Strike system" } else { a }, action_desc(a))
     }}</span> });
     let raid = (path == "joinraid.active_ms")
         .then(|| view! { <b class="muted">{move || raid_summary(&val.get())}</b> });
@@ -672,6 +672,8 @@ pub fn Section(
     let version = RwSignal::new(0i64);
     let dc = RwSignal::new(json!({}));
     let fields = RwSignal::new(Vec::<Value>::new());
+    // The default of the section's `enabled` field, from the whole schema: a page may not show the switch.
+    let switch_default = RwSignal::new(None::<bool>);
     let orig = RwSignal::new(json!({}));
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Until the schema answers, show a loading line instead of flashing the raw JSON editor.
@@ -720,6 +722,7 @@ pub fn Section(
                             }
                         })
                 };
+                switch_default.set(sec["fields"].as_array().into_iter().flatten().find(|f| f["path"] == "enabled" && f["section"].as_str().is_none_or(|x| x == n.as_str())).map(|f| f["default"].as_bool().unwrap_or(false)));
                 fields.set(
                     sec["fields"]
                         .as_array()
@@ -926,8 +929,12 @@ pub fn Section(
         );
     };
     // Read per card, not in the grouping closure: rebuilding the cards on every switch flip cut the knob's animation.
-    let off =
-        Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));
+    // A missing key reads as the switch's own default, like the switch shows it (every system starts off).
+    // A section without a master switch (Logging, Lockdown, ...) is never off.
+    let off = Memo::new(move |_| {
+        let sec = n.get_value();
+        switch_default.get().is_some_and(|d| !val.with(|v| v[sec.as_str()]["enabled"].as_bool().unwrap_or(d)))
+    });
     view! {
         {card_view}
         <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| if loaded.get() { raw_editor(val, n.get_value(), msg).into_any() } else { view! { <p class="muted">"Loading..."</p> }.into_any() })>

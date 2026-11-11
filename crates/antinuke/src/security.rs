@@ -353,7 +353,7 @@ pub fn checks(
     match (setup.quarantine_role, quarantine) {
         (None, _) => row(
             "quarantine_unset",
-            Severity::Warn,
+            Severity::Bad,
             "No quarantine role",
             "Anti-nuke has no role to quarantine offenders into.".into(),
             None,
@@ -484,7 +484,7 @@ pub fn checks(
     for (name, on) in &setup.modules {
         if *name == BAN_SYNC {
             if *on {
-                let (sev, text) = pick(
+                let (mut sev, text) = pick(
                     bot & (ADMINISTRATOR | VIEW_AUDIT_LOG) != 0,
                     "The bot can read the audit log that Ban Sync listens to.",
                     "Ban Sync is on but the bot cannot view the audit log, so no bans are shared. Give the bot's role View Audit Log.".into(),
@@ -493,11 +493,15 @@ pub fn checks(
             }
             continue;
         }
-        let (sev, text) = pick(
+        let (mut sev, text) = pick(
             *on,
             "Switched on.",
             format!("{name} is off, so it does not protect the server."),
         );
+        // Without anti-nuke nothing stops a staff account that goes rogue.
+        if *name == "Anti-nuke" && !on {
+            sev = Severity::Bad;
+        }
         row(
             &format!("module_{}", name.to_lowercase().replace(' ', "_")),
             sev,
@@ -522,9 +526,12 @@ pub fn checks(
     } else {
         row(
             "bot_position",
-            Severity::Warn,
+            Severity::Bad,
             "Roles above the bot",
-            format!("The bot cannot manage: {}.", above.join(", ")),
+            format!(
+                "The bot cannot act on members holding: {}.",
+                above.join(", ")
+            ),
             None,
         );
     }
@@ -533,17 +540,22 @@ pub fn checks(
         .iter()
         .filter(|r| r.position > bot_top && r.id != g.id)
         .count();
-    row(
-        "bot_top_eight",
-        if higher < 8 {
-            Severity::Ok
-        } else {
-            Severity::Warn
-        },
-        "Bot role among the top 8",
-        format!("{higher} roles sit above the bot's highest role."),
-        None,
-    );
+    let (sev, text) = match higher {
+        0 => (Severity::Ok, "No role sits above it.".to_string()),
+        1..8 => (
+            Severity::Ok,
+            if higher == 1 {
+                "Only 1 role sits above it.".to_string()
+            } else {
+                format!("Only {higher} roles sit above it.")
+            },
+        ),
+        _ => (
+            Severity::Warn,
+            format!("{higher} roles sit above it. Move it up so a raider's bot cannot outrank it."),
+        ),
+    };
+    row("bot_top_eight", sev, "Bot role among the top 8", text, None);
     for r in roles.iter().filter(|r| {
         !r.managed
             && r.id != g.id
@@ -680,37 +692,43 @@ pub fn checks(
             }),
         );
     }
-    let ok = |good: bool| if good { Severity::Ok } else { Severity::Warn };
     let fix = |good: bool, s| if good { None } else { set(s) };
-    row(
-        "verification_level",
-        ok(g.verification >= 2),
-        "Server verification level",
-        "Set it to at least Medium so brand new accounts cannot post at once.".into(),
-        fix(g.verification >= 2, "verification_level"),
-    );
-    row(
-        "content_filter",
-        ok(g.content_filter == 2),
-        "Explicit media content filter",
-        "Set it to scan media from all members.".into(),
-        fix(g.content_filter == 2, "content_filter"),
-    );
-    row(
-        "notifications",
-        ok(g.notifications != 0),
-        "Default notifications",
-        "Set them to mentions only, so a spam raid does not notify every member for every message."
-            .into(),
-        fix(g.notifications != 0, "notifications"),
-    );
-    row(
-        "mfa",
-        ok(g.mfa != 0),
-        "2FA for moderators",
-        "The owner can turn on \"Require 2FA for moderator actions\" under Server Settings > Safety Setup, so a stolen password alone cannot ban or delete.".into(),
-        None,
-    );
+    // Each with a text for the good state, so a green row never reads as a to-do.
+    for (id, good, title, yes, no) in [
+        (
+            "verification_level",
+            g.verification >= 2,
+            "Server verification level",
+            "Medium or higher, so brand new accounts cannot post at once.",
+            "Set it to at least Medium so brand new accounts cannot post at once.",
+        ),
+        (
+            "content_filter",
+            g.content_filter == 2,
+            "Explicit media content filter",
+            "Media from all members is scanned.",
+            "Set it to scan media from all members.",
+        ),
+        (
+            "notifications",
+            g.notifications != 0,
+            "Default notifications",
+            "Mentions only, so a spam raid does not notify every member.",
+            "Set them to mentions only, so a spam raid does not notify every member for every message.",
+        ),
+        (
+            "mfa",
+            g.mfa != 0,
+            "2FA for moderators",
+            "Moderators need 2FA, so a stolen password alone cannot ban or delete.",
+            "The owner can turn on \"Require 2FA for moderator actions\" under Server Settings > Safety Setup, so a stolen password alone cannot ban or delete.",
+        ),
+    ] {
+        let (sev, text) = pick(good, yes, no.into());
+        // 2FA is the owner's own account setting; the bot cannot switch it.
+        let f = if id == "mfa" { None } else { fix(good, id) };
+        row(id, sev, title, text, f);
+    }
     out
 }
 
@@ -819,6 +837,8 @@ mod tests {
         // Manage Messages and Timeout count too.
         assert!(ids.contains(&"role_5") && ids.contains(&"role_6"));
         assert!(ids.contains(&"log_fallback") && ids.contains(&"bot_position"));
+        // Members holding a role above the bot are immune to it.
+        assert_eq!(sev(&rows, "bot_position").unwrap().severity, Severity::Bad);
         assert_eq!(sev(&rows, "role_2").unwrap().fix, strip(2));
         let rows = checks(&SAFE, &roles, &[], 2, &setup(Some(9), true));
         assert!(sev(&rows, "quarantine_above_bot").is_some());
@@ -854,6 +874,10 @@ mod tests {
         let rows = checks(&SAFE, &[], &[], 0, &setup);
         // Only the missing quarantine role and the bot role (none here) fail.
         assert_eq!(rows.len(), 13);
+        assert_eq!(
+            sev(&rows, "quarantine_unset").unwrap().severity,
+            Severity::Bad
+        );
         assert_eq!(score(&rows), 11 * 100 / 13);
         assert_eq!(score(&[]), 0);
     }
@@ -940,6 +964,20 @@ mod tests {
         };
         assert_eq!(at(7), Severity::Ok);
         assert_eq!(at(8), Severity::Warn);
+        let detail = |above: u64| {
+            let roles: Vec<RoleImg> = (0..above)
+                .map(|i| role(10 + i, 2 + i as i64, true, 0))
+                .collect();
+            sev(
+                &checks(&SAFE, &roles, &[], 1, &setup(None, true)),
+                "bot_top_eight",
+            )
+            .unwrap()
+            .detail
+            .clone()
+        };
+        // A passing row reads as fine, not as a problem.
+        assert!(detail(3).starts_with("Only 3 "), "{}", detail(3));
     }
 
     #[test]
@@ -967,7 +1005,7 @@ mod tests {
             whitelisted: false,
             mod_log: false,
             main_roles: vec![],
-            modules: vec![("Join gate", false)],
+            modules: vec![("Anti-nuke", false), ("Join gate", false)],
             ..good
         };
         let rows = checks(&SAFE, &roles, &[], 5, &bad);
@@ -982,6 +1020,11 @@ mod tests {
         ] {
             assert_eq!(sev(&rows, id).unwrap().severity, Severity::Warn, "{id}");
         }
+        // Serious ones are bad: no anti-nuke at all.
+        assert_eq!(
+            sev(&rows, "module_anti-nuke").unwrap().severity,
+            Severity::Bad
+        );
         assert!(sev(&rows, "staff_permits")
             .unwrap()
             .detail
