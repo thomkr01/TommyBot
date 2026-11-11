@@ -44,8 +44,9 @@ pub async fn restore(app: &App) -> Result<()> {
     Ok(())
 }
 
-/// Adds a message to its channel's pool and starts the slowmode when the pool trips. Only what a
-/// slowmode would slow counts: no bots, webhooks or members Discord lets skip it.
+/// Adds a message to its channel's pool. Some(cfg) when the pool tripped: the caller runs `start`
+/// after the message's own punishment, so a slowmode never delays it. Only what a slowmode would
+/// slow counts: no bots, webhooks or members Discord lets skip it.
 pub async fn feed(
     app: &App,
     am: &AutomodCfg,
@@ -54,7 +55,7 @@ pub async fn feed(
     b: &Breakdown,
     heat: &HeatCfg,
     now: i64,
-) {
+) -> Option<AutoSlowmodeCfg> {
     let slow = &am.auto_slowmode;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
     if !slow.enabled
@@ -63,20 +64,16 @@ pub async fn feed(
         || m.webhook_id.is_some()
         || exempt(app, gid, m.author.id, roles).await
     {
-        return;
+        return None;
     }
-    let start = {
-        let mut map = app.slow.lock().unwrap();
-        if map.len() > 50_000 {
-            map.retain(|_, c| !c.idle(now));
-        }
-        map.entry(m.channel_id.get())
-            .or_default()
-            .on_message(now, m.author.id.get(), b, slow, heat)
-    };
-    if start {
-        self::start(app, gid, m.channel_id, slow).await;
+    let mut map = app.slow.lock().unwrap();
+    if map.len() > 50_000 {
+        map.retain(|_, c| !c.idle(now));
     }
+    map.entry(m.channel_id.get())
+        .or_default()
+        .on_message(now, m.author.id.get(), b, slow, heat)
+        .then(|| slow.clone())
 }
 
 async fn exempt(
@@ -112,14 +109,25 @@ fn revert_to(current: u16, set: i32, prior: i32) -> Option<u16> {
         .flatten()
 }
 
+/// What `try_start` did.
+#[derive(Debug, PartialEq)]
+enum Started {
+    On,
+    /// Nothing set: locked, already as slow, or staff took over meanwhile.
+    Nothing,
+    /// The channel already has a live auto slowmode (another task, process, or before a restart):
+    /// its off job ends the claim.
+    Owned,
+}
+
 /// Starts a slowmode after `ChannelHeat::on_message` claimed one. Failures are logged here.
-async fn start(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>, cfg: &AutoSlowmodeCfg) {
+pub async fn start(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>, cfg: &AutoSlowmodeCfg) {
     let r = try_start(app, gid, ch, cfg).await;
-    if !matches!(r, Ok(true)) {
+    if matches!(r, Ok(Started::Nothing) | Err(_)) {
         release(app, ch.get());
     }
     match r {
-        Ok(true) => {
+        Ok(Started::On) => {
             let log = Log::new("Auto Slowmode On", ORANGE)
                 .line("Channel", &channel(ch.get()))
                 .line("Slowmode", &format!("`{}s`", cfg.slowmode_secs))
@@ -134,7 +142,7 @@ async fn start(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>, cfg: &Aut
                 tracing::warn!(?e, %ch, "could not log the auto slowmode");
             }
         }
-        Ok(false) => {}
+        Ok(_) => {}
         Err(e) => {
             tracing::warn!(?e, %ch, "auto slowmode failed");
             // Every flooding message would log it again (missing Manage Channels): once an hour.
@@ -163,20 +171,18 @@ async fn start(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>, cfg: &Aut
     }
 }
 
-/// True when the slowmode is on; false when nothing was done (locked, already slow, owned by
-/// another task, or staff changed it meanwhile).
 async fn try_start(
     app: &App,
     gid: Id<GuildMarker>,
     ch: Id<ChannelMarker>,
     cfg: &AutoSlowmodeCfg,
-) -> Result<bool> {
+) -> Result<Started> {
     let locked = crate::lockdown::active(app, gid)
         .await?
         .iter()
         .any(|k| k.covers().0 || *k == LockKind::Channel(ch.get()));
     if locked {
-        return Ok(false);
+        return Ok(Started::Nothing);
     }
     let c = app.http.channel(ch).await?.model().await?;
     anyhow::ensure!(
@@ -185,28 +191,30 @@ async fn try_start(
     );
     let (prior, set) = (c.rate_limit_per_user.unwrap_or(0), cfg.slowmode_secs as u16);
     if !raises(prior, set) {
-        return Ok(false);
+        return Ok(Started::Nothing);
     }
     let off_at = now_secs() + i64::from(cfg.min_on_secs);
     if !claim(app, gid.get(), ch.get(), prior, set, off_at).await? {
-        return Ok(false);
+        return Ok(Started::Owned);
     }
-    let patched = app
-        .http
+    // A failed PATCH keeps the row and its job: the job finds the old value and only drops the row.
+    app.http
         .update_channel(ch)
         .rate_limit_per_user(set)
         .reason(REASON)
-        .await;
-    if let Err(e) = patched {
-        // The job would find the old value and drop the row anyway; this only does it now.
-        if let Err(d) = drop_rows(app, &[ch.get()]).await {
-            tracing::warn!(?d, %ch, "removing the auto slowmode row failed");
+        .await?;
+    let marked = match mark_on(app, ch.get()).await {
+        Ok(m) => m,
+        Err(e) => {
+            // The slowmode is on; the pending row and its job still turn it off.
+            tracing::warn!(?e, %ch, "auto slowmode is on, marking its row failed");
+            return Ok(Started::On);
         }
-        return Err(e.into());
-    }
-    match mark_on(app, ch.get()).await? {
-        Some(None) => Ok(true),
-        // Staff changed it between our read and our write: theirs wins.
+    };
+    match marked {
+        Some(None) => Ok(Started::On),
+        // Staff changed it between our read and our write: theirs wins. If this PATCH fails, the
+        // row keeps staff's value and the off job puts it back.
         Some(Some(staff)) => {
             app.http
                 .update_channel(ch)
@@ -214,16 +222,28 @@ async fn try_start(
                 .reason(REASON)
                 .await?;
             drop_rows(app, &[ch.get()]).await?;
-            Ok(false)
+            Ok(Started::Nothing)
         }
         // The off job already ran and put the old value back.
-        None => Ok(false),
+        None => Ok(Started::Nothing),
     }
 }
 
 /// Writes the pending row and its undo job together; false when the channel already has a row.
+/// A row whose off job is gone (it gave up after its retries) is stuck and is taken over, so it
+/// cannot block the channel for good.
 async fn claim(app: &App, guild: u64, ch: u64, prior: u16, set: u16, off_at: i64) -> Result<bool> {
     let mut tx = app.pool.begin().await?;
+    // A parallel claim that also saw the stuck row finds it deleted here, then conflicts with ours.
+    sqlx::query(
+        "DELETE FROM auto_slowmode WHERE channel_id = $1 AND NOT EXISTS (
+             SELECT 1 FROM scheduled_jobs WHERE kind = $2 AND payload->>'channel' = $3)",
+    )
+    .bind(ch as i64)
+    .bind(KIND)
+    .bind(ch.to_string())
+    .execute(&mut *tx)
+    .await?;
     let new = sqlx::query(
         "INSERT INTO auto_slowmode (channel_id, guild_id, prior_secs, set_secs)
          VALUES ($1, $2, $3, $4) ON CONFLICT (channel_id) DO NOTHING",
@@ -280,35 +300,59 @@ async fn drop_rows(app: &App, channels: &[u64]) -> Result<()> {
     Ok(())
 }
 
-/// Staff set the slowmode of `ch` to `secs` (`/slowmode` with `any`, else a channel update, where
-/// our own value is ignored). Theirs wins: a running auto slowmode ends without a revert, and a
-/// starting one puts `secs` back after its write.
-pub async fn staff_set(app: &App, ch: u64, secs: u16, any: bool) -> Result<()> {
+/// Staff set the slowmode of `ch` to `secs` with `/slowmode`. Theirs wins: a running auto slowmode
+/// ends without a revert, and a starting one puts `secs` back after its write.
+pub async fn staff_set(app: &App, ch: u64, secs: u16) -> Result<()> {
     if !app.slow_active.lock().unwrap().contains(&ch) {
         return Ok(());
     }
-    sqlx::query(
-        "UPDATE auto_slowmode SET staff_secs = $2
-         WHERE channel_id = $1 AND state = 'pending' AND ($3 OR set_secs <> $2)",
+    let state: Option<String> = sqlx::query_scalar(
+        "UPDATE auto_slowmode SET staff_secs = CASE WHEN state = 'pending' THEN $2 ELSE staff_secs END
+         WHERE channel_id = $1 RETURNING state",
     )
     .bind(ch as i64)
     .bind(i32::from(secs))
-    .bind(any)
-    .execute(&app.pool)
+    .fetch_optional(&app.pool)
     .await?;
-    let on: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM auto_slowmode
-         WHERE channel_id = $1 AND state = 'on' AND ($3 OR set_secs <> $2))",
-    )
-    .bind(ch as i64)
-    .bind(i32::from(secs))
-    .bind(any)
-    .fetch_one(&app.pool)
-    .await?;
-    if on {
+    if state.as_deref() == Some("on") {
         drop_rows(app, &[ch]).await?;
     }
     Ok(())
+}
+
+/// A channel update while an auto slowmode starts. Its value can be older than our own write, so
+/// the live value is read: one that is neither the old nor our value is staff's, and wins. While
+/// the slowmode is on nothing is needed: the off job reverts only its own value.
+pub async fn channel_updated(app: &App, ch: u64) -> Result<()> {
+    if !app.slow_active.lock().unwrap().contains(&ch) {
+        return Ok(());
+    }
+    let pending: Option<(i32, i32)> = sqlx::query_as(
+        "SELECT prior_secs, set_secs FROM auto_slowmode WHERE channel_id = $1 AND state = 'pending'",
+    )
+    .bind(ch as i64)
+    .fetch_optional(&app.pool)
+    .await?;
+    let Some((prior, set)) = pending else {
+        return Ok(());
+    };
+    let live = app.http.channel(Id::new(ch)).await?.model().await?;
+    if let Some(secs) = staff_value(live.rate_limit_per_user.unwrap_or(0), prior, set) {
+        sqlx::query(
+            "UPDATE auto_slowmode SET staff_secs = $2 WHERE channel_id = $1 AND state = 'pending'",
+        )
+        .bind(ch as i64)
+        .bind(secs)
+        .execute(&app.pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Staff's slowmode, if the live value is neither the one before nor the one we set.
+fn staff_value(live: u16, prior: i32, set: i32) -> Option<i32> {
+    let live = i32::from(live);
+    (live != prior && live != set).then_some(live)
 }
 
 fn release(app: &App, ch: u64) {
@@ -332,17 +376,32 @@ pub async fn off(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
         .unwrap()
         .get(&ch)
         .is_none_or(|c| c.is_calm(now_ms(), slow, heat));
+    let mut tx = app.pool.begin().await?;
     if !calm {
-        let at = now_secs() + i64::from(slow.calm_secs);
-        jobs::enqueue(&app.pool, gid.get() as i64, KIND, p.clone(), at).await?;
+        // Only while the row is there (locked, so staff ending it waits): no job without a row.
+        let held = sqlx::query(
+            "SELECT 1 FROM auto_slowmode WHERE channel_id = $1 AND guild_id = $2 FOR UPDATE",
+        )
+        .bind(ch as i64)
+        .bind(gid.get() as i64)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if held {
+            let at = now_secs() + i64::from(slow.calm_secs);
+            jobs::enqueue(&mut *tx, gid.get() as i64, KIND, p.clone(), at).await?;
+        }
+        tx.commit().await?;
         return Ok(());
     }
-    let mut tx = app.pool.begin().await?;
-    // The claim: a second run waits on this row and then finds nothing.
+    // The claim: a second run waits on this row and then finds nothing. Staff's value, when they
+    // changed it while it started and putting it back failed, wins over the old one.
     let row: Option<(i32, i32)> = sqlx::query_as(
-        "DELETE FROM auto_slowmode WHERE channel_id = $1 RETURNING prior_secs, set_secs",
+        "DELETE FROM auto_slowmode WHERE channel_id = $1 AND guild_id = $2
+         RETURNING COALESCE(staff_secs, prior_secs), set_secs",
     )
     .bind(ch as i64)
+    .bind(gid.get() as i64)
     .fetch_optional(&mut *tx)
     .await?;
     let Some((prior, set)) = row else {
@@ -350,6 +409,10 @@ pub async fn off(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     };
     let r = async {
         let now = app.http.channel(Id::new(ch)).await?.model().await?;
+        anyhow::ensure!(
+            now.guild_id == Some(gid),
+            "<#{ch}> is not a channel of this server"
+        );
         let back = revert_to(now.rate_limit_per_user.unwrap_or(0), set, prior);
         if let Some(v) = back {
             app.http
@@ -361,18 +424,31 @@ pub async fn off(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
         anyhow::Ok(back)
     }
     .await;
-    // A deleted channel ends the job (ONE_TARGET); any other failure keeps the row for the retry.
-    if r.is_err() && !r.as_ref().is_err_and(http_err::gone_any) {
+    // A deleted channel ends the job (ONE_TARGET), and so does a missing permission, which a retry
+    // cannot fix; any other failure keeps the row for the retry.
+    let forbidden = r.as_ref().is_err_and(http_err::forbidden_any);
+    if r.as_ref()
+        .is_err_and(|e| !http_err::gone_any(e) && !forbidden)
+    {
         return r.map(drop);
     }
     tx.commit().await?;
     app.slow_active.lock().unwrap().remove(&ch);
     release(app, ch);
-    let back = r?;
-    let value = back.map_or("left as staff set it".into(), |v| format!("`{v}s` again"));
-    let log = Log::new("Auto Slowmode Off", DONE)
-        .line("Channel", &channel(ch))
-        .line("Slowmode", &value);
+    let log = match r {
+        Err(e) if forbidden => {
+            tracing::warn!(?e, ch, "auto slowmode could not be turned off");
+            Log::new("Auto Slowmode Off Failed", RED)
+                .line("Channel", &channel(ch))
+                .line("Error", &http_err::why(&e))
+        }
+        r => {
+            let value = r?.map_or("left as staff set it".into(), |v| format!("`{v}s` again"));
+            Log::new("Auto Slowmode Off", DONE)
+                .line("Channel", &channel(ch))
+                .line("Slowmode", &value)
+        }
+    };
     if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
         tracing::warn!(?e, ch, "could not log the auto slowmode end");
     }
@@ -391,6 +467,14 @@ mod tests {
         assert_eq!(revert_to(5, 5, 2), Some(2));
         assert_eq!(revert_to(30, 5, 0), None, "staff changed it");
         assert_eq!(revert_to(0, 5, 0), None);
+    }
+
+    #[test]
+    fn a_channel_update_counts_as_staff_only_with_a_new_value() {
+        assert_eq!(staff_value(0, 0, 5), None, "not slowed yet, or a rename");
+        assert_eq!(staff_value(5, 0, 5), None, "our own value");
+        assert_eq!(staff_value(30, 0, 5), Some(30));
+        assert_eq!(staff_value(0, 10, 5), Some(0), "staff turned it off");
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres.
@@ -440,27 +524,66 @@ mod tests {
         assert_eq!([x.unwrap(), y.unwrap()].iter().filter(|w| **w).count(), 1);
         assert_eq!((rows_of(a).await, jobs_of(a).await), (1, 1));
         assert!(app.slow_active.lock().unwrap().contains(&a));
-        // Our own value seen in a channel update while pending is ignored; staff raising it is kept.
-        staff_set(&app, a, 5, false).await.unwrap();
         assert_eq!(mark_on(&app, a).await.unwrap(), Some(None));
         // Rolled back after a failed start, or ended by staff: row and job are gone.
         drop_rows(&app, &[a]).await.unwrap();
         assert_eq!((rows_of(a).await, jobs_of(a).await), (0, 0));
         assert!(!app.slow_active.lock().unwrap().contains(&a));
 
-        // Staff raise it while pending: mark_on hands back their value.
+        // /slowmode while pending: mark_on hands back staff's value.
         assert!(claim(&app, g, b, 0, 5, at).await.unwrap());
-        staff_set(&app, b, 30, false).await.unwrap();
+        staff_set(&app, b, 30).await.unwrap();
         assert_eq!(mark_on(&app, b).await.unwrap(), Some(Some(30)));
         drop_rows(&app, &[b]).await.unwrap();
 
-        // A running one: a channel update to our value is ours, /slowmode (any) ends it.
+        // A running one: /slowmode ends it.
         assert!(claim(&app, g, b, 0, 5, at).await.unwrap());
         assert_eq!(mark_on(&app, b).await.unwrap(), Some(None));
-        staff_set(&app, b, 5, false).await.unwrap();
-        assert_eq!(rows_of(b).await, 1);
-        staff_set(&app, b, 5, true).await.unwrap();
+        staff_set(&app, b, 5).await.unwrap();
         assert_eq!((rows_of(b).await, jobs_of(b).await), (0, 0));
+
+        // A row whose job gave up is taken over; one with a live job is not.
+        assert!(claim(&app, g, b, 0, 5, at).await.unwrap());
+        assert!(!claim(&app, g, b, 0, 5, at).await.unwrap());
+        sqlx::query("DELETE FROM scheduled_jobs WHERE kind = $1 AND payload->>'channel' = $2")
+            .bind(KIND)
+            .bind(b.to_string())
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let (x, y) = tokio::join!(claim(&app, g, b, 2, 5, at), claim(&app, g, b, 2, 5, at));
+        assert_eq!([x.unwrap(), y.unwrap()].iter().filter(|w| **w).count(), 1);
+        assert_eq!((rows_of(b).await, jobs_of(b).await), (1, 1));
+
+        // A hot channel's off job waits again, but only while its row is there, and only for
+        // its own server.
+        let hot = Breakdown {
+            parts: vec![("message", 1e6)],
+        };
+        let (cfg, heat) = (AutoSlowmodeCfg::default(), HeatCfg::default());
+        for ch in [a, b] {
+            app.slow.lock().unwrap().entry(ch).or_default().on_message(
+                now_ms(),
+                1,
+                &hot,
+                &cfg,
+                &heat,
+            );
+        }
+        let job = |ch: u64| json!({"channel": ch, "set_secs": 5});
+        off(&app, Id::new(g), &job(a)).await.unwrap();
+        assert_eq!(jobs_of(a).await, 0, "no row, no new job");
+        off(&app, Id::new(g + 9), &job(b)).await.unwrap();
+        assert_eq!(
+            jobs_of(b).await,
+            1,
+            "another server's job does not see the row"
+        );
+        off(&app, Id::new(g), &job(b)).await.unwrap();
+        assert_eq!(jobs_of(b).await, 2, "queued again while hot");
+        drop_rows(&app, &[b]).await.unwrap();
+        assert_eq!((rows_of(b).await, jobs_of(b).await), (0, 0));
+        app.slow.lock().unwrap().clear();
 
         // The off job's claim: two runs, one gets the row.
         assert!(claim(&app, g, a, 0, 5, at).await.unwrap());

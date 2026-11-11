@@ -87,6 +87,14 @@ The config listener died after one DB hiccup, so dashboard changes never applied
 The timeout DM went out before the timeout worked, and a failed anti-nuke report stopped panic mode.
 *Avoid:* fixed order Contain → Revert → Report → Panic. Logs and DMs are side effects; their failure never skips the next protective step.
 
+**A gateway event's value can be older than the bot's own write.** (auto slowmode review, 11-11)
+Events run in parallel tasks and Discord sends a channel update for every edit (a rename too), so a ChannelUpdate handled after the bot's own PATCH can still carry the old slowmode. Auto slowmode read that value as "staff changed it" and put it back, which undid its own slowmode.
+*Avoid:* don't decide from a field of the event when the bot itself writes that field. Read the live value (`GET channel`) and compare it with both the old and the bot's value (`slowmode::staff_value`), or skip the event when a later compare-and-set already handles it (the off job reverts only its own value). Also checked: `enforce_quarantine` and `catch::keep_top` act on event values too, but their writes are idempotent, so a stale event only repeats them.
+
+**A claim row without its job blocked the channel for good.** (auto slowmode review, 11-11)
+An `auto_slowmode` row is claimed with `ON CONFLICT DO NOTHING`. When its `slowmode_off` job gave up after its retries (Discord down, a missing permission retried until the last attempt), the row stayed and every later start found "already owned". Also: a failed start deleted row and job even when the PATCH might have landed, the not-calm re-queue made a job for a row staff had already removed, and a 403 was retried until the job gave up.
+*Avoid:* a claim takes over a row with no pending job (`DELETE … WHERE NOT EXISTS (job)` in the claim's transaction, so a parallel claim conflicts instead of doubling it). Treat 50001/50013 as final (`http_err::forbidden_any`): end the claim and log it. Re-queue only while the row exists, under `FOR UPDATE`. Scope a job's rows to its own guild (`AND guild_id = $2`).
+
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
 

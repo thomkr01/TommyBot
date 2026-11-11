@@ -48,6 +48,11 @@ pub fn gone_any(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Error>().is_some_and(gone)
 }
 
+/// 50001 Missing Access or 50013 Missing Permissions: retrying will not help until staff fix it.
+pub fn forbidden_any(e: &anyhow::Error) -> bool {
+    matches!(code(e), Some(50001 | 50013))
+}
+
 /// Discord's reason for a failed action, for the reply.
 pub fn why(e: &anyhow::Error) -> String {
     match e.downcast_ref::<Error>().map(|e| e.kind()) {

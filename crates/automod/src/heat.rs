@@ -429,12 +429,11 @@ impl ChannelHeat {
             && now - self.calm_since >= i64::from(cfg.calm_secs) * 1000
     }
 
-    /// Ends a claimed slowmode (turned off, or starting it failed); the flap guard starts here.
+    /// Ends a claimed slowmode (turned off, or nothing was started); the flap guard starts here.
+    /// Not for a start that found the slowmode already ours: that one stays claimed until it ends.
     pub fn release(&mut self, now: i64) {
-        if self.on {
-            self.on = false;
-            self.off_ms = now;
-        }
+        self.on = false;
+        self.off_ms = now;
     }
 
     /// Nothing worth keeping: no slowmode and no heat for 10 minutes.
@@ -918,6 +917,24 @@ mod tests {
         assert!(flood(&mut c, 4, 250, t + 140_000 + 180_000, 40).is_some());
         // A fresh channel (also after a restart) is calm.
         assert!(ChannelHeat::default().is_calm(1_700_000_000_000, &cfg, &h));
+    }
+
+    #[test]
+    fn flap_guard_counts_from_the_real_off() {
+        let mut c = ChannelHeat::default();
+        let t = flood(&mut c, 4, 250, 1, 40).unwrap() * 250 + 1;
+        // A second start that found the slowmode already on leaves the claim alone: no new trip.
+        assert_eq!(flood(&mut c, 4, 250, t, 2_000), None, "still claimed");
+        // The real off, much later, starts the guard (min on 60 s + calm 120 s).
+        let off = t + 1_000_000;
+        c.release(off);
+        assert_eq!(flood(&mut c, 4, 250, off + 1_000, 400), None, "flap guard");
+        assert!(flood(&mut c, 4, 250, off + 180_000, 40).is_some());
+        // A second release (the off job after a failed start released it) moves the guard too.
+        let mut c = ChannelHeat::default();
+        c.release(1_000);
+        c.release(500_000);
+        assert_eq!(flood(&mut c, 4, 250, 501_000, 400), None);
     }
 
     #[test]

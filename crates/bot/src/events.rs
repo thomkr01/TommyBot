@@ -432,10 +432,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Err(e) = crate::setup::enforce_quarantine(app, c).await {
                 tracing::warn!(?e, channel = %c.id, "quarantine overwrite failed");
             }
-            // A slowmode changed in Discord's own UI ends an auto slowmode.
-            let secs = c.rate_limit_per_user.unwrap_or(0);
-            if let Err(e) = crate::slowmode::staff_set(app, c.id.get(), secs, false).await {
-                tracing::warn!(?e, channel = %c.id, "ending the auto slowmode failed");
+            // A slowmode staff change in Discord's own UI while an auto slowmode starts wins.
+            if let Err(e) = crate::slowmode::channel_updated(app, c.id.get()).await {
+                tracing::warn!(?e, channel = %c.id, "checking the auto slowmode failed");
             }
             crate::catch::keep_top(app, c).await?;
         }

@@ -1018,7 +1018,7 @@ pub async fn run(
                         .reason(&audit)
                         .await?;
                     // Staff's value stays: a running auto slowmode must not revert it.
-                    if let Err(e) = crate::slowmode::staff_set(app, *c, secs, true).await {
+                    if let Err(e) = crate::slowmode::staff_set(app, *c, secs).await {
                         tracing::warn!(?e, channel = c, "ending the auto slowmode failed");
                     }
                 }
