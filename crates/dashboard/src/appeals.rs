@@ -468,12 +468,25 @@ async fn close_log(st: &AppState, id: i64, decision: &str) {
         return;
     };
     let mut embeds = m["embeds"].take();
-    if let Some(fields) = embeds[0]["fields"].as_array_mut() {
-        fields.push(json!({"name": "Decision", "value": decision, "inline": false}));
-    }
-    let body = json!({"embeds": embeds, "components": []});
+    add_decision(&mut embeds, decision);
+    let body = if embeds.is_array() {
+        json!({"embeds": embeds, "components": []})
+    } else {
+        json!({"components": []})
+    };
     if let Err(e) = st.discord.call(Method::PATCH, &path, Some(body)).await {
         tracing::warn!(?e, "closing the appeal log failed");
+    }
+}
+
+/// Adds the Decision field to the log's first embed. A log without an embed is left as it is
+/// (`embeds[0]` would panic and kill `decide` before the verdict DM).
+fn add_decision(embeds: &mut Value, decision: &str) {
+    let Some(e) = embeds.get_mut(0).and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(fields) = e.entry("fields").or_insert(json!([])).as_array_mut() {
+        fields.push(json!({"name": "Decision", "value": decision, "inline": false}));
     }
 }
 
@@ -644,6 +657,23 @@ mod tests {
         let mut f = field(&[], false, true);
         f.min = Some(20);
         assert!(check(&f, "0123456789").is_ok());
+    }
+
+    #[test]
+    fn decision_on_logs_of_any_shape() {
+        let d = json!({"name": "Decision", "value": "Denied", "inline": false});
+        for (mut embeds, want) in [
+            (json!([]), json!([])),
+            (Value::Null, Value::Null),
+            (json!("x"), json!("x")),
+            (json!([5]), json!([5])),
+            (json!([{}]), json!([{"fields": [d]}])),
+            (json!([{"fields": 1}]), json!([{"fields": 1}])),
+            (json!([{"fields": [d]}]), json!([{"fields": [d, d]}])),
+        ] {
+            add_decision(&mut embeds, "Denied");
+            assert_eq!(embeds, want);
+        }
     }
 
     #[test]

@@ -28,6 +28,10 @@ fn set_at(e: &mut Value, path: &str, v: String) {
             m.remove(key);
         }
     } else {
+        // A stored embed may hold `"image": "url"`; indexing a string by key panics.
+        if !m.is_object() {
+            *m = json!({});
+        }
         m[key] = json!(v);
     }
     if let Some(p) = parent {
@@ -320,6 +324,9 @@ mod tests {
         set_at(&mut e, "author.name", String::new());
         set_at(&mut e, "title", String::new());
         assert_eq!(e, json!({}));
+        let mut e = json!({"image": "x"});
+        set_at(&mut e, "image.url", "u".into());
+        assert_eq!(e, json!({"image": {"url": "u"}}));
         assert_eq!(
             get_at(&json!({"footer": {"text": "x"}}), "footer.text"),
             "x"
