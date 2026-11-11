@@ -112,6 +112,13 @@ fn choice(group: &str, path: &str, opts: &[&str]) -> Value {
     v
 }
 
+/// Ticks several of `opts`; stored as an array of the ticked ones.
+fn multi(group: &str, path: &str, opts: &[&str]) -> Value {
+    let mut v = fg(group, path, "multi");
+    v["options"] = json!(opts);
+    v
+}
+
 /// A heat weight with its default and the "N messages before a timeout" helper.
 fn heat_field(group: &str, w: &str, page: &str, noun: &str) -> Value {
     let heat = serde_json::to_value(HeatCfg::default()).unwrap_or_default();
@@ -254,6 +261,10 @@ const TIPS: &[(&str, &str, &str)] = &[
     ("ban_sync", "share_joingate", "Join Gate filters are made for this server, so they may not fit your other servers. Off by default."),
     ("ban_sync", "share_verify", "These are usually real people who were too slow to verify. Off by default."),
     ("ban_sync", "receive", "What happens here when a member is banned in one of your other servers. Alert posts it in the mod log with a Ban here button. Ban bans them here as well."),
+    ("raider_list", "enabled", "The Raider List is a list of raider accounts TommyBot caught across many servers. The bot owner checks every entry before it is used. Your server sees only the category and a short note, never other servers' evidence."),
+    ("raider_list", "action", "What TommyBot does when a listed account joins. Alert posts it in the mod log with Ban, Kick and Quarantine buttons."),
+    ("raider_list", "lift_on_removal", "When the bot owner takes someone off the list, for example after an appeal, TommyBot lifts the ban it made here."),
+    ("raider_list", "no_collect", "Normally TommyBot also learns about raiders from what it catches here. Turn this on to keep this server out of that."),
 ];
 
 pub fn schema() -> Vec<Value> {
@@ -1198,6 +1209,42 @@ pub fn schema() -> Vec<Value> {
                 ),
             ],
         ),
+        (
+            "raider_list",
+            "Raider List",
+            vec![
+                ti(fg("General", "enabled", "bool"), "Use the Raider List"),
+                ti(
+                    dv(
+                        choice("General", "action", &["alert", "quarantine", "kick", "ban"]),
+                        "ban",
+                    ),
+                    "When a listed account joins",
+                ),
+                ti(
+                    dv(
+                        multi("General", "categories", &["nuke", "raid", "scam", "spam"]),
+                        json!(["nuke", "raid", "scam", "spam"]),
+                    ),
+                    "Act on these categories",
+                ),
+                hp(
+                    ti(
+                        dv(fg("General", "scan_members", "bool"), true),
+                        "Check members already in the server",
+                    ),
+                    "Only alerts in the mod log, it never acts on members who are already here.",
+                ),
+                ti(
+                    dv(fg("General", "lift_on_removal", "bool"), true),
+                    "Unban here when someone is taken off the list",
+                ),
+                ti(
+                    fg("General", "no_collect", "bool"),
+                    "Do not send what TommyBot catches here to the list",
+                ),
+            ],
+        ),
     ]
     .into_iter()
     .map(|(n, t, mut fields)| {
@@ -1344,6 +1391,7 @@ mod tests {
             "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
             "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
             "snippets" => json!([{"name": "x", "content": "y"}]),
+            "multi" => json!([fd["options"][0]]),
             _ => json!(["1"]),
         }
     }
