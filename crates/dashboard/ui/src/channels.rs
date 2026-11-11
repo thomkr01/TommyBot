@@ -6,7 +6,8 @@ use leptos::{html, prelude::*};
 use serde_json::{json, Value};
 
 /// Icon for a Discord channel type. Kept in one place so #164's `ChannelTree` mapping can replace it.
-fn kind_icon(kind: u64) -> &'static str {
+/// Also the Backups tree icons.
+pub(crate) fn kind_icon(kind: u64) -> &'static str {
     match kind {
         2 => "channel_voice",
         4 => "category",

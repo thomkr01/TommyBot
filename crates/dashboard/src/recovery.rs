@@ -103,13 +103,17 @@ async fn detail(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i6
             .find(|c| Some(c.id) == id)
             .map(|c| c.name.clone())
     };
+    // Discord's order: voice and stage channels after the text ones, then by position. The UI
+    // groups them under their category by `parent_id` (names can repeat).
     let mut channels = img.channels.clone();
-    channels.sort_by_key(|c| (c.parent.or(Some(c.id)), c.kind != 4, c.position));
+    channels.sort_by_key(|c| (matches!(c.kind, 2 | 13), c.position, c.id));
+    let mut roles = img.roles.clone();
+    roles.sort_by_key(|r| (std::cmp::Reverse(r.position), r.id));
     Ok(Json(json!({
         "name": img.name,
         "settings": img.settings,
-        "roles": img.roles.iter().map(|r| json!({"name": r.name, "color": r.color, "permissions": r.permissions.to_string(), "perm_names": perm_names(r.permissions)})).collect::<Vec<_>>(),
-        "channels": channels.iter().map(|c| json!({"name": c.name, "kind": c.kind, "parent": name(c.parent), "overwrites": c.overwrites.iter().map(|o| json!({
+        "roles": roles.iter().map(|r| json!({"name": r.name, "color": r.color, "permissions": r.permissions.to_string(), "perm_names": perm_names(r.permissions)})).collect::<Vec<_>>(),
+        "channels": channels.iter().map(|c| json!({"id": c.id.to_string(), "name": c.name, "kind": c.kind, "parent_id": c.parent.map(|p| p.to_string()), "overwrites": c.overwrites.iter().map(|o| json!({
             "target": if o.is_role { img.roles.iter().find(|r| r.id == o.target).map_or_else(|| format!("role {}", o.target), |r| format!("@{}", r.name.trim_start_matches('@'))) } else { format!("member {}", o.target) },
             "allow": perm_names(o.allow),
             "deny": perm_names(o.deny),
