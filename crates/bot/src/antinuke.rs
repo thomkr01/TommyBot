@@ -820,10 +820,69 @@ async fn quarantine_and_revert(
             now_secs() + 120,
         )
         .await?;
-        let mut r = revert_and_report(app, gid, actor, why, since).await;
-        while r.is_ok() && nuke_rerun(app, key) {
+        // An actor an earlier run already quarantined only has late audit entries left: revert
+        // them without a second case and owner alert.
+        let full = !is_quarantined(app, gid, actor).await?;
+        let r = nuke_run(app, gid, actor, why, since, full).await;
+        jobs::finish(&app.pool, guard).await?;
+        r
+    }
+    .await;
+    app.nuke_runs.lock().unwrap().remove(&key);
+    r
+}
+
+/// The `nuke_revert` guard job after a restart: the cut-off run again, under the same claim, so a
+/// live run started meanwhile is not doubled.
+pub(crate) async fn resume_nuke(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+    since: i64,
+) -> Result<()> {
+    let key = (gid.get(), actor.get());
+    if !claim_nuke_run(app, key) {
+        return Ok(());
+    }
+    let r = nuke_run(app, gid, actor, why, since, true).await;
+    app.nuke_runs.lock().unwrap().remove(&key);
+    r
+}
+
+/// True while a quarantine and revert for this actor runs in this process.
+pub(crate) fn nuke_running(app: &App, gid: u64, actor: u64) -> bool {
+    app.nuke_runs.lock().unwrap().contains_key(&(gid, actor))
+}
+
+async fn is_quarantined(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Result<bool> {
+    Ok(
+        sqlx::query("SELECT 1 FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+            .bind(gid.get() as i64)
+            .bind(actor.get() as i64)
+            .fetch_optional(&app.pool)
+            .await?
+            .is_some(),
+    )
+}
+
+/// One claimed run: the full contain, revert, report and panic, or only the revert, then again
+/// for every action that came in meanwhile.
+async fn nuke_run(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    why: &str,
+    since: i64,
+    full: bool,
+) -> Result<()> {
+    let mut first = full;
+    loop {
+        let r = if first {
+            revert_and_report(app, gid, actor, why, since).await
+        } else {
             let backups = app.cfg(gid.get()).await?.backups.clone();
-            r = revert_actor(app, gid, actor, since, Some(&backups))
+            revert_actor(app, gid, actor, since, Some(&backups))
                 .await
                 .map(|s| {
                     tracing::info!(
@@ -831,14 +890,13 @@ async fn quarantine_and_revert(
                         recreated = s.recreated,
                         "reverted the nuker's later actions"
                     )
-                });
+                })
+        };
+        if r.is_err() || !nuke_rerun(app, (gid.get(), actor.get())) {
+            return r;
         }
-        jobs::finish(&app.pool, guard).await?;
-        r
+        first = false;
     }
-    .await;
-    app.nuke_runs.lock().unwrap().remove(&key);
-    r
 }
 
 /// True when no quarantine and revert runs for this (guild, actor) yet; otherwise asks the running
