@@ -5,7 +5,8 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
-- The verification Start button checks the same names as Join Gate (cured username and display name). A member Join Gate found suspicious by name could skip the captcha in "suspicious only" mode.
+- The verification Start button checks the same names as Join Gate (cured username and display name). A member Join Gate found suspicious by name could skip the captcha in "suspicious only" mode. It also checks Discord's spammer flag.
+- The dashboard's and the MCP server's Discord requests time out after 15 seconds, and every raw Discord request sends the User-Agent Discord asks for.
 - The backup channel list follows Discord's order. It sorted channels by category id instead of position, and matched channels to a category by name. (#164)
 - DEPLOY.md step 6.4 names the right link: **MCP tokens** in the account menu. (#165)
 - A dashboard icon used more than once no longer goes blank when its first copy is hidden. (#163)

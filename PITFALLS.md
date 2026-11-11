@@ -34,7 +34,8 @@ The quarantine row was written before the role change. When the change failed, t
 
 **Outgoing HTTP needs a timeout.** (#97)
 The raw reqwest client had none, so one hung call could hold a lockdown or rule sync forever.
-*Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`). Twilight already handles 429.
+The dashboard's and the MCP server's Discord clients had none either, found 11-11.
+*Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`, the dashboard's and the MCP's Discord client). Twilight already handles 429.
 
 **A DM can be slow or refused.** (#136, #142)
 A DM before a punishment must not hold the punishment back, and a DM to a bot is refused.
@@ -48,7 +49,8 @@ Auto Setup answered "internal error" because the saved Quarantine role had been 
 *Avoid:* treat a 404 on a saved id as "missing" and make it again (`sections::create` checks an existing id first). Never let a 404 on reuse fail a whole setup.
 
 **Raw requests need a real User-Agent.** (live tests, 11-09)
-Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010.
+Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010. Until 11-11 none of the bot's, dashboard's or MCP's raw Discord clients set one.
+*Avoid:* every reqwest client that talks to Discord sets `DiscordBot (<repo url>, <version>)`.
 
 **Twilight drops permission and user flag bits it does not know.** (#133)
 Saving a bot role's old permissions loses bits newer than twilight. This is a known limit (marked `shortcut:` in the code). Upgrade twilight before relying on new bits.
@@ -108,7 +110,7 @@ Whitelisted channels and roles still got base message heat, other bots' slash-co
 
 **The verify button judged "suspicious" on other names than Join Gate.** (spammer-flag PR, 11-11)
 Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
-*Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button cannot see it.
+*Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the target is not Everyone, and a failed lookup means a captcha.
 
 ## 4. Parsing and limits
 

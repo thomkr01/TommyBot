@@ -220,7 +220,7 @@ fn spam_flag(json: &str) -> bool {
     json.contains(r#""t":"GUILD_MEMBER_ADD""#)
         && serde_json::from_str::<Frame>(json).is_ok_and(|f| {
             f.t.as_deref() == Some("GUILD_MEMBER_ADD")
-                && f.d.user.public_flags.unwrap_or(0) & (1 << 20) != 0
+                && f.d.user.public_flags.unwrap_or(0) & tommybot_automod::join::SPAMMER_FLAG != 0
         })
 }
 

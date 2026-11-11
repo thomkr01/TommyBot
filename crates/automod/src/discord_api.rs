@@ -48,6 +48,8 @@ impl Api {
             // A hung request would otherwise hold its caller (a lockdown, a rule sync) forever.
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
+                // Discord asks for this form; Cloudflare can refuse requests without one.
+                .user_agent(concat!("DiscordBot (https://github.com/thomkr01/TommyBot, ", env!("CARGO_PKG_VERSION"), ")"))
                 .build()
                 .unwrap_or_default(),
             token: token.into(),
@@ -93,6 +95,12 @@ impl Api {
         )
         .await?;
         Ok(())
+    }
+
+    /// The raw `public_flags` of a user, with the bits twilight drops (see [`crate::join::SPAMMER_FLAG`]).
+    pub async fn public_flags(&self, user: u64) -> Result<u64> {
+        let v = self.send(self.http.get(format!("{API}/users/{user}")), None).await?;
+        Ok(v["public_flags"].as_u64().unwrap_or(0))
     }
 
     pub async fn list_rules(&self, guild: u64) -> Result<Vec<Rule>> {

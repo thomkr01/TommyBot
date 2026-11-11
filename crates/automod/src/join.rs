@@ -8,6 +8,9 @@ const DAY_MS: i64 = 86_400_000;
 pub const MIN_AGE_MS: (i64, i64) = (5_000, 100 * DAY_MS);
 const HOUR_MS: i64 = 3_600_000;
 
+/// Discord's undocumented "likely spammer" bit in `public_flags`; twilight's `UserFlags` drops it.
+pub const SPAMMER_FLAG: u64 = 1 << 20;
+
 pub fn account_created_ms(user_id: u64) -> i64 {
     (user_id >> 22) as i64 + DISCORD_EPOCH_MS
 }

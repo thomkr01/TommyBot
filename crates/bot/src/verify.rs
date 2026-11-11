@@ -896,6 +896,13 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             let min_age = cfg.joingate.min_age_ms();
             let suspicious =
                 tommybot_automod::join::is_suspicious(&joiner, &cfg.joingate, min_age, now);
+            // The interaction user has no spammer bit (twilight drops it), so ask Discord, only when
+            // the answer matters. A failed lookup means a captcha, never a free pass.
+            let suspicious = suspicious
+                || (cfg.verification.verify.target != tommybot_automod::join::VerifyTarget::Everyone
+                    && app.api.public_flags(u.id.get()).await.map_or(true, |f| {
+                        f & tommybot_automod::join::SPAMMER_FLAG != 0
+                    }));
             let raid = app
                 .raids
                 .lock()
