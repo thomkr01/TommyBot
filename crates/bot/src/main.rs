@@ -31,6 +31,7 @@ mod scheduler;
 mod settings;
 mod setup;
 mod slash;
+mod sticky;
 mod targets;
 mod tickets;
 mod timeout_roles;

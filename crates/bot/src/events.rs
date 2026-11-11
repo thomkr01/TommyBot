@@ -453,9 +453,14 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(e) = verify::on_member_update(app, m).await {
                 tracing::warn!(?e, "pausing the verification time limit failed");
             }
+            if let Err(e) = crate::sticky::on_member_update(app, m).await {
+                tracing::warn!(?e, "saving sticky roles failed");
+            }
             crate::joingate::on_member_update(app, m).await?
         }
         Event::MemberAdd(m) => crate::joingate::on_join(app, m).await?,
+        Event::MemberRemove(m) => crate::sticky::on_leave(app, m.guild_id, m.user.id).await?,
+        Event::BanAdd(b) => crate::sticky::on_ban(app, b.guild_id, b.user.id).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?

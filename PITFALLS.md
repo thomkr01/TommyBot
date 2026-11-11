@@ -95,6 +95,14 @@ Past the limit every audit entry returned `Quarantine` again, and each one is it
 The ticket-category exemption read the category that the `ChannelCreate` task stores. When the audit task ran first, the lookup missed and a ticket bot's channels counted towards its limit.
 *Avoid:* do not rely on the order of two events. `note_parent` stores every channel (also "no category"), so a miss means "not seen yet", and `parent_of` waits up to 0.5 s for it.
 
+**Join-time steps race each other.** (sticky roles plan, 11-11)
+A `MemberUpdate` (from verification, another bot or the bot's own role adds) can run before or alongside the `MemberAdd` task, and a late update can come from the membership before. Saving roles "per user id" would let such an update overwrite the saved roles before the rejoin reads them.
+*Avoid:* key per-member state by membership: `member_roles` rows carry `joined_at`, an update writes only when its `joined_at` matches the row, and the rejoin claims the older row in one statement (`sticky::claim`), so a replayed `MemberAdd` gets nothing.
+
+**Member role adds share Discord's rate-limit bucket with punishments.** (sticky roles, 11-11)
+A mass rejoin (after a raid, or a re-invite) giving every member's roles back would fill the per-guild member bucket that timeouts, kicks and bans need right then.
+*Avoid:* bulk role or nickname work on members gets a per-guild cap (`sticky::take`, 20 adds a minute) and queues the rest as a job instead of dropping it.
+
 **A join quarantine counted as a nuke target.** (race review follow-up, 11-11)
 Verification's "quarantine on join" writes a quarantine row with no saved roles. The quarantine hold treated it like an anti-nuke quarantine, so an autorole bot giving a joiner its role was quarantined and lost its role permissions on every join.
 *Avoid:* a row with empty `saved_roles` is a join quarantine. The hold undoes the role change but punishes nobody. Code that reads `quarantines` must tell the two kinds apart.

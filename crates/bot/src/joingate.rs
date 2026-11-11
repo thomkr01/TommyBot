@@ -50,9 +50,13 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         .await;
     }
     // Before the other checks, so a failed join gate step cannot let a quarantined member back in.
-    if let Err(e) = crate::antinuke::requarantine_rejoin(app, gid, user.id).await {
-        tracing::warn!(?e, "quarantining a rejoined member failed");
-    }
+    // A failed check counts as quarantined, so sticky roles never gives roles to a held member.
+    let mut acted = crate::antinuke::requarantine_rejoin(app, gid, user.id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(?e, "quarantining a rejoined member failed");
+            true
+        });
     // One invites call per join: only when something shows the result.
     let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
         || cfg.logging.target(LogKind::Member, None).is_some()
@@ -106,9 +110,10 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     let timeout = m.member.communication_disabled_until.map(|t| t.as_secs());
-    verify::on_join(app, gid, user.id, suspicious, user.bot, timeout).await;
+    let verifying = verify::on_join(app, gid, user.id, suspicious, user.bot, timeout).await;
     let hits = gate(&j, &cfg.joingate, now);
     if let Some(action) = harshest(&hits) {
+        acted = true;
         let why = if hits.iter().any(|h| h.0 == Filter::AccountAge) {
             let min = duration(cfg.joingate.min_age_ms() / 1000);
             format!("join gate: accounts must be at least {min} old")
@@ -137,9 +142,9 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         }
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
-        join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
+        acted |= join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
     }
-    Ok(())
+    crate::sticky::on_join(app, m, acted, verifying).await
 }
 
 /// The alert when a join raid starts: what happens next and the first flagged accounts.
@@ -199,6 +204,7 @@ pub(crate) fn raid_report_log(caught: i64, code: Option<&str>) -> Log {
 /// The link button under a raid report.
 pub(crate) const RAID_REPORT: &str = "Full Raid Report ↗";
 
+/// True when the joiner was among the punished raiders.
 async fn join_raid(
     app: &App,
     cfg: &GuildCfg,
@@ -207,7 +213,7 @@ async fn join_raid(
     j: &Joiner<'_>,
     suspicious: bool,
     now: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let (out, started, names, invites, code) = {
         let mut raids = app.raids.lock().unwrap();
         let d = raids.entry(gid.get()).or_default();
@@ -285,6 +291,7 @@ async fn join_raid(
             tracing::warn!(?e, "join raid lockdown failed");
         }
     }
+    let hit = out.flagged.contains(&j.id);
     // One raider who already left (404) or a failed log must not let the rest go.
     for id in out.flagged {
         let r = punish(
@@ -301,7 +308,7 @@ async fn join_raid(
             tracing::warn!(?e, user = id, "punishing a raider failed");
         }
     }
-    Ok(())
+    Ok(hit)
 }
 
 /// The cured names, one per line, as `GateCfg::name_matches` reads them.

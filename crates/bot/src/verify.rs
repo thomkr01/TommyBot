@@ -174,7 +174,7 @@ fn help_steps(cfg: &VerificationCfg) -> String {
         .join("\n")
 }
 
-/// Gives a fresh joiner until the time limit to verify; see [`deadline`].
+/// Gives a fresh joiner until the time limit to verify; see [`deadline`]. True when they must verify.
 pub async fn on_join(
     app: &App,
     gid: Id<GuildMarker>,
@@ -182,13 +182,13 @@ pub async fn on_join(
     suspicious: bool,
     is_bot: bool,
     timeout_until: Option<i64>,
-) {
+) -> bool {
     let Ok(cfg) = app.cfg(gid.get()).await else {
-        return;
+        return false;
     };
     let v = &cfg.verification;
     if is_bot || !v.enabled || !must_verify(&v.verify, suspicious, false) {
-        return;
+        return false;
     }
     if v.channel.is_none() {
         if let Err(e) = ensure_channel(app, gid).await {
@@ -201,7 +201,7 @@ pub async fn on_join(
         }
     }
     if v.verify.on_fail == FailAction::Nothing {
-        return;
+        return true;
     }
     // A timeout survives a kick or ban, so a member can come back still timed out.
     let now = now_secs();
@@ -222,6 +222,7 @@ pub async fn on_join(
     {
         tracing::warn!(?e, "scheduling the verification deadline failed");
     }
+    true
 }
 
 const DEADLINE: &str = "verify_deadline";
@@ -524,12 +525,7 @@ pub(crate) async fn grant(
     // Verifying is open to anyone, so it never hands out a permit role or one with kick/ban/admin-like rights,
     // whoever put that role in the config.
     let info = app.guild_info(gid).await?;
-    let permit_roles: Vec<i64> = sqlx::query_scalar(
-        "SELECT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id WHERE p.guild_id = $1",
-    )
-    .bind(gid.get() as i64)
-    .fetch_all(&app.pool)
-    .await?;
+    let permit_roles = tommybot_core::permits::permit_roles(&app.pool, gid.get() as i64).await?;
     let roles: Vec<_> = v
         .roles
         .iter()
@@ -566,6 +562,10 @@ pub(crate) async fn grant(
             .bind(user.get() as i64)
             .execute(&app.pool)
             .await?;
+    }
+    // After the roles are set and the join quarantine is gone, so neither wipes the restored roles.
+    if let Err(e) = crate::sticky::restore_pending(app, gid, user).await {
+        tracing::warn!(?e, "giving back sticky roles after verification failed");
     }
     if let Ok(u) = async { anyhow::Ok(app.http.user(user).await?.model().await?) }.await {
         let status = format!("{YES} `{}` has passed verification successfully.", u.name);

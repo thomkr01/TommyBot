@@ -136,6 +136,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             crate::antinuke::resume_nuke(app, gid, actor, why, since).await?
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
+        crate::sticky::KIND => crate::sticky::run_job(app, gid, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())

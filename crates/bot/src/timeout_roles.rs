@@ -12,7 +12,7 @@ use twilight_model::{
 
 use crate::app::{now_secs, App};
 
-const KIND: &str = "restore_main_roles";
+pub(crate) const KIND: &str = "restore_main_roles";
 
 /// The end of a timeout that has not run out yet.
 fn active(until: Option<Timestamp>) -> Option<i64> {

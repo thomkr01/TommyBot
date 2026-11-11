@@ -167,6 +167,8 @@ pub struct App {
     pub reactions: Mutex<HashMap<(u64, u64), tommybot_automod::window::Window>>,
     /// Thread -> parent channel; see [`App::channel_scope`].
     pub thread_parents: Mutex<HashMap<Id<ChannelMarker>, Id<ChannelMarker>>>,
+    /// Sticky role adds per guild in the current minute: (minute, count).
+    pub sticky_budget: Mutex<HashMap<u64, (i64, u32)>>,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -228,6 +230,7 @@ impl App {
             lock_ops: Default::default(),
             thread_parents: Default::default(),
             reactions: Default::default(),
+            sticky_budget: Default::default(),
         }
     }
 

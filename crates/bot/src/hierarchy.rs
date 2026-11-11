@@ -21,12 +21,14 @@ pub struct GuildInfo {
     pub owner: Id<UserMarker>,
     pub roles: HashMap<Id<RoleMarker>, i64>,
     pub role_perms: HashMap<Id<RoleMarker>, u64>,
+    /// Bot, booster and integration roles: Discord hands these out itself.
+    pub managed: HashSet<Id<RoleMarker>>,
     /// Channel -> its category (threads are not listed).
     pub parents: HashMap<Id<ChannelMarker>, Id<ChannelMarker>>,
     /// Every channel but threads.
     pub channels: HashSet<Id<ChannelMarker>>,
     pub bot_top: i64,
-    fetched: Instant,
+    pub(crate) fetched: Instant,
 }
 
 /// The roles with each position rewritten to its rank in Discord's order (ties broken by id), so
@@ -71,6 +73,7 @@ impl App {
             owner,
             bot_top: top_position(&roles, &me.roles),
             role_perms: all.iter().map(|r| (r.id, r.permissions.bits())).collect(),
+            managed: all.iter().filter(|r| r.managed).map(|r| r.id).collect(),
             parents,
             channels: all_channels.iter().map(|c| c.id).collect(),
             roles,
