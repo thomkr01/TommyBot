@@ -926,8 +926,12 @@ pub fn Section(
         );
     };
     // Read per card, not in the grouping closure: rebuilding the cards on every switch flip cut the knob's animation.
-    let off =
-        Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));
+    // A missing key reads as the switch's own default, like the switch shows it (most systems start off).
+    let off = Memo::new(move |_| {
+        let sec = n.get_value();
+        let dflt = fields.with(|fs| fs.iter().find(|f| f["path"] == format!("{sec}.enabled").as_str()).and_then(|f| f["default"].as_bool())).unwrap_or(false);
+        !val.with(|v| v[sec.as_str()]["enabled"].as_bool().unwrap_or(dflt))
+    });
     view! {
         {card_view}
         <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| if loaded.get() { raw_editor(val, n.get_value(), msg).into_any() } else { view! { <p class="muted">"Loading..."</p> }.into_any() })>
