@@ -5,6 +5,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- Dashboard 2FA: a setup request racing your own confirm can no longer replace your confirmed authenticator secret, and a confirm only confirms the secret it checked. (#PR)
 - Max heat must be at least 1 and heat degradation between 0.1% and 99% per second, on the dashboard, in the `heat` panel and through MCP (panic mode's heat decay too). The `heat` panel took any number, so a degradation of 100% or more broke every heat value and 0 kept heat from ever cooling. The bot also pulls a stored value inside these ranges.
 - The verification Start button checks the same names as Join Gate (cured username and display name). A member Join Gate found suspicious by name could skip the captcha in "suspicious only" mode. It also checks Discord's spammer flag.
 - The dashboard's and the MCP server's Discord requests time out after 15 seconds, and every raw Discord request sends the User-Agent Discord asks for.
