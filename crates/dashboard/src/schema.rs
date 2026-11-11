@@ -852,6 +852,15 @@ pub fn schema() -> Vec<Value> {
         ti(fg("General", "ignore_no_permit", "bool"), "Always ignore commands issued by members without any permits"),
         ti(fg("General", "ban_appeal_message", "text"), "Message shown to banned members with the appeal link"),
         ti(fg("General", "enforce_permits", "bool"), "Remove roles with dangerous permissions from members without any permits"),
+        hp(
+            ti(fg("General", "sticky_roles", "bool"), "Give members their roles back when they rejoin"),
+            "Roles with dangerous permissions, permit roles, bot roles and roles above TommyBot are never given back. A member who has to verify gets them after verifying.",
+        ),
+        ti(fg("General", "sticky_never", "roles"), "Roles never given back on rejoin"),
+        hp(
+            ti(fg("General", "auto_dehoist", "bool"), "Remove symbols from the start of names on join and on every name change"),
+            "Only the owner and extra owners are skipped.",
+        ),
         sx(
             "logging",
             hp(

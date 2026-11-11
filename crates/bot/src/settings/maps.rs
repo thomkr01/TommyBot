@@ -379,6 +379,9 @@ pub(super) static MISC: Module = Module {
         r!("7", "Ignore Permit 1 Commands", "misc.ignore_no_permit", Kind::Bool, |c| on(c.misc.ignore_no_permit)),
         r!("8", "Enforce Permits", "misc.enforce_permits", Kind::Bool, |c| on(c.misc.enforce_permits)),
         r!("9", "Ban Appeal Message", "misc.ban_appeal_message", Kind::Text, |c| Some(c.misc.ban_appeal_message.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| NO.into())),
+        r!("10", "Sticky Roles", "misc.sticky_roles", Kind::Bool, |c| on(c.misc.sticky_roles)),
+        r!("11", "Never Sticky Roles", "misc.sticky_never", Kind::Roles, |c| roles(&c.misc.sticky_never)),
+        r!("12", "Auto Dehoist", "misc.auto_dehoist", Kind::Bool, |c| on(c.misc.auto_dehoist)),
     ],
 };
 
