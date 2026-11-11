@@ -9,6 +9,9 @@ const ADMINISTRATOR: u64 = 0x8;
 /// What @everyone and main roles must not have: [`DANGEROUS`] plus Mention @everyone.
 const EVERYONE_DANGEROUS: u64 = DANGEROUS | (1 << 17);
 const VIEW: u64 = 1 << 10;
+const VIEW_AUDIT_LOG: u64 = 1 << 7;
+/// The `Setup::modules` name of Ban Sync: optional, so it gives a row only while it is on.
+pub const BAN_SYNC: &str = "ban_sync";
 /// View Channel, Send Messages and Embed Links: what the bot needs in a log channel.
 const BOT_LOG: u64 = VIEW | (1 << 11) | (1 << 14);
 
@@ -479,6 +482,17 @@ pub fn checks(
     );
     row("main_roles", sev, "Main roles", text, None);
     for (name, on) in &setup.modules {
+        if *name == BAN_SYNC {
+            if *on {
+                let (sev, text) = pick(
+                    bot & (ADMINISTRATOR | VIEW_AUDIT_LOG) != 0,
+                    "The bot can read the audit log that Ban Sync listens to.",
+                    "Ban Sync is on but the bot cannot view the audit log, so no bans are shared. Give the bot's role View Audit Log.".into(),
+                );
+                row("ban_sync_audit_log", sev, "Ban Sync audit log", text, None);
+            }
+            continue;
+        }
         let (mut sev, text) = pick(
             *on,
             "Switched on.",
@@ -1016,6 +1030,23 @@ mod tests {
             .detail
             .contains("Admins or Moderators"));
         assert_eq!(sev(&rows, "everyone_perms").unwrap().fix, None);
+    }
+
+    #[test]
+    fn ban_sync_row_needs_the_audit_log_only_while_on() {
+        let with = |perms, on| {
+            let roles = [role(1, 0, false, 0), role(7, 5, true, perms)];
+            let s = Setup {
+                bot_roles: vec![7],
+                modules: vec![(BAN_SYNC, on)],
+                ..setup(None, true)
+            };
+            sev(&checks(&SAFE, &roles, &[], 5, &s), "ban_sync_audit_log").map(|r| r.severity)
+        };
+        assert_eq!(with(0x400, false), None);
+        assert_eq!(with(0x400, true), Some(Severity::Warn));
+        assert_eq!(with(VIEW_AUDIT_LOG, true), Some(Severity::Ok));
+        assert_eq!(with(ADMINISTRATOR, true), Some(Severity::Ok));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use twilight_http::{api_error::ApiError, error::ErrorType, Client, Error};
 use twilight_model::{
-    guild::Member,
+    guild::{Ban, Member},
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -48,6 +48,14 @@ pub fn gone_any(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Error>().is_some_and(gone)
 }
 
+/// Discord answered with a 4xx: it refused the request, and the same request would be refused
+/// again. A 5xx or no answer at all is an outage, not a refusal.
+pub fn refused(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Error>()
+        .and_then(status_code)
+        .is_some_and(|(s, _)| (400..500).contains(&s))
+}
+
 /// Discord's reason for a failed action, for the reply.
 pub fn why(e: &anyhow::Error) -> String {
     match e.downcast_ref::<Error>().map(|e| e.kind()) {
@@ -88,6 +96,15 @@ pub async fn member(
     uid: Id<UserMarker>,
 ) -> Result<Option<Member>> {
     match http.guild_member(gid, uid).await {
+        Ok(r) => Ok(Some(r.model().await?)),
+        Err(e) if gone(&e) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// A guild ban, `None` only when Discord says the user is not banned; like [`member`].
+pub async fn ban(http: &Client, gid: Id<GuildMarker>, uid: Id<UserMarker>) -> Result<Option<Ban>> {
+    match http.ban(gid, uid).await {
         Ok(r) => Ok(Some(r.model().await?)),
         Err(e) if gone(&e) => Ok(None),
         Err(e) => Err(e.into()),

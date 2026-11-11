@@ -7,6 +7,11 @@ pub const NUKE_HOUR: (i64, i64) = (2, 500);
 pub const NUKE_HEAT: (i64, i64) = (1, 100);
 pub use tommybot_automod::join::MIN_AGE_MS;
 
+/// Ban Sync: seconds a ban waits before it is shared, so anti-nuke can stop a hacked account first.
+pub const BAN_SYNC_HOLD_S: i64 = 60;
+/// Ban Sync: bans one server may share per hour before sharing pauses for the owner.
+pub const BAN_SYNC_HOURLY: i64 = 30;
+
 /// The range of the number at `path` (below the section, e.g. `limits.Ban.per_hour`), if it has one.
 pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
     match (section, path.split('.').collect::<Vec<_>>().as_slice()) {

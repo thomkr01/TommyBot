@@ -27,7 +27,7 @@ fs.mkdirSync(out, { recursive: true });
   const links = [...new Set(await page.$$eval('a[href^="#/"]', (as) => as.map((a) => a.getAttribute('href'))))]
     .filter((h) => /^#\/\d+\//.test(h));
   // tabs that no sidebar link reaches
-  links.push(links[0].replace(/^(#\/\d+\/).*/, '$1raid_log'));
+  links.push(links[0].replace(/^(#\/\d+\/).*/, '$1raid_log'), links[0].replace(/^(#\/\d+\/).*/, '$1ban_sync_log'));
   links.push('#/commands', '#/update');
   console.log(`${links.length} pages`);
   const failed = [];
@@ -104,10 +104,11 @@ fs.mkdirSync(out, { recursive: true });
   await page.goto(`${base}/${links[0].replace(/^(#\/\d+\/).*/, '$1logging')}`);
   // No wait here on purpose: a change made right after the page loaded once got its bar hidden again (ui/PITFALLS.md #3).
   const drop = page.locator('select:has(option[value=""]:text-is("none"))').first();
-  await drop.waitFor({ timeout: 5000 }).catch(() => failed.push('cancel: no channel dropdown on logging'));
+  // Wait for the channel options too: the select shows with only "none" until the channel list arrives.
+  await drop.locator('option:nth-child(2)').waitFor({ state: 'attached', timeout: 5000 }).catch(() => failed.push('cancel: no channel dropdown on logging'));
   const was = await drop.inputValue();
   const other = await drop.locator('option').evaluateAll((os, w) => os.map((o) => o.value).find((v) => v !== w), was);
-  await drop.selectOption(other);
+  if (other !== undefined) await drop.selectOption(other);
   await page.click('.bar >> text=Cancel', { timeout: 5000 }).catch(() => failed.push('cancel: no Changes detected bar'));
   if ((await drop.inputValue()) !== was) failed.push(`cancel: dropdown kept ${other}, saved is ${was || 'none'}`);
   // Leaving a page while its requests run (or fail, as while the dashboard restarts) must not read disposed signals.
