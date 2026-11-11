@@ -13,6 +13,7 @@ mod lockdown;
 mod md;
 mod pages;
 mod permits;
+mod raiders;
 mod records;
 mod recovery;
 mod search;
@@ -35,6 +36,7 @@ use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Ticke
 use recovery::{Backups, Panic};
 use search::{Search, SearchBox};
 use mcp::McpTokens;
+use raiders::{RaiderAppeal, RaiderMatches, RaiderReview};
 use update::Update;
 
 /// Sidebar with only with the pages TommyBot has.
@@ -85,6 +87,7 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
             ("tickets", "Tickets"),
             ("catch", "Catch Channel"),
             ("ban_sync", "Ban Sync"),
+            ("raider_list", "Raider List"),
         ],
     ),
     (
@@ -127,6 +130,7 @@ fn page_icon(p: &str) -> &'static str {
         "tickets" => "ticket",
         "catch" => "target",
         "ban_sync" => "ban",
+        "raider_list" => "suspicious_account",
         "Tools" => "settings",
         "revert" => "restore",
         "history" => "history",
@@ -151,6 +155,7 @@ const APPEAL_TABS: &[(&str, &str)] = &[
 ];
 const RAID_TABS: &[(&str, &str)] = &[("joinraid", "Settings"), ("raid_log", "Raid Log")];
 const BAN_SYNC_TABS: &[(&str, &str)] = &[("ban_sync", "Settings"), ("ban_sync_log", "Log")];
+const RAIDER_TABS: &[(&str, &str)] = &[("raider_list", "Settings"), ("raider_matches", "Matches")];
 const GATE_TABS: &[(&str, &str)] = &[("joingate", "Settings"), ("joingate_log", "Join Gate Log")];
 const REPORT_TABS: &[(&str, &str)] = &[("report_list", "List"), ("report_blacklist", "Blacklist")];
 const WL_TABS: &[(&str, &str)] = &[
@@ -218,6 +223,7 @@ fn title(p: &str) -> (String, Option<String>) {
         "joingate_log" => ("Join gate".into(), None),
         "joinraid" | "raid_log" => ("Join Raid".into(), None),
         "ban_sync" | "ban_sync_log" => ("Ban Sync".into(), None),
+        "raider_list" | "raider_matches" => ("Raider List".into(), None),
         "verification" => two("Verification", "General Settings"),
         "automod_panic" => ("Auto Mod Panic Mode".into(), None),
         "antinuke_panic" => ("Anti Nuke Panic Mode".into(), None),
@@ -605,7 +611,7 @@ fn App() -> impl IntoView {
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
                     <summary aria-label="account menu">{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
-                    <div><a href="#/">"Servers"</a><a class="m-only" href="#/commands">"Commands"</a><Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="m-only" href="#/update">"Update"</a><a href="#/mcp-tokens">"MCP tokens"</a></Show><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
+                    <div><a href="#/">"Servers"</a><a class="m-only" href="#/commands">"Commands"</a><Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="m-only" href="#/update">"Update"</a><a href="#/mcp-tokens">"MCP tokens"</a><a href="#/raiders">"Raider List review"</a></Show><a href="#/raider-appeal">"Raider List status"</a><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
                 </details>
             </header>
             <StepUp need=step_up enrolled />
@@ -614,7 +620,7 @@ fn App() -> impl IntoView {
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
                         None => server_list().into_any(),
-                        Some(a) if a == "commands" || a == "update" || a == "mcp-tokens" => server_list().into_any(),
+                        Some(a) if ["commands", "update", "mcp-tokens", "raiders", "raider-appeal"].contains(&a.as_str()) => server_list().into_any(),
                         Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
@@ -657,6 +663,8 @@ fn App() -> impl IntoView {
                         [a] if a == "commands" => view! { <Commands /> }.into_any(),
                         [a] if a == "update" => view! { <Update enrolled /> }.into_any(),
                         [a] if a == "mcp-tokens" => view! { <McpTokens enrolled /> }.into_any(),
+                        [a] if a == "raiders" => view! { <RaiderReview enrolled /> }.into_any(),
+                        [a] if a == "raider-appeal" => view! { <RaiderAppeal /> }.into_any(),
                         [a, g] if a == "appeal" =>view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview").0 /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, rest @ ..] => {
@@ -692,10 +700,12 @@ fn App() -> impl IntoView {
                                 ("raid_log", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() /><RaidLog guild=g.clone() /> }.into_any(),
                                 ("ban_sync", _) => view! { <Tabs guild=g.clone() items=BAN_SYNC_TABS active=p.clone() />{sec("ban_sync", "")}<BanSyncGroup guild=g.clone() enrolled /> }.into_any(),
                                 ("ban_sync_log", _) => view! { <Tabs guild=g.clone() items=BAN_SYNC_TABS active=p.clone() /><BanSyncLog guild=g.clone() /> }.into_any(),
+                                ("raider_list", _) => view! { <Tabs guild=g.clone() items=RAIDER_TABS active=p.clone() />{sec("raider_list", "")} }.into_any(),
+                                ("raider_matches", _) => view! { <Tabs guild=g.clone() items=RAIDER_TABS active=p.clone() /><RaiderMatches guild=g.clone() /> }.into_any(),
                                 ("joingate", _) => view! { <Tabs guild=g.clone() items=GATE_TABS active=p.clone() />{sec("joingate", "")} }.into_any(),
                                 ("joingate_log", _) => view! { <Tabs guild=g.clone() items=GATE_TABS active=p.clone() /><JoinGateLog guild=g.clone() /> }.into_any(),
                                 ("catch", _) => view! { <Catch guild=g.clone() enrolled /> }.into_any(),
-                                ("cases", _) => view! { <CaseList guild=g.clone() /> }.into_any(),
+                                ("cases", _) => view! { <CaseList guild=g.clone() enrolled /> }.into_any(),
                                 ("notes", _) => view! { <NoteList guild=g.clone() /> }.into_any(),
                                 ("report_list", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><ReportList guild=g.clone() /> }.into_any(),
                                 ("report_blacklist", _) => view! { <Tabs guild=g.clone() items=REPORT_TABS active=p.clone() /><Blacklist guild=g.clone() base="reports" /> }.into_any(),

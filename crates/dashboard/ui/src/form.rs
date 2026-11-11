@@ -590,6 +590,20 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         }
         "users" => view! { <UserPick get=Signal::derive(get) set=Callback::new(set) /> }.into_any(),
         "route_pick" => view! { <RoutePick f=f.clone() get=Signal::derive(get) set=Callback::new(set) dc /> }.into_any(),
+        "multi" => {
+            let opts: Vec<String> = strs(&f["options"]);
+            view! { <div class="pick">
+                {opts.into_iter().map(|o| {
+                    let (o2, l) = (o.clone(), opt_label(&o));
+                    view! { <label><input type="checkbox" prop:checked=move || strs(&get()).contains(&o) on:change=move |e| {
+                        let mut cur = strs(&get());
+                        cur.retain(|x| *x != o2);
+                        if event_target_checked(&e) { cur.push(o2.clone()); }
+                        set(json!(cur));
+                    } /> {l}</label> }
+                }).collect_view()}
+            </div> }.into_any()
+        }
         "channels" | "categories" | "roles" => {
             let key = StoredValue::new(kind.clone());
             view! { <div class="pick">

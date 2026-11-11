@@ -28,7 +28,8 @@ fs.mkdirSync(out, { recursive: true });
     .filter((h) => /^#\/\d+\//.test(h));
   // tabs that no sidebar link reaches
   links.push(links[0].replace(/^(#\/\d+\/).*/, '$1raid_log'), links[0].replace(/^(#\/\d+\/).*/, '$1ban_sync_log'));
-  links.push('#/commands', '#/update');
+  links.push(links[0].replace(/^(#\/\d+\/).*/, '$1raider_matches'));
+  links.push('#/commands', '#/update', '#/raiders', '#/raider-appeal');
   console.log(`${links.length} pages`);
   const failed = [];
   for (const h of links) {

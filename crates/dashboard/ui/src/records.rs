@@ -16,7 +16,7 @@ fn chips(
 }
 
 /// Loads `/api/guilds/{g}/{path}?{query}` into `rows`, errors into `msg`; `loaded` turns on after the first answer.
-fn fetch(path: String, rows: WriteSignal<Vec<Value>>, msg: Msg, loaded: RwSignal<bool>) {
+pub(crate) fn fetch(path: String, rows: WriteSignal<Vec<Value>>, msg: Msg, loaded: RwSignal<bool>) {
     spawn_local(async move {
         match api("GET", &path, None).await {
             Ok(v) => {
@@ -135,8 +135,11 @@ fn enc(v: &str) -> String {
 }
 
 #[component]
-pub fn CaseList(guild: String) -> impl IntoView {
+pub fn CaseList(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let (rows, set_rows) = signal(Vec::<Value>::new());
+    let need = RwSignal::new(false);
+    // Owners and extra owners may report a ban, kick or quarantine case; the server checks again.
+    let owner = expect_context::<Access>().rank() == 4;
     let loaded = RwSignal::new(false);
     let (q, kind, state, msg) = (
         RwSignal::new(String::new()),
@@ -208,6 +211,7 @@ pub fn CaseList(guild: String) -> impl IntoView {
             {export_csv(list, "cases", &["case_no", "kind", "user_id", "mod_id", "reason", "proof", "points", "active", "at"], msg)}
             <Toast msg />
         </div>
+        <StepUp need enrolled />
         <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No cases found."</p></Show>
         <For each=move || rows.get() key=|r| (r["case_no"].as_i64(), r["active"].as_bool(), r["reason"].as_str().map(String::from), r["proof"].as_str().map(String::from)) let:r>
             {
@@ -224,11 +228,31 @@ pub fn CaseList(guild: String) -> impl IntoView {
                         <button on:click=move |_| save(active)>"Save"</button>
                         <button class="ghost" on:click=move |_| save(!active)>{if active { "Close" } else { "Reopen" }}</button>
                         <button class="ghost" on:click=move |_| if confirm("Delete this case for good?") { post(no, "/delete", json!({})) }>"Delete"</button>
+                        {(owner && matches!(s(&r["kind"]).as_str(), "ban" | "kick" | "quarantine")).then(|| report(g.get_value(), no, msg, need))}
                     </div>
                 </div> }
             }
         </For>
         {pager(page, move || rows.get().len(), load)}
+    }
+}
+
+/// "Report to Raider List": a category and a button. The report waits for the bot owner's review.
+fn report(guild: String, no: i64, msg: Msg, need: RwSignal<bool>) -> impl IntoView {
+    let cat = RwSignal::new("raid".to_string());
+    let path = StoredValue::new(format!("/api/guilds/{guild}/cases/{no}/raider_report"));
+    let go = move |_| {
+        if !confirm("Report this user to the Raider List? The bot owner reviews every report before other servers use it.") {
+            return;
+        }
+        let (path, body) = (path.get_value(), json!({"category": cat.get_untracked()}));
+        run_act(async move { api("POST", &path, Some(body)).await }, msg, need, move |_| msg.ok("Reported. The bot owner reviews it."));
+    };
+    view! {
+        <select aria-label="Raider List category" on:change=move |e| cat.set(event_target_value(&e))>
+            {["raid", "nuke", "scam", "spam"].map(|c| view! { <option value=c prop:selected=move || cat.get() == c>{c}</option> }).to_vec()}
+        </select>
+        <button class="ghost" on:click=go>"Report to Raider List"</button>
     }
 }
 

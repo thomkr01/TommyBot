@@ -626,7 +626,7 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
         let mut v = v.clone();
         strip_ids(&mut v, k, &mut cleared);
         // An import never switches a cross-server feature on.
-        if k == "ban_sync" {
+        if k == "ban_sync" || k == "raider_list" {
             v["enabled"] = json!(false);
         }
         if k == "permits" {
@@ -718,7 +718,7 @@ pub async fn import(
 pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{
         AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
-        MiscCfg, PanicCfg, TicketsCfg, WhitelistCfg,
+        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
     };
     if section == "logging" {
         for (i, c) in v["custom"].as_array().into_iter().flatten().enumerate() {
@@ -800,6 +800,7 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
         "catch" => serde_json::from_value::<CatchCfg>(v).map(drop),
         "ban_sync" => serde_json::from_value::<BanSyncCfg>(v).map(drop),
+        "raider_list" => serde_json::from_value::<RaiderListCfg>(v).map(drop),
         _ => Ok(()),
     };
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
@@ -853,6 +854,20 @@ mod logging_validate_tests {
         assert!(import_config(&json!({"ban_sync": {"receive": "nuke"}}), &json!({})).is_err());
         assert_eq!(import_bar(&new, &json!({})), (Level::Owner, true));
         assert!(owner_only_changed(&new, &json!({})));
+    }
+
+    #[test]
+    fn import_never_turns_raider_list_on() {
+        let file = json!({"raider_list": {"enabled": true, "action": "kick"}});
+        let (new, _) = import_config(&file, &json!({})).unwrap();
+        assert_eq!(
+            new["raider_list"],
+            json!({"enabled": false, "action": "kick"})
+        );
+        let bad = json!({"raider_list": {"categories": ["nuke", "bad"]}});
+        assert!(import_config(&bad, &json!({})).is_err());
+        assert_eq!(import_bar(&new, &json!({})), (Level::Owner, true));
+        assert!(!owner_only_changed(&new, &json!({})));
     }
 
     #[test]

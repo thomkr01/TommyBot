@@ -1,6 +1,6 @@
 # TommyBot Terms of Service
 
-Last updated: 2026-10-13
+Last updated: 2026-11-11
 
 These terms apply when you add TommyBot ("the bot") to a Discord server or use its commands. By adding the bot, or letting someone on your server use it, you agree to these terms.
 
@@ -20,6 +20,10 @@ TommyBot is a free Discord moderation and server-management bot written in Rust.
 - Do not try to break, overload, or reverse-engineer the bot or its hosting.
 - Do not use the bot to harass, spam, or target people.
 - Keep your own permissions and role setup sensible. The bot acts with the permissions Discord gives it and with the rules you configure. You are responsible for the rules you set.
+
+## The Raider List
+
+TommyBot keeps a list of accounts it caught nuking, raiding, spamming or scamming across servers with different owners, plus accounts that server owners reported from a ban, kick or quarantine case. The bot owner reviews every entry: reports never list anyone on their own, and automatic listings are checked by the bot owner. Servers that turn the list on can alert, quarantine, kick or ban listed accounts when they join, and they see only the category and a short note, never the evidence or which servers it came from. If you think you are listed by mistake, sign in to the dashboard and open **Raider List status** in the account menu. It shows your own status, and you can send one appeal of up to 1,000 characters. After a denied appeal you can appeal again after 30 days. When an appeal is accepted, you are taken off the list and the bans the list made are lifted where the server allows it.
 
 ## Availability and changes
 

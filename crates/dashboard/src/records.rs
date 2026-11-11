@@ -43,6 +43,7 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{g}/raid_log"), get(raid_log))
         .route(&format!("{g}/joingate_log"), get(joingate_log))
         .route(&format!("{g}/ban_sync_log"), get(ban_sync_log))
+        .route(&format!("{g}/raider_matches"), get(raider_matches))
         .route(&format!("{g}/notes"), get(notes).post(note_add))
         .route(&format!("{g}/notes/sweep"), post(note_sweep))
         .route(&format!("{g}/notes/{{id}}"), post(note_edit))
@@ -189,6 +190,42 @@ async fn ban_sync_log(
             "to_id": to.to_string(), "to": names[&to], "from_id": from.to_string(), "from": names[&from],
             "user_id": user, "origin": origin, "reason": reason, "state": state, "skip_reason": skip,
             "case_no": case_no, "expires_at": until, "at": at
+        }))
+        .collect::<Vec<_>>())))
+}
+
+/// What the Raider List did in this server, newest first. Only the entry's category and public note
+/// come from the global list: never its evidence, other servers or who reported.
+async fn raider_matches(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Query(p): Query<Page>,
+) -> Res {
+    api::require(&st, &s, guild, crate::access::Level::Admin, false).await?;
+    type Row = (
+        String,
+        String,
+        Option<i32>,
+        At,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "select a.user_id::text, a.action, a.case_no, a.created_at, r.category, r.public_note, r.status
+         from raider_actions a left join raiders r on r.user_id = a.user_id
+         where a.guild_id = $1 order by a.created_at desc, a.user_id limit 50 offset $2",
+    )
+    .bind(guild)
+    .bind(offset(p.page))
+    .fetch_all(&st.db)
+    .await?;
+    Ok(Json(json!(rows
+        .into_iter()
+        .map(|(user, action, case_no, at, category, note, status)| json!({
+            "user_id": user, "action": action, "case_no": case_no, "at": at, "category": category,
+            "public_note": note, "listed": status.as_deref() == Some("confirmed")
         }))
         .collect::<Vec<_>>())))
 }
