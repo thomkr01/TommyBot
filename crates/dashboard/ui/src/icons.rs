@@ -27,7 +27,23 @@ icons!(
     "page_next",
     "checkbox_off",
     "modmail",
-    "info"
+    "info",
+    "backup",
+    "restore",
+    "trash",
+    "back",
+    "channel_text",
+    "channel_voice",
+    "category",
+    "announcement",
+    "channel_stage",
+    "forum",
+    "server",
+    "verification",
+    "nsfw_filter",
+    "webhook",
+    "role",
+    "dropdown"
 );
 
 pub fn icon(name: &'static str) -> AnyView {
