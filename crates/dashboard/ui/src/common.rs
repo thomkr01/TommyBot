@@ -404,9 +404,9 @@ pub fn copy_label(state: Option<bool>) -> &'static str {
     }
 }
 
-/// Info icon with a hover card (also on keyboard focus and tap) that explains a setting in plain words.
+/// Info icon (or another `icon`) with a hover card (also on keyboard focus and tap) that explains a setting in plain words.
 #[component]
-pub fn Tip(#[prop(into)] text: Signal<String>) -> impl IntoView {
+pub fn Tip(#[prop(into)] text: Signal<String>, #[prop(default = "info")] icon: &'static str) -> impl IntoView {
     // The card is centred over the icon; near an edge it is shifted to stay inside the page area
     // (not under the sidebar or past the screen), and below the icon when the header would cover it.
     let place = |e: &web_sys::Event| {
@@ -424,5 +424,5 @@ pub fn Tip(#[prop(into)] text: Signal<String>) -> impl IntoView {
             let _ = t.class_list().add_1("below");
         }
     };
-    view! { <span class="tip" tabindex="0" role="note" aria-label=text on:mouseenter=move |e| place(&e) on:focus=move |e| place(&e)>{crate::icons::icon("info")}<span class="bubble" aria-hidden="true">{text}</span></span> }
+    view! { <span class="tip" tabindex="0" role="note" aria-label=text on:mouseenter=move |e| place(&e) on:focus=move |e| place(&e)>{crate::icons::icon(icon)}<span class="bubble" aria-hidden="true">{text}</span></span> }
 }
