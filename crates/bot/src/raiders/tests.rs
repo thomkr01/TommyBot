@@ -179,7 +179,9 @@ impl T {
             "user": {"id": u.to_string(), "username": "raider", "discriminator": "0", "avatar": null},
         }))
         .unwrap();
-        crate::joingate::on_join(&self.app, &m, false).await.unwrap();
+        crate::joingate::on_join(&self.app, &m, false)
+            .await
+            .unwrap();
     }
 
     async fn forget(&self) {
