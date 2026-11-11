@@ -28,6 +28,10 @@ The `quarantines` row survived a leave, but no join code read it, so a quarantin
 Join Gate's username filter checks names again after join (the "POST join" switch) and called `punish` without a level check, so an Extra Owner or Trusted Admin who picked a nickname on the word list could be kicked or banned. At join time nobody is staff yet, so the gap only showed after join. The other automatic paths on existing members (automod, Discord AutoMod hits, reactions, threads) already go through `whitelisted()`.
 *Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first.
 
+**Member edits share one rate-limit bucket.** (auto-dehoist, 11-11)
+Nick changes, role adds, timeouts and kicks of members all use Discord's member bucket, so a burst of automatic renames or role restores slows the punishments of a raid.
+*Avoid:* bulk automatic member edits are capped per guild (`dehoist::rename`, 10 a minute through `RateLimiter`) and auto-dehoist is off during a join raid or lockdown.
+
 **Not every member lookup error means "not a member".** (#97)
 All `guild_member` errors (5xx, timeouts) were read as "left the server". Staff then lost their permit level for that event, so automod or anti-nuke could act on them.
 *Avoid:* use `http_err::member()`. Only a 404 means not a member. Other errors propagate.
@@ -136,6 +140,10 @@ Its `AddAssign` impl makes `s += &other` ambiguous once decancer is in scope, an
 **Exemptions that were too wide or too narrow.** (#100)
 Whitelisted channels and roles still got base message heat, other bots' slash-command replies counted as webhook spam, and saying "gg" twice in a quiet channel gave a timeout.
 *Avoid:* every new heat source checks the whitelist, and quiet-channel heat counts once per user. Add a test with both spammers and normal chatters in one channel.
+
+**A bot rename reads as a new name.** (auto-dehoist, 11-11)
+The post-join username filter dedupes on username + global name + nick. Its Rename action changes the nick, so the echo update looked like a new bad name and the bot would rename on every update; a dehoist nick on a member the filter already punished would punish them again.
+*Avoid:* for Rename the dedupe key leaves out the nick, and a clean nick counts as done (`joingate::post_join_key`). Auto-dehoist skips a name the filter matched, and its output always starts with a letter or digit, so dehoisting twice changes nothing.
 
 ## 4. Parsing and limits
 

@@ -7,6 +7,7 @@ mod backup;
 mod catch;
 mod commands;
 mod confirm;
+mod dehoist;
 mod events;
 mod general;
 mod hierarchy;

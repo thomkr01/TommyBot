@@ -453,7 +453,13 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(e) = verify::on_member_update(app, m).await {
                 tracing::warn!(?e, "pausing the verification time limit failed");
             }
-            crate::joingate::on_member_update(app, m).await?
+            if !crate::joingate::on_member_update(app, m).await? {
+                let (user, nick) = (&m.user, m.nick.as_deref());
+                let r = crate::dehoist::check(app, m.guild_id, user, nick, &m.roles).await;
+                if let Err(e) = r {
+                    tracing::warn!(?e, "auto-dehoist failed");
+                }
+            }
         }
         Event::MemberAdd(m) => crate::joingate::on_join(app, m).await?,
         Event::InteractionCreate(i) => {

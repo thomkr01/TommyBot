@@ -2,7 +2,7 @@
 use anyhow::Result;
 use tommybot_automod::{
     filters,
-    join::{gate, harshest, is_suspicious, Action, Filter, Joiner, RaidCfg},
+    join::{gate, harshest, is_suspicious, Action, Filter, GateCfg, Joiner, RaidCfg},
     lockdown::JoinLock,
 };
 use tommybot_core::{
@@ -139,6 +139,9 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
         join_raid(app, &cfg, gid, raid, &j, suspicious, now).await?;
     }
+    if hits.is_empty() {
+        crate::dehoist::on_join(app, gid, &m.member).await;
+    }
     Ok(())
 }
 
@@ -158,6 +161,7 @@ pub(crate) fn raid_trigger_log(
             duration(raid.active_ms / 1000),
             match raid.action {
                 Action::Log => "logged",
+                Action::Rename => "renamed",
                 Action::Warn => "warned",
                 Action::Timeout(_) => "timed out",
                 Action::Kick => "kicked",
@@ -313,8 +317,10 @@ fn names(raw: &[Option<&String>]) -> String {
         .join("\n")
 }
 
-/// Re-runs the username filter when a member renames, if the gate asks for it.
-pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
+/// Re-runs the username filter when a member renames, if the gate asks for it. True when the
+/// filter matched the name, so auto-dehoist leaves it alone: a dehoist nick would read as a new
+/// name and punish again.
+pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<bool> {
     let cfg = app.cfg(m.guild_id.get()).await?;
     let g = &cfg.joingate;
     let Some(action) = g
@@ -322,34 +328,26 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         .get(Filter::UsernameFilter.default_action())
         .filter(|_| g.enabled && g.username_post_join)
     else {
-        return Ok(());
+        return Ok(false);
     };
     let timed_out = m
         .communication_disabled_until
         .is_some_and(|t| t.as_secs() > now_secs());
     let key = (m.guild_id.get(), m.user.id.get());
-    let bad = g.name_matches(&names(&[
-        Some(&m.user.name),
-        m.user.global_name.as_ref(),
-        m.nick.as_ref(),
-    ]));
+    let global = m.user.global_name.as_ref();
+    let seen_as = post_join_key(g, action, &m.user.name, global, m.nick.as_ref());
     let skip = {
         let mut seen = app.punished_names.lock().unwrap();
-        if !bad {
+        let Some(names) = seen_as else {
             seen.remove(&key);
-        }
-        let names = format!(
-            "{}\0{}\0{}",
-            m.user.name,
-            m.user.global_name.as_deref().unwrap_or_default(),
-            m.nick.as_deref().unwrap_or_default()
-        );
+            return Ok(false);
+        };
         // A timeout fires another update and a role change keeps the name: act once per bad name pair.
-        timed_out || !bad || seen.insert(key, names.clone()) == Some(names)
+        timed_out || seen.insert(key, names.clone()) == Some(names)
     };
     // Owner, Extra Owners and Trusted Admins are immune to every bot action, here too.
     if skip || app.is_immune(m.guild_id, m.user.id).await? {
-        return Ok(());
+        return Ok(true);
     }
     punish(
         app,
@@ -360,7 +358,28 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         "username filter",
         Detail::default(),
     )
-    .await
+    .await?;
+    Ok(true)
+}
+
+/// What the post-join check remembers for a member it acts on, None when it has nothing to do.
+/// Rename leaves the nick out: its own nick would otherwise read as a new name and rename again.
+/// A clean nick already hides a bad username, which is all Rename can do.
+fn post_join_key(
+    g: &GateCfg,
+    action: Action,
+    user: &String,
+    global: Option<&String>,
+    nick: Option<&String>,
+) -> Option<String> {
+    let rename = action == Action::Rename;
+    let hidden = rename && nick.is_some_and(|n| !g.name_matches(&names(&[Some(n)])));
+    if hidden || !g.name_matches(&names(&[Some(user), global, nick])) {
+        return None;
+    }
+    let global = global.map_or("", |s| s.as_str());
+    let nick = nick.filter(|_| !rename).map_or("", |s| s.as_str());
+    Some(format!("{user}\0{global}\0{nick}"))
 }
 
 /// Bots added by the owner or an Extra Owner may skip the account filters; Trusted Admins and
@@ -442,6 +461,9 @@ async fn no_log_channel(app: &App, gid: Id<GuildMarker>) {
     }
 }
 
+/// The nick Join Gate's Rename action sets.
+const RENAMED: &str = "Moderated Nickname";
+
 /// A punishment Discord refused (role too low, permission missing) is shown to staff, not
 /// only written to the container log.
 pub(crate) async fn punish(
@@ -454,7 +476,10 @@ pub(crate) async fn punish(
     detail: Detail<'_>,
 ) -> Result<()> {
     let uid = Id::new(user);
-    let punishing = !matches!(action, Action::Log | Action::Timeout(..=-1));
+    let punishing = !matches!(
+        action,
+        Action::Log | Action::Rename | Action::Timeout(..=-1)
+    );
     if punishing && cfg.joingate.dm_punished {
         let mut text = if cfg.misc.show_reason_on_auto {
             format!("Automod action: {action:?} ({why})")
@@ -484,6 +509,38 @@ pub(crate) async fn punish(
     }
     match action {
         Action::Log => {}
+        Action::Rename => {
+            let Some(m) = crate::http_err::member(&app.http, gid, uid).await? else {
+                return Ok(());
+            };
+            let old = m.nick.or(m.user.global_name).unwrap_or(m.user.name);
+            let names = (old.as_str(), RENAMED);
+            let done = crate::dehoist::rename(
+                app,
+                gid,
+                uid,
+                &m.roles,
+                names,
+                "Join Gate: username filter",
+            )
+            .await;
+            match done {
+                Ok(true) => {}
+                // Skipped (owner, out of reach, cap): forget the name so the next update tries again.
+                Ok(false) => {
+                    app.punished_names
+                        .lock()
+                        .unwrap()
+                        .remove(&(gid.get(), user));
+                    return Ok(());
+                }
+                Err(e) => {
+                    let reason = crate::http_err::why(&e);
+                    finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await?;
+                    return Err(e);
+                }
+            }
+        }
         Action::Warn => {
             cases::create(
                 &app.pool,
@@ -569,6 +626,33 @@ mod tests {
         assert!(vouches(&Level::ExtraOwner));
         assert!(!vouches(&Level::TrustedAdmin));
         assert!(!vouches(&Level::None));
+    }
+
+    #[test]
+    fn rename_does_not_loop_on_its_own_nick() {
+        let g = GateCfg {
+            username_terms: vec!["raid".into()],
+            ..Default::default()
+        };
+        let s = |v: &str| v.to_string();
+        let (bad, clean, renamed) = (s("raidbot"), s("bob"), s(RENAMED));
+        let key = |a, nick: Option<&String>| post_join_key(&g, a, &bad, None, nick);
+        // Rename: one key before and after its own nick, and a clean nick needs nothing.
+        assert_eq!(key(Action::Rename, None), Some(s("raidbot\0\0")));
+        assert_eq!(key(Action::Rename, Some(&renamed)), None);
+        let bad_nick = s("raid2");
+        assert_eq!(
+            key(Action::Rename, Some(&bad_nick)),
+            key(Action::Rename, None)
+        );
+        // Other actions keep the nick, so a new bad nick acts again.
+        assert_eq!(
+            key(Action::Kick, Some(&renamed)),
+            Some(format!("raidbot\0\0{RENAMED}"))
+        );
+        // A clean username with a bad nick is renamed; a clean name is left alone.
+        assert!(post_join_key(&g, Action::Rename, &clean, None, Some(&bad_nick)).is_some());
+        assert_eq!(post_join_key(&g, Action::Kick, &clean, None, None), None);
     }
 
     #[test]
