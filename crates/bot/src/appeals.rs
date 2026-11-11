@@ -259,11 +259,14 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         Ok(Ok((line, color))) => {
             if let Some(mut e) = i.message.as_ref().and_then(|m| m.embeds.first().cloned()) {
                 e.color = Some(color);
-                e.fields.push(EmbedField {
-                    inline: false,
-                    name: "Decision".into(),
-                    value: line,
-                });
+                // Over 1024 or a 26th field, Discord refuses the update and the buttons stay.
+                if e.fields.len() < 25 {
+                    e.fields.push(EmbedField {
+                        inline: false,
+                        name: "Decision".into(),
+                        value: line.chars().take(1024).collect(),
+                    });
+                }
                 data.embeds = Some(vec![e]);
             }
             data.components = Some(vec![]);

@@ -485,8 +485,12 @@ fn add_decision(embeds: &mut Value, decision: &str) {
     let Some(e) = embeds.get_mut(0).and_then(Value::as_object_mut) else {
         return;
     };
+    // Discord refuses the whole PATCH (buttons stay) for a value over 1024 or a 26th field.
+    let value: String = decision.chars().take(1024).collect();
     if let Some(fields) = e.entry("fields").or_insert(json!([])).as_array_mut() {
-        fields.push(json!({"name": "Decision", "value": decision, "inline": false}));
+        if fields.len() < 25 {
+            fields.push(json!({"name": "Decision", "value": value, "inline": false}));
+        }
     }
 }
 
@@ -674,6 +678,19 @@ mod tests {
             add_decision(&mut embeds, "Denied");
             assert_eq!(embeds, want);
         }
+        let mut long = json!([{}]);
+        add_decision(&mut long, &"x".repeat(1100));
+        assert_eq!(
+            long[0]["fields"][0]["value"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            1024
+        );
+        let mut full = json!([{"fields": vec![d.clone(); 25]}]);
+        add_decision(&mut full, "Denied");
+        assert_eq!(full[0]["fields"].as_array().unwrap().len(), 25);
     }
 
     #[test]
