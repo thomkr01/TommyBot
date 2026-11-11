@@ -1,4 +1,4 @@
-//! Tests of `bansync` (own file to keep bansync.rs under 1000 lines). The DB tests run only when
+//! Tests of `bansync` (own file to keep bansync.rs short). The DB tests run only when
 //! DATABASE_URL points at a scratch Postgres; Discord is a small local mock.
 use super::actions::{ban_click, send_rest_click};
 use super::*;
@@ -78,8 +78,8 @@ fn the_staff_member_behind_a_ban_is_checked() {
 #[test]
 fn reasons_and_names_stay_one_plain_line() {
     assert_eq!(
-        md("a\nb [x](y) **c** `d` ~e~ |f| >g _h_"),
-        r"a b \[x\](y) \*\*c\*\* \`d\` \~e\~ \|f\| \>g \_h\_"
+        md("a\nb [x](y) **c** `d` ~e~ |f| >g _h_ <@1>"),
+        r"a b \[x\](y) \*\*c\*\* \`d\` \~e\~ \|f\| \>g \_h\_ \<@1\>"
     );
     let r = copy_reason("Main*", 5, "spam\nlink");
     assert_eq!(r, r"Ban Sync from Main\* (5): spam link");
@@ -102,6 +102,7 @@ struct Mock {
     owners: HashMap<u64, u64>,
     fail_get: bool,
     fail_put: bool,
+    fail_put_5xx: bool,
     fail_member: bool,
     log: Vec<String>,
 }
@@ -169,6 +170,7 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, json!(page).to_string())
         }
         ("PUT", ["guilds", _, "bans", _]) if m.fail_put => err(403, 50013),
+        ("PUT", ["guilds", _, "bans", _]) if m.fail_put_5xx => err(502, 0),
         ("PUT", ["guilds", g, "bans", u]) => {
             m.bans.insert((n(g), n(u)), reason);
             (204, String::new())
@@ -431,6 +433,9 @@ impl T {
             "DELETE FROM quarantines WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM joingate_actions WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM extra_owners WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM trusted_admins WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM permits WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM nuke_incidents WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM dash_session WHERE user_id BETWEEN $1 AND $1 + 9",
         ] {
             self.exec(sql).await;
@@ -463,6 +468,11 @@ async fn a_ban_is_held_then_copied_once_and_never_shared_on() {
         "ban time from the entry id"
     );
     share_job(&t.app, t.g(0), &held[0].1).await.unwrap();
+    assert_eq!(
+        t.calls(&format!("GET /guilds/{} ", t.g(0))),
+        1,
+        "the source owner is looked up once"
+    );
     let pending = T::row(1, "pending", None);
     assert_eq!(t.rows(500).await, [pending, T::row(2, "pending", None)]);
     let copies = t.take("ban_sync_copy").await;
@@ -546,7 +556,12 @@ async fn a_staff_command_whose_moderator_is_contained_syncs_nothing() {
         .await
         .unwrap();
     assert!(t.banned(1, 521).is_some(), "unban by a contained moderator");
-    // A bot ban without a case is held while anyone there was contained.
+    // A bot ban without a case is held while a permit holder there was contained.
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 9)")
+        .await;
+    // An automod ban: the bot is moderator too.
+    t.exec("INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id) VALUES ($1, 3, 'ban', 522, 1)")
+        .await;
     t.ban(0, 522, "raiding");
     share_job(&t.app, t.g(0), &t.share(522, Some(ME)))
         .await
@@ -763,8 +778,20 @@ async fn bot_bans_are_classified_after_the_hold() {
     // An import has no audit entry: records first, then the reason.
     assert_eq!(of(1, None, "").await, Origin::StaffCmd);
     assert_eq!(of(5, None, "spam").await, Origin::Discord);
-    assert_eq!(of(5, None, "").await, Origin::Verify);
     assert_eq!(of(5, None, verify::AUDIT_REASON).await, Origin::Verify);
+    // A timeout carries its audit reason unless that is off: only then is an empty one Verify.
+    assert_eq!(of(5, None, "").await, Origin::Discord);
+    t.exec("INSERT INTO guild_config (guild_id, version, config) VALUES ($1 + 2, 1, '{\"verification\": {\"audit_reason\": false}}')")
+        .await;
+    let off = origin(app, (t.g(2), Id::new(5)), None, None, None, "").await;
+    assert_eq!(off.unwrap(), Origin::Verify);
+    // A user with both a case and a Join Gate record: the newer one made the ban.
+    t.exec("INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id, created_at) VALUES ($1, 3, 'ban', 6, 9, now() - interval '1 hour'), ($1, 4, 'ban', 7, 9, now())")
+        .await;
+    t.exec("INSERT INTO joingate_actions (guild_id, user_id, reason, action, ok, created_at) VALUES ($1, 6, 'join raid', 'Ban', true, now()), ($1, 7, 'join raid', 'Ban', true, now() - interval '1 hour')")
+        .await;
+    assert_eq!(of(6, None, "").await, Origin::JoinRaid);
+    assert_eq!(of(7, None, "").await, Origin::StaffCmd);
     // A Join Gate ban stays home while its switch is off (the default).
     let o = t.owner();
     t.server(0, o, "off").await;
@@ -893,7 +920,7 @@ async fn ban_here_claims_the_row_once_and_gives_it_back_on_failure() {
     t.server(0, o, "off").await;
     t.server(1, o, "alert").await;
     let click = |u: u64| ban_click(&t.app, t.g(1), Id::new(o), (t.g(0), Id::new(u)));
-    for u in [540, 541, 542] {
+    for u in [540, 541, 542, 543] {
         t.ban(0, u, "raiding");
         t.link(1, u, 0, "alerted").await;
     }
@@ -911,6 +938,18 @@ async fn ban_here_claims_the_row_once_and_gives_it_back_on_failure() {
     assert_eq!(t.rows(540).await, [T::row(1, "banned", None)]);
     assert!(t.banned(1, 540).unwrap().starts_with(PREFIX));
     assert_eq!(click(540).await.unwrap(), "This alert was already handled.");
+    // Every claim queued a copy job long after, in case the bot stops mid-click.
+    let jobs = t.take("ban_sync_copy").await;
+    assert!(!jobs.is_empty() && jobs.iter().all(|j| (295..=300).contains(&j.2)));
+    // The staff member behind the source ban was contained since.
+    t.exec("UPDATE ban_sync_links SET mod_id = 9, actor_id = 1, banned_at = now() - interval '1 minute' WHERE user_id = 543")
+        .await;
+    t.exec("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 9, '{}')")
+        .await;
+    assert!(click(543).await.unwrap().starts_with("Anti-nuke stopped"));
+    let stopped = T::row(1, "cancelled", Some("source moderator contained"));
+    assert_eq!(t.rows(543).await, [stopped]);
+    assert_eq!(t.banned(1, 543), None);
     // An ended temp ban, and a source ban lifted since the alert.
     t.exec(
         "UPDATE ban_sync_links SET expires_at = now() - interval '1 minute' WHERE user_id = 541",
@@ -934,11 +973,14 @@ async fn an_import_pages_obeys_the_switches_and_the_cap() {
     for u in 0..(BAN_SYNC_HOURLY - 2) as u64 {
         t.link(1, 10_000 + u, 0, "banned").await;
     }
-    // Seven bans over three pages; one has no reason (maybe verification) and stays home.
+    // Seven bans over three pages; one is a verification timeout and stays home.
     for u in 550..557 {
         t.ban(0, u, "raiding");
     }
-    t.ban(0, 557, "");
+    t.ban(0, 557, verify::AUDIT_REASON);
+    // A member quarantined on join holds no permit: no reason to refuse.
+    t.exec("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 70, '{}')")
+        .await;
     let job = json!({"source": t.g(0).to_string(), "target": t.g(1).to_string()});
     import_job(&t.app, &job).await.unwrap();
     assert_eq!(t.calls(&format!("GET /guilds/{}/bans?", t.g(0))), 3);
@@ -964,7 +1006,7 @@ async fn an_import_pages_obeys_the_switches_and_the_cap() {
     // Anti-nuke acted there today: no import.
     t.exec("DELETE FROM ban_sync_links WHERE guild_id = $1 + 1")
         .await;
-    t.exec("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 9, '{}')")
+    t.exec("INSERT INTO nuke_incidents (guild_id, case_id, data) VALUES ($1, 'n1', '{}')")
         .await;
     import_job(&t.app, &job).await.unwrap();
     assert!(t.rows(550).await.is_empty());
@@ -987,5 +1029,112 @@ async fn the_panel_shows_only_the_live_group_to_admins() {
         text.contains("<@560>") && !text.contains("<@561>"),
         "{text}"
     );
+    t.cleanup().await;
+}
+
+#[tokio::test]
+async fn only_a_nuke_case_or_a_contained_permit_holder_holds_a_bot_ban() {
+    let Some(t) = T::new(14).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    // Automod bans: the bot is moderator too.
+    t.exec("INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id) VALUES ($1, 1, 'ban', 600, 1), ($1, 2, 'ban', 601, 1), ($1, 3, 'ban', 602, 1)")
+        .await;
+    // A raider quarantined on join (or by `t!quarantine`) cannot stop them.
+    t.exec("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 70, '{}')")
+        .await;
+    t.ban(0, 600, "raiding");
+    share_job(&t.app, t.g(0), &t.share(600, Some(ME)))
+        .await
+        .unwrap();
+    assert_eq!(t.rows(600).await, [T::row(1, "pending", None)]);
+    // A quarantined member whose saved roles carry a permit does.
+    t.exec("INSERT INTO permits (id, guild_id, name) VALUES ($1, $1, 'Mods')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 555)")
+        .await;
+    t.exec("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 71, '{555}')")
+        .await;
+    t.ban(0, 601, "raiding");
+    share_job(&t.app, t.g(0), &t.share(601, Some(ME)))
+        .await
+        .unwrap();
+    assert!(t.rows(601).await.is_empty());
+    // So does any nuke case.
+    t.exec("DELETE FROM quarantines WHERE guild_id = $1").await;
+    t.exec("INSERT INTO nuke_incidents (guild_id, case_id, data) VALUES ($1, 'n1', '{}')")
+        .await;
+    t.ban(0, 602, "raiding");
+    share_job(&t.app, t.g(0), &t.share(602, Some(ME)))
+        .await
+        .unwrap();
+    assert!(t.rows(602).await.is_empty());
+    t.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_ban_left_by_a_stopped_try_is_recorded_or_lifted() {
+    let Some(t) = T::new(15).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "alert").await;
+    let copy = |u: u64| json!({"user": u, "source": t.g(0).get()});
+    let ours = format!("{PREFIX} Main ({}): raiding | Moderator: {o}", t.g(0));
+    // Ban here banned (with its case by the clicker) and the bot stopped: the recovery job
+    // records the ban and takes over that case.
+    t.ban(0, 610, "raiding");
+    t.link(1, 610, 0, "pending").await;
+    t.ban(1, 610, &ours);
+    t.exec("INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id) VALUES ($1 + 1, 1, 'ban', 610, $1 + 9)")
+        .await;
+    copy_job(&t.app, t.g(1), &copy(610)).await.unwrap();
+    assert_eq!(t.rows(610).await, [T::row(1, "banned", None)]);
+    let cases = t
+        .count("SELECT count(*) FROM cases WHERE guild_id = $1 + 1 AND user_id = 610")
+        .await;
+    assert_eq!(cases, 1, "no second case");
+    // Stopped before the ban: the recovery job alerts again.
+    t.ban(0, 611, "raiding");
+    t.link(1, 611, 0, "pending").await;
+    copy_job(&t.app, t.g(1), &copy(611)).await.unwrap();
+    assert_eq!(t.rows(611).await, [T::row(1, "alerted", None)]);
+    // The ban was made but the source ban is gone by the retry: the copy is lifted, not left.
+    t.link(1, 612, 0, "pending").await;
+    t.ban(1, 612, &ours);
+    copy_job(&t.app, t.g(1), &copy(612)).await.unwrap();
+    assert_eq!(t.banned(1, 612), None);
+    assert_eq!(t.rows(612).await, [T::row(1, "lifted", None)]);
+    let unbans = t
+        .count("SELECT count(*) FROM cases WHERE guild_id = $1 + 1 AND user_id = 612 AND kind = 'unban'")
+        .await;
+    assert_eq!(unbans, 1);
+    // An unban lifts only copies from its own server, not one from another server of the group.
+    t.link(1, 613, 0, "banned").await;
+    t.ban(1, 613, &format!("{PREFIX} Other ({}): raiding", t.g(2)));
+    lift_job(&t.app, t.g(0), &t.share(613, Some(77)))
+        .await
+        .unwrap();
+    assert!(t.banned(1, 613).is_some());
+    let by_hand = T::row(1, "skipped", Some("banned again by hand"));
+    assert_eq!(t.rows(613).await, [by_hand]);
+    t.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_discord_outage_on_the_ban_retries_instead_of_skipping() {
+    let Some(t) = T::new(16).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    t.ban(0, 620, "raiding");
+    t.link(1, 620, 0, "pending").await;
+    let copy = json!({"user": 620, "source": t.g(0).get()});
+    t.set(|m| m.fail_put_5xx = true);
+    assert!(copy_job(&t.app, t.g(1), &copy).await.is_err());
+    assert_eq!(t.rows(620).await, [T::row(1, "pending", None)]);
+    t.set(|m| m.fail_put_5xx = false);
+    copy_job(&t.app, t.g(1), &copy).await.unwrap();
+    assert_eq!(t.rows(620).await, [T::row(1, "banned", None)]);
     t.cleanup().await;
 }

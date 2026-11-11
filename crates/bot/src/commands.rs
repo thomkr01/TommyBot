@@ -247,6 +247,8 @@ pub async fn apply_dm(
     let (told, acted) = reply::dm_and_act(reply::dm_first(dm_kind), dm, act).await;
     let (inverse, points) = match acted {
         Ok(a) => a,
+        // An outage is an infrastructure failure, so a job retries it instead of giving up.
+        Err(e) if !crate::http_err::refused(&e) => return Err(e),
         // Keep the DM outcome: the member may already have been told.
         Err(e) => {
             tracing::warn!(?e, "mod command failed");

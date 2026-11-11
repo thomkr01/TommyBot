@@ -9,9 +9,9 @@ use twilight_model::{
 
 /// The other servers of the group, confirmed live; a failed lookup leaves a server out.
 async fn siblings(app: &App, gid: Id<GuildMarker>) -> Result<Vec<Id<GuildMarker>>> {
-    let mut out = vec![];
+    let (owners, mut out) = (Owners::default(), vec![]);
     for g in group(app, gid).await? {
-        match same_owner(app, gid, g).await {
+        match same_owner(app, &owners, gid, g).await {
             Ok(true) => out.push(g),
             Ok(false) => {}
             Err(e) => tracing::warn!(?e, %gid, %g, "ban sync: group check failed"),
@@ -112,21 +112,23 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
     Ok(true)
 }
 
-/// Ban here: the clicker's ban permit here, the group and the source ban still there. The row is
-/// pending while the ban runs, and goes back to alerted when it does not happen.
+/// Ban here: the clicker's ban permit here, the group, the source ban still there and its
+/// moderator not contained. The row is pending while the ban runs, and goes back to alerted when
+/// it does not happen; a copy job queued first finishes or re-alerts it if the bot stops midway.
 pub(super) async fn ban_click(
     app: &App,
     gid: Id<GuildMarker>,
     clicker: Id<UserMarker>,
     (src, user): (Id<GuildMarker>, Id<UserMarker>),
 ) -> Result<String> {
-    let owner = app.guild_info(gid).await?.owner;
+    let owners = Owners::default();
+    let owner = owners.need(app, gid).await?;
     let level = app.level(gid, owner, clicker).await?;
     if !level.has("ban") {
         return Ok("You need the ban permit in this server to do this.".into());
     }
     let key = (gid, user, src);
-    if !grouped(app, src, gid).await? {
+    if !grouped(app, &owners, src, gid).await? {
         return Ok("Ban Sync no longer links these servers, so nothing was done.".into());
     }
     if http_err::ban(&app.http, src, user).await?.is_none() {
@@ -136,6 +138,11 @@ pub(super) async fn ban_click(
     let Some(row) = load(app, key).await?.filter(|r| r.state == "alerted") else {
         return Ok("This alert was already handled.".into());
     };
+    if stopped(app, src, row.behind(app.me), row.banned_at).await? {
+        let why = Some("source moderator contained");
+        mark(app, key, &["alerted"], "cancelled", why).await?;
+        return Ok("Anti-nuke stopped the moderator behind that ban, so nothing was done.".into());
+    }
     let duration = match remaining(row.expires) {
         Ok(d) => d,
         Err(why) => {
@@ -143,6 +150,7 @@ pub(super) async fn ban_click(
             return Ok("That temp ban has already ended, so nothing was done.".into());
         }
     };
+    enqueue_copy(app, key, now_secs() + CLICK_RECOVERY_S).await?;
     // Pending while the ban runs, so its audit event is not shared on as a new ban.
     if !mark(app, key, &["alerted"], "pending", None).await? {
         return Ok("This alert was already handled.".into());
@@ -171,6 +179,9 @@ pub(super) async fn ban_click(
     }
     Ok(done?.text)
 }
+
+/// When the copy job queued by Ban here runs: long after a click that went normally.
+const CLICK_RECOVERY_S: i64 = 300;
 
 /// Send the rest: only the live owner of the source server, with a fresh 2FA on the dashboard.
 pub(super) async fn send_rest_click(
@@ -205,7 +216,7 @@ pub(super) async fn send_rest_click(
 /// (receiving server, actor, moderator, ban time) of a row sent by Send the rest.
 type Held = (i64, Option<i64>, Option<i64>, Option<i64>);
 
-/// Anti-nuke acted in the server in the last day.
+/// Anti-nuke opened a nuke case or contained a permit holder in the server in the last day.
 async fn recent_incident(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
     crate::antinuke::contained_since(app, gid, None, now_secs() - 86_400).await
 }
@@ -226,7 +237,7 @@ async fn share_waiting(app: &App, src: Id<GuildMarker>, user: Id<UserMarker>) ->
 /// share switches and the cap.
 pub async fn import_job(app: &App, p: &Value) -> Result<()> {
     let (src, to) = (Id::new(need(p, "source")?), Id::new(need(p, "target")?));
-    if !grouped(app, src, to).await? {
+    if !grouped(app, &Owners::default(), src, to).await? {
         return Ok(());
     }
     // Right after an attack the ban list may hold a hacked account's bans.
@@ -314,7 +325,7 @@ pub async fn send_rest_job(app: &App, p: &Value) -> Result<()> {
                 let why = Some("source moderator contained");
                 mark(app, key, &["pending"], "cancelled", why).await?;
             } else {
-                enqueue_copy(app, key.0, user, src).await?;
+                enqueue_copy(app, key, now_secs()).await?;
             }
         }
     }

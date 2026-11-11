@@ -387,10 +387,10 @@ async fn self_grant(
     grant(app, gid, user, v).await
 }
 
-/// The audit log reason at the time limit, when `audit_reason` is on.
 /// The audit reason of a verification timeout, which Ban Sync also reads to tell such bans apart.
 pub(crate) const AUDIT_REASON: &str = "Did not verify within the time limit";
 
+/// The audit log reason at the time limit, when `audit_reason` is on.
 fn audit_reason(v: &VerifyCfg) -> Option<&'static str> {
     v.audit_reason.then_some(AUDIT_REASON)
 }

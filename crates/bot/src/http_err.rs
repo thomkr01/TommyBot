@@ -48,6 +48,14 @@ pub fn gone_any(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Error>().is_some_and(gone)
 }
 
+/// Discord answered with a 4xx: it refused the request, and the same request would be refused
+/// again. A 5xx or no answer at all is an outage, not a refusal.
+pub fn refused(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Error>()
+        .and_then(status_code)
+        .is_some_and(|(s, _)| (400..500).contains(&s))
+}
+
 /// Discord's reason for a failed action, for the reply.
 pub fn why(e: &anyhow::Error) -> String {
     match e.downcast_ref::<Error>().map(|e| e.kind()) {

@@ -158,13 +158,13 @@ fn exempt(
     }
 }
 
-/// User text for an embed line: one line, markdown shown as typed.
+/// User text for an embed line: one line, markdown and mentions shown as typed.
 fn md(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\n' | '\r' => out.push(' '),
-            '\\' | '[' | ']' | '*' | '_' | '~' | '|' | '>' | '`' => {
+            '\\' | '[' | ']' | '*' | '_' | '~' | '|' | '>' | '<' | '`' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -315,6 +315,22 @@ async fn origin(
     if actor.is_some_and(|a| a != app.me.get()) {
         return Ok(Origin::Discord);
     }
+    // The newer record of the two made the ban, when the user has both.
+    let gate: Option<String> = sqlx::query_scalar(
+        "SELECT reason FROM joingate_actions WHERE guild_id = $1 AND user_id = $2 AND action = 'Ban'
+           AND ($3::float8 IS NULL OR created_at >= to_timestamp($3::float8))
+           AND ($4::int IS NULL OR created_at > (SELECT created_at FROM cases WHERE guild_id = $1 AND case_no = $4))
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(src.get() as i64)
+    .bind(user.get() as i64)
+    .bind(since.map(|s| s as f64))
+    .bind(case.map(|c| c.0))
+    .fetch_optional(&app.pool)
+    .await?;
+    if let Some(r) = gate {
+        return Ok(gate_origin(&r));
+    }
     if let Some((_, by)) = case {
         // Automod filters and warn thresholds write cases with the bot as moderator.
         return Ok(if by as u64 == app.me.get() {
@@ -323,21 +339,11 @@ async fn origin(
             Origin::StaffCmd
         });
     }
-    let gate: Option<String> = sqlx::query_scalar(
-        "SELECT reason FROM joingate_actions WHERE guild_id = $1 AND user_id = $2 AND action = 'Ban'
-           AND ($3::float8 IS NULL OR created_at >= to_timestamp($3::float8))
-         ORDER BY id DESC LIMIT 1",
-    )
-    .bind(src.get() as i64)
-    .bind(user.get() as i64)
-    .bind(since.map(|s| s as f64))
-    .fetch_optional(&app.pool)
-    .await?;
-    if let Some(r) = gate {
-        return Ok(gate_origin(&r));
-    }
-    // Verification bans leave no case and no Join Gate record, and may have no reason either.
-    let verify = actor.is_some() || reason.is_empty() || reason == verify::AUDIT_REASON;
+    // Verification bans leave no case and no Join Gate record. They carry AUDIT_REASON, or no
+    // reason when the server switched that off.
+    let verify = actor.is_some()
+        || reason == verify::AUDIT_REASON
+        || (reason.is_empty() && !app.cfg(src.get()).await?.verification.verify.audit_reason);
     Ok(if verify {
         Origin::Verify
     } else {
@@ -363,8 +369,36 @@ async fn live_owner(app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<UserMar
     }
 }
 
+/// Live owners looked up in one job, so each server is asked once.
+#[derive(Default)]
+struct Owners(Mutex<BTreeMap<u64, Option<Id<UserMarker>>>>);
+
+impl Owners {
+    async fn of(&self, app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<UserMarker>>> {
+        let known = self.0.lock().unwrap().get(&gid.get()).copied();
+        if let Some(o) = known {
+            return Ok(o);
+        }
+        let o = live_owner(app, gid).await?;
+        self.0.lock().unwrap().insert(gid.get(), o);
+        Ok(o)
+    }
+
+    /// The owner of a server the bot is in.
+    async fn need(&self, app: &App, gid: Id<GuildMarker>) -> Result<Id<UserMarker>> {
+        self.of(app, gid)
+            .await?
+            .with_context(|| format!("server {gid} is not visible"))
+    }
+}
+
 /// Same Discord owner in `guild_owners`, then confirmed live for both servers.
-async fn same_owner(app: &App, a: Id<GuildMarker>, b: Id<GuildMarker>) -> Result<bool> {
+async fn same_owner(
+    app: &App,
+    owners: &Owners,
+    a: Id<GuildMarker>,
+    b: Id<GuildMarker>,
+) -> Result<bool> {
     let stored: Vec<i64> =
         sqlx::query_scalar("SELECT owner_id FROM guild_owners WHERE guild_id = ANY($1)")
             .bind([a.get() as i64, b.get() as i64].as_slice())
@@ -375,17 +409,22 @@ async fn same_owner(app: &App, a: Id<GuildMarker>, b: Id<GuildMarker>) -> Result
         return Ok(false);
     }
     let owner = Some(Id::new(stored[0] as u64));
-    Ok(live_owner(app, a).await? == owner && live_owner(app, b).await? == owner)
+    Ok(owners.of(app, a).await? == owner && owners.of(app, b).await? == owner)
 }
 
 /// `src` sends and `to` receives, and they have the same owner.
-async fn grouped(app: &App, src: Id<GuildMarker>, to: Id<GuildMarker>) -> Result<bool> {
+async fn grouped(
+    app: &App,
+    owners: &Owners,
+    src: Id<GuildMarker>,
+    to: Id<GuildMarker>,
+) -> Result<bool> {
     let (a, b) = (app.cfg(src.get()).await?, app.cfg(to.get()).await?);
     let on = a.ban_sync.enabled
         && a.ban_sync.share
         && b.ban_sync.enabled
         && b.ban_sync.receive != BanSyncReceive::Off;
-    Ok(on && same_owner(app, src, to).await?)
+    Ok(on && same_owner(app, owners, src, to).await?)
 }
 
 /// The other servers of `gid`'s owner, as `guild_owners` lists them.
@@ -458,19 +497,14 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy, capped: bool) -> Resul
     .rows_affected()
         == 1;
     if written && !capped {
-        enqueue_copy(app, to, user, src).await?;
+        enqueue_copy(app, (to, user, src), now_secs()).await?;
     }
     Ok(written && !capped)
 }
 
-async fn enqueue_copy(
-    app: &App,
-    to: Id<GuildMarker>,
-    user: Id<UserMarker>,
-    src: Id<GuildMarker>,
-) -> Result<()> {
+async fn enqueue_copy(app: &App, (to, user, src): Key, at: i64) -> Result<()> {
     let job = json!({"user": user.get(), "source": src.get()});
-    jobs::enqueue(&app.pool, to.get() as i64, "ban_sync_copy", job, now_secs()).await?;
+    jobs::enqueue(&app.pool, to.get() as i64, "ban_sync_copy", job, at).await?;
     Ok(())
 }
 
@@ -485,8 +519,9 @@ async fn receivers(
         Ok(g) => g,
         Err(e) => return (out, Some(e)),
     };
+    let owners = Owners::default();
     for to in all {
-        match grouped(app, src, to).await {
+        match grouped(app, &owners, src, to).await {
             Ok(true) => out.push(to),
             Ok(false) => {}
             Err(e) => {
@@ -590,14 +625,19 @@ async fn mark(
 }
 
 /// Pending (or banned without a case, after a failed try) becomes banned; returns the case the
-/// row already has, `None` inside when it still needs one, or `None` when another run finished it.
+/// row has, `None` inside when it still needs one, or `None` when another run finished it. A ban
+/// case for the user made since the row (by a try that stopped before the row was updated, or by
+/// a Ban here click) is taken over instead of writing a second one.
 async fn claim_banned(
     app: &App,
     (to, user, src): Key,
     case: Option<i32>,
 ) -> Result<Option<Option<i32>>> {
     Ok(sqlx::query_scalar(
-        "UPDATE ban_sync_links SET state = 'banned', done_at = now(), case_no = COALESCE(case_no, $4)
+        "UPDATE ban_sync_links l SET state = 'banned', done_at = now(), case_no = COALESCE(l.case_no, $4,
+             (SELECT c.case_no FROM cases c WHERE c.guild_id = $1 AND c.user_id = $2
+                AND c.kind IN ('ban', 'tempban') AND c.created_at >= l.created_at
+              ORDER BY c.case_no DESC LIMIT 1))
          WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3
            AND (state = 'pending' OR (state = 'banned' AND case_no IS NULL))
          RETURNING case_no",
@@ -660,47 +700,42 @@ async fn copy(app: &App, key: Key) -> Result<()> {
     let Some(row) = load(app, key).await? else {
         return Ok(());
     };
-    let alert = app.cfg(to.get()).await?.ban_sync.receive == BanSyncReceive::Alert;
+    let name = verify::guild_name(app, src).await;
+    let why = copy_reason(&name, src.get(), &row.reason);
     // An earlier try banned but its case failed: only the case is left to write.
     if row.state == "banned" && row.case_no.is_none() && banned_by_us(app, key).await? {
-        let name = verify::guild_name(app, src).await;
-        return finish_ban(app, key, None, &copy_reason(&name, src.get(), &row.reason)).await;
+        return finish_ban(app, key, None, &why).await;
     }
     // A second run of the same job finds the row done and stops.
     if row.state != "pending" {
         return Ok(());
     }
-    let cancel = |why: &'static str| mark(app, key, &["pending"], "cancelled", Some(why));
-    // Time has passed since the share: everything is checked again here.
-    if !grouped(app, src, to).await? {
-        return cancel("not in the same group").await.map(drop);
+    // A ban made by a try or a Ban here click that stopped before the row was updated.
+    let ban = http_err::ban(&app.http, to, user).await?;
+    let mine = ours(ban.as_ref().and_then(|b| b.reason.as_deref()), src);
+    let owners = Owners::default();
+    if let Some((state, reason)) = blocked(app, &owners, key, &row).await? {
+        // Lifted while the row is still pending, so a failed unban is retried, never left behind.
+        if mine {
+            return lift(app, key, &name).await;
+        }
+        return mark(app, key, &["pending"], state, Some(reason))
+            .await
+            .map(drop);
     }
-    if http_err::ban(&app.http, src, user).await?.is_none() {
-        return cancel("source ban lifted").await.map(drop);
-    }
-    if stopped(app, src, row.behind(app.me), row.banned_at).await? {
-        return cancel("source moderator contained").await.map(drop);
+    if mine {
+        return finish_ban(app, key, None, &why).await;
     }
     let skip = |why: &'static str| mark(app, key, &["pending"], "skipped", Some(why));
-    let owner = app.guild_info(to).await?.owner;
-    let level = app.level(to, owner, user).await?;
-    if let Some(why) = exempt(&level, user, app.me, app.bot_owner) {
-        return skip(why).await.map(drop);
-    }
-    let name = verify::guild_name(app, src).await;
-    let why = copy_reason(&name, src.get(), &row.reason);
-    match http_err::ban(&app.http, to, user).await? {
-        // Our own ban from a try that stopped before the row was updated.
-        Some(b) if ours(b.reason.as_deref(), src) => return finish_ban(app, key, None, &why).await,
-        // So a later unban there never lifts a ban this server made itself.
-        Some(_) => return skip("already banned").await.map(drop),
-        None => {}
+    // So a later unban there never lifts a ban this server made itself.
+    if ban.is_some() {
+        return skip("already banned").await.map(drop);
     }
     let duration = match remaining(row.expires) {
         Ok(d) => d,
         Err(why) => return skip(why).await.map(drop),
     };
-    if alert {
+    if app.cfg(to.get()).await?.ban_sync.receive == BanSyncReceive::Alert {
         if !mark(app, key, &["pending"], "alerted", None).await? {
             return Ok(());
         }
@@ -724,7 +759,29 @@ async fn copy(app: &App, key: Key) -> Result<()> {
         }
         return Ok(());
     }
+    let owner = owners.need(app, to).await?;
     ban_copy(app, key, owner, &why, duration).await
+}
+
+/// Why a pending copy may not go ahead now, as (state, reason): time has passed since the share,
+/// so everything is checked again.
+async fn blocked(
+    app: &App,
+    owners: &Owners,
+    (to, user, src): Key,
+    row: &Row,
+) -> Result<Option<(&'static str, &'static str)>> {
+    if !grouped(app, owners, src, to).await? {
+        return Ok(Some(("cancelled", "not in the same group")));
+    }
+    if http_err::ban(&app.http, src, user).await?.is_none() {
+        return Ok(Some(("cancelled", "source ban lifted")));
+    }
+    if stopped(app, src, row.behind(app.me), row.banned_at).await? {
+        return Ok(Some(("cancelled", "source moderator contained")));
+    }
+    let level = app.level(to, owners.need(app, to).await?, user).await?;
+    Ok(exempt(&level, user, app.me, app.bot_owner).map(|why| ("skipped", why)))
 }
 
 /// Bans through the shared ban path, without a DM. The row stays pending until the ban is made,
@@ -876,10 +933,15 @@ pub async fn lift_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()> 
     .fetch_all(&app.pool)
     .await?;
     let name = verify::guild_name(app, src).await;
-    let mut failed = None;
+    let (owners, mut failed) = (Owners::default(), None);
     for to in copies {
         let to = Id::new(to as u64);
-        if let Err(e) = lift(app, (to, user, src), &name).await {
+        // A server that left the group keeps its copies as ordinary bans.
+        let done = match same_owner(app, &owners, src, to).await {
+            Ok(true) => lift(app, (to, user, src), &name).await,
+            r => r.map(drop),
+        };
+        if let Err(e) = done {
             tracing::warn!(?e, %src, %to, "ban sync: lifting a copy failed");
             failed = Some(e);
         }
@@ -887,18 +949,18 @@ pub async fn lift_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()> 
     failed.map_or(Ok(()), Err)
 }
 
+/// The rows `lift` acts on: copies, and a pending row whose ban was made by a try that stopped.
+const LIVE: &[&str] = &["pending", "banned"];
+
+/// Unbans a copy with an unban case, unless staff banned again by hand since.
 async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
     let (to, user, src) = key;
-    // A server that left the group keeps its copies as ordinary bans.
-    if !same_owner(app, src, to).await? {
-        return Ok(());
-    }
     let Some(ban) = http_err::ban(&app.http, to, user).await? else {
-        return mark(app, key, &["banned"], "lifted", None).await.map(drop);
+        return mark(app, key, LIVE, "lifted", None).await.map(drop);
     };
-    if !ban.reason.as_deref().is_some_and(|r| r.starts_with(PREFIX)) {
+    if !ours(ban.reason.as_deref(), src) {
         let why = Some("banned again by hand");
-        return mark(app, key, &["banned"], "skipped", why).await.map(drop);
+        return mark(app, key, LIVE, "skipped", why).await.map(drop);
     }
     let why = format!("Ban Sync: lifted in {} ({src})", md(name));
     let audit = commands::audit_reason(Some(&why), app.me);
@@ -921,7 +983,7 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
         },
     )
     .await?;
-    mark(app, key, &["banned"], "lifted", None).await?;
+    mark(app, key, LIVE, "lifted", None).await?;
     commands::mod_log(
         app,
         to,
