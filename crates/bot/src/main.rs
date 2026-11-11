@@ -46,6 +46,7 @@ use tommybot_core::{config::Config, db};
 use twilight_gateway::{
     error::ReceiveMessageError, Event, EventTypeFlags, Intents, Message, Shard, ShardId,
 };
+use twilight_model::gateway::event::GatewayEventDeserializer;
 
 /// Loads the ids of the application emojis that `tools/emojis.mjs upload` uploaded.
 async fn load_emojis(http: &twilight_http::Client) -> Result<()> {
@@ -220,8 +221,10 @@ fn spam_flag(json: &str) -> bool {
     struct User {
         public_flags: Option<u64>,
     }
-    // Cheap check first: every frame passes here, only joins get parsed.
-    json.contains(r#""t":"GUILD_MEMBER_ADD""#)
+    // Cheap check first: every frame passes here, only joins get parsed. twilight's own scan, so
+    // whitespace or key order Discord might send does not hide a join.
+    GatewayEventDeserializer::from_json(json)
+        .is_some_and(|d| d.event_type() == Some("GUILD_MEMBER_ADD"))
         && serde_json::from_str::<Frame>(json).is_ok_and(|f| {
             f.t.as_deref() == Some("GUILD_MEMBER_ADD")
                 && f.d.user.public_flags.unwrap_or(0) & tommybot_automod::join::SPAMMER_FLAG != 0
@@ -265,6 +268,9 @@ mod tests {
         let other =
             join(r#","public_flags":1048576"#).replace("GUILD_MEMBER_ADD", "GUILD_MEMBER_UPDATE");
         assert!(!spam_flag(&other));
+        let spaced = join(r#","public_flags":1048576"#).replace(r#""t":"#, r#""t": "#);
+        assert!(spaced.contains(r#""t": "GUILD_MEMBER_ADD""#));
+        assert!(spam_flag(&spaced));
     }
 
     #[test]
