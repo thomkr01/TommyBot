@@ -67,16 +67,22 @@ pub struct Evidence<'a> {
     pub note: Option<&'a str>,
 }
 
+/// Takes the user's lock until the transaction ends, so one user's evidence and listing go one at a time.
+pub async fn lock_user(tx: &mut PgConnection, user: i64) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('raider_user:' || $1, 0))")
+        .bind(user)
+        .execute(tx)
+        .await?;
+    Ok(())
+}
+
 /// Writes the evidence and its entry. New evidence makes the entry pending again when it was
 /// rejected or removed, and a scam entry lasts 14 days after its last scam evidence. Raid and spam
 /// detections make no entry until a second owner flagged the user. True when the evidence is new.
 pub async fn add(tx: &mut PgConnection, e: &Evidence<'_>) -> Result<bool> {
     // One user's evidence is written one at a time, so two owners' evidence in parallel both see
     // each other in the owner count.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('raider_user:' || $1, 0))")
-        .bind(e.user)
-        .execute(&mut *tx)
-        .await?;
+    lock_user(tx, e.user).await?;
     let fresh = sqlx::query(
         "INSERT INTO raider_evidence (user_id, source_guild, source_owner, kind, ref, detail, reporter_id, note)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",

@@ -1,8 +1,15 @@
 //! Tests of `raiders`. The DB tests run only when DATABASE_URL points at a scratch Postgres, with
 //! Ban Sync's mock Discord.
-use super::*;
-use crate::bansync::tests::{BOT_OWNER, ME, T};
+use super::{join::*, review::*, tasks::*, *};
+use crate::bansync::{
+    live_owner,
+    tests::{BOT_OWNER, ME, T},
+};
+use anyhow::Context;
+use serde_json::Value;
+use tommybot_core::permits::Level;
 use twilight_model::gateway::payload::incoming::MemberAdd;
+use twilight_model::guild::audit_log::AuditLogEntry;
 
 #[test]
 fn each_button_needs_its_permit() {
