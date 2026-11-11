@@ -95,6 +95,25 @@ pub(crate) fn sanitized(name: &str) -> String {
     }
 }
 
+/// Auto-dehoist: only the leading symbols go, so non-Latin names stay; None when the name already
+/// starts with a letter or digit. The result always does, which keeps a rename from looping.
+pub(crate) fn dehoisted(name: &str) -> Option<String> {
+    if name.chars().next().is_some_and(char::is_alphanumeric) {
+        return None;
+    }
+    let rest = name.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let s: String = rest.chars().take(32).collect();
+    let s = s.trim_end();
+    Some(
+        if s.is_empty() {
+            "Moderated Nickname"
+        } else {
+            s
+        }
+        .into(),
+    )
+}
+
 type CaseRow = (i32, String, i64, i64, Option<String>, bool, i64);
 
 fn fmt_case((no, kind, user, moderator, reason, active, at): &CaseRow) -> String {
@@ -224,6 +243,49 @@ mod tests {
         assert_eq!(sanitized("𝓽𝓲𝓶𝓶𝔂"), "timmy");
         assert_eq!(sanitized("Ann-Marie 2"), "Ann-Marie 2");
         assert_eq!(sanitized("⚡⚡"), "Moderated Nickname");
+    }
+
+    #[test]
+    fn dehoists_leading_symbols_only() {
+        let d = |n: &str| dehoisted(n);
+        assert_eq!(d("!!Bob").as_deref(), Some("Bob"));
+        assert_eq!(d("★ Bob").as_deref(), Some("Bob"));
+        assert_eq!(d("🔥🔥 fire").as_deref(), Some("fire"));
+        assert_eq!(d("\u{200B}\u{2060}Bob").as_deref(), Some("Bob"));
+        assert_eq!(d("\u{200F}\u{202E}محمد").as_deref(), Some("محمد"));
+        assert_eq!(d("!!!").as_deref(), Some("Moderated Nickname"));
+        assert_eq!(d("\u{200B}").as_deref(), Some("Moderated Nickname"));
+        assert_eq!(d("").as_deref(), Some("Moderated Nickname"));
+        assert_eq!(d("日本"), None);
+        assert_eq!(d("Bob!"), None);
+        assert_eq!(d("2fast"), None);
+        // 33 three-byte chars after the symbol: cut at 32 chars, not bytes.
+        let long = format!("!{}", "日".repeat(33));
+        assert_eq!(d(&long), Some("日".repeat(32)));
+        // A space at the cut is trimmed.
+        let spaced = format!("!{} x", "a".repeat(31));
+        assert_eq!(d(&spaced), Some("a".repeat(31)));
+    }
+
+    #[test]
+    fn dehoisting_twice_changes_nothing() {
+        for n in [
+            "!!Bob",
+            "★ Bob",
+            "🔥",
+            "\u{200B}Bob",
+            "\u{200F}x",
+            "!!!",
+            "",
+            " . a ",
+            "!日本語",
+            "(((Bob)))",
+            "-_-",
+            "!aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b",
+        ] {
+            let once = dehoisted(n).unwrap_or_else(|| n.into());
+            assert_eq!(dehoisted(&once), None, "{n:?} -> {once:?}");
+        }
     }
 
     #[test]

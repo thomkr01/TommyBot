@@ -142,6 +142,8 @@ pub struct App {
     pub channels: Mutex<HashMap<u64, ChannelActivity>>,
     /// Name pair last punished by the post-join username check, so unrelated member updates do not repeat it.
     pub punished_names: Mutex<HashMap<(u64, u64), String>>,
+    /// Nick auto-dehoist last set per (guild, member), so an update with the old name renames once.
+    pub dehoisted: Mutex<HashMap<(u64, u64), String>>,
     /// Last public command per (guild, member), in ms.
     pub cmd_cooldown: Mutex<HashMap<(u64, u64), i64>>,
     /// Anti-nuke heat per (guild, staff member) for panic mode's heat algorithm.
@@ -216,6 +218,7 @@ impl App {
             pings: Default::default(),
             channels: Default::default(),
             punished_names: Default::default(),
+            dehoisted: Default::default(),
             cmd_cooldown: Default::default(),
             crowd: Default::default(),
             nuke_heat: Default::default(),

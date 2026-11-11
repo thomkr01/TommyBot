@@ -456,7 +456,13 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(e) = crate::sticky::on_member_update(app, m).await {
                 tracing::warn!(?e, "saving sticky roles failed");
             }
-            crate::joingate::on_member_update(app, m).await?
+            if !crate::joingate::on_member_update(app, m).await? {
+                let (user, nick) = (&m.user, m.nick.as_deref());
+                let r = crate::dehoist::check(app, m.guild_id, user, nick, &m.roles).await;
+                if let Err(e) = r {
+                    tracing::warn!(?e, "auto-dehoist failed");
+                }
+            }
         }
         Event::MemberAdd(m) => crate::joingate::on_join(app, m).await?,
         Event::MemberRemove(m) => crate::sticky::on_leave(app, m.guild_id, m.user.id).await?,

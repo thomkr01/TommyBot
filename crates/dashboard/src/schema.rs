@@ -223,6 +223,8 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("Unban", "Unbans"),
 ];
 const GATE_ACTIONS: &[&str] = &["Log", "Warn", "Timeout", "Kick", "Ban"];
+/// Only a name can be fixed by renaming, so only the username filter offers Rename.
+const NAME_ACTIONS: &[&str] = &["Log", "Rename", "Warn", "Timeout", "Kick", "Ban"];
 
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
 /// Plain-language hover text for settings that are hard to read from their name: (section, path or
@@ -673,12 +675,17 @@ pub fn schema() -> Vec<Value> {
             GateFilter::UsernameFilter,
         ),
     ] {
+        let name = filter == GateFilter::UsernameFilter;
         gate.extend([
             ti(fg(card, &format!("{k}.enabled"), "bool"), status),
             hp(
                 ti(
                     dv(
-                        choice(card, &format!("{k}.action"), GATE_ACTIONS),
+                        choice(
+                            card,
+                            &format!("{k}.action"),
+                            if name { NAME_ACTIONS } else { GATE_ACTIONS },
+                        ),
                         match filter.default_action() {
                             GateAction::Timeout(_) => "Timeout".to_string(),
                             a => format!("{a:?}"),
@@ -686,7 +693,11 @@ pub fn schema() -> Vec<Value> {
                     ),
                     "Trigger action",
                 ),
-                "Kick is Discord's native kick feature, Timeout its native timeout.",
+                if name {
+                    "Rename sets the nickname to Moderated Nickname. Kick is Discord's native kick feature, Timeout its native timeout."
+                } else {
+                    "Kick is Discord's native kick feature, Timeout its native timeout."
+                },
             ),
         ]);
     }

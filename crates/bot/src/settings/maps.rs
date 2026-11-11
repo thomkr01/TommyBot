@@ -62,16 +62,21 @@ fn cap(c: &GuildCfg, a: NukeAction) -> (bool, u32, u32, u32) {
 /// One Join Gate card: status and action.
 macro_rules! gate_filter {
     ($n:literal, $name:literal, $f:ident) => {
+        gate_filter!($n, $name, $f, ACTIONS)
+    };
+    ($n:literal, $name:literal, $f:ident, $actions:ident) => {
         [
             group!($n, $name),
             r!(concat!($n, "a"), "Status", concat!("joingate.", stringify!($f), ".enabled"), Kind::Bool, |c| on(c.joingate.$f.enabled)),
-            r!(concat!($n, "b"), "Action", concat!("joingate.", stringify!($f), ".action"), Kind::Choice(ACTIONS), |c| gate(c.joingate.$f)),
+            r!(concat!($n, "b"), "Action", concat!("joingate.", stringify!($f), ".action"), Kind::Choice($actions), |c| gate(c.joingate.$f)),
         ]
     };
 }
 
 const FILTER_ACTIONS: &[(&str, &str)] = &[("delete", "\"delete\""), ("warn", "\"warn\""), ("timeout", "\"timeout\""), ("kick", "\"kick\""), ("ban", "\"ban\"")];
 const ACTIONS: &[(&str, &str)] = &[("log", "\"Log\""), ("warn", "\"Warn\""), ("timeout", "\"Timeout\""), ("kick", "\"Kick\""), ("ban", "\"Ban\"")];
+/// Only a name can be fixed by renaming, so only the username filter offers Rename.
+const NAME_ACTIONS: &[(&str, &str)] = &[("log", "\"Log\""), ("rename", "\"Rename\""), ("warn", "\"Warn\""), ("timeout", "\"Timeout\""), ("kick", "\"Kick\""), ("ban", "\"Ban\"")];
 
 fn on(b: bool) -> String {
     if b { "Enabled" } else { "Disabled" }.into()
@@ -284,7 +289,7 @@ static JOINGATE_ROWS: [Row; 27] = {
     let [d1, d2, d3] = gate_filter!("5", "Advertising Names", invite_in_name);
     let [e1, e2, e3] = gate_filter!("6", "Unverified Bots", unverified_bot);
     let [f1, f2, f3] = gate_filter!("7", "Suspicious Accounts", suspicious);
-    let [g1, g2, g3] = gate_filter!("8", "Username Filter", username_filter);
+    let [g1, g2, g3] = gate_filter!("8", "Username Filter", username_filter, NAME_ACTIONS);
     [
         group!("1", "General"),
         r!("1a", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
