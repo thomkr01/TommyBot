@@ -64,7 +64,11 @@ fn oauth_from_env() -> anyhow::Result<Option<tommybot_mcp::oauth::OAuth>> {
         // A hung Discord call would otherwise hold an OAuth request forever.
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
-            .user_agent(concat!("DiscordBot (https://github.com/thomkr01/TommyBot, ", env!("CARGO_PKG_VERSION"), ")"))
+            .user_agent(concat!(
+                "DiscordBot (https://github.com/thomkr01/TommyBot, ",
+                env!("CARGO_PKG_VERSION"),
+                ")"
+            ))
             .build()?,
     }))
 }
