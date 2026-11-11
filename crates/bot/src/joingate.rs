@@ -130,7 +130,10 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             is_bot: user.bot,
             adder: adder.map(|a| a.get()),
         };
-        punish(app, &cfg, gid, j.id, action, &why, detail).await?;
+        // A refused punishment must not skip the raid check below.
+        if let Err(e) = punish(app, &cfg, gid, j.id, action, &why, detail).await {
+            tracing::warn!(?e, "join gate punishment failed");
+        }
         // The bot filter also punishes whoever added it.
         let bot_hit = hits.iter().find(|h| h.0 == Filter::UnauthorizedBot);
         if let (Some(adder), Some(hit)) = (adder, bot_hit) {
@@ -140,7 +143,7 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             } else {
                 action
             };
-            punish(
+            let r = punish(
                 app,
                 &cfg,
                 gid,
@@ -149,7 +152,10 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
                 "adding a bot without permission",
                 Detail::default(),
             )
-            .await?;
+            .await;
+            if let Err(e) = r {
+                tracing::warn!(?e, "punishing the bot's adder failed");
+            }
         }
     }
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {

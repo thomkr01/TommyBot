@@ -128,6 +128,8 @@ The timeout DM went out before the timeout worked, and a failed anti-nuke report
 *Avoid:* fixed order Contain → Revert → Report → Panic. Logs and DMs are side effects; their failure never skips the next protective step.
 The race review (11-11) found the same in Join Raid (a failed raid log or report job skipped the lockdown and every punishment, and one raider who had already left stopped the punish loop), in automod (the mention-lock log and lock came before the strike, the timeout log before the strike-cap lock) and in `warn_actions`. A loop that punishes several members logs a failure and goes on with the next.
 
+The sticky roles review (11-11) found it in Join Gate too: a refused gate punishment (403 on kick) ended `on_join`, so the join raid check never ran for that joiner. Gate punishments now log and go on.
+
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
 
