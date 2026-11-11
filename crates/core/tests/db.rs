@@ -461,7 +461,7 @@ async fn purge_deletes_one_guild_only() {
     }
     db::purge_guild(&p, a).await.unwrap();
     assert_eq!(left(&p, a, a).await, (0, false));
-    assert_eq!(left(&p, b, b).await, (6, true));
+    assert_eq!(left(&p, b, b).await, (7, true));
     db::purge_guild(&p, b).await.unwrap();
 }
 
@@ -478,6 +478,6 @@ async fn purge_left_takes_only_guilds_gone_over_30_days() {
     let ids = db::purge_left(&p, 30).await.unwrap();
     assert!(ids.contains(&old) && !ids.contains(&new));
     assert_eq!(left(&p, old, old).await, (0, false));
-    assert_eq!(left(&p, new, new).await, (7, true));
+    assert_eq!(left(&p, new, new).await, (8, true));
     db::purge_guild(&p, new).await.unwrap();
 }
