@@ -69,8 +69,9 @@ fs.mkdirSync(out, { recursive: true });
   await page.fill('input[aria-label="new note"]', `first note ${tag}`);
   await page.click('text=Add note');
   // Newest note first; earlier runs may have left notes behind.
+  // Wait for this run's note: older notes are listed at once, and the reload that adds the new one on top would swap the card under the fill.
+  await page.waitForFunction((t) => document.querySelector('input[aria-label="note text"]')?.value === t, `first note ${tag}`, { timeout: 5000 }).catch(() => failed.push('notes: added note not listed'));
   const card = page.locator('.card:has(input[aria-label="note text"])').first();
-  await page.waitForSelector(`input[aria-label="note text"] >> nth=0`, { timeout: 5000 }).catch(() => failed.push('notes: added note not listed'));
   await card.locator('input[aria-label="note text"]').fill(`edited note ${tag}`);
   await card.locator('button', { hasText: 'Save' }).click();
   await card.locator('summary', { hasText: 'History (1)' }).click({ timeout: 5000 }).catch(() => failed.push('notes: no history after edit'));

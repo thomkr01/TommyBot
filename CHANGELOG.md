@@ -5,6 +5,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- Channel Setup no longer answers "a push is running" right after a save or a refused push. The draft lock is now released before the answer instead of whenever the database connection was reused.
 - MCP writes: the owner's code DM is never cut. A change too long for it is refused, `embed_post` shows the embed it posts, a rollback shows live Extra Owner and Trusted Admin changes, and a change whose preview changed after the DM is refused. MCP login only returns to claude.ai's own callback page. Migration 3100. (#169)
 - The backup channel list follows Discord's order. It sorted channels by category id instead of position, and matched channels to a category by name. (#164)
 - DEPLOY.md step 6.4 names the right link: **MCP tokens** in the account menu. (#165)

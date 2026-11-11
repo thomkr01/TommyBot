@@ -20,12 +20,12 @@ pub(crate) fn kind_icon(kind: u64) -> &'static str {
 
 fn kind_name(kind: u64) -> &'static str {
     match kind {
-        2 => "voice channel",
-        4 => "category",
-        5 => "announcement channel",
-        13 => "stage channel",
-        15 => "forum",
-        _ => "text channel",
+        2 => "Voice channel",
+        4 => "Category",
+        5 => "Announcement channel",
+        13 => "Stage channel",
+        15 => "Forum",
+        _ => "Text channel",
     }
 }
 
@@ -252,7 +252,7 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
     // (id, true when the name is edited in the right panel rather than in the tree)
     let editing = RwSignal::new(None::<(String, bool)>);
     let (drag, over) = (RwSignal::new(None::<String>), RwSignal::new(None::<String>));
-    let adding = RwSignal::new(false);
+    let kind_pick = NodeRef::<html::Select>::new();
     // Some(true): push stopped by issues; Some(false): confirm the push.
     let dialog = RwSignal::new(None::<bool>);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
@@ -382,7 +382,6 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         edit(&move |d: &mut Value, t: &[Value]| place(d, t, &id, parent_id.clone(), at))
     };
     let create = move |kind: u8| {
-        adding.set(false);
         if data.with_untracked(Value::is_null) {
             return;
         }
@@ -601,6 +600,7 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         let sid = StoredValue::new(id.clone());
         let pv = StoredValue::new(p.clone());
         let cur = StoredValue::new((picked.clone(), staff));
+        let role_pick = NodeRef::<html::Select>::new();
         let role_chips = picked.iter().map(|r| {
             let (role, r2) = (role_of(r), r.clone());
             let name = role["name"].as_str().unwrap_or(r).to_string();
@@ -643,9 +643,11 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
             </div>
             {limited.then(|| view! {
                 <div class="chips">{role_chips}
-                    <select class="add" aria-label="add a role" prop:value="" on:change=move |e| { let r = event_target_value(&e); if r.is_empty() { return } let (mut roles, st) = cur.get_value(); roles.push(r); set_access(sid.get_value(), access(&roles, st, true)) }>
-                        <option value="">"+ Role"</option>{options}
+                    // Added by the button, not on change (see the channel kind pick).
+                    <select class="add" node_ref=role_pick aria-label="role to add">
+                        <option value="">"Pick a role"</option>{options}
                     </select>
+                    <button class="ghost" aria-label="add a role" on:click=move |_| { let Some(r) = role_pick.get_untracked().map(|s| s.value()).filter(|r| !r.is_empty()) else { return }; let (mut roles, st) = cur.get_value(); roles.push(r); set_access(sid.get_value(), access(&roles, st, true)) }>"+ Role"</button>
                 </div>
                 <div class="row2">
                     <input type="checkbox" class="sw" aria-label="staff can see it" prop:checked=staff disabled={ !can } title=(!can).then_some("Only the owner or an extra owner can change this")
@@ -759,16 +761,12 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
             <div class="cs-grid">
                 <div class="card">
                     <div class="ttl"><h2>{icon("channel_text")}"Channels"</h2><span class="sp"></span>
-                        <button class="ghost" disabled=move || data.with(Value::is_null) on:click=move |_| create(4)>"+ Category"</button>
-                        <button class="ghost" disabled=move || data.with(Value::is_null) aria-expanded=move || adding.get().to_string() on:click=move |_| adding.update(|a| *a = !*a)>"+ Channel"</button>
+                        // A pick plus a button: Chrome fires `change` on every arrow key of a closed select, so acting on change made a keyboard user create channels while browsing.
+                        <span class="addgrp"><select class="addch" node_ref=kind_pick aria-label="kind to add" disabled=move || data.with(Value::is_null)>
+                            <option value="0">"Text channel"</option><option value="2">"Voice channel"</option><option value="5">"Announcement channel"</option><option value="4">"Category"</option>
+                        </select>
+                        <button class="ghost" aria-label="add it" disabled=move || data.with(Value::is_null) on:click=move |_| { if let Some(k) = kind_pick.get_untracked().and_then(|s| s.value().parse().ok()) { create(k) } }>"+ Add"</button></span>
                     </div>
-                    <Show when=move || adding.get()>
-                        <div class="chips end"><span class="muted">"Kind:"</span>
-                            <button class="ghost" on:click=move |_| create(0)>{icon("channel_text")}"Text"</button>
-                            <button class="ghost" on:click=move |_| create(2)>{icon("channel_voice")}"Voice"</button>
-                            <button class="ghost" on:click=move |_| create(5)>{icon("announcement")}"Announcement"</button>
-                        </div>
-                    </Show>
                     {move || if data.with(Value::is_null) { view! { <div class="skel"></div> }.into_any() } else { rows().into_any() }}
                 </div>
                 {panel}

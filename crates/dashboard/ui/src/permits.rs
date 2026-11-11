@@ -123,7 +123,10 @@ pub fn Permits(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                                 {s["items"].as_array().cloned().unwrap_or_default().into_iter().map(|it| {
                                     let key = it["key"].as_str().unwrap_or("").to_string();
                                     let field = if it["flag"].as_bool().unwrap_or(false) { "whitelist" } else { "perms" };
-                                    let locked = it["locked"].as_bool().unwrap_or(false);
+                                    // Mirrors the server's keep_exemptions: below Owner these toggles are refused.
+                                    let flag = field == "whitelist";
+                                    let owner_only = key == "mod_stats" || (flag && (key == "all" || key == "antinuke" || key.starts_with("wl_")));
+                                    let locked = it["locked"].as_bool().unwrap_or(false) || (owner_only && access.rank() < 4);
                                     let k = key.clone();
                                     view! {
                                         <div class="row tog">

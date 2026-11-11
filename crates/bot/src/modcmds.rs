@@ -729,6 +729,9 @@ pub async fn run(
                 else {
                     return plain(format!("No note `{id}`"));
                 };
+                if old == text {
+                    return plain(format!("Note `{id}` already says that"));
+                }
                 let log = NoteLog {
                     action: NoteAction::Modify,
                     id: Some(id.clone()),
@@ -797,14 +800,16 @@ pub async fn run(
                 return plain(format!("Removed {n} notes"));
             }
             ModCmd::CasesEdit { case, reason } => {
-                let done =
-                    sqlx::query("UPDATE cases SET reason=$3 WHERE guild_id=$1 AND case_no=$2")
-                        .bind(g)
-                        .bind(case)
-                        .bind(&reason)
-                        .execute(&app.pool)
-                        .await?
-                        .rows_affected();
+                let target: Option<i64> = sqlx::query_scalar(
+                    "UPDATE cases SET reason=$3 WHERE guild_id=$1 AND case_no=$2 RETURNING user_id",
+                )
+                .bind(g)
+                .bind(case)
+                .bind(&reason)
+                .fetch_optional(&app.pool)
+                .await?;
+                let done = target.is_some() as u64;
+                stat(app, g, actor_id.get(), "case_edit", target, Some(case)).await;
                 if done > 0 {
                     let log = Log::new("Case Updated", ORANGE)
                         .line("Case", &format!("`{case}`"))
@@ -820,14 +825,16 @@ pub async fn run(
                 });
             }
             ModCmd::CaseSet { case, active } => {
-                let done =
-                    sqlx::query("UPDATE cases SET active=$3 WHERE guild_id=$1 AND case_no=$2")
-                        .bind(g)
-                        .bind(case)
-                        .bind(active)
-                        .execute(&app.pool)
-                        .await?
-                        .rows_affected();
+                let target: Option<i64> = sqlx::query_scalar(
+                    "UPDATE cases SET active=$3 WHERE guild_id=$1 AND case_no=$2 RETURNING user_id",
+                )
+                .bind(g)
+                .bind(case)
+                .bind(active)
+                .fetch_optional(&app.pool)
+                .await?;
+                let done = target.is_some() as u64;
+                stat(app, g, actor_id.get(), "case_edit", target, Some(case)).await;
                 return plain(match (done, active) {
                     (0, _) => format!("No case #{case}"),
                     (_, true) => format!("Case #{case} is active again"),
@@ -836,6 +843,15 @@ pub async fn run(
             }
             ModCmd::ClearWarns { user } => {
                 cases::reset_warns(&app.pool, g, user as i64).await?;
+                stat(
+                    app,
+                    g,
+                    actor_id.get(),
+                    "warn_clear",
+                    Some(user as i64),
+                    None,
+                )
+                .await;
                 return plain(format!("Cleared the warns of <@{user}>"));
             }
             ModCmd::Unban { user } => {
@@ -1073,3 +1089,30 @@ pub async fn run(
 #[cfg(test)]
 #[path = "modcmds_tests.rs"]
 mod tests;
+
+/// A command that rewrites case history counts in moderator stats, like the dashboard's edits.
+/// Nothing is recorded when the case did not exist; a failed write is only logged.
+async fn stat(app: &App, g: i64, by: u64, kind: &str, target: Option<i64>, case_no: Option<i32>) {
+    if target.is_none() {
+        return;
+    }
+    let r = async {
+        cases::record(
+            &mut *app.pool.acquire().await?,
+            cases::ModAction {
+                guild_id: g,
+                mod_id: by as i64,
+                kind,
+                source: "bot",
+                target_id: target,
+                case_no,
+                audit_id: None,
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(?e, kind, "recording a case change for mod stats failed");
+    }
+}

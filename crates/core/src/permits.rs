@@ -182,6 +182,11 @@ pub const CATALOG: &[PermSection] = &[
         title: "Moderation",
         items: &[
             perm("cases", "Manage Cases", "View and edit cases"),
+            perm(
+                "mod_stats",
+                "View Mod Stats",
+                "See how many actions each staff member took. Only owners can change who has this",
+            ),
             perm("ban", "Ban Command", "Ban, unban and hackban"),
             perm(
                 "kick",
