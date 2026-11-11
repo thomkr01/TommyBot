@@ -153,6 +153,8 @@ pub struct App {
     pub spam_flags: Mutex<HashMap<(u64, u64), (bool, i64)>>,
     /// Name pair last punished by the post-join username check, so unrelated member updates do not repeat it.
     pub punished_names: Mutex<HashMap<(u64, u64), String>>,
+    /// Nick auto-dehoist last set per (guild, member), so an update with the old name renames once.
+    pub dehoisted: Mutex<HashMap<(u64, u64), String>>,
     /// Last public command per (guild, member), in ms.
     pub cmd_cooldown: Mutex<HashMap<(u64, u64), i64>>,
     /// Anti-nuke heat per (guild, staff member) for panic mode's heat algorithm.
@@ -178,6 +180,8 @@ pub struct App {
     pub reactions: Mutex<HashMap<(u64, u64), tommybot_automod::window::Window>>,
     /// Thread -> parent channel; see [`App::channel_scope`].
     pub thread_parents: Mutex<HashMap<Id<ChannelMarker>, Id<ChannelMarker>>>,
+    /// Sticky role adds per guild in the current minute: (minute, count).
+    pub sticky_budget: Mutex<HashMap<u64, (i64, u32)>>,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -229,6 +233,7 @@ impl App {
             slow_active: Default::default(),
             spam_flags: Default::default(),
             punished_names: Default::default(),
+            dehoisted: Default::default(),
             cmd_cooldown: Default::default(),
             crowd: Default::default(),
             nuke_heat: Default::default(),
@@ -243,6 +248,7 @@ impl App {
             lock_ops: Default::default(),
             thread_parents: Default::default(),
             reactions: Default::default(),
+            sticky_budget: Default::default(),
         }
     }
 

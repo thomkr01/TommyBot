@@ -26,7 +26,11 @@ The `quarantines` row survived a leave, but no join code read it, so a quarantin
 
 **The post-join username filter punished immune staff.** (Join Gate check, 11-11)
 Join Gate's username filter checks names again after join (the "POST join" switch) and called `punish` without a level check, so an Extra Owner or Trusted Admin who picked a nickname on the word list could be kicked or banned. At join time nobody is staff yet, so the gap only showed after join. The other automatic paths on existing members (automod, Discord AutoMod hits, reactions, threads) already go through `whitelisted()`.
-*Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first.
+*Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first. The one deliberate exception is auto-dehoist (and Join Gate's Rename through `dehoist::rename`): Thomas's D6 skips only the owner and Extra Owners, so Trusted Admins and mods are renamed too.
+
+**Member edits share one rate-limit bucket.** (auto-dehoist, 11-11)
+Nick changes, role adds, timeouts and kicks of members all use Discord's member bucket, so a burst of automatic renames or role restores slows the punishments of a raid.
+*Avoid:* bulk automatic member edits are capped per guild (`dehoist::rename`, 10 a minute through `RateLimiter`) and auto-dehoist is off during a join raid or lockdown.
 
 **Not every member lookup error means "not a member".** (#97)
 All `guild_member` errors (5xx, timeouts) were read as "left the server". Staff then lost their permit level for that event, so automod or anti-nuke could act on them.
@@ -115,6 +119,18 @@ Past the limit every audit entry returned `Quarantine` again, and each one is it
 The ticket-category exemption read the category that the `ChannelCreate` task stores. When the audit task ran first, the lookup missed and a ticket bot's channels counted towards its limit.
 *Avoid:* do not rely on the order of two events. `note_parent` stores every channel (also "no category"), so a miss means "not seen yet", and `parent_of` waits up to 0.5 s for it.
 
+**Join-time steps race each other.** (sticky roles plan, 11-11)
+A `MemberUpdate` (from verification, another bot or the bot's own role adds) can run before or alongside the `MemberAdd` task, and a late update can come from the membership before. Saving roles "per user id" would let such an update overwrite the saved roles before the rejoin reads them.
+*Avoid:* key per-member state by membership: `member_roles` rows carry `joined_at`, an update writes only when its `joined_at` matches the row, and the rejoin claims the older row in one statement (`sticky::claim`), so a replayed `MemberAdd` gets nothing.
+
+**Membership was checked when roles were claimed, not when they were added.** (sticky roles review, 11-11)
+Sticky roles checked the member once, when the rejoin claimed the saved list, and then added roles later: from a job a minute on, after verification, or when a timeout ended. By then the member could have left and rejoined, been banned, quarantined or sent back to verification, and still got the old roles. Errors after the claim (a failed read, a refused add) dropped the claimed list, and a join where any step acted (even a Log hit) froze the row, so the next rejoin got roles from two memberships ago. Found the same gap in `timeout_roles::restore`, which gave main roles back to a quarantined member.
+*Avoid:* every delayed add carries the membership it was claimed for (`joined_at`) and checks again right before the add: same `joined_at`, setting on, no quarantine row, not pending (`sticky::due`). Do fallible reads before a claim, and put whatever a claim took and could not finish into a job. A ban leaves a tombstone row instead of deleting, so a late event of the old membership cannot write it back.
+
+**Member role adds share Discord's rate-limit bucket with punishments.** (sticky roles, 11-11)
+A mass rejoin (after a raid, or a re-invite) giving every member's roles back would fill the per-guild member bucket that timeouts, kicks and bans need right then.
+*Avoid:* bulk role or nickname work on members gets a per-guild cap (`sticky::take`, 20 adds a minute) and queues the rest as a job instead of dropping it.
+
 **A join quarantine counted as a nuke target.** (race review follow-up, 11-11)
 Verification's "quarantine on join" writes a quarantine row with no saved roles. The quarantine hold treated it like an anti-nuke quarantine, so an autorole bot giving a joiner its role was quarantined and lost its role permissions on every join.
 *Avoid:* a row with empty `saved_roles` is a join quarantine. The hold undoes the role change but punishes nobody. Code that reads `quarantines` must tell the two kinds apart.
@@ -131,6 +147,8 @@ The config listener died after one DB hiccup, so dashboard changes never applied
 The timeout DM went out before the timeout worked, and a failed anti-nuke report stopped panic mode.
 *Avoid:* fixed order Contain → Revert → Report → Panic. Logs and DMs are side effects; their failure never skips the next protective step.
 The race review (11-11) found the same in Join Raid (a failed raid log or report job skipped the lockdown and every punishment, and one raider who had already left stopped the punish loop), in automod (the mention-lock log and lock came before the strike, the timeout log before the strike-cap lock) and in `warn_actions`. A loop that punishes several members logs a failure and goes on with the next.
+
+The sticky roles review (11-11) found it in Join Gate too: a refused gate punishment (403 on kick) ended `on_join`, so the join raid check never ran for that joiner. Gate punishments now log and go on.
 
 **A gateway event's value can be older than the bot's own write.** (auto slowmode review, 11-11)
 Events run in parallel tasks and Discord sends a channel update for every edit (a rename too), so a ChannelUpdate handled after the bot's own PATCH can still carry the old slowmode. Auto slowmode read that value as "staff changed it" and put it back, which undid its own slowmode.
@@ -168,6 +186,10 @@ Its `AddAssign` impl makes `s += &other` ambiguous once decancer is in scope, an
 **Exemptions that were too wide or too narrow.** (#100)
 Whitelisted channels and roles still got base message heat, other bots' slash-command replies counted as webhook spam, and saying "gg" twice in a quiet channel gave a timeout.
 *Avoid:* every new heat source checks the whitelist, and quiet-channel heat counts once per user. Add a test with both spammers and normal chatters in one channel.
+
+**A bot rename reads as a new name.** (auto-dehoist, 11-11)
+The post-join username filter dedupes on username + global name + nick. Its Rename action changes the nick, so the echo update looked like a new bad name and the bot would rename on every update; a dehoist nick on a member the filter already punished would punish them again.
+*Avoid:* for Rename the dedupe key leaves out the nick, and a clean nick counts as done (`joingate::post_join_key`). Auto-dehoist skips a name the filter matched, and its output always starts with a letter or digit, so dehoisting twice changes nothing.
 
 **The verify button judged "suspicious" on other names than Join Gate.** (spammer-flag PR, 11-11)
 Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.

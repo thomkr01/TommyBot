@@ -367,6 +367,7 @@ async fn seed(p: &PgPool, g: i64, user: i64) {
         "INSERT INTO guild_config (guild_id, version) VALUES ($1, 1)",
         "INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, 1)",
         "INSERT INTO welcomed_guilds (guild_id) VALUES ($1)",
+        "INSERT INTO member_roles (guild_id, user_id, roles, joined_at) VALUES ($1, 1, '{2}', now())",
     ] {
         sqlx::query(sql).bind(g).execute(p).await.unwrap();
     }
@@ -380,6 +381,7 @@ async fn left(p: &PgPool, g: i64, user: i64) -> (i64, bool) {
         "SELECT (SELECT count(*) FROM cases WHERE guild_id = $1) + (SELECT count(*) FROM action_log WHERE guild_id = $1)
               + (SELECT count(*) FROM guild_config WHERE guild_id = $1) + (SELECT count(*) FROM extra_owners WHERE guild_id = $1)
               + (SELECT count(*) FROM welcomed_guilds WHERE guild_id = $1) + (SELECT count(*) FROM guild_left WHERE guild_id = $1)
+              + (SELECT count(*) FROM member_roles WHERE guild_id = $1)
               + (SELECT count(*) FROM mod_actions WHERE guild_id = $1)",
     )
     .bind(g).fetch_one(p).await.unwrap();
@@ -459,7 +461,7 @@ async fn purge_deletes_one_guild_only() {
     }
     db::purge_guild(&p, a).await.unwrap();
     assert_eq!(left(&p, a, a).await, (0, false));
-    assert_eq!(left(&p, b, b).await, (6, true));
+    assert_eq!(left(&p, b, b).await, (7, true));
     db::purge_guild(&p, b).await.unwrap();
 }
 
@@ -476,6 +478,6 @@ async fn purge_left_takes_only_guilds_gone_over_30_days() {
     let ids = db::purge_left(&p, 30).await.unwrap();
     assert!(ids.contains(&old) && !ids.contains(&new));
     assert_eq!(left(&p, old, old).await, (0, false));
-    assert_eq!(left(&p, new, new).await, (7, true));
+    assert_eq!(left(&p, new, new).await, (8, true));
     db::purge_guild(&p, new).await.unwrap();
 }

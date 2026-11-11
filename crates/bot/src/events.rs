@@ -476,9 +476,20 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Err(e) = verify::on_member_update(app, m).await {
                 tracing::warn!(?e, "pausing the verification time limit failed");
             }
-            crate::joingate::on_member_update(app, m).await?
+            if let Err(e) = crate::sticky::on_member_update(app, m).await {
+                tracing::warn!(?e, "saving sticky roles failed");
+            }
+            if !crate::joingate::on_member_update(app, m).await? {
+                let (user, nick) = (&m.user, m.nick.as_deref());
+                let r = crate::dehoist::check(app, m.guild_id, user, nick, &m.roles).await;
+                if let Err(e) = r {
+                    tracing::warn!(?e, "auto-dehoist failed");
+                }
+            }
         }
         Event::MemberAdd(m) => crate::joingate::on_join(app, m, extra.spammer).await?,
+        Event::MemberRemove(m) => crate::sticky::on_leave(app, m.guild_id, m.user.id).await?,
+        Event::BanAdd(b) => crate::sticky::on_ban(app, b.guild_id, b.user.id).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?
