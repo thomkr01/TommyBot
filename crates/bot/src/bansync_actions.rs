@@ -20,12 +20,9 @@ async fn siblings(app: &App, gid: Id<GuildMarker>) -> Result<Vec<Id<GuildMarker>
     Ok(out)
 }
 
-/// Below the `bansync` panel, for Trusted Admins and up as on the dashboard: the group and the
+/// Below the `bansync` panel (the caller shows it to Trusted Admins and up): the group and the
 /// last 10 copies between this server and the servers still in it.
-pub async fn panel_text(app: &App, gid: Id<GuildMarker>, admin: bool) -> Result<String> {
-    if !admin {
-        return Ok(String::new());
-    }
+pub async fn panel_text(app: &App, gid: Id<GuildMarker>) -> Result<String> {
     let mut names = BTreeMap::new();
     for g in siblings(app, gid).await? {
         names.insert(g.get(), md(&verify::guild_name(app, g).await));
@@ -85,20 +82,17 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
     fn id<T>(s: &str) -> Option<Id<T>> {
         s.parse().ok().and_then(Id::new_checked)
     }
-    let done = match (rest.strip_prefix(REST), i.author_id()) {
-        (Some(src), Some(clicker)) => match id(src) {
-            Some(src) => send_rest_click(app, clicker, src).await,
-            None => Ok("This button does not work here.".into()),
-        },
-        (None, Some(clicker)) => match (i.guild_id, rest.split_once(':')) {
-            (Some(gid), Some((s, u))) => match (id(s), id(u)) {
-                (Some(src), Some(user)) => ban_click(app, gid, clicker, (src, user)).await,
-                _ => Ok("This button does not work here.".into()),
-            },
-            _ => Ok("This button does not work here.".into()),
-        },
-        _ => Ok("This button does not work here.".into()),
+    let clicked = async {
+        let clicker = i.author_id()?;
+        Some(match rest.strip_prefix(REST) {
+            Some(src) => send_rest_click(app, clicker, id(src)?).await,
+            None => {
+                let (s, u) = rest.split_once(':')?;
+                ban_click(app, i.guild_id?, clicker, (id(s)?, id(u)?)).await
+            }
+        })
     };
+    let done = (clicked.await).unwrap_or_else(|| Ok("This button does not work here.".into()));
     let text = done.unwrap_or_else(|e| {
         tracing::warn!(?e, "ban sync button failed");
         format!("Something went wrong: {}", http_err::why(&e))
@@ -215,11 +209,6 @@ pub(super) async fn send_rest_click(
 /// (receiving server, actor, moderator, ban time) of a row sent by Send the rest.
 type Held = (i64, Option<i64>, Option<i64>, Option<i64>);
 
-/// Anti-nuke opened a nuke case or contained a permit holder in the server in the last day.
-async fn recent_incident(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
-    crate::antinuke::contained_since(app, gid, None, now_secs() - 86_400).await
-}
-
 /// A share of this user is still in its hold.
 async fn share_waiting(app: &App, src: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
     Ok(sqlx::query_scalar(
@@ -239,8 +228,9 @@ pub async fn import_job(app: &App, p: &Value) -> Result<()> {
     if !grouped(app, &Owners::default(), src, to).await? {
         return Ok(());
     }
-    // Right after an attack the ban list may hold a hacked account's bans.
-    if recent_incident(app, src).await? {
+    // Right after an attack the ban list may hold a hacked account's bans: anti-nuke opened a nuke
+    // case or contained a permit holder there in the last day.
+    if crate::antinuke::contained_since(app, src, None, now_secs() - 86_400).await? {
         tracing::warn!(%src, %to, "ban sync import refused: anti-nuke acted there in the last 24 hours");
         let name = md(&verify::guild_name(app, src).await);
         let text = format!("{WARNING} **Ban Sync did not import the bans of {name}.** Anti-nuke acted there in the last 24 hours, so its ban list may hold bans a hacked account made. Check them, then try again tomorrow.");
@@ -352,11 +342,8 @@ pub(super) async fn paused(app: &App, src: Id<GuildMarker>) {
     let text = format!(
         "{WARNING} **Ban Sync paused for {name}.** More than {BAN_SYNC_HOURLY} bans were made there in the last hour, so the rest were not sent to your other servers. If you did not expect that many bans, check that server's staff first. If the bans are real, press **Send the rest** to send the next {BAN_SYNC_HOURLY} (it needs a fresh 2FA on the dashboard)."
     );
-    let row = buttons(vec![button(
-        "Send the rest",
-        format!("{BUTTON}{REST}{src}"),
-        ButtonStyle::Primary,
-    )]);
+    let id = format!("{BUTTON}{REST}{src}");
+    let row = verify::row(embed::button("Send the rest", &id, ButtonStyle::Primary));
     dm_owner(app, src, &text, &[row]).await;
 }
 

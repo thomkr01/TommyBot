@@ -1014,7 +1014,7 @@ async fn an_import_pages_obeys_the_switches_and_the_cap() {
 }
 
 #[tokio::test]
-async fn the_panel_shows_only_the_live_group_to_admins() {
+async fn the_panel_shows_only_the_live_group() {
     let Some(t) = T::new(13).await else { return };
     let o = t.owner();
     t.server(0, o, "ban").await;
@@ -1022,8 +1022,7 @@ async fn the_panel_shows_only_the_live_group_to_admins() {
     t.link(0, 560, 1, "banned").await;
     // A row with a server that is no longer in the group stays hidden.
     t.link(0, 561, 2, "banned").await;
-    assert_eq!(panel_text(&t.app, t.g(0), false).await.unwrap(), "");
-    let text = panel_text(&t.app, t.g(0), true).await.unwrap();
+    let text = panel_text(&t.app, t.g(0)).await.unwrap();
     assert!(text.contains(&format!("Server {}", t.g(1))), "{text}");
     assert!(
         text.contains("<@560>") && !text.contains("<@561>"),

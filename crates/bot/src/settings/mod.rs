@@ -712,7 +712,7 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
             let cfg = app.cfg(gid.get()).await?;
             let (mut embed, pages) = panel(m, &cfg, gid.get(), *page);
             if m.names[0] == "bansync" && level.immune() {
-                let extra = crate::bansync::panel_text(app, gid, true).await?;
+                let extra = crate::bansync::panel_text(app, gid).await?;
                 let d = embed.description.get_or_insert_with(String::new);
                 d.push_str(&format!("\n\n{extra}"));
             }

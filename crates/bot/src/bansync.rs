@@ -17,7 +17,7 @@ use tommybot_logging::{
 };
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
-    channel::message::component::{ActionRow, Button, ButtonStyle, Component},
+    channel::message::component::{ButtonStyle, Component},
     guild::audit_log::{AuditLogEntry, AuditLogEventType as A},
     id::{
         marker::{GuildMarker, UserMarker},
@@ -601,26 +601,6 @@ pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()>
     failed.map_or(Ok(()), Err)
 }
 
-fn button(label: &str, id: String, style: ButtonStyle) -> Component {
-    Component::Button(Button {
-        id: None,
-        custom_id: Some(id),
-        disabled: false,
-        emoji: None,
-        label: Some(label.into()),
-        style,
-        url: None,
-        sku_id: None,
-    })
-}
-
-fn buttons(components: Vec<Component>) -> Component {
-    Component::ActionRow(ActionRow {
-        id: None,
-        components,
-    })
-}
-
 /// Moves a row on from one of `from`; false when another run already did.
 async fn mark(
     app: &App,
@@ -776,12 +756,12 @@ async fn copy(app: &App, key: Key) -> Result<()> {
             row.source_case,
             row.expires,
         );
-        let ban_here = button(
+        let ban_here = embed::button(
             "Ban here",
-            format!("{BUTTON}{src}:{user}"),
+            &format!("{BUTTON}{src}:{user}"),
             ButtonStyle::Danger,
         );
-        let rows = [buttons(vec![ban_here])];
+        let rows = [verify::row(ban_here)];
         let sent = crate::events::send_log_rows(app, to.get(), LogKind::ModCommand, log, &rows);
         if let Err(e) = sent.await {
             tracing::warn!(?e, "ban sync alert log failed");
@@ -876,21 +856,8 @@ async fn finish_ban(app: &App, key: Key, case: Option<i32>, why: &str) -> Result
     let Some(None) = claim_banned(app, key, case).await? else {
         return Ok(());
     };
-    let n = cases::create(
-        &app.pool,
-        cases::NewCase {
-            guild_id: to.get() as i64,
-            kind: "ban",
-            user_id: user.get() as i64,
-            mod_id: app.me.get() as i64,
-            reason: Some(why),
-            points: 0,
-            duration_s: None,
-            proof: None,
-            inverse: Some(json!({"op": "unban", "user": user.get()})),
-        },
-    )
-    .await?;
+    let inverse = json!({"op": "unban", "user": user.get()});
+    let n = new_case(app, (to, user), "ban", why, Some(inverse)).await?;
     sqlx::query(
         "UPDATE ban_sync_links SET case_no = $4
          WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3 AND case_no IS NULL",
@@ -905,14 +872,39 @@ async fn finish_ban(app: &App, key: Key, case: Option<i32>, why: &str) -> Result
     Ok(())
 }
 
+/// A case with the bot as moderator.
+async fn new_case(
+    app: &App,
+    (to, user): (Id<GuildMarker>, Id<UserMarker>),
+    kind: &str,
+    why: &str,
+    inverse: Option<Value>,
+) -> Result<i32> {
+    let case = cases::NewCase {
+        guild_id: to.get() as i64,
+        kind,
+        user_id: user.get() as i64,
+        mod_id: app.me.get() as i64,
+        reason: Some(why),
+        points: 0,
+        duration_s: None,
+        proof: None,
+        inverse,
+    };
+    cases::create(&app.pool, case).await
+}
+
 /// The case and audit reason of a copy; the audit header is cut to Discord's limit by `apply_dm`.
 fn copy_reason(name: &str, src: u64, reason: &str) -> String {
-    let reason = if reason.is_empty() {
+    format!("{PREFIX} {} ({src}): {}", md(name), reason_md(reason))
+}
+
+fn reason_md(reason: &str) -> String {
+    if reason.is_empty() {
         "No reason provided".into()
     } else {
         md(reason)
-    };
-    format!("{PREFIX} {} ({src}): {reason}", md(name))
+    }
 }
 
 /// The mod log alert in a server that receives as Alert, with a Ban here button under it.
@@ -924,18 +916,13 @@ pub(crate) fn alert_log(
     case: Option<i32>,
     expires: Option<i64>,
 ) -> Log {
-    let reason = if reason.is_empty() {
-        "No reason provided".into()
-    } else {
-        md(reason)
-    };
     let mut log = Log::new("Banned in your other server", ORANGE)
         .user("Member", user)
         .line(
             "Server",
             &format!("{} *`{src}`*", md(&embed::clip(name, 100))),
         )
-        .line("Reason", &reason);
+        .line("Reason", &reason_md(reason));
     if let Some(c) = case {
         log = log.line("Case", &format!("`{c}`"));
     }
@@ -1014,21 +1001,7 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
         Err(e) if !http_err::gone(&e) => return Err(e.into()),
         _ => {}
     }
-    let case_no = cases::create(
-        &app.pool,
-        cases::NewCase {
-            guild_id: to.get() as i64,
-            kind: "unban",
-            user_id: user.get() as i64,
-            mod_id: app.me.get() as i64,
-            reason: Some(&why),
-            points: 0,
-            duration_s: None,
-            proof: None,
-            inverse: None,
-        },
-    )
-    .await?;
+    let case_no = new_case(app, (to, user), "unban", &why, None).await?;
     mark(app, key, LIVE, "lifted", None).await?;
     commands::mod_log(
         app,
