@@ -104,6 +104,8 @@ pub async fn lock_for(
     if lock_thread(app, gid, &kind, true).await? {
         return Ok(true);
     }
+    // Held until the lock is applied: a second lock waits, then sees this one as active.
+    let _one = exclusive(app, gid).await;
     let active = store::locks(&app.pool, gid.get()).await?;
     if active
         .iter()
@@ -129,6 +131,19 @@ pub async fn lock_for(
     )
     .await;
     Ok(true)
+}
+
+/// Lock and unlock of one guild run one at a time. The dashboard only queues jobs and this bot
+/// runs one process, so an in-process lock covers every writer of `lock_snapshots`.
+async fn exclusive(app: &App, gid: Id<GuildMarker>) -> tokio::sync::OwnedMutexGuard<()> {
+    let m = app
+        .lock_ops
+        .lock()
+        .unwrap()
+        .entry(gid.get())
+        .or_default()
+        .clone();
+    m.lock_owned().await
 }
 
 /// The lock plan for the guild as it is now.
@@ -297,6 +312,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             return Ok(1);
         }
     }
+    let _one = exclusive(app, gid).await;
     let (mut lifted, mut failed) = (0, 0);
     for snap in store::locks(&app.pool, gid.get()).await? {
         let hit = match (which, &snap.kind) {

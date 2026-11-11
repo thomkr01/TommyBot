@@ -134,14 +134,14 @@ impl App {
     }
 
     /// Remembers a created or deleted channel's category until its audit entry arrives.
+    /// Channels without a category are noted too, so anti-nuke can tell "no category" from "not seen yet".
     pub fn note_parent(&self, c: &twilight_model::channel::Channel) {
-        let Some(p) = c.parent_id else { return };
         let mut m = self.channel_parents.lock().unwrap();
         // shortcut: entries whose audit entry never comes (anti-nuke off) pile up until this cap clears them all.
         if m.len() > 10_000 {
             m.clear();
         }
-        m.insert(c.id.get(), p.get());
+        m.insert(c.id.get(), c.parent_id.map(|p| p.get()));
     }
 }
 

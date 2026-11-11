@@ -152,12 +152,20 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
 }
 
 pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()> {
-    app.panic_runs.lock().unwrap().insert(
-        gid.get(),
-        PanicRun {
-            lock_mod_commands: cfg.lock_mod_commands,
-        },
-    );
+    // The check and the insert are one step: two trips at once must not start it twice, or the
+    // second saves the already exempted overwrites and the categories stay open after panic ends.
+    let run = PanicRun {
+        lock_mod_commands: cfg.lock_mod_commands,
+    };
+    if app
+        .panic_runs
+        .lock()
+        .unwrap()
+        .insert(gid.get(), run)
+        .is_some()
+    {
+        return Ok(());
+    }
     let mut exempted = vec![];
     for &c in &cfg.whitelisted_categories {
         match exempt(app, gid, c).await {
