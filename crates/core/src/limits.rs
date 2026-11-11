@@ -12,6 +12,15 @@ pub const BAN_SYNC_HOLD_S: i64 = 60;
 /// Ban Sync: bans one server may share per hour before sharing pauses for the owner.
 pub const BAN_SYNC_HOURLY: i64 = 30;
 
+/// Raider List: different server owners whose strong detections list a user by themselves.
+pub const RAIDER_AUTO_OWNERS: i64 = 3;
+/// Raider List reports: per owner per day, and what a reporting server needs.
+pub const RAIDER_REPORTS_DAY: i64 = 10;
+pub const RAIDER_MIN_DAYS: i64 = 7;
+pub const RAIDER_MIN_MEMBERS: u64 = 100;
+/// Raider List: days a scam listing lasts after its last evidence.
+pub const RAIDER_SCAM_DAYS: i64 = 14;
+
 /// The range of the number at `path` (below the section, e.g. `limits.Ban.per_hour`), if it has one.
 pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
     match (section, path.split('.').collect::<Vec<_>>().as_slice()) {

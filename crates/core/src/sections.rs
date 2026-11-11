@@ -470,7 +470,7 @@ impl WhitelistList {
 pub const MAX_APPEAL_FIELDS: usize = 6;
 
 /// Sections the dashboard saves only after a TOTP step-up, so prefix panels may not edit them.
-pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch", "ban_sync"];
+pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch", "ban_sync", "raider_list"];
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppealField {
@@ -821,10 +821,69 @@ pub enum BanSyncReceive {
     Ban,
 }
 
+/// Raider List: acts on confirmed raider accounts when they join. Off until saved on.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct RaiderListCfg {
+    pub enabled: bool,
+    pub action: RaiderAction,
+    pub categories: Vec<RaiderCategory>,
+    /// What to do for listed users already in the server: only alert, or nothing.
+    pub scan_members: bool,
+    /// Unban here when the bot owner removes someone from the list.
+    pub lift_on_removal: bool,
+    /// Do not send this server's detections to the list.
+    pub no_collect: bool,
+}
+
+impl Default for RaiderListCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            action: RaiderAction::Ban,
+            categories: RaiderCategory::ALL.to_vec(),
+            scan_members: true,
+            lift_on_removal: true,
+            no_collect: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RaiderAction {
+    Alert,
+    Quarantine,
+    Kick,
+    #[default]
+    Ban,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RaiderCategory {
+    Nuke,
+    Raid,
+    Scam,
+    Spam,
+}
+
+impl RaiderCategory {
+    pub const ALL: [RaiderCategory; 4] = [Self::Nuke, Self::Raid, Self::Scam, Self::Spam];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn raider_list_is_off_until_saved_on() {
+        let c: RaiderListCfg = serde_json::from_value(json!({})).unwrap();
+        assert!(!c.enabled && c.scan_members && c.lift_on_removal && !c.no_collect);
+        assert_eq!(c.action, RaiderAction::Ban);
+        assert_eq!(c.categories, RaiderCategory::ALL);
+    }
 
     #[test]
     fn ban_sync_is_off_until_saved_on() {
