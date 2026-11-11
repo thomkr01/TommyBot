@@ -20,12 +20,12 @@ pub(crate) fn kind_icon(kind: u64) -> &'static str {
 
 fn kind_name(kind: u64) -> &'static str {
     match kind {
-        2 => "voice channel",
-        4 => "category",
-        5 => "announcement channel",
-        13 => "stage channel",
-        15 => "forum",
-        _ => "text channel",
+        2 => "Voice channel",
+        4 => "Category",
+        5 => "Announcement channel",
+        13 => "Stage channel",
+        15 => "Forum",
+        _ => "Text channel",
     }
 }
 
@@ -252,7 +252,7 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
     // (id, true when the name is edited in the right panel rather than in the tree)
     let editing = RwSignal::new(None::<(String, bool)>);
     let (drag, over) = (RwSignal::new(None::<String>), RwSignal::new(None::<String>));
-    let adding = RwSignal::new(false);
+    let kind_pick = NodeRef::<html::Select>::new();
     // Some(true): push stopped by issues; Some(false): confirm the push.
     let dialog = RwSignal::new(None::<bool>);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
@@ -382,7 +382,6 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         edit(&move |d: &mut Value, t: &[Value]| place(d, t, &id, parent_id.clone(), at))
     };
     let create = move |kind: u8| {
-        adding.set(false);
         if data.with_untracked(Value::is_null) {
             return;
         }
@@ -760,15 +759,11 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
                 <div class="card">
                     <div class="ttl"><h2>{icon("channel_text")}"Channels"</h2><span class="sp"></span>
                         <button class="ghost" disabled=move || data.with(Value::is_null) on:click=move |_| create(4)>"+ Category"</button>
-                        <button class="ghost" disabled=move || data.with(Value::is_null) aria-expanded=move || adding.get().to_string() on:click=move |_| adding.update(|a| *a = !*a)>"+ Channel"</button>
+                        <select class="addch" node_ref=kind_pick aria-label="add a channel" disabled=move || data.with(Value::is_null) prop:value=""
+                            on:change=move |e| { if let Ok(k) = event_target_value(&e).parse() { create(k) }; if let Some(s) = kind_pick.get_untracked() { s.set_value("") } }>
+                            <option value="">"+ Channel"</option><option value="0">"Text"</option><option value="2">"Voice"</option><option value="5">"Announcement"</option>
+                        </select>
                     </div>
-                    <Show when=move || adding.get()>
-                        <div class="chips end"><span class="muted">"Kind:"</span>
-                            <button class="ghost" on:click=move |_| create(0)>{icon("channel_text")}"Text"</button>
-                            <button class="ghost" on:click=move |_| create(2)>{icon("channel_voice")}"Voice"</button>
-                            <button class="ghost" on:click=move |_| create(5)>{icon("announcement")}"Announcement"</button>
-                        </div>
-                    </Show>
                     {move || if data.with(Value::is_null) { view! { <div class="skel"></div> }.into_any() } else { rows().into_any() }}
                 </div>
                 {panel}

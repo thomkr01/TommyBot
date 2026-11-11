@@ -72,9 +72,11 @@ details { margin:12px 0; }
 .ring { width:120px; height:120px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(var(--c,var(--ok)) calc(var(--p) * 1%), var(--b3) 0); flex:none; transition:--p var(--dur-slow) var(--ease); }
 .ring b { width:86px; height:86px; border-radius:50%; background:var(--c,var(--ok)); display:grid; place-items:center; font-size:20px; color:#fff; }
 .split { display:flex; gap:24px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
-.stat { display:inline-block; margin-right:24px; } .stat b { display:block; } .stat span { font-size:13px; }
-.sys { display:flex; flex-direction:column; border-left:48px solid var(--primary); } .sys h3 { margin:0 0 6px; font-size:24px; }
-.sys .foot { display:flex; justify-content:space-between; align-items:center; margin-top:auto; padding-top:12px; }
+.stat { display:inline-flex; align-items:baseline; gap:6px; min-width:0; } .stat > span { font-size:13px; color:var(--muted); } .stat b { overflow-wrap:anywhere; }
+/* Overview Details: the title and the stats on one line, wrapping on a phone. */
+.facts { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 24px; padding:8px 16px; } .facts h2 { margin:0; }
+.sys { display:flex; flex-direction:column; border-left:12px solid var(--primary); padding:10px 12px; } .sys h3 { margin:0 0 4px; font-size:17px; } .sys p { margin:0; font-size:13px; }
+.sys .foot { display:flex; justify-content:space-between; align-items:center; margin-top:auto; padding-top:8px; }
 .bar { animation:bar-in var(--dur-slow) var(--ease); position:fixed; left:50%; bottom:24px; transform:translateX(-50%); z-index:40; display:flex; gap:12px; align-items:center; background:var(--b2); padding:10px 20px; border-radius:12px; box-shadow:0 4px 24px #000a; }
 .toast { overflow:hidden; animation:enter var(--dur) var(--ease); position:fixed; left:0; right:0; top:76px; z-index:41; width:min(92vw,520px); margin:0 auto; background:var(--b2); padding:16px 20px 20px; border-radius:14px; box-shadow:0 8px 32px #000c; cursor:pointer; font-size:1.05rem; font-weight:600; }
 /* The toast's only colour mark: a strip along the bottom, clipped by the toast's rounded corners. It shrinks
@@ -101,7 +103,9 @@ header details.ico summary { background:none; font-size:18px; }
 .modal { animation:fade var(--dur) var(--ease); position:fixed; inset:0; z-index:50; background:#000a; display:grid; place-items:center; overflow:auto; } .modal .card { width:min(92vw,640px); max-height:90vh; overflow:auto; margin:0; }
 .card .back { cursor:pointer; color:var(--info); display:block; margin-bottom:8px; } button.menu { display:block; width:100%; margin:6px 0; text-align:left; text-transform:none; }
 table.permits { width:100%; max-width:900px; margin:0 auto; border-collapse:collapse; } table.permits th { text-align:left; text-transform:uppercase; } table.permits th, table.permits td { padding:10px 12px; border-bottom:1px solid var(--line); } table.permits td:last-child { text-align:right; }
-.cards.five { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+/* 5 in a row on desktop, then 2, then 1: auto-fit made 4+1 or 3+2. Stretch so every card is as tall as the row. */
+.cards.five { grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; align-items:stretch; }
+@media (max-width:1200px) { .cards.five { grid-template-columns:repeat(2,minmax(0,1fr)); } } @media (max-width:600px) { .cards.five { grid-template-columns:minmax(0,1fr); } }
 /* Info icon (assets/icons/info.svg) with the design spec's tooltip card. */
 .tip { display:inline-grid; place-items:center; width:20px; height:20px; margin-left:8px; vertical-align:middle; position:relative; cursor:help; flex:none; border-radius:50%; }
 .tip .i, .tip svg { width:20px; height:20px; display:block; }
@@ -130,6 +134,10 @@ main { overflow-x:clip; }
 .wizart .tick { stroke-dasharray:70; animation:draw var(--dur-slow) var(--ease) var(--dur) backwards; } @keyframes draw { from { stroke-dashoffset:70; } }
 .wiz .preview { background:var(--b3); border-radius:6px; padding:8px 12px; min-width:220px; }
 .note { background:var(--b3); border:1px solid var(--line); border-radius:6px; padding:4px 10px; margin:4px 0; font-size:13px; }
+/* Security rows: title and detail flow as one text block, the fix button stays at the right edge. */
+.note.chk { flex-wrap:nowrap; } .note.chk > div { flex:1; min-width:0; overflow-wrap:anywhere; } .note.chk > button { flex:none; margin-left:auto; }
+.note.chk.bad { border-color:color-mix(in srgb, var(--bad) 60%, transparent); background:color-mix(in srgb, var(--bad) 8%, var(--b3)); }
+.passed { margin:8px 0 0; } .passed summary { cursor:pointer; font-size:13px; color:var(--muted); }
 .dinput { background:var(--b1); border-radius:6px; padding:6px 10px; margin-top:8px; font-family:monospace; }
 .checks { list-style:none; padding:0; } .checks li::before { content:"○ "; } .checks li { transition:color var(--dur) var(--ease) calc(var(--i, 0) * 60ms); } .checks li.ok { color:var(--ok); } .checks li.run { animation:pulse 1.2s var(--ease) calc(var(--i, 0) * 150ms) infinite; } @keyframes pulse { 50% { opacity:.35; } } .checks li.ok::before { content:"✓ "; } .checks li.err { color:var(--bad); } .checks li.err::before { content:"✕ "; }
 .checks.warn li { color:var(--warn); } .checks.warn li::before { content:"⚠ "; }
@@ -222,7 +230,8 @@ nav a.on .i [fill^="url"] { fill:currentColor; } nav a.on .i [stroke^="url"] { s
 .cs .lbl { font-size:12px; font-weight:600; text-transform:uppercase; color:var(--muted); margin:16px 0 6px; }
 .cs .seg { display:inline-flex; flex-wrap:wrap; border:1px solid var(--line); border-radius:8px; overflow:hidden; } .cs .seg button { border:0; border-radius:0; text-transform:none; font-weight:400; } .cs .seg button.on { font-weight:600; }
 .cs .row2 { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:10px 0; } .cs .row2 .tip { margin-left:0; } .cs .row2 button .i { margin-right:6px; }
-.cs select.add { width:auto; padding:2px 10px; font-size:12px; font-weight:600; text-transform:uppercase; background:none; }
+.cs select.add { width:auto; padding:2px 10px; font-size:12px; font-weight:600; background:none; }
+.cs button { text-transform:none; } .cs select.addch { width:auto; font-weight:600; background:none; cursor:pointer; }
 .cs .line { margin:12px 0 0; font-size:13px; } .cs .line .i { width:18px; height:18px; vertical-align:-4px; margin-right:6px; }
 .cs .line button.link { display:inline; color:var(--info); text-decoration:underline; } [data-theme=light] .cs .line button.link { color:#0369a1; }
 .cs .modal h2 { display:flex; gap:8px; align-items:center; } .cs .modal h2 .i { width:22px; height:22px; flex:none; }
