@@ -201,6 +201,7 @@ nav a.on .i [fill^="url"] { fill:currentColor; } nav a.on .i [stroke^="url"] { s
 .cs .tr:hover { background:color-mix(in srgb, var(--b3) 60%, transparent); }
 .cs .tr.sel, .cs .tr.sel:hover { background:color-mix(in srgb, var(--primary) 18%, transparent); box-shadow:inset 0 0 0 1px var(--primary); }
 .cs .tr.over, .cs .tr.over:hover { box-shadow:inset 0 2px 0 var(--primary); }
+.cs .slot { height:4px; border-radius:6px; transition:height var(--dur) var(--ease); } .cs .slot.on { height:14px; } .cs .slot.on:hover { box-shadow:inset 0 2px 0 var(--primary); }
 .cs .tr.child { padding-left:32px; } .cs .tr.cat { margin-top:10px; font-size:13px; font-weight:600; text-transform:uppercase; color:var(--muted); }
 .cs .tr > .i, .cs .tr .tip .i, .cs .acts .i { width:18px; height:18px; flex:none; } .cs .tr .tip { margin-left:0; width:18px; height:18px; }
 .cs .nm { min-width:0; overflow-wrap:anywhere; text-align:left; } .cs .tr input.nm { flex:1; padding:2px 8px; }

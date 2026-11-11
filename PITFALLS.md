@@ -82,6 +82,14 @@ The timeout DM went out before the timeout worked, and a failed anti-nuke report
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
 
+**A resumable run read its intent from the state it was changing.** (Channel Setup review, 11-11)
+Push decided "this channel follows its category" from live Discord (synced with the category). Once the category's overwrites were pushed and a child's step failed, the child was no longer synced in live, read as an exception on the next push, and stayed public.
+*Avoid:* a run that is resumed by recomputing a diff stores every decision derived from the old state before its first step (Push writes `reset` into the draft for each follower), and stops at the first failed step instead of running the rest (deletes included) against a half-changed server.
+
+**A per-process flag does not stop a second writer.** (Channel Setup review, 11-11)
+Push guarded itself with a static `HashSet` of guilds, so a second dashboard process could push at the same time, and a draft PUT or DELETE during a push was overwritten by the push's write-back. A stale PUT after a push brought back `new-*` keys that were already created, and the next push created them twice.
+*Avoid:* hold a Postgres advisory lock for the whole run (`pg_try_advisory_xact_lock` in a transaction the run owns, so it is freed when the task ends or the process dies) and refuse other writers with 409 while it is held. Keys a run has used up are recorded (`next`) and refused when they come back. Run the steps in `tokio::spawn` and await the handle, so a dropped request does not stop a run half way; log what will happen before the first step and the result after, and record a failed save instead of returning with `?`.
+
 ## 3. Automod
 
 **Filters only saw plain text.** (#101)
@@ -156,6 +164,10 @@ See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the t
 - **The toast looked like two pieces.** A coloured `border-left` on a rounded box curves at the corners, and the absolutely placed progress strip starts inside that border, so the two met as a hook. *Avoid:* one colour mark per box. Put strips and edges inside an `overflow:hidden` box with `left:0; right:0` and no border on that side. Also `cargo fmt` in `crates/dashboard/ui` reformats unrelated files; revert them before committing.
 
 - **The 2FA check ran before the DM code.** (MCP writes, PR 4, caught in review) `confirm` checked the TOTP code first, so anyone holding an MCP token could send wrong TOTP codes and lock the owner out of dashboard 2FA for 10 minutes. *Avoid:* when a request carries several secrets, check the one the caller must already hold (the DM code) first, and touch shared lockout counters only after it passes.
+- **An action ran something other than what was reviewed.** (Channel Setup review, 11-11) Push ran the draft stored at that moment, which another editor (or a late save) could have changed after the preview. *Avoid:* every reply carries a version of what it shows (`updated_at`), the action sends it back, and a mismatch is refused with 409.
+- **An empty list switched an authorization rule off.** (Channel Setup review, 11-11) "Only owners may hide a channel from staff" compared against the staff roles; a server without roles on the Admins and Moderators permits had none, so nothing ever counted as hidden and anyone could do it. *Avoid:* decide what an empty list means for the rule (here: every newly limited channel hides it from staff) and say in the refusal how to fix it.
+- **A filter meant for display also weakened the check.** (Channel Setup review, 11-11) Member overwrites were left out of the issue list so they would not make rows pulse, which also let a dangerous member overwrite through Push. *Avoid:* filter for display where it is shown; the list that decides keeps every row.
+- **A picker's filter is not validation.** (Channel Setup review, 11-11) The UI left the quarantine and main roles out of the role picker, but the server took any role id, and the UI's own list still offered roles the server would refuse. *Avoid:* the server validates with the same rule (`Ctx::pickable`) and sends the allowed ids, and the UI offers only those.
 - **A body extractor answers before the handler's own check.** (MCP writes, PR 4) The "not through the tunnel" check sat inside the handler, after `Json(..)`, so a request without a JSON body got 415 instead of 404 and the route showed it exists. *Avoid:* a check that must refuse before anything else is a `route_layer` middleware, not the first line of the handler.
 
 ## 7. Build and deploy

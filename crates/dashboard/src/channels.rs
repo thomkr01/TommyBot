@@ -19,10 +19,7 @@ use axum::{
 use reqwest::Method;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::{LazyLock, Mutex},
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tommybot_antinuke::{
     security::{self, private_overwrites, stripped_overwrite, synced, GuildSafety, Setup},
     ChannelImg, OverwriteImg, RoleImg, CATEGORY,
@@ -42,6 +39,19 @@ const KINDS: [u8; 4] = [0, 2, CATEGORY, 5];
 pub struct Draft {
     #[serde(default)]
     pub items: BTreeMap<String, Item>,
+    /// Lowest `new-<n>` number not yet used: a push raises it past every key it created, so a stale
+    /// PUT cannot bring a created key back and create it twice. Kept by the server, the UI's is ignored.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub next: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// The number of a `new-<n>` key.
+fn new_num(key: &str) -> Option<u64> {
+    key.strip_prefix("new-")?.parse().ok()
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
@@ -113,13 +123,14 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    /// Roles a user picks: not @everyone, staff, the bot's, quarantine or a main role.
+    /// Roles a user picks: not @everyone, staff, the bot's, quarantine, a main or a managed role.
     fn pickable(&self, role: u64) -> bool {
         role != self.guild
             && !self.staff.contains(&role)
             && !self.setup.bot_roles.contains(&role)
             && self.setup.quarantine_role != Some(role)
             && !self.setup.main_roles.contains(&role)
+            && !self.roles.iter().any(|r| r.id == role && r.managed)
     }
 }
 
@@ -144,6 +155,9 @@ pub struct Node {
     img: ChannelImg,
     #[serde(skip)]
     changed: bool,
+    /// A live channel that takes its category's overwrites because it is synced in live.
+    #[serde(skip)]
+    follows: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -154,6 +168,9 @@ pub struct Issue {
     pub title: String,
     pub detail: String,
     pub fix: Option<DraftFix>,
+    /// On a member overwrite: it stops Push, but the tree's red pulse counts only role overwrites.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub member: bool,
 }
 
 /// The draft edit Fix makes on the issue's channel.
@@ -291,12 +308,7 @@ fn channel_name(name: &str, kind: u8) -> String {
 }
 
 /// Checks a draft from the UI against the live server and normalizes its names.
-pub fn validate(
-    draft: &mut Draft,
-    live: &[ChannelImg],
-    roles: &[RoleImg],
-    guild: u64,
-) -> Result<(), String> {
+pub fn validate(draft: &mut Draft, live: &[ChannelImg], ctx: &Ctx) -> Result<(), String> {
     if draft.items.len() > MAX_ITEMS {
         return Err(format!("at most {MAX_ITEMS} changes"));
     }
@@ -343,12 +355,14 @@ pub fn validate(
             return Err(format!("{key}: strip takes up to {MAX_LIST} ids"));
         }
         if let Some(a) = &it.access {
+            // Quarantine, bot, main, managed roles and @everyone are not given access by hand.
             let known = |r: &String| {
-                r != &guild.to_string() && roles.iter().any(|x| &x.id.to_string() == r)
+                r.parse::<u64>()
+                    .is_ok_and(|r| ctx.pickable(r) && ctx.roles.iter().any(|x| x.id == r))
             };
             if a.roles.len() > MAX_LIST || !a.roles.iter().all(known) {
                 return Err(format!(
-                    "{key}: access takes up to {MAX_LIST} roles of this server"
+                    "{key}: access takes up to {MAX_LIST} roles of this server that you can pick"
                 ));
             }
         }
@@ -381,21 +395,29 @@ pub fn validate(
 }
 
 /// Channels the draft hides from staff that live shows them, by a channel's own access, a move
-/// or reset into such a category, or a new channel in one. Only owners may do that.
+/// or reset into such a category, or a new channel in one. Only owners may do that. Without staff
+/// roles every limited channel hides from staff, so newly limiting one needs an owner too.
 pub fn unstaffed(nodes: &[Node], live: &[ChannelImg], ctx: &Ctx) -> HashSet<String> {
+    let hides = |a: &Access| a.is_limited() && (!a.staff || ctx.staff.is_empty());
     nodes
         .iter()
-        .filter(|n| !n.deleted && n.access.is_limited() && !n.access.staff)
+        .filter(|n| !n.deleted && hides(&n.access))
         .filter(|n| {
             live.iter()
                 .find(|c| c.id.to_string() == n.id)
-                .is_none_or(|c| {
-                    let now = access_of(&c.overwrites, ctx);
-                    !now.is_limited() || now.staff
-                })
+                .is_none_or(|c| !hides(&access_of(&c.overwrites, ctx)))
         })
         .map(|n| n.id.clone())
         .collect()
+}
+
+/// The refusal when `unstaffed` finds something and the user is no owner.
+fn unstaff_refusal(ctx: &Ctx) -> ApiError {
+    ApiError::Forbidden(if ctx.staff.is_empty() {
+        "only owners can hide a channel from staff. Set roles for the Admins and Moderators permits first"
+    } else {
+        "only owners can hide a channel from staff"
+    })
 }
 
 /// Positions as the index inside the parent, the order the UI edits. Discord's own positions have
@@ -482,6 +504,7 @@ pub fn desired(live: &[ChannelImg], draft: &Draft, ctx: &Ctx) -> Vec<Node> {
             .and_then(|c| c.parent)
             .and_then(|p| live.iter().find(|x| x.id == p));
         let follows = c.is_some_and(|c| live_cat.is_some_and(|cat| synced(c, cat)));
+        let follows = follows && parent_ows.is_some();
         let base = match (c, parent_ows) {
             (None, p) => quarantine(p.unwrap_or_default()),
             (Some(_), Some(p)) if it.reset || follows => p,
@@ -501,6 +524,16 @@ pub fn desired(live: &[ChannelImg], draft: &Draft, ctx: &Ctx) -> Vec<Node> {
             Some(a) => apply(&img, img.overwrites.clone(), a, ctx),
             None => img.overwrites.clone(),
         };
+        // Taking a category's overwrites (reset, move, follow) must not drop the quarantine deny.
+        let q = ctx.setup.quarantine_role;
+        let held = c.and_then(|c| {
+            c.overwrites
+                .iter()
+                .find(|o| o.is_role && Some(o.target) == q)
+        });
+        if let Some(o) = held.filter(|o| !ows.iter().any(|x| x.is_role && x.target == o.target)) {
+            ows.push(o.clone());
+        }
         for o in ows.iter_mut() {
             if it.strip.contains(&o.target.to_string()) {
                 *o = stripped_overwrite(o, ctx.guild, &ctx.setup);
@@ -530,6 +563,7 @@ pub fn desired(live: &[ChannelImg], draft: &Draft, ctx: &Ctx) -> Vec<Node> {
             issues: vec![],
             img,
             changed,
+            follows,
         });
     }
     let cats: HashMap<String, ChannelImg> = nodes
@@ -587,6 +621,7 @@ pub fn issues(nodes: &[Node], ctx: &Ctx, config: &Value) -> Vec<Issue> {
     };
     let mut out = vec![];
     for row in security::checks(&g, &ctx.roles, &imgs, ctx.bot_pos, &ctx.setup) {
+        let mut member = false;
         let (channel, id, fix) = if let Some(rest) = row.id.strip_prefix("overwrite_") {
             let Some((c, t)) = rest.split_once('_') else {
                 continue;
@@ -594,13 +629,10 @@ pub fn issues(nodes: &[Node], ctx: &Ctx, config: &Value) -> Vec<Issue> {
             let (Ok(c), Ok(t)) = (c.parse::<u64>(), t.parse::<u64>()) else {
                 continue;
             };
-            let role = imgs
+            member = imgs
                 .iter()
                 .find(|x| x.id == c)
-                .is_some_and(|x| x.overwrites.iter().any(|o| o.target == t && o.is_role));
-            if !role {
-                continue;
-            }
+                .is_some_and(|x| x.overwrites.iter().any(|o| o.target == t && !o.is_role));
             let fix = DraftFix {
                 strip: Some(t.to_string()),
                 access: None,
@@ -628,6 +660,7 @@ pub fn issues(nodes: &[Node], ctx: &Ctx, config: &Value) -> Vec<Issue> {
             title: row.title.into(),
             detail: row.detail,
             fix,
+            member,
         });
     }
     for n in nodes.iter().filter(|n| n.deleted && !n.new) {
@@ -643,6 +676,7 @@ pub fn issues(nodes: &[Node], ctx: &Ctx, config: &Value) -> Vec<Issue> {
                 title: "Channel is in use".into(),
                 detail: format!("{what} is used by {by}; pick another channel first."),
                 fix: None,
+                member: false,
             });
         }
     }
@@ -716,10 +750,12 @@ pub fn plan(live: &[ChannelImg], nodes: &[Node]) -> Vec<Step> {
     }
     // Positions are indexes inside a parent, so every sibling of a moved channel is sent too.
     let group = |n: &Node| (n.parent.clone(), n.kind == CATEGORY);
+    // A new channel takes an index position, so its kept siblings need index positions too.
     let touched: HashSet<_> = kept
         .iter()
         .filter(|(n, _)| n.moved)
         .map(|(n, _)| group(n))
+        .chain(fresh.iter().map(|n| group(n)))
         .collect();
     let moves: Vec<Move> = kept
         .iter()
@@ -780,6 +816,15 @@ fn remap(draft: &mut Draft, key: &str, id: &str) {
     }
 }
 
+/// Writes "follow the category" into the draft for every channel that follows it only because it
+/// is synced in live. Push saves this first: once the category is pushed, a child whose step
+/// failed is no longer synced in live and would otherwise read as an exception on the next push.
+fn pin_follows(draft: &mut Draft, nodes: &[Node]) {
+    for n in nodes.iter().filter(|n| n.follows && !n.deleted) {
+        draft.items.entry(n.id.clone()).or_default().reset = true;
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -821,54 +866,94 @@ async fn world(st: &AppState, guild: i64) -> Result<World, ApiError> {
     })
 }
 
-async fn load(st: &AppState, guild: i64) -> Result<Draft, ApiError> {
-    let v: Option<Value> =
-        sqlx::query_scalar("SELECT draft FROM channel_drafts WHERE guild_id = $1")
+/// The stored draft and its version (`updated_at`, empty without a row).
+async fn load(st: &AppState, guild: i64) -> Result<(Draft, String), ApiError> {
+    let row: Option<(Value, String)> =
+        sqlx::query_as("SELECT draft, updated_at::text FROM channel_drafts WHERE guild_id = $1")
             .bind(guild)
             .fetch_optional(&st.db)
             .await?;
-    Ok(v.and_then(|v| serde_json::from_value(v).ok())
+    Ok(row
+        .map(|(v, t)| (serde_json::from_value(v).unwrap_or_default(), t))
         .unwrap_or_default())
 }
 
-/// Stores the draft; an empty one is deleted.
-async fn save(st: &AppState, guild: i64, draft: &Draft, user: i64) -> Result<(), ApiError> {
-    if draft.items.is_empty() {
+/// Stores the draft and returns its new version; an empty one without a `next` is deleted.
+async fn save(st: &AppState, guild: i64, draft: &Draft, user: i64) -> sqlx::Result<String> {
+    if draft.items.is_empty() && draft.next == 0 {
         sqlx::query("DELETE FROM channel_drafts WHERE guild_id = $1")
             .bind(guild)
             .execute(&st.db)
             .await?;
-        return Ok(());
+        return Ok(String::new());
     }
-    sqlx::query(
+    sqlx::query_scalar(
         "INSERT INTO channel_drafts (guild_id, draft, updated_by) VALUES ($1, $2, $3)
-         ON CONFLICT (guild_id) DO UPDATE SET draft = $2, updated_by = $3, updated_at = now()",
+         ON CONFLICT (guild_id) DO UPDATE SET draft = $2, updated_by = $3, updated_at = now()
+         RETURNING updated_at::text",
     )
     .bind(guild)
     .bind(sqlx::types::Json(draft))
     .bind(user)
-    .execute(&st.db)
-    .await?;
-    Ok(())
+    .fetch_one(&st.db)
+    .await
+}
+
+/// The guild's draft lock, held until the transaction ends (also when it is dropped or the process
+/// dies). Push holds it exclusively for its whole run; PUT and DELETE share it while they save, so
+/// they are refused during a push instead of overwriting the draft it writes back.
+async fn lock(
+    st: &AppState,
+    guild: i64,
+    push: bool,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, ApiError> {
+    let mut tx = st.db.begin().await?;
+    let sql = if push {
+        "SELECT pg_try_advisory_xact_lock(hashtextextended('channel_drafts:' || $1, 0))"
+    } else {
+        "SELECT pg_try_advisory_xact_lock_shared(hashtextextended('channel_drafts:' || $1, 0))"
+    };
+    let ok: bool = sqlx::query_scalar(sql)
+        .bind(guild)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !ok {
+        return Err(ApiError::Busy(if push {
+            "a push is running or the draft is being saved; try again in a moment"
+        } else {
+            "a push is running; wait for it to finish, then reload"
+        }));
+    }
+    Ok(tx)
 }
 
 /// The tree with its issues, as every route answers.
-fn view(w: &World, draft: &Draft, level: Level) -> (Vec<Node>, Vec<Issue>, Value) {
+fn view(w: &World, draft: &Draft, level: Level, version: &str) -> (Vec<Node>, Vec<Issue>, Value) {
     let mut tree = desired(&w.channels, draft, &w.ctx);
     let issues = issues(&tree, &w.ctx, &w.config);
     for n in &mut tree {
+        // Member overwrites stop Push but do not make the row pulse.
         n.issues = issues
             .iter()
-            .filter(|i| i.channel == n.id)
+            .filter(|i| i.channel == n.id && !i.member)
             .cloned()
             .collect();
     }
+    let pickable: Vec<String> = w
+        .ctx
+        .roles
+        .iter()
+        .filter(|r| w.ctx.pickable(r.id))
+        .map(|r| r.id.to_string())
+        .collect();
     let reply = json!({
         "draft": draft,
+        "version": version,
         "tree": tree,
         "issues": issues,
         "changes": tree.iter().filter(|n| n.changed).count(),
         "staff_roles": w.ctx.staff.iter().map(u64::to_string).collect::<Vec<_>>(),
+        "pickable_roles": pickable,
         "can_unstaff": level >= Level::Owner,
     });
     (tree, issues, reply)
@@ -877,9 +962,9 @@ fn view(w: &World, draft: &Draft, level: Level) -> (Vec<Node>, Vec<Issue>, Value
 async fn get_draft(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     let level = require(&st, &s, guild, Level::Viewer, false).await?;
     let w = world(&st, guild).await?;
-    let mut draft = load(&st, guild).await?;
+    let (mut draft, version) = load(&st, guild).await?;
     prune(&mut draft, &w.channels);
-    Ok(Json(view(&w, &draft, level).2))
+    Ok(Json(view(&w, &draft, level, &version).2))
 }
 
 #[derive(Deserialize)]
@@ -899,61 +984,65 @@ async fn put_draft(
     let mut draft = serde_json::from_value::<PutBody>(b)
         .map_err(|e| ApiError::BadRequest(format!("invalid draft: {e}")))?
         .draft;
+    let _lock = lock(&st, guild, false).await?;
     let w = world(&st, guild).await?;
     prune(&mut draft, &w.channels);
-    validate(&mut draft, &w.channels, &w.ctx.roles, w.ctx.guild).map_err(ApiError::BadRequest)?;
+    validate(&mut draft, &w.channels, &w.ctx).map_err(ApiError::BadRequest)?;
+    let (mut before, _) = load(&st, guild).await?;
+    prune(&mut before, &w.channels);
+    draft.next = before.next;
+    let reused = draft
+        .items
+        .keys()
+        .any(|k| !before.items.contains_key(k) && new_num(k).is_some_and(|n| n < before.next));
+    if reused {
+        return Err(ApiError::Busy(
+            "this draft is older than the last push; reload the page",
+        ));
+    }
     // What an owner already put in the draft may stay while someone else edits the rest.
     let hidden = |d: &Draft| unstaffed(&desired(&w.channels, d, &w.ctx), &w.channels, &w.ctx);
-    if level < Level::Owner {
-        let mut before = load(&st, guild).await?;
-        prune(&mut before, &w.channels);
-        if !hidden(&draft).is_subset(&hidden(&before)) {
-            return Err(ApiError::Forbidden(
-                "only owners can hide a channel from staff",
-            ));
-        }
+    if level < Level::Owner && !hidden(&draft).is_subset(&hidden(&before)) {
+        return Err(unstaff_refusal(&w.ctx));
     }
-    save(&st, guild, &draft, s.user_id).await?;
-    Ok(Json(view(&w, &draft, level).2))
+    let version = save(&st, guild, &draft, s.user_id).await?;
+    Ok(Json(view(&w, &draft, level, &version).2))
 }
 
 async fn discard(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     let level = require(&st, &s, guild, Level::Editor, false).await?;
-    save(&st, guild, &Draft::default(), s.user_id).await?;
+    let _lock = lock(&st, guild, false).await?;
+    let empty = Draft {
+        next: load(&st, guild).await?.0.next,
+        ..Default::default()
+    };
+    let version = save(&st, guild, &empty, s.user_id).await?;
     let w = world(&st, guild).await?;
-    Ok(Json(view(&w, &Draft::default(), level).2))
-}
-
-/// Guilds with a push running, so a double click cannot create every channel twice.
-static PUSHING: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
-
-struct Pushing(i64);
-
-impl Drop for Pushing {
-    fn drop(&mut self) {
-        PUSHING.lock().unwrap().remove(&self.0);
-    }
+    Ok(Json(view(&w, &empty, level, &version).2))
 }
 
 async fn push(
     State(st): State<AppState>,
     s: Sess,
     Path(guild): Path<i64>,
+    Json(b): Json<Value>,
 ) -> Result<Response, ApiError> {
     let level = require(&st, &s, guild, Level::Admin, true).await?;
-    if !PUSHING.lock().unwrap().insert(guild) {
-        return Err(ApiError::BadRequest("a push is already running".into()));
-    }
-    let _guard = Pushing(guild);
+    // Held by the step task until the push is done, also when this request is dropped.
+    let lock = lock(&st, guild, true).await?;
     let w = world(&st, guild).await?;
-    let mut draft = load(&st, guild).await?;
-    prune(&mut draft, &w.channels);
-    validate(&mut draft, &w.channels, &w.ctx.roles, w.ctx.guild).map_err(ApiError::BadRequest)?;
-    let (tree, issues, _) = view(&w, &draft, level);
-    if level < Level::Owner && !unstaffed(&tree, &w.channels, &w.ctx).is_empty() {
-        return Err(ApiError::Forbidden(
-            "only owners can hide a channel from staff",
+    let (mut draft, version) = load(&st, guild).await?;
+    // Push runs exactly the draft the user reviewed.
+    if b["version"].as_str() != Some(version.as_str()) {
+        return Err(ApiError::Busy(
+            "the draft changed since you looked at it; check it again, then push",
         ));
+    }
+    prune(&mut draft, &w.channels);
+    validate(&mut draft, &w.channels, &w.ctx).map_err(ApiError::BadRequest)?;
+    let (tree, issues, _) = view(&w, &draft, level, &version);
+    if level < Level::Owner && !unstaffed(&tree, &w.channels, &w.ctx).is_empty() {
+        return Err(unstaff_refusal(&w.ctx));
     }
     if !issues.is_empty() {
         let body = json!({"error": "the draft is not safe yet", "issues": issues});
@@ -961,7 +1050,11 @@ async fn push(
     }
     let steps = plan(&w.channels, &tree);
     if steps.is_empty() {
-        save(&st, guild, &Draft::default(), s.user_id).await?;
+        let empty = Draft {
+            next: draft.next,
+            ..Default::default()
+        };
+        save(&st, guild, &empty, s.user_id).await?;
         return Ok(Json(json!({"done": 0, "failed": [], "backup": null})).into_response());
     }
     let backup: i64 =
@@ -970,38 +1063,119 @@ async fn push(
             .bind(sqlx::types::Json(live_image(guild, &w.raw.0, &w.raw.1)))
             .fetch_one(&st.db)
             .await?;
+    pin_follows(&mut draft, &tree);
+    save(&st, guild, &draft, s.user_id).await?;
+    let who = format!("{} (<@{}>)", s.username, s.user_id);
+    log_change(
+        &st,
+        guild,
+        &w.config,
+        format!(
+            "{who} started a channel setup push: {}, backup #{backup}",
+            outline(&steps, &tree)
+        ),
+    )
+    .await;
+    let task = tokio::spawn(run_steps(
+        st, guild, s.user_id, who, draft, steps, w.config, backup, lock,
+    ));
+    let (done, failed) = task.await?;
+    Ok(Json(json!({"done": done, "failed": failed, "backup": backup})).into_response())
+}
+
+/// Counts of what the steps do, with the names of the channels they delete.
+fn outline(steps: &[Step], tree: &[Node]) -> String {
+    let count = |f: fn(&Step) -> bool| steps.iter().filter(|s| f(s)).count();
+    let moves: usize = steps
+        .iter()
+        .map(|s| match s {
+            Step::Positions(m) => m.len(),
+            _ => 0,
+        })
+        .sum();
+    let gone: Vec<String> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Delete { id } => tree
+                .iter()
+                .find(|n| n.img.id == *id)
+                .map(|n| n.name.clone()),
+            _ => None,
+        })
+        .collect();
+    format!(
+        "{} create(s), {} rename(s), {moves} move(s), {} permission change(s), {} delete(s){}",
+        count(|s| matches!(s, Step::Create { .. })),
+        count(|s| matches!(s, Step::Rename { .. })),
+        count(|s| matches!(s, Step::Overwrite { .. } | Step::DropOverwrite { .. })),
+        gone.len(),
+        if gone.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", gone.join(", "))
+        }
+    )
+}
+
+/// Runs the steps in Discord and stops at the first failure: the plan is diff-based, so the next
+/// push resumes there. Created ids are written back into the draft as they happen.
+#[allow(clippy::too_many_arguments)]
+async fn run_steps(
+    st: AppState,
+    guild: i64,
+    user: i64,
+    who: String,
+    mut draft: Draft,
+    steps: Vec<Step>,
+    config: Value,
+    backup: i64,
+    _lock: sqlx::Transaction<'static, sqlx::Postgres>,
+) -> (usize, Vec<String>) {
     let (mut done, mut failed) = (0, vec![]);
     let mut made: HashMap<String, String> = HashMap::new();
     for step in &steps {
         match run(&st, guild, step, &made).await {
             Ok(Some((key, id))) => {
                 remap(&mut draft, &key, &id);
+                if let Some(n) = new_num(&key) {
+                    draft.next = draft.next.max(n + 1);
+                }
                 made.insert(key, id);
-                save(&st, guild, &draft, s.user_id).await?;
                 done += 1;
+                // Without the new id in the store, the next push would create it again.
+                if let Err(e) = save(&st, guild, &draft, user).await {
+                    failed.push(format!("save the draft after {}: {e}", what(step)));
+                    break;
+                }
             }
             Ok(None) => done += 1,
-            Err(e) => failed.push(format!("{}: {e:#}", what(step))),
+            Err(e) => {
+                failed.push(format!("{}: {e:#}", what(step)));
+                break;
+            }
         }
     }
-    // A failed step keeps the rest of the draft (with the created ids), so Push again resumes.
     if failed.is_empty() {
-        draft = Draft::default();
+        draft = Draft {
+            next: draft.next,
+            ..Default::default()
+        };
     }
-    save(&st, guild, &draft, s.user_id).await?;
+    if let Err(e) = save(&st, guild, &draft, user).await {
+        failed.push(format!("save the draft: {e}"));
+    }
     log_change(
         &st,
         guild,
-        &w.config,
+        &config,
         format!(
-            "{} (<@{}>) pushed the channel setup: {done} change(s), {} failed, backup #{backup}",
-            s.username,
-            s.user_id,
+            "{who} pushed the channel setup: {done} of {} step(s) done, {} failed, backup #{backup}",
+            steps.len(),
             failed.len()
         ),
     )
     .await;
-    Ok(Json(json!({"done": done, "failed": failed, "backup": backup})).into_response())
+    (done, failed)
 }
 
 fn what(step: &Step) -> String {
@@ -1259,7 +1433,7 @@ mod tests {
             "new-2": {"kind": 0, "name": "x", "parent": "20"},
             "new-3": {"kind": 2, "name": "Voice Room"},
         }));
-        validate(&mut d, &live, &ctx.roles, G).unwrap();
+        validate(&mut d, &live, &ctx).unwrap();
         assert_eq!(d.items["new-1"].name.as_deref(), Some("my-chat"));
         assert_eq!(d.items["new-3"].name.as_deref(), Some("Voice Room"));
         let n = desired(&live, &d, &ctx);
@@ -1312,24 +1486,18 @@ mod tests {
     fn deleting_a_category_with_channels_or_a_used_channel_is_refused() {
         let (live, ctx) = (live(), ctx());
         let mut d = draft(json!({"10": {"delete": true}}));
-        let e = validate(&mut d, &live, &ctx.roles, G).unwrap_err();
+        let e = validate(&mut d, &live, &ctx).unwrap_err();
         assert_eq!(e, "move or delete its channels first");
         let mut d =
             draft(json!({"10": {"delete": true}, "11": {"delete": true}, "12": {"parent": null}}));
-        validate(&mut d, &live, &ctx.roles, G).unwrap();
+        validate(&mut d, &live, &ctx).unwrap();
         let mut d = draft(json!({"new-1": {"kind": 0, "name": "x", "parent": "11"}}));
-        assert!(
-            validate(&mut d, &live, &ctx.roles, G).is_err(),
-            "11 is no category"
-        );
+        assert!(validate(&mut d, &live, &ctx).is_err(), "11 is no category");
         let mut d = draft(json!({"11": {"access": {"roles": ["999"]}}}));
-        assert!(
-            validate(&mut d, &live, &ctx.roles, G).is_err(),
-            "not a role here"
-        );
+        assert!(validate(&mut d, &live, &ctx).is_err(), "not a role here");
         let mut d = draft(json!({"11": {"kind": 0}}));
         assert!(
-            validate(&mut d, &live, &ctx.roles, G).is_err(),
+            validate(&mut d, &live, &ctx).is_err(),
             "kind is for new ones"
         );
         // The config's log channel cannot go.
@@ -1366,6 +1534,7 @@ mod tests {
         };
         let d = Draft {
             items: [("13".to_string(), item)].into(),
+            ..Default::default()
         };
         let n = desired(&live, &d, &ctx);
         assert!(issues(&n, &ctx, &json!({})).is_empty());
@@ -1374,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dangerous_role_overwrite_is_an_issue_a_member_one_is_not() {
+    fn a_dangerous_overwrite_is_an_issue_a_member_one_only_stops_push() {
         let (mut live, mut ctx) = (live(), ctx());
         ctx.setup.log_channels.clear();
         live.push(ch(14, 0, None, vec![ow(5, MANAGE_CHANNELS | VIEW, 0)]));
@@ -1385,13 +1554,19 @@ mod tests {
         live.push(ch(15, 0, None, vec![member]));
         let n = desired(&live, &Draft::default(), &ctx);
         let i = issues(&n, &ctx, &json!({}));
-        assert_eq!(i.len(), 1);
+        assert_eq!(i.len(), 2);
         assert_eq!(
-            (i[0].id.as_str(), i[0].channel.as_str()),
-            ("overwrite_14_5", "14")
+            (i[0].id.as_str(), i[0].channel.as_str(), i[0].member),
+            ("overwrite_14_5", "14", false)
         );
         assert_eq!(i[0].fix.as_ref().unwrap().strip.as_deref(), Some("5"));
-        let n = desired(&live, &draft(json!({"14": {"strip": ["5"]}})), &ctx);
+        // The member overwrite stops Push too; only the pulse (view) leaves it out.
+        assert_eq!((i[1].id.as_str(), i[1].member), ("overwrite_15_8", true));
+        let n = desired(
+            &live,
+            &draft(json!({"14": {"strip": ["5"]}, "15": {"strip": ["8"]}})),
+            &ctx,
+        );
         assert!(issues(&n, &ctx, &json!({})).is_empty());
         assert_eq!(node(&n, "14").img.overwrites, vec![ow(5, VIEW, 0)]);
     }
@@ -1426,6 +1601,95 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_push_still_moves_a_child_whose_category_went_through() {
+        let (live, ctx) = (live(), ctx());
+        let mut d = draft(json!({"10": {"access": {"roles": ["6"]}}}));
+        let n = desired(&live, &d, &ctx);
+        pin_follows(&mut d, &n);
+        assert!(d.items["11"].reset, "11 follows 10 in live");
+        assert!(!d.items.contains_key("12"), "12 is an exception");
+        // The category's overwrites were pushed, 11's step failed.
+        let mut half = live.clone();
+        half[0].overwrites = node(&n, "10").img.overwrites.clone();
+        let rest = plan(&half, &desired(&half, &d, &ctx));
+        assert!(
+            rest.iter()
+                .any(|s| matches!(s, Step::Overwrite { channel: 11, .. })),
+            "{rest:?}"
+        );
+        assert!(rest.iter().all(|s| !matches!(
+            s,
+            Step::Overwrite {
+                channel: 10 | 12,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_new_channel_gives_its_siblings_index_positions() {
+        let ctx = ctx();
+        let mut raw = live();
+        raw[1].position = 40;
+        raw[2].position = 41;
+        let live = normalized(raw);
+        let d = draft(json!({"new-1": {"kind": 0, "name": "x", "parent": "10", "position": 2}}));
+        let Some(Step::Positions(m)) = plan(&live, &desired(&live, &d, &ctx))
+            .into_iter()
+            .find(|s| matches!(s, Step::Positions(_)))
+        else {
+            panic!("no positions step");
+        };
+        let mut got: Vec<_> = m.iter().map(|m| (m.id, m.position)).collect();
+        got.sort();
+        assert_eq!(got, [(11, 0), (12, 1)]);
+    }
+
+    #[test]
+    fn without_staff_roles_newly_limiting_needs_an_owner() {
+        let (mut live, mut ctx) = (live(), ctx());
+        ctx.staff.clear();
+        let hidden =
+            |d: Value, live: &[ChannelImg]| unstaffed(&desired(live, &draft(d), &ctx), live, &ctx);
+        let on = json!({"access": {"roles": ["6"], "staff": true}});
+        assert!(hidden(json!({"13": on.clone()}), &live).contains("13"));
+        assert!(hidden(json!({"13": {"name": "x"}}), &live).is_empty());
+        // Limited in Discord already: not new.
+        live[4].overwrites = vec![ow(G, 0, VIEW)];
+        assert!(hidden(json!({"13": on}), &live).is_empty());
+        match unstaff_refusal(&ctx) {
+            ApiError::Forbidden(m) => {
+                assert!(m.contains("Set roles for the Admins and Moderators"))
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn quarantine_bot_main_and_managed_roles_cannot_be_picked_and_the_deny_stays() {
+        let (mut live, mut ctx) = (live(), ctx());
+        ctx.setup.bot_roles = vec![5];
+        ctx.roles.push(RoleImg {
+            managed: true,
+            ..role(8, 0)
+        });
+        for r in [Q, 5, G, 8, MAIN] {
+            let mut d = draft(json!({"11": {"access": {"roles": [r.to_string()]}}}));
+            assert!(validate(&mut d, &live, &ctx).is_err(), "role {r}");
+        }
+        let mut d = draft(json!({"11": {"access": {"roles": ["6"]}}}));
+        validate(&mut d, &live, &ctx).unwrap();
+        // 14 has the deny as an exception in 10, 21 is synced with 20: reset and move keep it.
+        let qdeny = ow(Q, 0, QUARANTINE_DENY);
+        live.push(ch(14, 0, Some(10), vec![qdeny.clone()]));
+        live.push(ch(21, 0, Some(20), vec![qdeny.clone()]));
+        let d = draft(json!({"14": {"reset": true}, "21": {"parent": "10"}}));
+        let n = desired(&live, &d, &ctx);
+        assert_eq!(node(&n, "14").img.overwrites, vec![qdeny.clone()]);
+        assert_eq!(node(&n, "21").img.overwrites, vec![qdeny]);
+    }
+
+    #[test]
     fn plan_runs_in_order_and_is_empty_once_applied() {
         let (live, ctx) = (live(), ctx());
         let mut d = draft(json!({
@@ -1436,7 +1700,7 @@ mod tests {
             "12": {"parent": "new-1", "position": 0},
             "13": {"delete": true},
         }));
-        validate(&mut d, &live, &ctx.roles, G).unwrap();
+        validate(&mut d, &live, &ctx).unwrap();
         let n = desired(&live, &d, &ctx);
         let steps = plan(&live, &n);
         let rank = |s: &Step| match s {
@@ -1455,7 +1719,10 @@ mod tests {
             position: 0,
             parent: Some(Some("new-1".into())),
         };
-        assert!(steps.contains(&Step::Positions(vec![moved])));
+        // New channels give their groups index positions too (here the categories).
+        assert!(steps
+            .iter()
+            .any(|s| matches!(s, Step::Positions(m) if m.contains(&moved))));
         // Only the creates went through: the rest is still planned, nothing is created twice.
         let made: HashMap<u64, u64> = n
             .iter()
@@ -1503,7 +1770,7 @@ mod db_tests {
         let owner = 7_800_000_000 + std::process::id() as i64;
         let calls: Arc<Mutex<Vec<String>>> = Default::default();
         let log = |c: &Arc<Mutex<Vec<String>>>, s: String| c.lock().unwrap().push(s);
-        let (c1, c2) = (calls.clone(), calls.clone());
+        let (c1, c2, c3) = (calls.clone(), calls.clone(), calls.clone());
         // A role overwrite that grants Manage Channels: Push must refuse until it is stripped.
         let channels = json!([{"id": "300", "name": "chat", "type": 0, "position": 0,
             "permission_overwrites": [{"id": "5", "type": 0, "allow": "16", "deny": "0"}]}]);
@@ -1524,6 +1791,9 @@ mod db_tests {
                 get(move || async move { Json(channels) }).post(move |Json(b): Json<Value>| async move {
                     log(&c1, format!("create {}", b["name"]));
                     Json(json!({"id": "301"}))
+                }).patch(move |Json(b): Json<Value>| async move {
+                    log(&c3, format!("positions {b}"));
+                    Json(json!({}))
                 }),
             )
             .route("/users/@me", get(|| async { Json(json!({"id": "7"})) }))
@@ -1585,9 +1855,9 @@ mod db_tests {
             }
         };
         let stored = || async {
-            sqlx::query_scalar::<_, i64>("select count(*) from channel_drafts where guild_id = $1")
+            sqlx::query_scalar::<_, Value>("select draft from channel_drafts where guild_id = $1")
                 .bind(g)
-                .fetch_one(&db)
+                .fetch_optional(&db)
                 .await
                 .unwrap()
         };
@@ -1598,6 +1868,10 @@ mod db_tests {
             (r["changes"].as_i64(), r["can_unstaff"].as_bool()),
             (Some(0), Some(true))
         );
+        assert_eq!(
+            (&r["version"], &r["pickable_roles"]),
+            (&json!(""), &json!(["5"]))
+        );
         assert_eq!(r["issues"][0]["id"], "overwrite_300_5");
         assert_eq!(r["tree"][0]["issues"][0]["fix"], json!({"strip": "5"}));
 
@@ -1606,39 +1880,92 @@ mod db_tests {
         assert_eq!(code, 200, "{r}");
         assert_eq!(r["changes"], 1);
         assert_eq!(r["draft"]["items"]["new-1"]["name"], "news-room");
-        assert_eq!(stored().await, 1);
+        assert!(stored().await.is_some());
         let bad = json!({"draft": {"items": {"300": {"perms": 8}}}});
         assert_eq!(send("PUT", "", owner, false, Some(bad)).await.0, 400);
         let other = json!({"draft": {"items": {}}});
         assert_eq!(send("PUT", "", owner + 1, false, Some(other)).await.0, 403);
 
-        let (code, r) = send("POST", "/push", owner, false, None).await;
+        let (code, r) = send("POST", "/push", owner, false, Some(json!({}))).await;
         assert_eq!((code, r["error"].as_str()), (403, Some("step_up_required")));
-        let (code, r) = send("POST", "/push", owner, true, None).await;
+        let (code, r) = send("POST", "/push", owner, true, Some(json!({}))).await;
+        assert_eq!(code, 409, "no version: {r}");
+        let v = send("GET", "", owner, false, None).await.1["version"].clone();
+        let (code, r) = send("POST", "/push", owner, true, Some(json!({ "version": v }))).await;
         assert_eq!(code, 409, "{r}");
         assert_eq!(r["issues"][0]["id"], "overwrite_300_5");
         assert!(calls.lock().unwrap().is_empty(), "nothing ran");
 
         let fixed = json!({"draft": {"items": {"new-1": {"kind": 0, "name": "news"}, "300": {"strip": ["5"]}}}});
-        assert_eq!(send("PUT", "", owner, false, Some(fixed)).await.0, 200);
-        let (code, r) = send("POST", "/push", owner, true, None).await;
+        let (code, r) = send("PUT", "", owner, false, Some(fixed)).await;
+        assert_eq!(code, 200, "{r}");
+        // A push of a version the user did not review is refused.
+        let (code, _) = send("POST", "/push", owner, true, Some(json!({ "version": v }))).await;
+        assert_eq!(code, 409);
+        let push = Some(json!({ "version": r["version"] }));
+        let (code, r) = send("POST", "/push", owner, true, push).await;
         assert_eq!(code, 200, "{r}");
         assert_eq!(
             (r["done"].as_i64(), r["failed"].as_array().map(Vec::len)),
-            (Some(2), Some(0))
+            (Some(3), Some(0))
         );
         assert!(r["backup"].is_i64());
         assert_eq!(
             *calls.lock().unwrap(),
-            ["create \"news\"", "put 300 5 \"0\""]
+            [
+                "create \"news\"",
+                "positions [{\"id\":\"300\",\"position\":0}]",
+                "put 300 5 \"0\""
+            ]
         );
-        assert_eq!(stored().await, 0, "a full push deletes the draft");
+        assert_eq!(
+            stored().await,
+            Some(json!({"items": {}, "next": 2})),
+            "a full push empties the draft and keeps the used keys"
+        );
+        // A stale tab sends new-1 again: it was created, so it is refused.
+        let stale = json!({"draft": {"items": {"new-1": {"kind": 0, "name": "news"}}}});
+        assert_eq!(send("PUT", "", owner, false, Some(stale)).await.0, 409);
 
-        let again = json!({"draft": {"items": {"new-1": {"kind": 4, "name": "x"}}}});
+        // The rename fails (the mock has no PATCH): the push stops there.
+        calls.lock().unwrap().clear();
+        let two = json!({"draft": {"items": {"new-2": {"kind": 0, "name": "a"}, "300": {"name": "b", "strip": ["5"]}}}});
+        let (code, r) = send("PUT", "", owner, false, Some(two)).await;
+        assert_eq!(code, 200, "{r}");
+        let push = Some(json!({ "version": r["version"] }));
+        let (code, r) = send("POST", "/push", owner, true, push).await;
+        assert_eq!(code, 200, "{r}");
+        assert_eq!(
+            (r["done"].as_i64(), r["failed"].as_array().map(Vec::len)),
+            (Some(1), Some(1))
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["create \"a\""],
+            "no step after the failure"
+        );
+        let left = stored().await.unwrap();
+        assert_eq!(
+            (&left["next"], left["items"].get("301").is_some()),
+            (&json!(3), true)
+        );
+
+        // While a push holds the lock, PUT and DELETE are refused.
+        let mut tx = db.begin().await.unwrap();
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended('channel_drafts:' || $1, 0))")
+            .bind(g)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let empty = json!({"draft": {"items": {}}});
+        assert_eq!(send("PUT", "", owner, false, Some(empty)).await.0, 409);
+        assert_eq!(send("DELETE", "", owner, false, None).await.0, 409);
+        tx.rollback().await.unwrap();
+
+        let again = json!({"draft": {"items": {"new-3": {"kind": 4, "name": "x"}}}});
         assert_eq!(send("PUT", "", owner, false, Some(again)).await.0, 200);
         let (code, r) = send("DELETE", "", owner, false, None).await;
-        assert_eq!((code, &r["draft"]), (200, &json!({"items": {}})));
-        assert_eq!(stored().await, 0);
+        assert_eq!((code, &r["draft"]), (200, &json!({"items": {}, "next": 3})));
         for t in ["backups", "channel_drafts"] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "delete from {t} where guild_id = $1"

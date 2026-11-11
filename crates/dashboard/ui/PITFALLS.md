@@ -151,6 +151,18 @@ Channel Setup's rename box focused and selected its text from an `Effect` on the
 
 **Rule:** an effect that needs a new input's value sets it first (`i.set_value(..)`, then `focus()` and `select()`). No other page selected text on open.
 
+## 15. Overlapping saves stored an older draft
+
+Channel Setup sent a PUT for every edit. Two in flight could reach the server in either order, so the older draft could be the one stored, and the refused-save path set the page from a follow-up GET without checking that it was still the newest request. An edit made before the first GET answered built on an empty draft and replaced the stored one.
+
+**Rule:** a page that saves on every edit keeps one request in flight: later edits change only the local copy and mark it dirty, and the reply sends the newest copy if it differs. Every reply that sets page data after an await checks its sequence number with `try_get_value()` (rule 2). Actions that need the saved state (Push, Discard) are disabled while a request is pending, and editing waits until the first load is in.
+
+## 16. A panel rebuilt from every reply loses the focus
+
+Channel Setup's right panel is rebuilt from the server's reply after each change, so the button, switch or picker that was just used was replaced and keyboard focus fell back to the page.
+
+**Rule:** a reactive closure that rebuilds controls notes the focused control's `aria-label` before it builds and focuses the new control with that label in a `request_animation_frame` (`panel_focus`/`refocus` in `channels.rs`). Every control in such a panel needs a unique `aria-label`.
+
 ## Where it was fixed (#143)
 
 - `form.rs`: the `-` button on number fields (`>=` in the attribute); the settings card's config/schema load; the preview flash frame callback; list import.

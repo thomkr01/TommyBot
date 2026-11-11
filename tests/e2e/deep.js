@@ -83,7 +83,7 @@ async function matrix(browser) {
     ['GET', `${g}/channel-setup`, () => undefined, 'viewer', false],
     ['PUT', `${g}/channel-setup`, () => ({ draft: { items: {} } }), 'editor', false],
     ['DELETE', `${g}/channel-setup`, () => undefined, 'editor', false],
-    ['POST', `${g}/channel-setup/push`, () => ({}), 'admin', true],
+    ['POST', `${g}/channel-setup/push`, () => ({ version: '' }), 'admin', true],
     ['POST', `${g}/lockdown/lock`, () => ({ kind: 'server' }), 'editor', false],
     ['POST', `${g}/lockdown/update`, () => ({ text: 'e2e' }), 'editor', false],
     ['POST', `${g}/lockdown/unlock`, () => ({}), 'editor', false],

@@ -68,13 +68,26 @@ fn parent(t: &[Value], n: &Value) -> Option<String> {
         .then(|| p.to_string())
 }
 
+/// Voice and stage channels: Discord always lists them below the text channels of a category.
+fn is_voice(t: &[Value], id: &str) -> bool {
+    find(t, id).is_some_and(|n| matches!(n["kind"].as_u64(), Some(2 | 13)))
+}
+
 /// Ids in tree order (the server sends Discord's order): the categories (`cat`), or the channels in
-/// `parent` (None: no category).
+/// `parent` (None: no category), voice ones last.
 fn siblings(t: &[Value], parent_id: Option<&str>, cat: bool) -> Vec<String> {
-    t.iter()
+    let mut list: Vec<String> = t
+        .iter()
         .filter(|n| is_cat(n) == cat && (cat || parent(t, n).as_deref() == parent_id))
         .map(|n| s(&n["id"]))
-        .collect()
+        .collect();
+    list.sort_by_key(|x| is_voice(t, x));
+    list
+}
+
+/// A category the draft deletes: nothing new goes into it.
+fn gone(t: &[Value], id: &str) -> bool {
+    find(t, id).is_some_and(|n| is_cat(n) && n["deleted"] == true)
 }
 
 /// The draft item for `id` (an omitted field means unchanged).
@@ -98,6 +111,7 @@ fn place(d: &mut Value, t: &[Value], id: &str, parent_id: Option<String>, at: us
     let mut list = siblings(t, parent_id.as_deref(), cat);
     list.retain(|x| x != id);
     list.insert(at.min(list.len()), id.to_string());
+    list.sort_by_key(|x| is_voice(t, x));
     if !cat && parent(t, n) != parent_id {
         item(d, id)["parent"] = json!(parent_id);
     }
@@ -112,7 +126,7 @@ fn place(d: &mut Value, t: &[Value], id: &str, parent_id: Option<String>, at: us
 /// it; a category dropped on a channel goes before that channel's category.
 fn drop_target(t: &[Value], dragged: &str, target: &str) -> Option<(Option<String>, usize)> {
     let (d, tg) = (find(t, dragged)?, find(t, target)?);
-    if dragged == target {
+    if dragged == target || gone(t, target) || parent(t, tg).is_some_and(|p| gone(t, &p)) {
         return None;
     }
     if is_cat(d) {
@@ -154,15 +168,49 @@ fn apply_fix(d: &mut Value, id: &str, fix: &Value) {
     }
 }
 
-/// A key for a new draft item: `new-<n>`, one higher than any in the draft.
+/// A key for a new draft item: `new-<n>`, one higher than any in the draft and not below the
+/// server's `next` (keys a push already created are refused).
 fn new_id(d: &Value) -> String {
     let n = d["items"]
         .as_object()
         .into_iter()
         .flatten()
         .filter_map(|(k, _)| k.strip_prefix("new-")?.parse::<u64>().ok())
+        .map(|n| n + 1)
+        .chain(d["next"].as_u64())
         .max();
-    format!("new-{}", n.map_or(1, |n| n + 1))
+    format!("new-{}", n.unwrap_or(1).max(1))
+}
+
+/// The aria-label of the focused element inside `.cs-panel`, so it can be focused again after the
+/// panel is rebuilt.
+fn panel_focus() -> Option<String> {
+    let a = web_sys::window()?.document()?.active_element()?;
+    a.closest(".cs-panel").ok()??;
+    a.get_attribute("aria-label")
+}
+
+fn refocus(label: String) {
+    use wasm_bindgen::JsCast;
+    request_animation_frame(move || {
+        let Some(list) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.query_selector_all(".cs-panel [aria-label]").ok())
+        else {
+            return;
+        };
+        for i in 0..list.length() {
+            let el = list
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::HtmlElement>().ok());
+            if let Some(el) =
+                el.filter(|e| e.get_attribute("aria-label").as_deref() == Some(&label))
+            {
+                let _ = el.focus();
+                return;
+            }
+        }
+    });
 }
 
 fn summary(t: &[Value], n: u64) -> String {
@@ -231,37 +279,68 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         });
     };
     load();
-    // Only the newest reply is shown, so a slow older one cannot undo a newer edit.
-    let send = move |method: &'static str, body: Option<Value>| {
+    // One request at a time: two PUTs in flight could be stored in the wrong order. Edits made
+    // meanwhile stay in the local draft, and the newest one is sent when the reply is back.
+    let pending = RwSignal::new(false);
+    let queued = StoredValue::new(false);
+    let sender = StoredValue::new_local(None::<Box<dyn Fn(&'static str)>>);
+    let send = move |method: &'static str| sender.with_value(|f| f.as_ref().map(|f| f(method)));
+    let send_now = move |method: &'static str| {
+        if pending.get_untracked() {
+            queued.set_value(true);
+            return;
+        }
+        pending.set(true);
         let n = seq.get_value() + 1;
         seq.set_value(n);
+        let sent = data.with_untracked(|v| v["draft"].clone());
+        let body = (method == "PUT").then(|| json!({"draft": sent.clone()}));
         let p = path();
         run_act(
             async move {
                 let r = api(method, &p, body).await;
+                pending.set(false);
                 // The refused edit is already in the local draft: show the server's draft again.
                 if r.is_err() {
+                    queued.set_value(false);
                     if let Ok(v) = api("GET", &p, None).await {
-                        data.set(v);
+                        if seq.try_get_value() == Some(n) {
+                            data.set(v);
+                        }
                     }
                 }
                 r
             },
             msg,
             need,
-            move |v| {
-                if seq.get_value() == n {
-                    data.set(v)
+            move |mut v| {
+                if seq.get_value() != n {
+                    return;
+                }
+                let again = queued.get_value() && method == "PUT";
+                queued.set_value(false);
+                let local = data.with_untracked(|d| d["draft"].clone());
+                if again && local != sent {
+                    v["draft"] = local;
+                    data.set(v);
+                    send("PUT");
+                } else {
+                    data.set(v);
                 }
             },
         );
     };
+    sender.set_value(Some(Box::new(send_now)));
     let edit = move |f: &dyn Fn(&mut Value, &[Value])| {
+        // Before the draft is loaded an edit would replace the stored one.
+        if data.with_untracked(Value::is_null) {
+            return;
+        }
         let (mut d, t) = data.with_untracked(|v| (v["draft"].clone(), arr(&v["tree"])));
         f(&mut d, &t);
         // The next edit builds on this one before the reply is back.
-        data.update_untracked(|v| v["draft"] = d.clone());
-        send("PUT", Some(json!({"draft": d})));
+        data.update_untracked(|v| v["draft"] = d);
+        send("PUT");
     };
     let tree = Memo::new(move |_| arr(&data.get()["tree"]));
     let changes = move || data.with(|v| v["changes"].as_u64().unwrap_or(0));
@@ -303,6 +382,9 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
     };
     let create = move |kind: u8| {
         adding.set(false);
+        if data.with_untracked(Value::is_null) {
+            return;
+        }
         let t = tree.get_untracked();
         let id = data.with_untracked(|v| new_id(&v["draft"]));
         let parent_id = (kind != 4)
@@ -317,7 +399,8 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
                     })
                 })
             })
-            .flatten();
+            .flatten()
+            .filter(|p| !gone(&t, p));
         let name = match kind {
             4 => "New Category",
             2 => "New Voice",
@@ -442,10 +525,43 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         }
     };
 
+    // A drop slot at the end of a category (`p`) or of the channels without one; the last one also
+    // takes a category, which then goes last.
+    let slot = move |p: Option<String>, last: bool| {
+        view! { <div class="slot" class:on=move || drag.get().is_some() aria-hidden="true"
+        on:dragover=move |e| { if drag.get_untracked().is_some() { e.prevent_default(); over.set(None) } }
+        on:drop=move |e| {
+            e.prevent_default();
+            let Some(d) = drag.get_untracked() else { return };
+            drag.set(None);
+            let t = tree.get_untracked();
+            match find(&t, &d) {
+                Some(n) if is_cat(n) => if last { move_to(d, None, siblings(&t, None, true).len()) },
+                Some(_) if !p.as_deref().is_some_and(|p| gone(&t, p)) => { let at = siblings(&t, p.as_deref(), false).len(); move_to(d, p.clone(), at) }
+                _ => {}
+            }
+        }></div> }
+    };
+    let rows = move || {
+        let t = tree.get();
+        let mut out = vec![];
+        let mut group = None::<String>;
+        for n in t {
+            if is_cat(&n) {
+                out.push(slot(group.replace(s(&n["id"])), false).into_any());
+            }
+            out.push(row(n).into_any());
+        }
+        out.push(slot(group, true).into_any());
+        out.collect_view()
+    };
+
     let panel = move || {
+        // Every reply rebuilds the panel; the control that was used gets the focus back.
+        let had = panel_focus();
         let t = tree.get();
         let Some(n) = sel.get().and_then(|id| find(&t, &id).cloned()) else {
-            return view! { <div class="card"><p class="muted">"Pick a channel or category to see who can see it."</p></div> }.into_any();
+            return view! { <div class="card cs-panel"><p class="muted">"Pick a channel or category to see who can see it."</p></div> }.into_any();
         };
         let id = s(&n["id"]);
         let (cat, deleted, kind) = (
@@ -454,6 +570,10 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
             n["kind"].as_u64().unwrap_or(0),
         );
         let ed = editing.get().is_some_and(|(e, p)| e == id && p);
+        // The name box focuses itself.
+        if let Some(l) = had.filter(|_| !ed) {
+            refocus(l);
+        }
         let title = if ed {
             name_input(id.clone(), s(&n["name"])).into_any()
         } else {
@@ -461,19 +581,18 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         };
         let head = view! { <div class="ttl">{title}<span class="muted">{kind_name(kind)}</span><span class="sp"></span><span class="acts">{acts(id.clone(), deleted, true)}</span></div> };
         if deleted {
-            return view! { <div class="card">{head}<p class="muted">"Deleted when you push. Undo keeps it."</p></div> }.into_any();
+            return view! { <div class="card cs-panel">{head}<p class="muted">"Deleted when you push. Undo keeps it."</p></div> }.into_any();
         }
         let acc = n["access"].clone();
         let limited = acc["limited"] == true;
         let picked = strs(&acc["roles"]);
         let staff = acc["staff"].as_bool().unwrap_or(true);
-        let (can, staff_roles) = data.with(|v| {
+        let (can, pickable) = data.with(|v| {
             (
                 v["can_unstaff"].as_bool().unwrap_or(false),
-                strs(&v["staff_roles"]),
+                strs(&v["pickable_roles"]),
             )
         });
-        let gid = g.get_value();
         let p = parent(&t, &n);
         let list = siblings(&t, p.as_deref(), cat);
         let at = list.iter().position(|x| *x == id).unwrap_or(0);
@@ -489,12 +608,7 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         let options = dc
             .with(|d| arr(&d["roles"]))
             .into_iter()
-            .filter(|r| {
-                r["id"] != gid.as_str()
-                    && r["managed"] != true
-                    && !picked.contains(&s(&r["id"]))
-                    && !staff_roles.contains(&s(&r["id"]))
-            })
+            .filter(|r| pickable.contains(&s(&r["id"])) && !picked.contains(&s(&r["id"])))
             .map(|r| view! { <option value=s(&r["id"])>{s(&r["name"])}</option> })
             .collect_view();
         let follow = if cat {
@@ -519,12 +633,12 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         } else {
             "Staff are the roles of the Admins and Moderators permits. Only the owner or an extra owner can hide a channel from staff."
         };
-        view! { <div class="card">
+        view! { <div class="card cs-panel">
             {head}
             <div class="lbl">"Who can see it"</div>
             <div class="seg" role="group" aria-label="who can see it">
-                <button class="ghost" class:on=!limited aria-pressed=(!limited).to_string() on:click=move |_| if limited { set_access(sid.get_value(), access(&[], true, false)) }>"Everyone"</button>
-                <button class="ghost" class:on=limited aria-pressed=limited.to_string() on:click=move |_| if !limited { set_access(sid.get_value(), access(&[], true, true)) }>"Only these roles"</button>
+                <button class="ghost" class:on=!limited aria-label="Everyone" aria-pressed=(!limited).to_string() on:click=move |_| if limited { set_access(sid.get_value(), access(&[], true, false)) }>"Everyone"</button>
+                <button class="ghost" class:on=limited aria-label="Only these roles" aria-pressed=limited.to_string() on:click=move |_| if !limited { set_access(sid.get_value(), access(&[], true, true)) }>"Only these roles"</button>
             </div>
             {limited.then(|| view! {
                 <div class="chips">{role_chips}
@@ -541,8 +655,8 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
             {follow}
             <div class="lbl">"Position"</div>
             <div class="row2">
-                <button class="ghost" disabled={at == 0} on:click=move |_| move_to(sid.get_value(), pv.get_value(), at.saturating_sub(1))>{icon("arrow_up")}"Move up"</button>
-                <button class="ghost" disabled={at >= last} on:click=move |_| move_to(sid.get_value(), pv.get_value(), at + 1)>{icon("arrow_down")}"Move down"</button>
+                <button class="ghost" aria-label="Move up" disabled={at == 0} on:click=move |_| move_to(sid.get_value(), pv.get_value(), at.saturating_sub(1))>{icon("arrow_up")}"Move up"</button>
+                <button class="ghost" aria-label="Move down" disabled={at >= last} on:click=move |_| move_to(sid.get_value(), pv.get_value(), at + 1)>{icon("arrow_down")}"Move down"</button>
                 {cats}
             </div>
         </div> }.into_any()
@@ -560,8 +674,26 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
     let push = move || {
         dialog.set(None);
         let p = path();
+        // The version the user reviewed: the server refuses a push of any other draft.
+        let body = data.with_untracked(|v| json!({"version": v["version"]}));
+        let n = seq.get_value();
         run_act(
-            async move { api("POST", &format!("{p}/push"), None).await },
+            async move {
+                let r = api("POST", &format!("{p}/push"), Some(body)).await;
+                // Refused (unsafe or changed since): show the server's draft and what stops it.
+                if r.as_ref().is_err_and(|e| e != "step_up_required") {
+                    if let Ok(v) = api("GET", &p, None).await {
+                        if seq.try_get_value() == Some(n) {
+                            let stopped = v["issues"].as_array().is_some_and(|a| !a.is_empty());
+                            data.set(v);
+                            if stopped {
+                                dialog.set(Some(true));
+                            }
+                        }
+                    }
+                }
+                r
+            },
             msg,
             need,
             move |v| {
@@ -626,8 +758,8 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
             <div class="cs-grid">
                 <div class="card">
                     <div class="ttl"><h2>{icon("channel_text")}"Channels"</h2><span class="sp"></span>
-                        <button class="ghost" on:click=move |_| create(4)>"+ Category"</button>
-                        <button class="ghost" aria-expanded=move || adding.get().to_string() on:click=move |_| adding.update(|a| *a = !*a)>"+ Channel"</button>
+                        <button class="ghost" disabled=move || data.with(Value::is_null) on:click=move |_| create(4)>"+ Category"</button>
+                        <button class="ghost" disabled=move || data.with(Value::is_null) aria-expanded=move || adding.get().to_string() on:click=move |_| adding.update(|a| *a = !*a)>"+ Channel"</button>
                     </div>
                     <Show when=move || adding.get()>
                         <div class="chips end"><span class="muted">"Kind:"</span>
@@ -636,15 +768,15 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
                             <button class="ghost" on:click=move |_| create(5)>{icon("announcement")}"Announcement"</button>
                         </div>
                     </Show>
-                    {move || if data.with(Value::is_null) { view! { <div class="skel"></div> }.into_any() } else { tree.get().into_iter().map(row).collect_view().into_any() }}
+                    {move || if data.with(Value::is_null) { view! { <div class="skel"></div> }.into_any() } else { rows().into_any() }}
                 </div>
                 {panel}
             </div>
             <Fade when=Signal::derive(move || dialog.get().is_some())>{move || dlg.get().map(dialog_view)}</Fade>
             <Fade when=Signal::derive(move || { changes() > 0 })>
                 <div class="bar cs-bar"><span class="dot"></span><span><b>{move || format!("{} change{}", changes(), if changes() == 1 { "" } else { "s" })}</b>" not pushed yet"</span>
-                    <button class="ghost" on:click=move |_| { if confirm(&format!("Discard all {} change(s)? Discord is not touched.", changes())) { send("DELETE", None) } }>"Discard"</button>
-                    <button class="go" on:click=move |_| dialog.set(Some(data.with_untracked(|v| v["issues"].as_array().is_some_and(|a| !a.is_empty()))))>"Push"</button>
+                    <button class="ghost" disabled=move || pending.get() on:click=move |_| { if confirm(&format!("Discard all {} change(s)? Discord is not touched.", changes())) { send("DELETE"); } }>"Discard"</button>
+                    <button class="go" disabled=move || pending.get() on:click=move |_| dialog.set(Some(data.with_untracked(|v| v["issues"].as_array().is_some_and(|a| !a.is_empty()))))>"Push"</button>
                 </div>
             </Fade>
             <Toast msg />
@@ -712,5 +844,27 @@ mod tests {
         );
         assert_eq!(new_id(&d), "new-3");
         assert_eq!(new_id(&json!({})), "new-1");
+        // Keys a push created are not used again.
+        assert_eq!(new_id(&json!({"items": {}, "next": 5})), "new-5");
+    }
+
+    #[test]
+    fn voice_stays_below_text_and_deleted_categories_take_nothing() {
+        let mut t = tree();
+        t.push(json!({"id": "w", "name": "Talk", "kind": 2, "parent": "c1", "position": 2}));
+        t.push(json!({"id": "c3", "name": "OLD", "kind": 4, "parent": null, "position": 2, "deleted": true}));
+        t.push(json!({"id": "z", "name": "z", "kind": 0, "parent": "c3", "position": 0, "deleted": true}));
+        assert_eq!(siblings(&t, Some("c1"), false), ["a", "b", "w"]);
+        // Put after the voice channel, a text channel still sorts above it.
+        let mut d = json!({"items": {}});
+        place(&mut d, &t, "r", Some("c1".into()), 3);
+        assert_eq!(d["items"]["r"]["position"], 2);
+        assert_eq!(d["items"]["w"]["position"], 3);
+        // A voice channel moved up stays below the text ones.
+        let mut d = json!({"items": {}});
+        place(&mut d, &t, "w", Some("c1".into()), 0);
+        assert_eq!(d["items"], json!({}));
+        assert_eq!(drop_target(&t, "r", "c3"), None);
+        assert_eq!(drop_target(&t, "r", "z"), None);
     }
 }
