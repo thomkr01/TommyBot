@@ -79,6 +79,25 @@ impl Default for HeatCfg {
     }
 }
 
+/// Max heat: above 0, or every message trips.
+pub const HEAT_MAX: (f64, f64) = (1.0, 100_000.0);
+/// Decay per second: above 0 (heat that never cools never gets calm) and below 1 (a negative base
+/// makes `powf` NaN).
+pub const HEAT_DECAY: (f64, f64) = (0.001, 0.99);
+
+impl HeatCfg {
+    /// Max and decay pulled inside their ranges: config also arrives from the prefix panel and MCP.
+    pub fn clamped(self) -> Self {
+        let fit = |v: f64, (lo, hi): (f64, f64), d: f64| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        let d = Self::default();
+        Self {
+            max: fit(self.max, HEAT_MAX, d.max),
+            decay_per_sec: fit(self.decay_per_sec, HEAT_DECAY, d.decay_per_sec),
+            ..self
+        }
+    }
+}
+
 /// Which filters the author is whitelisted from (the whitelist tabs).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Whitelist {
@@ -898,6 +917,34 @@ mod tests {
         assert!(flood(&mut c, 4, 250, t + 140_000 + 180_000, 40).is_some());
         // A fresh channel (also after a restart) is calm.
         assert!(ChannelHeat::default().is_calm(1_700_000_000_000, &cfg, &h));
+    }
+
+    #[test]
+    fn heat_max_and_decay_are_clamped() {
+        let bad = |max, decay_per_sec| {
+            HeatCfg {
+                max,
+                decay_per_sec,
+                ..Default::default()
+            }
+            .clamped()
+        };
+        let c = bad(0.0, 10.0);
+        assert_eq!((c.max, c.decay_per_sec), (1.0, 0.99));
+        let c = bad(-5.0, 0.0);
+        assert_eq!((c.max, c.decay_per_sec), (1.0, 0.001));
+        let c = bad(f64::NAN, f64::INFINITY);
+        assert_eq!((c.max, c.decay_per_sec), (100.0, 0.08));
+        let d = HeatCfg::default().clamped();
+        assert_eq!((d.max, d.decay_per_sec), (100.0, 0.08));
+        // Clamped values keep the heat finite and a channel able to calm down.
+        let h = bad(0.0, 1.0);
+        let s = HeatState {
+            value: 50.0,
+            ..Default::default()
+        };
+        assert!(s.decayed(10_000, &h).is_finite());
+        assert!(fall_ms(600.0, 150.0, bad(100.0, 0.0).decay_per_sec) < i64::MAX);
     }
 
     #[test]

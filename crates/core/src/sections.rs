@@ -136,12 +136,18 @@ pub struct AutomodCfg {
     pub anti_spam: bool,
     /// Off: messages from webhooks are left alone.
     pub monitor_webhooks: bool,
+    #[serde(deserialize_with = "heat_cfg")]
     pub heat: HeatCfg,
     pub strike: StrikeCfg,
     pub auto_lockdown: AutoLockdownCfg,
     #[serde(deserialize_with = "slowmode_cfg")]
     pub auto_slowmode: AutoSlowmodeCfg,
     pub filters: FiltersCfg,
+}
+
+/// Max heat and decay inside their limits, so heat never turns NaN or stops cooling.
+fn heat_cfg<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HeatCfg, D::Error> {
+    HeatCfg::deserialize(d).map(HeatCfg::clamped)
 }
 
 /// Auto slowmode inside its limits. A value of the wrong type (say -1) gives this card its defaults,
@@ -869,6 +875,16 @@ mod tests {
         let none: AutomodCfg = serde_json::from_value(json!({})).unwrap();
         assert!(!none.auto_slowmode.enabled);
         assert_eq!(none.auto_slowmode.slowmode_secs, 5);
+    }
+
+    #[test]
+    fn heat_is_clamped_when_read() {
+        let am: AutomodCfg =
+            serde_json::from_value(json!({"heat": {"max": 0, "decay_per_sec": 4, "base": 3}}))
+                .unwrap();
+        assert_eq!((am.heat.max, am.heat.decay_per_sec, am.heat.base), (1.0, 0.99, 3.0));
+        let am: AutomodCfg = serde_json::from_value(json!({})).unwrap();
+        assert_eq!((am.heat.max, am.heat.decay_per_sec), (100.0, 0.08));
     }
 
     #[test]

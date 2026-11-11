@@ -122,6 +122,10 @@ Duration parsing sliced off the last character by byte and panicked on input lik
 The prefix panels, the dashboard and the save path each had their own bounds, and an out-of-range value was changed silently.
 *Avoid:* all bounds live in `core::limits` and are used everywhere. A value out of range is refused with a message.
 
+**Heat max and decay had no range outside the dashboard.** (auto slowmode review, 11-11)
+Only the dashboard's `heat_ok` checked them, and it let decay 0 through. The `heat` prefix panel took any number (`4 1000` saved a decay of 10, so `(1 - 10)^t` made every heat NaN; `3 0` made every message trip), and the bot used the values as read. Decay 0 meant heat never cooled, so an auto slowmode channel was never calm. Panic mode's `heat_decay` had no range either.
+*Avoid:* `HEAT_MAX` and `HEAT_DECAY` live in `automod::heat` and go through `core::limits::float_for_path` (dashboard, import and MCP saves, the prefix panel's `Kind::Num` rows), and the bot clamps when it reads (`HeatCfg::clamped` in `AutomodCfg`'s deserializer, the panic decay in `add_heat`). A number the bot divides by, raises to a power or waits on gets a range in `limits` and a clamp on read.
+
 **A URL checked by prefix lets look-alike hosts through.** (MCP security review, 2026-11-10)
 The MCP OAuth registration took any `https://` redirect and checked localhost with `starts_with("http://localhost")`, which `http://localhost.evil.com` also passes. A stranger could register their own site, send the owner a login link and get the code, and with it a token for everything the MCP reads.
 *Avoid:* parse the URL (`reqwest::Url`) and compare scheme and host exactly against an allow list. OAuth redirects go only to known clients (claude.ai) or the owner's own computer.

@@ -195,7 +195,17 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
                     if !n.is_finite() || n < 0.0 {
                         return Err(bad());
                     }
-                    json!(n * scale)
+                    // Rounded, so `99` at scale 0.01 is 0.99 and not 0.9900000000000001.
+                    let round = |x: f64| (x * 1e9).round() / 1e9;
+                    let x = round(n * scale);
+                    let (section, path) = row.path.split_once('.').unwrap_or_default();
+                    if let Some((lo, hi)) = tommybot_core::limits::float_for_path(section, path) {
+                        if !(lo..=hi).contains(&x) {
+                            let (lo, hi) = (round(lo / scale), round(hi / scale));
+                            return Err(format!("{label} must be between {lo} and {hi}"));
+                        }
+                    }
+                    json!(x)
                 }
                 Kind::Secs | Kind::Ms => {
                     let secs = duration::parse(v).ok_or_else(|| {
@@ -1052,6 +1062,19 @@ mod tests {
         // A stored age outside the range reads as the nearest limit.
         let cfg = GuildCfg::parse(&json!({"joingate": {"min_age_override_ms": 0}}));
         assert_eq!((row(&JOINGATE, "3c").get)(&cfg), "5s");
+        // Max heat above 0, decay strictly between 0% and 100% per second.
+        assert_eq!(
+            set(&HEAT, "3", "0"),
+            Err("[3] Max Heat Percentage must be between 1 and 100000".into())
+        );
+        assert_eq!(set(&HEAT, "3", "100"), Ok(Edit::Put(json!(100.0))));
+        assert_eq!(
+            set(&HEAT, "4", "100"),
+            Err("[4] Heat Degradation must be between 0.1 and 99".into())
+        );
+        assert!(set(&HEAT, "4", "0").is_err());
+        assert_eq!(set(&HEAT, "4", "99"), Ok(Edit::Put(json!(0.99))));
+        assert_eq!(set(&HEAT, "4", "0.1"), Ok(Edit::Put(json!(0.001))));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use tommybot_antinuke::{
     gained_dangerous, has_dangerous, hold_violation, nuke_plan, plan_revert, Action, Inverse,
     LogEntry, NukeCase, NukeStep, Verdict,
 };
-use tommybot_automod::heat::{Breakdown, HeatCfg};
+use tommybot_automod::heat::{Breakdown, HeatCfg, HEAT_DECAY};
 use tommybot_core::{
     cases::{self, NewCase},
     jobs, permits,
@@ -204,7 +204,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
 /// Adds a staff action's heat %; true when the member just reached 100.
 fn add_heat(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, heat: u32, decay: f64) -> bool {
     let cfg = HeatCfg {
-        decay_per_sec: decay.clamp(0.0, 1.0),
+        decay_per_sec: decay.clamp(HEAT_DECAY.0, HEAT_DECAY.1),
         ..Default::default()
     };
     let b = Breakdown {

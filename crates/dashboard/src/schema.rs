@@ -1211,6 +1211,10 @@ pub fn schema() -> Vec<Value> {
                 v["min"] = json!(lo);
                 v["max"] = json!(hi);
             }
+            if let Some((lo, hi)) = v["path"].as_str().and_then(|p| limits::float_for_path(&sec, p)) {
+                v["min"] = json!(lo);
+                v["max"] = json!(hi);
+            }
         }
         json!({"name": n, "title": t, "fields": fields})
     })
