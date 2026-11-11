@@ -607,6 +607,24 @@ fn used_by(config: &Value, id: &str) -> Option<String> {
 
 /// What makes the draft unsafe: the security score's channel rows on the desired channels (role
 /// overwrites only), plus deleting a channel the config still uses.
+/// The issues of what the draft changes (Thomas 2026-11-11): a channel the draft touches, or an
+/// issue the draft brings. Problems that are already on the server are the Overview's to show.
+pub fn draft_issues(live: &[ChannelImg], nodes: &[Node], ctx: &Ctx, config: &Value) -> Vec<Issue> {
+    let before: HashSet<String> = issues(&desired(live, &Draft::default(), ctx), ctx, config)
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    let changed: HashSet<&str> = nodes
+        .iter()
+        .filter(|n| n.changed)
+        .map(|n| n.id.as_str())
+        .collect();
+    issues(nodes, ctx, config)
+        .into_iter()
+        .filter(|i| changed.contains(i.channel.as_str()) || !before.contains(&i.id))
+        .collect()
+}
+
 pub fn issues(nodes: &[Node], ctx: &Ctx, config: &Value) -> Vec<Issue> {
     let kept: Vec<&Node> = nodes.iter().filter(|n| !n.deleted).collect();
     let key: HashMap<u64, &str> = kept.iter().map(|n| (n.img.id, n.id.as_str())).collect();
@@ -927,10 +945,33 @@ async fn lock(
     Ok(tx)
 }
 
+/// The Overview's row for an unpushed draft that Push would refuse, by Channel Setup's own rules.
+pub(crate) async fn overview_check(
+    st: &AppState,
+    guild: i64,
+) -> Result<Option<security::Check>, ApiError> {
+    let (draft, _) = load(st, guild).await?;
+    if draft.items.is_empty() {
+        return Ok(None);
+    }
+    let w = world(st, guild).await?;
+    let tree = desired(&w.channels, &draft, &w.ctx);
+    let n = draft_issues(&w.channels, &tree, &w.ctx, &w.config).len();
+    Ok((n > 0).then(|| security::Check {
+        id: "channel_setup_draft".into(),
+        severity: security::Severity::Warn,
+        title: "Channel Setup draft is not safe",
+        detail: format!(
+            "{n} problem(s) in the unpushed Channel Setup draft. Push refuses it until they are fixed on the Channel Setup page."
+        ),
+        fix: None,
+    }))
+}
+
 /// The tree with its issues, as every route answers.
 fn view(w: &World, draft: &Draft, level: Level, version: &str) -> (Vec<Node>, Vec<Issue>, Value) {
     let mut tree = desired(&w.channels, draft, &w.ctx);
-    let issues = issues(&tree, &w.ctx, &w.config);
+    let issues = draft_issues(&w.channels, &tree, &w.ctx, &w.config);
     for n in &mut tree {
         // Member overwrites stop Push but do not make the row pulse.
         n.issues = issues
@@ -1513,6 +1554,39 @@ mod tests {
     }
 
     #[test]
+    fn push_only_stops_for_what_the_draft_changes() {
+        let (live, ctx) = (live(), ctx());
+        // #13 is a public log channel already; changing something else does not stop Push.
+        let d = draft(json!({"11": {"name": "chat"}}));
+        assert!(draft_issues(&live, &desired(&live, &d, &ctx), &ctx, &json!({})).is_empty());
+        // Touching #13 does.
+        let d = draft(json!({"13": {"name": "logs"}}));
+        let i = draft_issues(&live, &desired(&live, &d, &ctx), &ctx, &json!({}));
+        assert_eq!(i.len(), 1);
+        assert_eq!(i[0].id, "log_channel_public_13");
+    }
+
+    #[test]
+    fn a_limited_category_is_no_overview_problem() {
+        // What Channel Setup writes for "only these roles" must pass the Overview's own rules.
+        let (live, ctx) = (live(), ctx());
+        let d = draft(json!({"10": {"access": {"roles": ["6"], "staff": true}}}));
+        let n = desired(&live, &d, &ctx);
+        let imgs: Vec<ChannelImg> = n.iter().map(|n| n.img.clone()).collect();
+        let g = GuildSafety {
+            id: ctx.guild,
+            mfa: 1,
+            verification: 2,
+            content_filter: 2,
+            notifications: 1,
+        };
+        let rows = security::checks(&g, &ctx.roles, &imgs, ctx.bot_pos, &ctx.setup);
+        assert!(!rows.iter().any(|r| r.id.starts_with("overwrite_10")
+            || r.id.starts_with("overwrite_11")
+            || r.id.starts_with("overwrite_12")));
+    }
+
+    #[test]
     fn a_public_log_channel_is_an_issue_until_fixed() {
         let (live, ctx) = (live(), ctx());
         let n = desired(&live, &Draft::default(), &ctx);
@@ -1770,7 +1844,7 @@ mod db_tests {
         let owner = 7_800_000_000 + std::process::id() as i64;
         let calls: Arc<Mutex<Vec<String>>> = Default::default();
         let log = |c: &Arc<Mutex<Vec<String>>>, s: String| c.lock().unwrap().push(s);
-        let (c1, c2, c3) = (calls.clone(), calls.clone(), calls.clone());
+        let (c1, c2, c3, c4) = (calls.clone(), calls.clone(), calls.clone(), calls.clone());
         // A role overwrite that grants Manage Channels: Push must refuse until it is stripped.
         let channels = json!([{"id": "300", "name": "chat", "type": 0, "position": 0,
             "permission_overwrites": [{"id": "5", "type": 0, "allow": "16", "deny": "0"}]}]);
@@ -1797,6 +1871,17 @@ mod db_tests {
                 }),
             )
             .route("/users/@me", get(|| async { Json(json!({"id": "7"})) }))
+            .route(
+                "/channels/{c}",
+                axum::routing::patch(move |Json(b): Json<Value>| async move {
+                    // "b" stands in for a rename Discord refuses.
+                    if b["name"] == "b" {
+                        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                    log(&c4, format!("rename {}", b["name"]));
+                    Ok(Json(json!({})))
+                }),
+            )
             .route(
                 "/guilds/{g}/members/{u}",
                 get(|| async { Json(json!({"roles": []})) }),
@@ -1872,13 +1957,15 @@ mod db_tests {
             (&r["version"], &r["pickable_roles"]),
             (&json!(""), &json!(["5"]))
         );
-        assert_eq!(r["issues"][0]["id"], "overwrite_300_5");
-        assert_eq!(r["tree"][0]["issues"][0]["fix"], json!({"strip": "5"}));
+        // An issue already on the server is the Overview's; it shows here once the draft touches it.
+        assert_eq!(r["issues"], json!([]), "{r}");
 
-        let new = json!({"draft": {"items": {"new-1": {"kind": 0, "name": "News Room"}}}});
+        let new = json!({"draft": {"items": {"new-1": {"kind": 0, "name": "News Room"}, "300": {"name": "lobby"}}}});
         let (code, r) = send("PUT", "", owner, false, Some(new)).await;
         assert_eq!(code, 200, "{r}");
-        assert_eq!(r["changes"], 1);
+        assert_eq!(r["changes"], 2);
+        assert_eq!(r["issues"][0]["id"], "overwrite_300_5");
+        assert_eq!(r["tree"][0]["issues"][0]["fix"], json!({"strip": "5"}));
         assert_eq!(r["draft"]["items"]["new-1"]["name"], "news-room");
         assert!(stored().await.is_some());
         let bad = json!({"draft": {"items": {"300": {"perms": 8}}}});
@@ -1896,7 +1983,7 @@ mod db_tests {
         assert_eq!(r["issues"][0]["id"], "overwrite_300_5");
         assert!(calls.lock().unwrap().is_empty(), "nothing ran");
 
-        let fixed = json!({"draft": {"items": {"new-1": {"kind": 0, "name": "news"}, "300": {"strip": ["5"]}}}});
+        let fixed = json!({"draft": {"items": {"new-1": {"kind": 0, "name": "news"}, "300": {"name": "lobby", "strip": ["5"]}}}});
         let (code, r) = send("PUT", "", owner, false, Some(fixed)).await;
         assert_eq!(code, 200, "{r}");
         // A push of a version the user did not review is refused.
@@ -1907,13 +1994,14 @@ mod db_tests {
         assert_eq!(code, 200, "{r}");
         assert_eq!(
             (r["done"].as_i64(), r["failed"].as_array().map(Vec::len)),
-            (Some(3), Some(0))
+            (Some(4), Some(0))
         );
         assert!(r["backup"].is_i64());
         assert_eq!(
             *calls.lock().unwrap(),
             [
                 "create \"news\"",
+                "rename \"lobby\"",
                 "positions [{\"id\":\"300\",\"position\":0}]",
                 "put 300 5 \"0\""
             ]
@@ -1927,7 +2015,7 @@ mod db_tests {
         let stale = json!({"draft": {"items": {"new-1": {"kind": 0, "name": "news"}}}});
         assert_eq!(send("PUT", "", owner, false, Some(stale)).await.0, 409);
 
-        // The rename fails (the mock has no PATCH): the push stops there.
+        // The rename fails: the push stops there.
         calls.lock().unwrap().clear();
         let two = json!({"draft": {"items": {"new-2": {"kind": 0, "name": "a"}, "300": {"name": "b", "strip": ["5"]}}}});
         let (code, r) = send("PUT", "", owner, false, Some(two)).await;

@@ -683,7 +683,7 @@ async fn log_setup(
 /// Sets the quarantine overwrite on every channel and returns how many it could not set (the
 /// bot lacks Manage Roles there); `None` when the channels could not be listed. Runs after the
 /// commit, so a failure here loses no setup.
-async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<usize> {
+pub(crate) async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<usize> {
     let channels = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)

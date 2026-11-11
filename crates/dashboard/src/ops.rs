@@ -22,6 +22,7 @@ use tommybot_antinuke::{
     security::{
         checks, move_under_bot, overwrite_targets, private_overwrites, setting_fix, strip_targets,
         stripped, stripped_overwrite, synced_children, GuildSafety, Setup, PRIVATE,
+        QUARANTINE_CHANNELS,
     },
     Inverse, RoleImg,
 };
@@ -202,13 +203,15 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     require(&st, &s, guild, Level::Viewer, false).await?;
     let (_, config) = crate::store::current(&st.db, guild).await?;
     let l = live(&st, guild, &config).await?;
-    Ok(Json(json!(checks(
+    let mut rows = checks(
         &l.safety,
         &l.image.roles,
         &l.image.channels,
         l.bot_pos,
-        &l.setup
-    ))))
+        &l.setup,
+    );
+    rows.extend(crate::channels::overview_check(&st, guild).await?);
+    Ok(Json(json!(rows)))
 }
 
 /// One of a row's `fix`: a role id (`*` for every strippable role and overwrite), an overwrite
@@ -231,6 +234,26 @@ async fn fix(
 ) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
     let (_, c) = crate::store::current(&st.db, guild).await?;
+    if b.setting.as_deref() == Some(QUARANTINE_CHANNELS) {
+        let role = c["antinuke"]["quarantine_role"]
+            .as_str()
+            .ok_or_else(|| ApiError::BadRequest("no quarantine role".into()))?;
+        // Only adds the deny; Backups is not needed to undo a stricter quarantine.
+        let failed = crate::sections::quarantine_channels(&st, guild, role)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("could not list the channels"))?;
+        log_change(
+            &st,
+            guild,
+            &c,
+            format!(
+                "{} (<@{}>) denied the quarantine role in every channel from the security score ({failed} failed)",
+                s.username, s.user_id
+            ),
+        )
+        .await;
+        return Ok(Json(json!({"ok": true, "failed": failed})));
+    }
     if b.setting.as_deref() == Some(PRIVATE) {
         return make_private(&st, &s, guild, &c, b.channel_id.as_deref()).await;
     }
