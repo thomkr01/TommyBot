@@ -2,6 +2,7 @@ mod access;
 mod api;
 mod appeals;
 mod auth;
+mod bansync;
 mod channels;
 mod diff;
 mod discord;
@@ -145,6 +146,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(channels::routes())
         .merge(appeals::routes())
         .merge(records::routes())
+        .merge(bansync::routes())
         .merge(verify::routes())
         .merge(embeds::routes())
         .merge(update::routes())
@@ -202,7 +204,15 @@ async fn main() -> anyhow::Result<()> {
         totp: Default::default(),
         rate: Default::default(),
         discord: discord::Discord {
-            http: reqwest::Client::new(),
+            // A hung Discord call would otherwise hold a dashboard request forever.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .user_agent(concat!(
+                    "DiscordBot (https://github.com/thomkr01/TommyBot, ",
+                    env!("CARGO_PKG_VERSION"),
+                    ")"
+                ))
+                .build()?,
             client_id: env("DISCORD_CLIENT_ID")?,
             client_secret: env("DISCORD_CLIENT_SECRET")?,
             bot_token: env("DISCORD_TOKEN")?,

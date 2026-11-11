@@ -2,7 +2,10 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use tommybot_antinuke::{Action as NukeAction, Limit};
-use tommybot_automod::{heat::HeatCfg, strike::StrikeCfg};
+use tommybot_automod::{
+    heat::{AutoSlowmodeCfg, HeatCfg},
+    strike::StrikeCfg,
+};
 use twilight_model::id::{
     marker::{ChannelMarker, RoleMarker, UserMarker, WebhookMarker},
     Id,
@@ -133,10 +136,27 @@ pub struct AutomodCfg {
     pub anti_spam: bool,
     /// Off: messages from webhooks are left alone.
     pub monitor_webhooks: bool,
+    #[serde(deserialize_with = "heat_cfg")]
     pub heat: HeatCfg,
     pub strike: StrikeCfg,
     pub auto_lockdown: AutoLockdownCfg,
+    #[serde(deserialize_with = "slowmode_cfg")]
+    pub auto_slowmode: AutoSlowmodeCfg,
     pub filters: FiltersCfg,
+}
+
+/// Max heat and decay inside their limits, so heat never turns NaN or stops cooling.
+fn heat_cfg<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HeatCfg, D::Error> {
+    HeatCfg::deserialize(d).map(HeatCfg::clamped)
+}
+
+/// Auto slowmode inside its limits. A value of the wrong type (say -1) gives this card its defaults,
+/// not the whole automod section.
+fn slowmode_cfg<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AutoSlowmodeCfg, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<AutoSlowmodeCfg>(v)
+        .unwrap_or_default()
+        .clamped())
 }
 
 impl Default for AutomodCfg {
@@ -148,6 +168,7 @@ impl Default for AutomodCfg {
             heat: HeatCfg::default(),
             strike: StrikeCfg::default(),
             auto_lockdown: AutoLockdownCfg::default(),
+            auto_slowmode: AutoSlowmodeCfg::default(),
             filters: FiltersCfg::default(),
         }
     }
@@ -470,7 +491,7 @@ impl WhitelistList {
 pub const MAX_APPEAL_FIELDS: usize = 6;
 
 /// Sections the dashboard saves only after a TOTP step-up, so prefix panels may not edit them.
-pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
+pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch", "ban_sync"];
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppealField {
@@ -789,10 +810,59 @@ pub struct CatchCfg {
     pub users: Vec<Id<UserMarker>>,
 }
 
+/// Ban Sync: copies bans between servers that have the same Discord owner. Off until the owner turns it on.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct BanSyncCfg {
+    pub enabled: bool,
+    /// Send this server's bans to the other servers in the group.
+    pub share: bool,
+    /// Which automatic bans are sent too (staff bans always are while `share` is on).
+    pub share_joinraid: bool,
+    pub share_automod: bool,
+    pub share_joingate: bool,
+    pub share_verify: bool,
+    pub receive: BanSyncReceive,
+    /// Lift the copies when the source ban is lifted.
+    pub sync_unbans: bool,
+}
+
+impl Default for BanSyncCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            share: true,
+            share_joinraid: true,
+            share_automod: true,
+            share_joingate: false,
+            share_verify: false,
+            receive: BanSyncReceive::Alert,
+            sync_unbans: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BanSyncReceive {
+    Off,
+    #[default]
+    Alert,
+    Ban,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn ban_sync_is_off_until_saved_on() {
+        let c: BanSyncCfg = serde_json::from_value(json!({})).unwrap();
+        assert!(!c.enabled && c.share && c.sync_unbans);
+        assert_eq!(c.receive, BanSyncReceive::Alert);
+        assert!(c.share_joinraid && c.share_automod && !c.share_joingate && !c.share_verify);
+    }
 
     #[test]
     fn regex_words_match_and_bad_ones_are_refused() {
@@ -828,6 +898,54 @@ mod tests {
         assert!(!c.enabled && c.channel.is_none() && c.action == CatchAction::Ban);
         let c: CatchCfg = serde_json::from_value(json!({"action": "Log"})).unwrap();
         assert_eq!(c.action, CatchAction::Log);
+    }
+
+    #[test]
+    fn auto_slowmode_is_clamped_and_a_bad_value_keeps_the_section() {
+        let am = |v: serde_json::Value| -> AutomodCfg {
+            serde_json::from_value(json!({"enabled": true, "auto_slowmode": v})).unwrap()
+        };
+        let c = am(
+            json!({"enabled": true, "channel_pct": 0, "min_users": 999, "slowmode_secs": 0,
+            "min_on_secs": u32::MAX, "calm_secs": 0}),
+        )
+        .auto_slowmode;
+        assert!(c.enabled);
+        assert_eq!(
+            (
+                c.channel_pct,
+                c.min_users,
+                c.slowmode_secs,
+                c.min_on_secs,
+                c.calm_secs
+            ),
+            (100, 50, 1, 3_600, 10)
+        );
+        let c = am(json!({"enabled": true, "slowmode_secs": 99_999})).auto_slowmode;
+        assert_eq!(
+            (c.slowmode_secs, c.channel_pct, c.min_users),
+            (21_600, 300, 4)
+        );
+        // -1 does not fit a u32: the card falls back to its defaults, automod stays on.
+        let bad = am(json!({"enabled": true, "min_users": -1}));
+        assert!(bad.enabled && !bad.auto_slowmode.enabled);
+        assert_eq!(bad.auto_slowmode.min_users, 4);
+        let none: AutomodCfg = serde_json::from_value(json!({})).unwrap();
+        assert!(!none.auto_slowmode.enabled);
+        assert_eq!(none.auto_slowmode.slowmode_secs, 5);
+    }
+
+    #[test]
+    fn heat_is_clamped_when_read() {
+        let am: AutomodCfg =
+            serde_json::from_value(json!({"heat": {"max": 0, "decay_per_sec": 4, "base": 3}}))
+                .unwrap();
+        assert_eq!(
+            (am.heat.max, am.heat.decay_per_sec, am.heat.base),
+            (1.0, 0.99, 3.0)
+        );
+        let am: AutomodCfg = serde_json::from_value(json!({})).unwrap();
+        assert_eq!((am.heat.max, am.heat.decay_per_sec), (100.0, 0.08));
     }
 
     #[test]

@@ -62,6 +62,8 @@ fn ti(mut v: Value, title: &str) -> Value {
     v
 }
 
+const SPAM_FLAG_HELP: &str = "Discord sets this flag on accounts it thinks are spammers. Discord does not document it, can change it without notice, and it can be wrong.";
+
 /// Help text under the field.
 fn hp(mut v: Value, help: &str) -> Value {
     v["help"] = json!(help);
@@ -251,6 +253,11 @@ const TIPS: &[(&str, &str, &str)] = &[
     ("joinraid", "id_flag_min", "Raid accounts are often made at the same moment. TommyBot looks for many joins whose accounts were created close together."),
     ("lockdown", "main_roles", "The roles normal members have. Lockdown takes the chat permissions away from these roles."),
     ("whitelist", "partner_channels", "Channels where invite links from other servers are allowed."),
+    ("ban_sync", "share_joinraid", "Members Join Raid bans here are banned in your other servers too."),
+    ("ban_sync", "share_automod", "Members Auto Mod bans here are banned in your other servers too."),
+    ("ban_sync", "share_joingate", "Join Gate filters are made for this server, so they may not fit your other servers. Off by default."),
+    ("ban_sync", "share_verify", "These are usually real people who were too slow to verify. Off by default."),
+    ("ban_sync", "receive", "What happens here when a member is banned in one of your other servers. Alert posts it in the mod log with a Ban here button. Ban bans them here as well."),
 ];
 
 pub fn schema() -> Vec<Value> {
@@ -433,6 +440,27 @@ pub fn schema() -> Vec<Value> {
         sx(
             "joinraid",
             ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
+        ),
+        hp(
+            ti(fg("Auto slowmode", "auto_slowmode.enabled", "bool"), "Use the auto slowmode"),
+            "Gives a flooding channel a slowmode and puts the old one back when it is calm. Needs Anti Spam on and Manage Channels in the channel. Threads, spam-whitelisted and locked channels are skipped.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.channel_pct", "int"), 300), "Trigger (% of max heat)"),
+            "All messages in the channel add their heat to one pool. 300 means three members' worth of max heat.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.min_users", "int"), 4), "Minimum members"),
+            "Members who sent messages in the last 30 seconds. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator don't count, as Discord lets them skip slowmode. Members who have these only in this channel still count.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode"),
+            "A slowmode staff set that is as high or higher is left alone.",
+        ),
+        ti(dv(fg("Auto slowmode", "auto_slowmode.min_on_secs", "int"), 60), "Minimum time on"),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.calm_secs", "int"), 120), "Calm time"),
+            "Off once the pool stayed under half the trigger this long. Changing the slowmode by hand ends it, unless you set exactly the auto value in Discord.",
         ),
     ];
     for (k, page, title) in FILTERS {
@@ -674,10 +702,21 @@ pub fn schema() -> Vec<Value> {
             "Target accounts whose username matches your list",
             GateFilter::UsernameFilter,
         ),
+        (
+            "spammer",
+            "Suspected spammer",
+            "Target accounts Discord flags as likely spammers",
+            GateFilter::SuspectedSpammer,
+        ),
     ] {
         let name = filter == GateFilter::UsernameFilter;
+        let on = ti(fg(card, &format!("{k}.enabled"), "bool"), status);
         gate.extend([
-            ti(fg(card, &format!("{k}.enabled"), "bool"), status),
+            if filter == GateFilter::SuspectedSpammer {
+                hp(on, SPAM_FLAG_HELP)
+            } else {
+                on
+            },
             hp(
                 ti(
                     dv(
@@ -746,6 +785,13 @@ pub fn schema() -> Vec<Value> {
         ti(
             f("flag_no_avatar", "bool"),
             "Flag accounts without an avatar",
+        ),
+        hp(
+            ti(
+                f("flag_spammer", "bool"),
+                "Flag accounts Discord marks as likely spammers",
+            ),
+            SPAM_FLAG_HELP,
         ),
         ti(
             fg("ID flag", "id_flag_min", "int"),
@@ -1172,6 +1218,44 @@ pub fn schema() -> Vec<Value> {
         ("tickets", "Tickets", tickets),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
+        (
+            "ban_sync",
+            "Ban Sync",
+            vec![
+                hp(
+                    ti(fg("General", "enabled", "bool"), "Use Ban Sync"),
+                    "Copies bans between servers you own. Only servers with the same Discord owner are in the group.",
+                ),
+                ti(
+                    dv(fg("General", "share", "bool"), true),
+                    "Send this server's bans to my other servers",
+                ),
+                ti(
+                    dv(choice("General", "receive", &["off", "alert", "ban"]), "alert"),
+                    "When a member is banned in my other servers",
+                ),
+                ti(
+                    dv(fg("General", "sync_unbans", "bool"), true),
+                    "Lift the copies when the ban is lifted",
+                ),
+                ti(
+                    dv(fg("Automatic bans to send", "share_joinraid", "bool"), true),
+                    "Join Raid bans",
+                ),
+                ti(
+                    dv(fg("Automatic bans to send", "share_automod", "bool"), true),
+                    "Auto Mod bans",
+                ),
+                ti(
+                    fg("Automatic bans to send", "share_joingate", "bool"),
+                    "Join Gate filter bans",
+                ),
+                ti(
+                    fg("Automatic bans to send", "share_verify", "bool"),
+                    "Verification timeout bans",
+                ),
+            ],
+        ),
     ]
     .into_iter()
     .map(|(n, t, mut fields)| {
@@ -1184,6 +1268,10 @@ pub fn schema() -> Vec<Value> {
                 v["tip"] = json!(tip);
             }
             if let Some((lo, hi)) = v["path"].as_str().and_then(|p| limits::for_path(&sec, p)) {
+                v["min"] = json!(lo);
+                v["max"] = json!(hi);
+            }
+            if let Some((lo, hi)) = v["path"].as_str().and_then(|p| limits::float_for_path(&sec, p)) {
                 v["min"] = json!(lo);
                 v["max"] = json!(hi);
             }
@@ -1283,6 +1371,7 @@ mod tests {
         assert_eq!(default("username_filter.action"), "Ban");
         assert_eq!(default("invite_in_name.action"), "Timeout");
         assert_eq!(default("no_avatar.action"), "Kick");
+        assert_eq!(default("spammer.action"), "Kick");
     }
 
     #[test]

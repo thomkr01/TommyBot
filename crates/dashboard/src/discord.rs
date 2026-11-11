@@ -179,6 +179,12 @@ impl Discord {
             .ok_or_else(|| anyhow::anyhow!("guild {guild} not found"))
     }
 
+    /// The server's name, or None when the bot is not in it.
+    pub async fn guild_name(&self, guild: i64) -> Result<Option<String>> {
+        let g = self.memo_get(format!("/guilds/{guild}")).await?;
+        Ok(g.and_then(|g| g["name"].as_str().map(String::from)))
+    }
+
     /// The user id of the bot application's owner (the team owner for a team app).
     pub async fn bot_owner(&self) -> Result<String> {
         let app = self.memo_get("/applications/@me".into()).await?;

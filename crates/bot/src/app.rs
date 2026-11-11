@@ -11,15 +11,15 @@ use std::time::{Duration, Instant};
 use tommybot_antinuke::{AntiNuke, NukeCase, PanicTracker};
 use tommybot_automod::discord_api::{Api, DiscordAutomodCfg};
 use tommybot_automod::{
-    heat::{ChannelActivity, HeatState, UserHistory},
+    heat::{ChannelActivity, ChannelHeat, HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
     lockdown::{LockdownPrefs, MentionWatch},
 };
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
     sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
-        TicketsCfg, WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
+        MiscCfg, PanicCfg, TicketsCfg, WhitelistCfg,
     },
 };
 use tommybot_logging::{LogConfig, Logger};
@@ -47,6 +47,7 @@ pub struct GuildCfg {
     pub verification: VerificationCfg,
     pub tickets: TicketsCfg,
     pub catch: CatchCfg,
+    pub ban_sync: BanSyncCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -79,6 +80,7 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
         "whitelist" => t::<WhitelistCfg>(v),
         "verification" => t::<VerificationCfg>(v),
         "tickets" => t::<TicketsCfg>(v),
+        "ban_sync" => t::<BanSyncCfg>(v),
         _ => Ok(()),
     }
 }
@@ -108,6 +110,7 @@ impl GuildCfg {
             verification,
             tickets: section(cfg, "tickets"),
             catch: section(cfg, "catch"),
+            ban_sync: section(cfg, "ban_sync"),
         }
     }
 }
@@ -119,6 +122,8 @@ pub struct App {
     pub pool: PgPool,
     pub api: Api,
     pub me: Id<UserMarker>,
+    /// The bot application's owner (the team owner for a team app); Ban Sync never acts on them.
+    pub bot_owner: Option<Id<UserMarker>>,
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
     pub logger: Mutex<Logger>,
     /// Whether @everyone can read a log channel, and when that was checked.
@@ -140,6 +145,12 @@ pub struct App {
     pub pings: Mutex<HashMap<(u64, u64), MentionWatch>>,
     /// Last message per channel, for the inactive channel filter.
     pub channels: Mutex<HashMap<u64, ChannelActivity>>,
+    /// Pooled heat per channel for auto slowmode; its own lock, never taken under `heat`.
+    pub slow: Mutex<HashMap<u64, ChannelHeat>>,
+    /// Channels with an `auto_slowmode` row, so a channel update needs no query otherwise.
+    pub slow_active: Mutex<HashSet<u64>>,
+    /// Discord's spammer flag per (guild, user) and when it was read (ms), for the verify button.
+    pub spam_flags: Mutex<HashMap<(u64, u64), (bool, i64)>>,
     /// Name pair last punished by the post-join username check, so unrelated member updates do not repeat it.
     pub punished_names: Mutex<HashMap<(u64, u64), String>>,
     /// Nick auto-dehoist last set per (guild, member), so an update with the old name renames once.
@@ -204,6 +215,7 @@ impl App {
             pool,
             api,
             me,
+            bot_owner: None,
             cfgs: Default::default(),
             logger: Mutex::new(Logger::new(me)),
             log_public: Default::default(),
@@ -217,6 +229,9 @@ impl App {
             mentions: Default::default(),
             pings: Default::default(),
             channels: Default::default(),
+            slow: Default::default(),
+            slow_active: Default::default(),
+            spam_flags: Default::default(),
             punished_names: Default::default(),
             dehoisted: Default::default(),
             cmd_cooldown: Default::default(),

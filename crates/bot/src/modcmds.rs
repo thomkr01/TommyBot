@@ -1033,6 +1033,10 @@ pub async fn run(
                         .rate_limit_per_user(secs)
                         .reason(&audit)
                         .await?;
+                    // Staff's value stays: a running auto slowmode must not revert it.
+                    if let Err(e) = crate::slowmode::staff_set(app, *c, secs).await {
+                        tracing::warn!(?e, channel = c, "ending the auto slowmode failed");
+                    }
                 }
                 let list: Vec<_> = channels.iter().map(|c| format!("<#{c}>")).collect();
                 let note = format!("{secs}s in {}", list.join(" "));

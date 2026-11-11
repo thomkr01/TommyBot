@@ -9,7 +9,7 @@ use tommybot_core::jobs;
 use tommybot_logging::embed::{duration, Log, ARROW, BLUE, GREEN, NO, YES};
 use tommybot_logging::emoji::{DETAILS, MODERATOR, PANIC, REASON, UNSET};
 use tommybot_logging::LogKind;
-use twilight_model::channel::message::Embed;
+use twilight_model::channel::message::{Component, Embed};
 use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
     Id,
@@ -342,15 +342,33 @@ pub async fn tell(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, n: Noti
         moderator.as_deref(),
         n.duration_s,
     );
-    send_dm(app, user, n.appeal.as_deref().unwrap_or_default(), &[e]).await
+    send_dm(
+        app,
+        user,
+        n.appeal.as_deref().unwrap_or_default(),
+        &[e],
+        &[],
+    )
+    .await
 }
 
 /// Best effort, at most [`DM_WAIT`]: closed DMs are normal, other failures are logged. True when sent.
 pub async fn dm(app: &App, user: Id<UserMarker>, text: &str) -> bool {
-    send_dm(app, user, text, &[]).await
+    send_dm(app, user, text, &[], &[]).await
 }
 
-async fn send_dm(app: &App, user: Id<UserMarker>, text: &str, embeds: &[Embed]) -> bool {
+/// [`dm`] with button rows under the text.
+pub async fn dm_buttons(app: &App, user: Id<UserMarker>, text: &str, rows: &[Component]) -> bool {
+    send_dm(app, user, text, &[], rows).await
+}
+
+async fn send_dm(
+    app: &App,
+    user: Id<UserMarker>,
+    text: &str,
+    embeds: &[Embed],
+    rows: &[Component],
+) -> bool {
     let send = async {
         let ch = best_effort(app.http.create_private_channel(user).await, "open DM")?;
         let ch = ch.model().await.ok()?;
@@ -359,6 +377,7 @@ async fn send_dm(app: &App, user: Id<UserMarker>, text: &str, embeds: &[Embed]) 
                 .create_message(ch.id)
                 .content(text)
                 .embeds(embeds)
+                .components(rows)
                 .await,
             "send DM",
         )

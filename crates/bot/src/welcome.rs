@@ -48,6 +48,7 @@ pub async fn on_guild_delete(app: &App, ev: &GuildDelete) -> Result<()> {
             .bind(ev.id.get() as i64)
             .execute(&app.pool)
             .await?;
+        crate::bansync::on_removed(app, ev.id).await?;
     }
     Ok(())
 }
@@ -67,6 +68,11 @@ pub async fn on_ready(
     .bind(&ids)
     .execute(&app.pool)
     .await?;
+    // Ban Sync groups only servers the bot is still in.
+    sqlx::query("DELETE FROM guild_owners WHERE guild_id <> ALL($1)")
+        .bind(&ids)
+        .execute(&app.pool)
+        .await?;
     Ok(())
 }
 
@@ -112,6 +118,7 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
     let GuildCreate::Available(g) = ev else {
         return Ok(());
     };
+    crate::bansync::on_owner(app, g.id, g.owner_id).await?;
     let fresh = g
         .joined_at
         .is_some_and(|t| t.as_secs() > crate::app::now_secs() - FRESH_SECS);

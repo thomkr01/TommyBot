@@ -50,7 +50,12 @@ The quarantine row was written before the role change. When the change failed, t
 
 **Outgoing HTTP needs a timeout.** (#97)
 The raw reqwest client had none, so one hung call could hold a lockdown or rule sync forever.
-*Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`). Twilight already handles 429.
+The dashboard's and the MCP server's Discord clients had none either, found 11-11.
+*Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`, the dashboard's and the MCP's Discord client). Twilight already handles 429.
+
+**A REST call before an interaction's answer can miss the 3 seconds.** (spammer-flag review, 11-11)
+The verify Start button asked Discord for the spammer flag on every click before it answered, through `Api::send`, which waits out a 429 up to 30 s and retries; the 15 s client timeout was the only limit. Discord drops an interaction answer after 3 s, so a slow or rate-limited lookup left the member with "This interaction failed", and every click cost another request on one bucket. `verify::guild_name` (before the "verified" answer) had no limit either.
+*Avoid:* do the work that needs no REST first and call only when the answer changes the result (`flagged_step`), cache the answer (`App::spam_flags`, 10 minutes, bounded), and bound the call: one try with no 429 wait (`Api::send_tries(.., 1)`) inside `tokio::time::timeout(1.5 s)`. Decide what a timeout means (here: a captcha, fail closed). Anything slower than that defers the interaction first.
 
 **A DM can be slow or refused.** (#136, #142)
 A DM before a punishment must not hold the punishment back, and a DM to a bot is refused.
@@ -63,11 +68,26 @@ A mention of the @everyone role renders as `@@everyone`, so write plain `@everyo
 Auto Setup answered "internal error" because the saved Quarantine role had been deleted in Discord: the PATCH got 404 and the whole setup stopped. Config keeps ids after the role or channel is gone (deleted by hand, or a backup restore).
 *Avoid:* treat a 404 on a saved id as "missing" and make it again (`sections::create` checks an existing id first). Never let a 404 on reuse fail a whole setup.
 
-**Raw requests need a real User-Agent.** (live tests, 11-09)
-Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010.
+**For bans the bot makes on staff's behalf, the audit actor is the bot, so checks must use the case moderator.** (Ban Sync review, 11-11)
+Ban Sync held a ban for 60 s and dropped it when anti-nuke contained the audit actor. A `t!ban` or a dashboard ban is made with the bot's token, so the actor was always the bot, never the hacked moderator, and the check could never fire for staff commands. Root cause: the audit entry names who called Discord, not who asked the bot to.
+*Avoid:* when the actor is the bot, take the moderator from the matching case (`cases.mod_id`, written by `apply_dm` within seconds) and check that person; with no case (an automatic ban), stop only for a nuke case or the quarantine of someone whose permit can ban, kick or quarantine since the ban. Any quarantine at all is too wide: Join Gate and verification quarantine raiders on join, so raiders could switch sharing off by getting themselves quarantined. Store the moderator with anything that acts later (`ban_sync_links.mod_id`), so the later step checks again. Searched for the same mistake: `antinuke::on_audit` skips the bot's own entries on purpose (staff commands are limited by the permit rate limit in `commands::gated` instead), and `verify::deleted::on_audit` treats the bot as the actor only for its own deletes; neither reads a staff member from a bot entry.
 
-**Twilight drops permission bits it does not know.** (#133)
+**Never mark a row done before the Discord call.** (Ban Sync review, 11-11)
+The first Ban Sync copy set its row to `banned` before the ban, so a job that crashed or failed in between left a "banned" row with no ban, and the retry saw `banned` and stopped. Root cause: the claim that makes a step run once was used as the record that it happened.
+*Avoid:* keep the row in its working state (`pending`) while the call runs, so a failure leaves it for the retry; on the retry, recognise your own earlier result in Discord (a ban whose reason starts with `Ban Sync from` counts as ours) and only then move the row on with `UPDATE … WHERE state = 'pending' RETURNING`; write the case only if the row has none yet. Mark a row skipped only for a refusal, never while the action exists. The Ban here button does the same and gives the row back to `alerted` when the ban does not happen. Searched for the same mistake: `reports::report` deletes its row when the log message fails, `joingate::punish` records after the action, lockdown uses `locking` → `locked` (section 2), and the quarantine row is written after the role change (above).
+
+**A Discord outage is not a refusal.** (Ban Sync review, 11-11)
+`commands::apply_dm` turned every failed Discord call into a refusal reply, a 502 too. A job that bans through it (a Ban Sync copy) then marked the row skipped and never retried, although the same request would have worked a minute later. Root cause: the error arm did not tell "Discord said no" (4xx) from "Discord did not answer" (5xx, timeout), and the doc comment ("Err only for infrastructure failures") already promised the second as `Err`.
+*Avoid:* only a 4xx is a refusal (`http_err::refused`); anything else goes back as `Err`, so jobs retry and commands show "Something went wrong". Searched the other places that turn an error into reply text with `http_err::why`: `confirm`, `reports`, `appeals`, `slash` and `tickets::dm` answer a person, who can press again; `verify::deleted` sends the failure to the owner as its alert; and `joingate::punish` returns the error after its log, so the job retries.
+
+**Raw requests need a real User-Agent.** (live tests, 11-09)
+Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010. Until 11-11 none of the bot's, dashboard's or MCP's raw Discord clients set one.
+*Avoid:* every reqwest client that talks to Discord sets `DiscordBot (<repo url>, <version>)`.
+
+**Twilight drops permission and user flag bits it does not know.** (#133)
 Saving a bot role's old permissions loses bits newer than twilight. This is a known limit (marked `shortcut:` in the code). Upgrade twilight before relying on new bits.
+User flags too: `UserFlags` is read with `from_bits_truncate`, so `public_flags` never holds Discord's undocumented spammer bit (`1 << 20`).
+*Avoid:* read such a bit from the raw gateway JSON before twilight parses it, like `spam_flag` in `crates/bot/src/main.rs` (the loop reads raw messages instead of `next_event`).
 
 ## 2. Concurrency and restarts
 
@@ -130,6 +150,14 @@ The race review (11-11) found the same in Join Raid (a failed raid log or report
 
 The sticky roles review (11-11) found it in Join Gate too: a refused gate punishment (403 on kick) ended `on_join`, so the join raid check never ran for that joiner. Gate punishments now log and go on.
 
+**A gateway event's value can be older than the bot's own write.** (auto slowmode review, 11-11)
+Events run in parallel tasks and Discord sends a channel update for every edit (a rename too), so a ChannelUpdate handled after the bot's own PATCH can still carry the old slowmode. Auto slowmode read that value as "staff changed it" and put it back, which undid its own slowmode.
+*Avoid:* don't decide from a field of the event when the bot itself writes that field. Read the live value (`GET channel`) and compare it with both the old and the bot's value (`slowmode::staff_value`), or skip the event when a later compare-and-set already handles it (the off job reverts only its own value). Also checked: `enforce_quarantine` and `catch::keep_top` act on event values too, but their writes are idempotent, so a stale event only repeats them.
+
+**A claim row without its job blocked the channel for good.** (auto slowmode review, 11-11)
+An `auto_slowmode` row is claimed with `ON CONFLICT DO NOTHING`. When its `slowmode_off` job gave up after its retries (Discord down, a missing permission retried until the last attempt), the row stayed and every later start found "already owned". Also: a failed start deleted row and job even when the PATCH might have landed, the not-calm re-queue made a job for a row staff had already removed, and a 403 was retried until the job gave up.
+*Avoid:* a claim takes over a row with no pending job (`DELETE … WHERE NOT EXISTS (job)` in the claim's transaction, so a parallel claim conflicts instead of doubling it). Treat 50001/50013 as final (`http_err::forbidden_any`): end the claim and log it. Re-queue only while the row exists, under `FOR UPDATE`. Scope a job's rows to its own guild (`AND guild_id = $2`). A start that stops early because the channel already shows the auto value also gives a stuck row a new off job (`requeue_stuck`), since the takeover in the claim never runs then.
+
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
 
@@ -163,6 +191,10 @@ Whitelisted channels and roles still got base message heat, other bots' slash-co
 The post-join username filter dedupes on username + global name + nick. Its Rename action changes the nick, so the echo update looked like a new bad name and the bot would rename on every update; a dehoist nick on a member the filter already punished would punish them again.
 *Avoid:* for Rename the dedupe key leaves out the nick, and a clean nick counts as done (`joingate::post_join_key`). Auto-dehoist skips a name the filter matched, and its output always starts with a letter or digit, so dehoisting twice changes nothing.
 
+**The verify button judged "suspicious" on other names than Join Gate.** (spammer-flag PR, 11-11)
+Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
+*Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the flag would turn a Grant into a challenge, and a failed lookup means a captcha.
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)
@@ -172,6 +204,10 @@ Duration parsing sliced off the last character by byte and panicked on input lik
 **Limits drifted between places.** (#134)
 The prefix panels, the dashboard and the save path each had their own bounds, and an out-of-range value was changed silently.
 *Avoid:* all bounds live in `core::limits` and are used everywhere. A value out of range is refused with a message.
+
+**Heat max and decay had no range outside the dashboard.** (auto slowmode review, 11-11)
+Only the dashboard's `heat_ok` checked them, and it let decay 0 through. The `heat` prefix panel took any number (`4 1000` saved a decay of 10, so `(1 - 10)^t` made every heat NaN; `3 0` made every message trip), and the bot used the values as read. Decay 0 meant heat never cooled, so an auto slowmode channel was never calm. Panic mode's `heat_decay` had no range either.
+*Avoid:* `HEAT_MAX` and `HEAT_DECAY` live in `automod::heat` and go through `core::limits::float_for_path` (dashboard, import and MCP saves, the prefix panel's `Kind::Num` rows), and the bot clamps when it reads (`HeatCfg::clamped` in `AutomodCfg`'s deserializer, the panic decay in `add_heat`). A number the bot divides by, raises to a power or waits on gets a range in `limits` and a clamp on read.
 
 **A URL checked by prefix lets look-alike hosts through.** (MCP security review, 2026-11-10)
 The MCP OAuth registration took any `https://` redirect and checked localhost with `starts_with("http://localhost")`, which `http://localhost.evil.com` also passes. A stranger could register their own site, send the owner a login link and get the code, and with it a token for everything the MCP reads.
@@ -270,4 +306,5 @@ Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` on
 - **Cloud env vars are read at session start.** A variable added during a session needs a new session.
 - **Two DB tests used the same guild id.** (MCP writes, PR 4; again in the race review, where `6_100_000_000` was already used twice in the bot crate) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
 - **An e2e step waited for any row, not the one it made.** (11-11) The notes check waited for "a note is listed", which old notes from an earlier run already met, then the reload that put the new note on top swapped the card under the fill, so Save sent the old text. *Avoid:* wait for the exact value the step created.
+- **An e2e step waited for a dropdown, not its options.** (11-11, PR #178 CI) The Logging Cancel check waited for the channel select, which shows with only "none" until the channel list loads, so it found no other option and crashed. *Avoid:* wait for the option the step will pick (`option:nth-child(2)`). Searched: the only other `selectOption` (log setup, by index) waits for its option already.
 - **`tests/e2e/run.sh` needs root Postgres, trunk and Playwright**; the gateway is not covered by the Discord mock.

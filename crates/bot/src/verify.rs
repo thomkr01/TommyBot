@@ -6,6 +6,7 @@ pub mod deleted;
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
 use serde::Deserialize;
+use std::collections::HashMap;
 use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
 };
@@ -89,6 +90,66 @@ fn decide(cfg: &VerificationCfg, raid_active: bool, suspicious: bool, has_role: 
     }
 }
 
+/// The step for a member Discord flags as a spammer, when that differs from a Grant; None when
+/// the flag cannot change the step, so no lookup is needed.
+fn flagged_step(
+    cfg: &VerificationCfg,
+    raid: bool,
+    suspicious: bool,
+    has_role: bool,
+) -> Option<Step> {
+    (!suspicious && decide(cfg, raid, false, has_role) == Step::Grant)
+        .then(|| decide(cfg, raid, true, has_role))
+        .filter(|s| *s != Step::Grant)
+}
+
+/// How long a spammer flag answer is reused, and how many are kept.
+const FLAG_TTL_MS: i64 = 600_000;
+const FLAG_KEEP: usize = 10_000;
+
+/// The cached answer for `key` if it is still fresh.
+fn cached_flag(map: &HashMap<(u64, u64), (bool, i64)>, key: (u64, u64), now: i64) -> Option<bool> {
+    map.get(&key)
+        .filter(|(_, at)| now - at < FLAG_TTL_MS)
+        .map(|e| e.0)
+}
+
+fn remember_flag(
+    map: &mut HashMap<(u64, u64), (bool, i64)>,
+    key: (u64, u64),
+    flagged: bool,
+    now: i64,
+) {
+    if map.len() >= FLAG_KEEP {
+        map.retain(|_, (_, at)| now - *at < FLAG_TTL_MS);
+        if map.len() >= FLAG_KEEP {
+            map.clear();
+        }
+    }
+    map.insert(key, (flagged, now));
+}
+
+/// Discord's spammer flag on `user`, cached 10 minutes so repeated clicks cost no request. The
+/// interaction must be answered within 3 s: one try, 1.5 s at most, and a timeout, an error or a
+/// 429 counts as flagged (a captcha, never a free pass).
+async fn spammer(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
+    let (key, now) = ((gid.get(), user.get()), now_secs() * 1000);
+    if let Some(f) = cached_flag(&app.spam_flags.lock().unwrap(), key, now) {
+        return f;
+    }
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        app.api.public_flags(user.get()),
+    )
+    .await;
+    let flagged = !matches!(read, Ok(Ok(f)) if f & tommybot_automod::join::SPAMMER_FLAG == 0);
+    if !matches!(read, Ok(Ok(_))) {
+        tracing::warn!(%user, ?read, "spammer flag lookup failed, the member gets a challenge");
+    }
+    remember_flag(&mut app.spam_flags.lock().unwrap(), key, flagged, now);
+    flagged
+}
+
 pub(crate) fn button(label: &str, id: &str) -> Component {
     tommybot_logging::embed::button(label, id, ButtonStyle::Primary)
 }
@@ -115,10 +176,15 @@ pub async fn setup(app: &App, gid: Id<GuildMarker>) -> Result<String> {
     Ok(format!("Posted the verify button in <#{ch}>"))
 }
 
+/// The server's name, or "the server". At most 1.5 s: buttons call it before their answer, and an
+/// interaction must be answered within 3 s.
 pub(crate) async fn guild_name(app: &App, gid: Id<GuildMarker>) -> String {
-    async { anyhow::Ok(app.http.guild(gid).await?.model().await?.name) }
+    let name = async { anyhow::Ok(app.http.guild(gid).await?.model().await?.name) };
+    tokio::time::timeout(std::time::Duration::from_millis(1500), name)
         .await
-        .unwrap_or_else(|_| "the server".into())
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_else(|| "the server".into())
 }
 
 /// "2 minutes" wording for the verification period.
@@ -388,10 +454,12 @@ async fn self_grant(
     grant(app, gid, user, v).await
 }
 
+/// The audit reason of a verification timeout, which Ban Sync also reads to tell such bans apart.
+pub(crate) const AUDIT_REASON: &str = "Did not verify within the time limit";
+
 /// The audit log reason at the time limit, when `audit_reason` is on.
 fn audit_reason(v: &VerifyCfg) -> Option<&'static str> {
-    v.audit_reason
-        .then_some("Did not verify within the time limit")
+    v.audit_reason.then_some(AUDIT_REASON)
 }
 
 /// Applies the fail action to a member who never verified.
@@ -884,9 +952,11 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             let member = i.member.as_ref();
             let has_role =
                 member.is_some_and(|m| m.roles.iter().any(|r| cfg.verification.roles.contains(r)));
+            // Same cured names as Join Gate, or a member it found suspicious skips the captcha here.
+            let name = crate::joingate::names(&[Some(&u.name), u.global_name.as_ref()]);
             let joiner = tommybot_automod::join::Joiner {
                 id: u.id.get(),
-                name: &u.name,
+                name: &name,
                 has_avatar: u.avatar.is_some(),
                 ..Default::default()
             };
@@ -913,7 +983,15 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                     return Ok(true);
                 }
             }
-            match decide(&cfg.verification, raid, suspicious, has_role) {
+            let mut step = decide(&cfg.verification, raid, suspicious, has_role);
+            // The interaction user has no spammer bit (twilight drops it): ask Discord, only when
+            // the answer would turn a Grant into a challenge.
+            if let Some(flagged) = flagged_step(&cfg.verification, raid, suspicious, has_role) {
+                if spammer(app, gid, user).await {
+                    step = flagged;
+                }
+            }
+            match step {
                 Step::Say(t) => {
                     client.create_response(i.id, &i.token, &reply(t)).await?;
                 }
@@ -1216,6 +1294,46 @@ mod tests {
             ),
             Step::Web
         );
+    }
+
+    #[test]
+    fn spammer_flag_is_read_only_when_it_changes_the_step() {
+        let c = cfg(VerifyMode::Captcha, VerifyTarget::SuspiciousOnly);
+        assert_eq!(flagged_step(&c, false, false, false), Some(Step::Captcha));
+        // Already suspicious or already verified: no lookup.
+        assert_eq!(flagged_step(&c, false, true, false), None);
+        assert_eq!(flagged_step(&c, false, false, true), None);
+        let every = cfg(VerifyMode::Captcha, VerifyTarget::Everyone);
+        assert_eq!(flagged_step(&every, false, false, false), None);
+        // Button mode grants either way.
+        let button = cfg(VerifyMode::Button, VerifyTarget::SuspiciousOnly);
+        assert_eq!(flagged_step(&button, false, false, false), None);
+        // ...except in a raid, where a suspicious member gets a captcha.
+        assert_eq!(
+            flagged_step(&button, true, false, false),
+            Some(Step::Captcha)
+        );
+        assert_eq!(
+            flagged_step(&VerificationCfg::default(), false, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn spammer_flag_cache_expires_and_stays_bounded() {
+        let mut m = HashMap::new();
+        remember_flag(&mut m, (1, 2), true, 1_000);
+        assert_eq!(cached_flag(&m, (1, 2), 1_000 + FLAG_TTL_MS - 1), Some(true));
+        assert_eq!(cached_flag(&m, (1, 2), 1_000 + FLAG_TTL_MS), None);
+        assert_eq!(cached_flag(&m, (1, 3), 1_000), None);
+        let mut m = HashMap::new();
+        for u in 0..FLAG_KEEP as u64 {
+            remember_flag(&mut m, (9, u), false, 0);
+        }
+        // Full of old answers: they are pruned before the next one goes in.
+        remember_flag(&mut m, (1, 4), false, FLAG_TTL_MS);
+        assert_eq!(m.len(), 1);
+        assert_eq!(cached_flag(&m, (1, 4), FLAG_TTL_MS), Some(false));
     }
 
     #[test]

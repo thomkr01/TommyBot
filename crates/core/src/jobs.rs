@@ -12,9 +12,10 @@ pub struct Job {
     pub attempts: i32,
 }
 
-/// Returns the job id, for [`finish`].
-pub async fn enqueue(
-    pool: &PgPool,
+/// Returns the job id, for [`finish`]. Takes a pool or a transaction, so a job can be written
+/// together with the state it undoes.
+pub async fn enqueue<'e>(
+    db: impl sqlx::PgExecutor<'e>,
     guild: i64,
     kind: &str,
     payload: Value,
@@ -28,14 +29,19 @@ pub async fn enqueue(
     .bind(kind)
     .bind(payload)
     .bind(run_at_secs as f64)
-    .fetch_one(pool)
+    .fetch_one(db)
     .await?)
 }
 
 /// Jobs that fail this many times are dropped by the scheduler.
 pub const MAX_ATTEMPTS: i32 = 5;
 /// Kinds that can run for minutes; a separate worker takes them so they never delay unbans or unlocks.
-pub const HEAVY: [&str; 3] = ["backup_load", "panic_start", "nuke_revert"];
+pub const HEAVY: [&str; 4] = [
+    "backup_load",
+    "panic_start",
+    "nuke_revert",
+    "ban_sync_import",
+];
 const LEASE_SECS: i32 = 60;
 const HEAVY_LEASE_SECS: i32 = 900;
 

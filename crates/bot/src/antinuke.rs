@@ -11,7 +11,7 @@ use tommybot_antinuke::{
     gained_dangerous, has_dangerous, hold_violation, nuke_plan, plan_revert, Action, Inverse,
     LogEntry, NukeCase, NukeStep, Verdict,
 };
-use tommybot_automod::heat::{Breakdown, HeatCfg};
+use tommybot_automod::heat::{Breakdown, HeatCfg, HEAT_DECAY};
 use tommybot_core::{
     cases::{self, NewCase},
     jobs, permits,
@@ -220,7 +220,7 @@ async fn parent_of(app: &App, channel: u64) -> Option<u64> {
 /// Adds a staff action's heat %; true when the member just reached 100.
 fn add_heat(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, heat: u32, decay: f64) -> bool {
     let cfg = HeatCfg {
-        decay_per_sec: decay.clamp(0.0, 1.0),
+        decay_per_sec: decay.clamp(HEAT_DECAY.0, HEAT_DECAY.1),
         ..Default::default()
     };
     let b = Breakdown {
@@ -1220,6 +1220,40 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         .roles(&roles)
         .await?;
     quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await
+}
+
+/// Whether anti-nuke quarantined `actor` or put them in a nuke case since `since` (unix secs), so
+/// Ban Sync does not spread what a hacked staff account did. With `None`, any nuke case or the
+/// quarantine of someone who could ban, kick or quarantine (`Level::has("quarantine")`) counts:
+/// a quarantine on join or by `t!quarantine` hits members a raider can provoke. A nuke case keeps
+/// the time it opened, so cases opened up to [`NUKE_GAP`] earlier count too.
+pub(crate) async fn contained_since(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Option<Id<UserMarker>>,
+    since: i64,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM quarantines q WHERE q.guild_id = $1
+                          AND q.created_at >= to_timestamp($3::float8)
+                          AND CASE WHEN $2::bigint IS NULL THEN
+                                EXISTS (SELECT 1 FROM extra_owners WHERE guild_id = $1 AND user_id = q.user_id)
+                                OR EXISTS (SELECT 1 FROM trusted_admins WHERE guild_id = $1 AND user_id = q.user_id)
+                                OR EXISTS (SELECT 1 FROM permit_roles r JOIN permits p ON p.id = r.permit_id
+                                           WHERE r.guild_id = $1 AND r.role_id = ANY(q.saved_roles)
+                                             AND p.perms && ARRAY['ban', 'kick', 'quarantine'])
+                              ELSE q.user_id = $2 END)
+             OR EXISTS (SELECT 1 FROM nuke_incidents WHERE guild_id = $1
+                          AND created_at >= to_timestamp($3::float8) - make_interval(secs => $4)
+                          AND ($2::bigint IS NULL OR data->'quarantined' @> to_jsonb($2::bigint)
+                               OR data->'failed' @> to_jsonb($2::bigint)))",
+    )
+    .bind(gid.get() as i64)
+    .bind(actor.map(|a| a.get() as i64))
+    .bind(since as f64)
+    .bind(NUKE_GAP.as_secs_f64())
+    .fetch_one(&app.pool)
+    .await?)
 }
 
 #[cfg(test)]
