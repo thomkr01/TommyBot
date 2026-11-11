@@ -249,7 +249,7 @@ pub async fn import_job(app: &App, p: &Value) -> Result<()> {
         return Ok(());
     }
     let cfg = app.cfg(src.get()).await?;
-    let mut sent = shared_last_hour(app, src).await?;
+    let mut capped = false;
     let mut after = None;
     loop {
         let req = app.http.bans(src).limit(PAGE);
@@ -279,16 +279,14 @@ pub async fn import_job(app: &App, p: &Value) -> Result<()> {
                 moderator: case.map(|c| c.1).filter(|m| *m as u64 != app.me.get()),
                 banned_at: None,
             };
-            if offer(app, (to, user, src), &copy, sent >= BAN_SYNC_HOURLY).await? {
-                sent += 1;
-            }
+            capped |= offer(app, (to, user, src), &copy).await?.1;
         }
         match page.last() {
             Some(b) if page.len() == usize::from(PAGE) => after = Some(b.user.id),
             _ => break,
         }
     }
-    if sent >= BAN_SYNC_HOURLY {
+    if capped {
         paused(app, src).await;
     }
     Ok(())
