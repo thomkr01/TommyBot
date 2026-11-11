@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 use twilight_model::{
-    guild::Permissions,
+    guild::{Permissions, Role},
     id::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
@@ -29,6 +29,17 @@ pub struct GuildInfo {
     fetched: Instant,
 }
 
+/// The roles with each position rewritten to its rank in Discord's order (ties broken by id), so
+/// every compare and every position sent back follows the order Discord enforces.
+pub fn ranked(gid: Id<GuildMarker>, mut roles: Vec<Role>) -> Vec<Role> {
+    let rank =
+        tommybot_core::roles::ranks(roles.iter().map(|r| (r.id.get(), r.position)), gid.get());
+    for r in &mut roles {
+        r.position = rank[&r.id.get()];
+    }
+    roles
+}
+
 /// Highest role position among `member_roles` (0 = @everyone only).
 pub fn top_position(roles: &HashMap<Id<RoleMarker>, i64>, member_roles: &[Id<RoleMarker>]) -> i64 {
     member_roles
@@ -48,7 +59,7 @@ impl App {
             }
         }
         let owner = self.http.guild(gid).await?.model().await?.owner_id;
-        let all = self.http.roles(gid).await?.models().await?;
+        let all = ranked(gid, self.http.roles(gid).await?.models().await?);
         let roles: HashMap<_, _> = all.iter().map(|r| (r.id, r.position)).collect();
         let all_channels = self.http.guild_channels(gid).await?.models().await?;
         let parents = all_channels

@@ -16,6 +16,10 @@ Quarantining a nuking bot failed, because Discord does not let anyone take a bot
 The first live nuke test got 403 because TommyBot's role was tied with the attacker's. A role between the bot and the quarantine role also breaks quarantine.
 *Avoid:* the bot role must sit above every role it acts on, and the quarantine role right below the bot. The security score checks the second one (Move role fix). When a live test gets 403, check the role order first.
 
+**Tied role positions were compared as equal.**
+On a server whose roles were never reordered, every role sits at position 1 (Skytest: both bots, Quarantine, Member, Admins, Moderators). Discord breaks the tie by id, with the older role ranking higher, but TommyBot compared only the numbers. So `/kick` and `/ban` refused any target with a role, anti-nuke would not strip Admins from a nuker, lockdown and `tshoot lockdown` skipped every role, the security score read them all as level with the bot, and Auto Setup never moved the quarantine role. `security.rs` already ranked ties by id, but other code called it with raw positions.
+*Avoid:* rank roles once where they are read from Discord: `hierarchy::ranked()` in the bot, `ops::roles_of()` and `recovery::live_image()` in the dashboard, all built on `tommybot_core::roles::ranks()`. Every role list that is compared or written back goes through one of them. Never compare `Role::position` straight from Discord.
+
 **Not every member lookup error means "not a member".** (#97)
 All `guild_member` errors (5xx, timeouts) were read as "left the server". Staff then lost their permit level for that event, so automod or anti-nuke could act on them.
 *Avoid:* use `http_err::member()`. Only a 404 means not a member. Other errors propagate.
