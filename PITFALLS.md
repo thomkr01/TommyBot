@@ -184,6 +184,7 @@ Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` on
 
 - **Defaults are off on new servers.** Heat filters and anti-nuke start off, so a live scenario must turn on what it tests (#92, #93).
 - **Bots are exempt from a lot.** Webhooks owned by TommyBot or by a verified bot are exempt, bot-authored commands are ignored and bots cannot press buttons. Coordinated spam, confirm buttons, appeals, reports, Join Gate and DM tickets need a second human account (#93, #142).
+- **The live test must not use the hosted bot's token or server.** (11-11) The cloud env had the VPS bot's `DISCORD_TOKEN` and its only guild as `TEST_GUILD_ID`, so `live.sh` and the VPS bot would both react to every attack and the result says nothing. *Avoid:* a separate test bot (own Discord application) on a separate test server, or stop the VPS bot (`docker compose stop bot`) for the run.
 - **The live script shares the bot's token** and its rate limits. Cache channel and role lookups and wait longer instead of polling hard (#142).
 - **Make scenarios clean up after themselves** so they can run again. The old nuke scenario kicked the attacker bot every run (#142).
 - **Cloud env vars are read at session start.** A variable added during a session needs a new session.

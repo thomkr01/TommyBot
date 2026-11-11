@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the real bot against the test server and fires the attack scenarios in live.py at it.
-# Needs DISCORD_TOKEN and TEST_GUILD_ID (ATTACKER_TOKEN for nuke), postgresql-16, cargo.
+# Needs DISCORD_TOKEN (a test bot, never the hosted bot: both would react; PITFALLS.md 8) and TEST_GUILD_ID (ATTACKER_TOKEN for nuke), postgresql-16, cargo.
 # Usage: tests/e2e/live.sh [spam|lock|mention_lock|nuke|panic|verify_delete|dm_timing|purge|emojis|edit|restart|all]. Run from anywhere; never prints the tokens.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
