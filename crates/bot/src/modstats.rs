@@ -2,9 +2,7 @@
 //! TommyBot's own actions are recorded as cases (`cases::create`), so they are skipped here.
 use anyhow::Result;
 use tommybot_core::cases::{self, ModAction};
-use twilight_model::guild::audit_log::{
-    AuditLogChange, AuditLogEntry, AuditLogEventType as A,
-};
+use twilight_model::guild::audit_log::{AuditLogChange, AuditLogEntry, AuditLogEventType as A};
 
 use crate::app::App;
 
@@ -16,9 +14,10 @@ fn kind(e: &AuditLogEntry) -> Option<&'static str> {
         A::MemberKick => "kick",
         A::MemberUpdate => e.changes.iter().find_map(|c| match c {
             AuditLogChange::CommunicationDisabledUntil { new: Some(_), .. } => Some("timeout"),
-            AuditLogChange::CommunicationDisabledUntil { new: None, old: Some(_) } => {
-                Some("untimeout")
-            }
+            AuditLogChange::CommunicationDisabledUntil {
+                new: None,
+                old: Some(_),
+            } => Some("untimeout"),
             _ => None,
         })?,
         _ => return None,
@@ -72,12 +71,24 @@ mod tests {
         assert_eq!(kind(&entry(A::MemberBanAdd, vec![])), Some("ban"));
         assert_eq!(kind(&entry(A::MemberBanRemove, vec![])), Some("unban"));
         assert_eq!(kind(&entry(A::MemberKick, vec![])), Some("kick"));
-        assert_eq!(kind(&entry(A::MemberUpdate, vec![to(Some(t), None)])), Some("timeout"));
-        assert_eq!(kind(&entry(A::MemberUpdate, vec![to(None, Some(t))])), Some("untimeout"));
+        assert_eq!(
+            kind(&entry(A::MemberUpdate, vec![to(Some(t), None)])),
+            Some("timeout")
+        );
+        assert_eq!(
+            kind(&entry(A::MemberUpdate, vec![to(None, Some(t))])),
+            Some("untimeout")
+        );
         // A nickname change, or a timeout field that did not change, is not an action.
         assert_eq!(kind(&entry(A::MemberUpdate, vec![to(None, None)])), None);
         assert_eq!(
-            kind(&entry(A::MemberUpdate, vec![AuditLogChange::Nick { new: None, old: None }])),
+            kind(&entry(
+                A::MemberUpdate,
+                vec![AuditLogChange::Nick {
+                    new: None,
+                    old: None
+                }]
+            )),
             None
         );
         assert_eq!(kind(&entry(A::ChannelDelete, vec![])), None);

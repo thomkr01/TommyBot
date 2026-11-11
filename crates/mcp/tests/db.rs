@@ -164,11 +164,33 @@ async fn read_only_role_and_tools() {
     assert_eq!(acts[0]["action"], "ban");
     assert_eq!(acts[0]["target_id"], "42");
 
-    let stats = tool(&st, "mod_actions", json!({"guild_id": g.to_string(), "mod_id": "7"})).await;
-    assert_eq!((stats[0]["kind"].as_str(), stats[0]["source"].as_str()), (Some("kick"), Some("discord")));
-    assert_eq!(tool(&st, "mod_actions", json!({"guild_id": g.to_string(), "mod_id": "8"})).await, json!([]));
+    let stats = tool(
+        &st,
+        "mod_actions",
+        json!({"guild_id": g.to_string(), "mod_id": "7"}),
+    )
+    .await;
+    assert_eq!(
+        (stats[0]["kind"].as_str(), stats[0]["source"].as_str()),
+        (Some("kick"), Some("discord"))
+    );
+    assert_eq!(
+        tool(
+            &st,
+            "mod_actions",
+            json!({"guild_id": g.to_string(), "mod_id": "8"})
+        )
+        .await,
+        json!([])
+    );
 
-    for t in ["cases", "guild_config", "notes", "action_log", "mod_actions"] {
+    for t in [
+        "cases",
+        "guild_config",
+        "notes",
+        "action_log",
+        "mod_actions",
+    ] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {t} WHERE guild_id = $1"
         )))

@@ -204,7 +204,10 @@ mod tests {
             assert_eq!(page("mod_stats", l, &p(&["cases"])), PageAccess::Hidden);
             assert_eq!(page("mod_stats", l, &p(&["mod_stats"])), PageAccess::Full);
         }
-        assert_eq!(page("mod_stats", Level::None, &p(&["mod_stats"])), PageAccess::Hidden);
+        assert_eq!(
+            page("mod_stats", Level::None, &p(&["mod_stats"])),
+            PageAccess::Hidden
+        );
         assert_eq!(page("mod_stats", Level::Owner, &[]), PageAccess::Full);
         assert_eq!(
             page("channel_setup", Level::Editor, &[]),

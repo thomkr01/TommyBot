@@ -317,13 +317,14 @@ async fn case_delete(
 ) -> Res {
     api::require(&st, &s, guild, crate::access::Level::Admin, false).await?;
     let mut tx = st.db.begin().await?;
-    let user: i64 =
-        sqlx::query_scalar("delete from cases where guild_id = $1 and case_no = $2 returning user_id")
-            .bind(guild)
-            .bind(no)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    let user: i64 = sqlx::query_scalar(
+        "delete from cases where guild_id = $1 and case_no = $2 returning user_id",
+    )
+    .bind(guild)
+    .bind(no)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::NotFound)?;
     staff_action(&mut tx, guild, &s, "case_delete", user, no).await?;
     tx.commit().await?;
     ok()
@@ -468,20 +469,16 @@ async fn mod_actions(
 ) -> Res {
     stats_access(&st, &s, guild).await?;
     let user = user_id(&user)?;
-    let rows: Vec<(String, String, Option<String>, Option<i32>, At)> = sqlx::query_as(
-        "select kind, source, target_id::text, case_no, created_at from mod_actions
-         where guild_id = $1 and mod_id = $2 order by created_at desc, id desc limit 50",
+    let rows: Option<Value> = sqlx::query_scalar(
+        "select jsonb_agg(r order by r.at desc, r.id desc) from (
+            select id, kind, source, target_id::text as target_id, case_no, created_at as at from mod_actions
+            where guild_id = $1 and mod_id = $2 order by created_at desc, id desc limit 50) r",
     )
     .bind(guild)
     .bind(user)
-    .fetch_all(&st.db)
+    .fetch_one(&st.db)
     .await?;
-    Ok(Json(json!(rows
-        .into_iter()
-        .map(|(kind, source, target, case_no, at)| json!({
-            "kind": kind, "source": source, "target_id": target, "case_no": case_no, "at": at
-        }))
-        .collect::<Vec<_>>())))
+    Ok(Json(rows.unwrap_or_else(|| json!([]))))
 }
 
 #[derive(Deserialize)]
@@ -778,18 +775,36 @@ mod tests {
                 ("1".into(), "warn".into(), 0, 2),
                 ("2".into(), "kick".into(), 5, 0),
             ],
-            vec![("1".into(), at(0)), ("2".into(), at(1)), ("3".into(), at(200))],
+            vec![
+                ("1".into(), at(0)),
+                ("2".into(), at(1)),
+                ("3".into(), at(200)),
+            ],
             vec![("1".into(), 0, 2), ("1".into(), 6, 1), ("2".into(), 9, 5)],
         );
         let m = v["mods"].as_array().unwrap();
-        assert_eq!(v["kinds"], json!(["ban", "kick"]), "a kind with nothing in the period gets no column");
+        assert_eq!(
+            v["kinds"],
+            json!(["ban", "kick"]),
+            "a kind with nothing in the period gets no column"
+        );
         assert_eq!(m[0]["mod_id"], "2");
-        assert_eq!(m[0]["series"], json!([5, 0, 0, 0, 0, 0, 0]), "a late bar joins the oldest");
+        assert_eq!(
+            m[0]["series"],
+            json!([5, 0, 0, 0, 0, 0, 0]),
+            "a late bar joins the oldest"
+        );
         assert_eq!(m[1]["mod_id"], "1");
         assert_eq!(m[1]["by_kind"], json!({"ban": 3}));
-        assert_eq!((m[1]["total"].as_i64(), m[1]["prev_total"].as_i64()), (Some(3), Some(3)));
+        assert_eq!(
+            (m[1]["total"].as_i64(), m[1]["prev_total"].as_i64()),
+            (Some(3), Some(3))
+        );
         assert_eq!(m[1]["series"], json!([1, 0, 0, 0, 0, 0, 2]));
-        assert_eq!(m[2]["mod_id"], "3", "quiet staff stay listed, with nothing in the period");
+        assert_eq!(
+            m[2]["mod_id"], "3",
+            "quiet staff stay listed, with nothing in the period"
+        );
         assert_eq!(m[2]["total"], 0);
     }
 

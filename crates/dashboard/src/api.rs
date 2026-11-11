@@ -898,11 +898,16 @@ mod logging_validate_tests {
         assert_ne!(antinuke_exempt(&a), antinuke_exempt(&c));
         let d = json!({"custom": [{"name": "Mods", "roles": ["1", "2"], "whitelist": ["wl_ban", "all"]}]});
         assert_ne!(antinuke_exempt(&a), antinuke_exempt(&d));
-        let stats = json!({"custom": [{"name": "S", "roles": ["4"], "perms": ["cases", "mod_stats"]}]});
-        assert_ne!(antinuke_exempt(&json!({"custom": []})), antinuke_exempt(&stats));
+        let stats =
+            json!({"custom": [{"name": "S", "roles": ["4"], "perms": ["cases", "mod_stats"]}]});
+        assert_ne!(
+            antinuke_exempt(&json!({"custom": []})),
+            antinuke_exempt(&stats)
+        );
         let more = json!({"custom": [{"name": "S", "roles": ["4", "5"], "perms": ["mod_stats"]}]});
         assert_ne!(antinuke_exempt(&stats), antinuke_exempt(&more));
-        let other = json!({"custom": [{"name": "S", "roles": ["4"], "perms": ["mod_stats", "ban"]}]});
+        let other =
+            json!({"custom": [{"name": "S", "roles": ["4"], "perms": ["mod_stats", "ban"]}]});
         assert_eq!(antinuke_exempt(&stats), antinuke_exempt(&other));
     }
 

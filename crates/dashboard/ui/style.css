@@ -243,3 +243,7 @@ nav a.on .i [fill^="url"] { fill:currentColor; } nav a.on .i [stroke^="url"] { s
 .bk .role i { width:11px; height:11px; border-radius:50%; border:2px solid var(--rc); } .bk .role.tinted { background:color-mix(in srgb,var(--rc) 22%,var(--b3)); border-color:color-mix(in srgb,var(--rc) 60%,transparent); } .bk .role.tinted i { background:var(--rc); }
 .bk .role.on { outline:2px solid var(--primary); }
 .bk .ttlrow { display:flex; align-items:center; gap:8px; margin:0 0 8px; } .bk .ttlrow .ttl { flex:1; margin:0; } .bk .compact-btn { padding:2px 10px; font-size:12px; } .bk .tree.compact .tr { padding:0; line-height:1.25; font-size:13px; } .bk .tree.compact .tr .i { display:none; } .bk .tree.compact .tr.cat { margin-top:4px; font-size:11px; } .bk .tree.compact .tr.child, .bk .tree.compact .perms.child { padding-left:12px; }
+/* Mod Stats: the table scrolls inside its card on narrow screens; quiet staff are dimmed. */
+.card.scroll { overflow-x:auto; } table.stats td, table.stats th { white-space:nowrap; } table.stats td:last-child { text-align:left; }
+table.stats tr.click { cursor:pointer; } table.stats tr.click:hover { background:color-mix(in srgb, var(--b3) 50%, transparent); } table.stats tr.quiet { opacity:.55; }
+table.stats tr.detail ul { margin:0; padding-left:18px; white-space:normal; } svg.bars { width:96px; height:20px; display:block; fill:var(--primary); }

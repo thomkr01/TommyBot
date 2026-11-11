@@ -399,11 +399,13 @@ async fn cases_and_audit_entries_count_once_for_mod_stats() {
     let Some(p) = pool().await else { return };
     let g = gid(30);
     cleanup(&p, g).await;
-    let no = cases::create(&p, case(g, "warn", 42, 1, None)).await.unwrap();
+    let no = cases::create(&p, case(g, "warn", 42, 1, None))
+        .await
+        .unwrap();
     for _ in 0..2 {
         // A gateway event replayed after a reconnect carries the same audit log id.
         cases::record(
-            &mut *p.acquire().await.unwrap(),
+            &mut p.acquire().await.unwrap(),
             cases::ModAction {
                 guild_id: g,
                 mod_id: 9,
@@ -417,7 +419,8 @@ async fn cases_and_audit_entries_count_once_for_mod_stats() {
         .await
         .unwrap();
     }
-    let rows: Vec<(i64, String, String, Option<i64>, Option<i32>)> = sqlx::query_as(
+    type Row = (i64, String, String, Option<i64>, Option<i32>);
+    let rows: Vec<Row> = sqlx::query_as(
         "SELECT mod_id, kind, source, target_id, case_no FROM mod_actions WHERE guild_id = $1 ORDER BY id",
     )
     .bind(g)
@@ -432,7 +435,11 @@ async fn cases_and_audit_entries_count_once_for_mod_stats() {
         ]
     );
     // Deleting the case leaves the history.
-    sqlx::query("DELETE FROM cases WHERE guild_id = $1").bind(g).execute(&p).await.unwrap();
+    sqlx::query("DELETE FROM cases WHERE guild_id = $1")
+        .bind(g)
+        .execute(&p)
+        .await
+        .unwrap();
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM mod_actions WHERE guild_id = $1")
         .bind(g)
         .fetch_one(&p)

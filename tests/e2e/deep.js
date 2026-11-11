@@ -100,6 +100,9 @@ async function matrix(browser) {
     ['POST', `${g}/rescue/regenerate`, () => ({}), 'discord', true],
     ['POST', `${g}/cases/999999`, () => ({ reason: 'x', proof: '', active: true }), 'viewer', false, ['cases']],
     ['POST', `${g}/cases/999999/delete`, () => ({}), 'admin', false],
+    // Mod stats: owners only here, since no fixture user holds View Mod Stats (trusted admins are refused)
+    ['GET', `${g}/mod_stats?days=30`, () => undefined, 'owner', false],
+    ['GET', `${g}/mod_stats/42`, () => undefined, 'owner', false],
     ['POST', `${g}/notes`, () => ({ user_id: '42', text: 'e2e matrix' }), 'viewer', false, ['notes_manage']],
     ['POST', `${g}/notes/999999`, () => ({ text: 'x' }), 'viewer', false, ['notes_manage']],
     ['POST', `${g}/notes/999999/delete`, () => ({}), 'viewer', false, ['notes_manage']],
@@ -153,7 +156,7 @@ async function matrix(browser) {
 }
 
 // ---------- 2. Every page as every level ----------
-const ALL_PAGES = ['overview', 'wizard', 'misc', 'permits', 'logging', 'backups', 'channel_setup', 'lockdown', 'lockdown_settings', 'appeal_list', 'appeals', 'appeal_blacklist', 'automod', 'filters', 'discord_automod', 'whitelist', 'automod_panic', 'antinuke', 'antinuke_filters', 'antinuke_panic', 'joingate', 'joingate_log', 'joinraid', 'raid_log', 'verification', 'cases', 'notes', 'report_list', 'report_blacklist', 'tickets', 'catch', 'revert', 'history', 'embeds', 'rescue'];
+const ALL_PAGES = ['overview', 'wizard', 'misc', 'permits', 'logging', 'backups', 'channel_setup', 'lockdown', 'lockdown_settings', 'appeal_list', 'appeals', 'appeal_blacklist', 'automod', 'filters', 'discord_automod', 'whitelist', 'automod_panic', 'antinuke', 'antinuke_filters', 'antinuke_panic', 'joingate', 'joingate_log', 'joinraid', 'raid_log', 'verification', 'cases', 'mod_stats', 'notes', 'report_list', 'report_blacklist', 'tickets', 'catch', 'revert', 'history', 'embeds', 'rescue'];
 const PAGES = process.env.DEEP_PAGES ? process.env.DEEP_PAGES.split(',') : ALL_PAGES;
 // Buttons that only read, switch view, open a dialog or copy.
 const HARMLESS = /^(refresh|show|hide|view|preview|copy|next|back|previous|prev|close|cancel|export|download|search|filter|load more|more|less|details|open|test|check|reset view|history|\d+|‹|›|«|»|<|>|←|→)$/i;
