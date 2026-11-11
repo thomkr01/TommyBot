@@ -474,6 +474,10 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
             }
+            // Stats are a side effect: their failure never stops protection.
+            if let Err(err) = crate::modstats::on_audit(app, &e.0).await {
+                tracing::warn!(?err, "recording a mod action failed");
+            }
             nuke?
         }
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
