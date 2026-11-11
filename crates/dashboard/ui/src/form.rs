@@ -672,6 +672,8 @@ pub fn Section(
     let version = RwSignal::new(0i64);
     let dc = RwSignal::new(json!({}));
     let fields = RwSignal::new(Vec::<Value>::new());
+    // The default of the section's `enabled` field, from the whole schema: a page may not show the switch.
+    let switch_default = RwSignal::new(None::<bool>);
     let orig = RwSignal::new(json!({}));
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Until the schema answers, show a loading line instead of flashing the raw JSON editor.
@@ -720,6 +722,7 @@ pub fn Section(
                             }
                         })
                 };
+                switch_default.set(sec["fields"].as_array().into_iter().flatten().find(|f| f["path"] == "enabled" && f["section"].as_str().is_none_or(|x| x == n.as_str())).map(|f| f["default"].as_bool().unwrap_or(false)));
                 fields.set(
                     sec["fields"]
                         .as_array()
@@ -926,8 +929,12 @@ pub fn Section(
         );
     };
     // Read per card, not in the grouping closure: rebuilding the cards on every switch flip cut the knob's animation.
-    let off =
-        Memo::new(move |_| val.with(|v| v[n.get_value().as_str()]["enabled"] == json!(false)));
+    // A missing key reads as the switch's own default, like the switch shows it (every system starts off).
+    // A section without a master switch (Logging, Lockdown, ...) is never off.
+    let off = Memo::new(move |_| {
+        let sec = n.get_value();
+        switch_default.get().is_some_and(|d| !val.with(|v| v[sec.as_str()]["enabled"].as_bool().unwrap_or(d)))
+    });
     view! {
         {card_view}
         <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| if loaded.get() { raw_editor(val, n.get_value(), msg).into_any() } else { view! { <p class="muted">"Loading..."</p> }.into_any() })>
