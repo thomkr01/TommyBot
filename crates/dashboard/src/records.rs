@@ -143,7 +143,9 @@ async fn joingate_log(
         .collect::<Vec<_>>())))
 }
 
-/// Ban Sync copies to and from this server, newest first, with both servers' names.
+/// Ban Sync copies to and from this server, newest first, with both servers' names. Only rows
+/// whose other server is still in the group (same live owner) are shown, so a server that changed
+/// hands shows nothing of its old owner's servers.
 async fn ban_sync_log(
     State(st): State<AppState>,
     s: Sess,
@@ -165,11 +167,13 @@ async fn ban_sync_log(
     );
     let rows: Vec<Row> = sqlx::query_as(
         "select guild_id, source_guild, user_id::text, origin, reason, state, skip_reason, case_no, expires_at, created_at
-         from ban_sync_links where guild_id = $1 or source_guild = $1
+         from ban_sync_links
+         where (guild_id = $1 and source_guild = any($3)) or (source_guild = $1 and guild_id = any($3))
          order by created_at desc, guild_id, user_id limit 50 offset $2",
     )
     .bind(guild)
     .bind(offset(p.page))
+    .bind(crate::bansync::siblings(&st, guild).await?)
     .fetch_all(&st.db)
     .await?;
     let mut names = std::collections::HashMap::new();

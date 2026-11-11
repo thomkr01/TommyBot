@@ -17,13 +17,8 @@ use tommybot_logging::{
 };
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
-    application::interaction::{Interaction, InteractionData},
-    channel::message::{
-        component::{ActionRow, Button, ButtonStyle, Component},
-        AllowedMentions, MessageFlags,
-    },
+    channel::message::component::{ActionRow, Button, ButtonStyle, Component},
     guild::audit_log::{AuditLogEntry, AuditLogEventType as A},
-    http::interaction::InteractionResponseType,
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -38,12 +33,22 @@ use crate::{
     reply, verify,
 };
 
+#[path = "bansync_actions.rs"]
+mod actions;
+use actions::paused;
+pub use actions::{handle, import_job, panel_text, send_rest_job};
+
 /// Start of the reason every copy carries; an unban lifts only bans that still start with it.
 pub const PREFIX: &str = "Ban Sync from";
 const BUTTON: &str = "bansync:";
 const REST: &str = "rest:";
 /// A bot ban is a staff command when a staff member's case for it is at most this old.
 const CASE_WINDOW_S: i64 = 300;
+/// Bans per page of `GET /guilds/{id}/bans` during an import.
+const PAGE: u16 = if cfg!(test) { 3 } else { 1000 };
+
+/// (receiving server, user, source server): the key of a `ban_sync_links` row.
+type Key = (Id<GuildMarker>, Id<UserMarker>, Id<GuildMarker>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
@@ -88,6 +93,49 @@ fn gate_origin(reason: &str) -> Origin {
     }
 }
 
+/// Whose containment by anti-nuke stops a sync. For a ban the bot made for staff, the audit actor
+/// is the bot, so the staff member comes from the case; a ban the bot made on its own is held
+/// while anyone in the server is contained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Behind {
+    Staff(Id<UserMarker>),
+    Bot,
+    Unknown,
+}
+
+fn behind(me: Id<UserMarker>, actor: Option<u64>, moderator: Option<i64>) -> Behind {
+    match (actor, moderator) {
+        (_, Some(m)) if m as u64 != me.get() => Behind::Staff(Id::new(m as u64)),
+        (Some(a), _) if a == me.get() => Behind::Bot,
+        (Some(a), _) => Behind::Staff(Id::new(a)),
+        (None, _) => Behind::Unknown,
+    }
+}
+
+/// The staff member stored with a row: the human behind the ban, if there was one.
+fn staff(b: Behind) -> Option<i64> {
+    match b {
+        Behind::Staff(u) => Some(u.get() as i64),
+        _ => None,
+    }
+}
+
+/// Anti-nuke contained whoever is behind the ban since `at`. A merged audit entry names no actor,
+/// so that check is skipped then.
+async fn stopped(app: &App, gid: Id<GuildMarker>, b: Behind, at: Option<i64>) -> Result<bool> {
+    let Some(at) = at else {
+        return Ok(false);
+    };
+    match b {
+        Behind::Staff(u) => crate::antinuke::contained_since(app, gid, Some(u), at).await,
+        Behind::Bot => crate::antinuke::contained_since(app, gid, None, at).await,
+        Behind::Unknown => {
+            tracing::info!(%gid, "ban sync: actor unknown, containment not checked");
+            Ok(false)
+        }
+    }
+}
+
 /// Why a user is never banned by a copy in this server, if they are not.
 fn exempt(
     level: &Level,
@@ -110,6 +158,36 @@ fn exempt(
     }
 }
 
+/// User text for an embed line: one line, markdown shown as typed.
+fn md(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\r' => out.push(' '),
+            '\\' | '[' | ']' | '*' | '_' | '~' | '|' | '>' | '`' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The unix time of an audit entry, from its snowflake id, a little early so nothing at the edge is missed.
+fn audit_secs(id: u64) -> i64 {
+    (((id >> 22) + 1_420_070_400_000) / 1000) as i64 - 5
+}
+
+/// The rest of a temp ban, or why there is nothing left to copy.
+fn remaining(expires: Option<i64>) -> Result<Option<i64>, &'static str> {
+    match expires {
+        Some(t) if t <= now_secs() => Err("temp ban already ended"),
+        Some(t) => Ok(Some(t - now_secs())),
+        None => Ok(None),
+    }
+}
+
 fn id_of(p: &Value, k: &str) -> Option<u64> {
     p[k].as_u64().or_else(|| p[k].as_str()?.parse().ok())
 }
@@ -128,6 +206,17 @@ async fn is_copy(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Resul
     .bind(user.get() as i64)
     .fetch_one(&app.pool)
     .await?)
+}
+
+/// A ban reason that a copy from `src` wrote.
+fn ours(reason: Option<&str>, src: Id<GuildMarker>) -> bool {
+    reason.is_some_and(|r| r.starts_with(PREFIX) && r.contains(&format!("({src}): ")))
+}
+
+/// The current ban there is a copy from `src`.
+async fn banned_by_us(app: &App, (to, user, src): Key) -> Result<bool> {
+    let ban = http_err::ban(&app.http, to, user).await?;
+    Ok(ours(ban.as_ref().and_then(|b| b.reason.as_deref()), src))
 }
 
 /// Audit `MemberBanAdd`, any actor: queues the share after the hold.
@@ -170,78 +259,90 @@ async fn queue(app: &App, gid: Id<GuildMarker>, kind: &str, e: &AuditLogEntry) -
         "user": e.target_id.map(|t| t.get()),
         "actor": e.user_id.map(|a| a.get()),
         "reason": e.reason,
-        "at": now_secs(),
+        "at": audit_secs(e.id.get()),
     });
     let at = now_secs() + BAN_SYNC_HOLD_S;
     jobs::enqueue(&app.pool, gid.get() as i64, kind, job, at).await?;
     Ok(())
 }
 
-/// After the hold: the ban still exists and its actor was not contained since. A merged audit
-/// entry names no actor, so that check is skipped then.
-async fn held(
+/// The newest case of `kinds` for the user, since `since` when given, as (case, moderator).
+async fn last_case(
     app: &App,
-    src: Id<GuildMarker>,
+    gid: Id<GuildMarker>,
     user: Id<UserMarker>,
-    p: &Value,
-    banned: bool,
-) -> Result<bool> {
-    // Only a 404 means "not banned"; any other error retries the job.
-    if http_err::ban(&app.http, src, user).await?.is_some() != banned {
-        return Ok(false);
-    }
-    let at = p["at"].as_i64().unwrap_or_else(now_secs);
-    match id_of(p, "actor").map(Id::new) {
-        Some(a) => Ok(!crate::antinuke::contained_since(app, src, a, at).await?),
-        None => {
-            tracing::info!(%src, %user, "ban sync: actor unknown, containment not checked");
-            Ok(true)
-        }
-    }
-}
-
-/// What made the ban, and its case. Runs after the hold, so `apply_dm` has written its case.
-async fn origin(
-    app: &App,
-    src: Id<GuildMarker>,
-    user: Id<UserMarker>,
-    actor: Option<u64>,
-    at: i64,
-) -> Result<(Origin, Option<i32>)> {
-    if actor != Some(app.me.get()) {
-        return Ok((Origin::Discord, None));
-    }
-    let case: Option<(i32, i64)> = sqlx::query_as(
-        "SELECT case_no, mod_id FROM cases WHERE guild_id = $1 AND user_id = $2
-           AND kind IN ('ban', 'tempban') AND created_at >= to_timestamp($3::float8)
+    kinds: &[&str],
+    since: Option<i64>,
+) -> Result<Option<(i32, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT case_no, mod_id FROM cases WHERE guild_id = $1 AND user_id = $2 AND kind = ANY($3)
+           AND ($4::float8 IS NULL OR created_at >= to_timestamp($4::float8))
          ORDER BY case_no DESC LIMIT 1",
     )
-    .bind(src.get() as i64)
+    .bind(gid.get() as i64)
     .bind(user.get() as i64)
-    .bind((at - CASE_WINDOW_S) as f64)
+    .bind(kinds)
+    .bind(since.map(|s| s as f64))
     .fetch_optional(&app.pool)
-    .await?;
-    if let Some((no, by)) = case {
+    .await?)
+}
+
+/// The case behind an action the bot made, if the audit actor is the bot.
+async fn bot_case(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    actor: Option<u64>,
+    kinds: &[&str],
+    at: i64,
+) -> Result<Option<(i32, i64)>> {
+    if actor != Some(app.me.get()) {
+        return Ok(None);
+    }
+    last_case(app, gid, user, kinds, Some(at - CASE_WINDOW_S)).await
+}
+
+/// What made the ban. `actor` is None for an import, where the audit entry is gone and only the
+/// bot's own records and the ban reason tell.
+async fn origin(
+    app: &App,
+    (src, user): (Id<GuildMarker>, Id<UserMarker>),
+    actor: Option<u64>,
+    case: Option<(i32, i64)>,
+    since: Option<i64>,
+    reason: &str,
+) -> Result<Origin> {
+    if actor.is_some_and(|a| a != app.me.get()) {
+        return Ok(Origin::Discord);
+    }
+    if let Some((_, by)) = case {
         // Automod filters and warn thresholds write cases with the bot as moderator.
-        let o = if by as u64 == app.me.get() {
+        return Ok(if by as u64 == app.me.get() {
             Origin::Automod
         } else {
             Origin::StaffCmd
-        };
-        return Ok((o, Some(no)));
+        });
     }
     let gate: Option<String> = sqlx::query_scalar(
-        "SELECT reason FROM joingate_actions WHERE guild_id = $1 AND user_id = $2
-           AND action = 'Ban' AND created_at >= to_timestamp($3::float8)
+        "SELECT reason FROM joingate_actions WHERE guild_id = $1 AND user_id = $2 AND action = 'Ban'
+           AND ($3::float8 IS NULL OR created_at >= to_timestamp($3::float8))
          ORDER BY id DESC LIMIT 1",
     )
     .bind(src.get() as i64)
     .bind(user.get() as i64)
-    .bind((at - CASE_WINDOW_S) as f64)
+    .bind(since.map(|s| s as f64))
     .fetch_optional(&app.pool)
     .await?;
-    // Verification bans are the only bot bans that leave no case and no Join Gate record.
-    Ok((gate.map_or(Origin::Verify, |r| gate_origin(&r)), None))
+    if let Some(r) = gate {
+        return Ok(gate_origin(&r));
+    }
+    // Verification bans leave no case and no Join Gate record, and may have no reason either.
+    let verify = actor.is_some() || reason.is_empty() || reason == verify::AUDIT_REASON;
+    Ok(if verify {
+        Origin::Verify
+    } else {
+        Origin::Discord
+    })
 }
 
 /// The end of a TommyBot temp ban: its pending unban job.
@@ -253,18 +354,28 @@ async fn temp_end(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Resu
     )
 }
 
-/// Same Discord owner, from `guild_owners` and confirmed live for both servers.
+/// The owner from Discord, not the 5-minute cache; None when the bot cannot see the server.
+async fn live_owner(app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<UserMarker>>> {
+    match app.http.guild(gid).await {
+        Ok(r) => Ok(Some(r.model().await?.owner_id)),
+        Err(e) if http_err::no_access(&e) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Same Discord owner in `guild_owners`, then confirmed live for both servers.
 async fn same_owner(app: &App, a: Id<GuildMarker>, b: Id<GuildMarker>) -> Result<bool> {
     let stored: Vec<i64> =
         sqlx::query_scalar("SELECT owner_id FROM guild_owners WHERE guild_id = ANY($1)")
             .bind([a.get() as i64, b.get() as i64].as_slice())
             .fetch_all(&app.pool)
             .await?;
-    let (oa, ob) = (
-        app.guild_info(a).await?.owner,
-        app.guild_info(b).await?.owner,
-    );
-    Ok(oa == ob && stored.len() == 2 && stored.iter().all(|o| *o as u64 == oa.get()))
+    // A server the bot left has no row any more: no Discord call for it.
+    if stored.len() != 2 || stored[0] != stored[1] {
+        return Ok(false);
+    }
+    let owner = Some(Id::new(stored[0] as u64));
+    Ok(live_owner(app, a).await? == owner && live_owner(app, b).await? == owner)
 }
 
 /// `src` sends and `to` receives, and they have the same owner.
@@ -305,30 +416,29 @@ struct Copy {
     case: Option<i32>,
     reason: String,
     expires: Option<i64>,
+    actor: Option<u64>,
+    moderator: Option<i64>,
+    banned_at: Option<i64>,
 }
 
 /// Writes the row (pending, or skipped when over the cap), then queues the copy. An active
 /// pending or banned row is left alone; a finished one starts over, so a re-ban syncs again.
 /// True when a copy was queued.
-async fn offer(
-    app: &App,
-    (to, user, src): (Id<GuildMarker>, Id<UserMarker>, Id<GuildMarker>),
-    c: &Copy,
-    capped: bool,
-) -> Result<bool> {
+async fn offer(app: &App, (to, user, src): Key, c: &Copy, capped: bool) -> Result<bool> {
     let (state, skip) = if capped {
         ("skipped", Some("rate cap"))
     } else {
         ("pending", None)
     };
     let written = sqlx::query(
-        "INSERT INTO ban_sync_links
-             (guild_id, user_id, source_guild, source_case, origin, reason, expires_at, state, skip_reason)
-         VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8), $8, $9)
+        "INSERT INTO ban_sync_links (guild_id, user_id, source_guild, source_case, origin, reason,
+             expires_at, state, skip_reason, actor_id, mod_id, banned_at)
+         VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8), $8, $9, $10, $11, to_timestamp($12::float8))
          ON CONFLICT (guild_id, user_id, source_guild) DO UPDATE SET
              source_case = excluded.source_case, origin = excluded.origin, reason = excluded.reason,
-             expires_at = excluded.expires_at, state = excluded.state,
-             skip_reason = excluded.skip_reason, case_no = NULL, created_at = now(), done_at = NULL
+             expires_at = excluded.expires_at, state = excluded.state, skip_reason = excluded.skip_reason,
+             actor_id = excluded.actor_id, mod_id = excluded.mod_id, banned_at = excluded.banned_at,
+             case_no = NULL, created_at = now(), done_at = NULL
          WHERE ban_sync_links.state IN ('lifted', 'cancelled', 'skipped', 'alerted')",
     )
     .bind(to.get() as i64)
@@ -340,6 +450,9 @@ async fn offer(
     .bind(c.expires.map(|t| t as f64))
     .bind(state)
     .bind(skip)
+    .bind(c.actor.map(|a| a as i64))
+    .bind(c.moderator)
+    .bind(c.banned_at.map(|t| t as f64))
     .execute(&app.pool)
     .await?
     .rows_affected()
@@ -361,67 +474,75 @@ async fn enqueue_copy(
     Ok(())
 }
 
+/// The servers of the group that `src` sends to now. One failing server is logged and skipped,
+/// and its error returned with the rest so the job runs again for it.
+async fn receivers(
+    app: &App,
+    src: Id<GuildMarker>,
+) -> (Vec<Id<GuildMarker>>, Option<anyhow::Error>) {
+    let (mut out, mut failed) = (vec![], None);
+    let all = match group(app, src).await {
+        Ok(g) => g,
+        Err(e) => return (out, Some(e)),
+    };
+    for to in all {
+        match grouped(app, src, to).await {
+            Ok(true) => out.push(to),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(?e, %src, %to, "ban sync: group check failed");
+                failed = Some(e);
+            }
+        }
+    }
+    (out, failed)
+}
+
 /// `ban_sync_share` in the source server, after the hold.
 pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(need(p, "user")?);
     let cfg = app.cfg(src.get()).await?;
     let c = &cfg.ban_sync;
-    if !(c.enabled && c.share)
-        || is_copy(app, src, user).await?
-        || !held(app, src, user, p, true).await?
-    {
+    if !(c.enabled && c.share) || is_copy(app, src, user).await? {
+        return Ok(());
+    }
+    // Only a 404 means the ban was lifted or reverted in the hold; other errors retry the job.
+    if http_err::ban(&app.http, src, user).await?.is_none() {
         return Ok(());
     }
     let at = p["at"].as_i64().unwrap_or_else(now_secs);
-    let (origin, case) = origin(app, src, user, id_of(p, "actor"), at).await?;
+    let actor = id_of(p, "actor");
+    let case = bot_case(app, src, user, actor, &["ban", "tempban"], at).await?;
+    let who = behind(app.me, actor, case.map(|c| c.1));
+    if stopped(app, src, who, Some(at)).await? {
+        return Ok(());
+    }
+    let reason = p["reason"].as_str().unwrap_or_default();
+    let since = Some(at - CASE_WINDOW_S);
+    let origin = origin(app, (src, user), actor, case, since, reason).await?;
     if !sends(c, origin) {
         return Ok(());
     }
-    let mut targets = vec![];
-    for to in group(app, src).await? {
-        if grouped(app, src, to).await? {
-            targets.push(to);
+    let (targets, failed) = receivers(app, src).await;
+    if !targets.is_empty() {
+        let copy = Copy {
+            origin,
+            case: case.map(|c| c.0),
+            reason: embed::clip(reason, 400),
+            expires: temp_end(app, src, user).await?,
+            actor,
+            moderator: staff(who),
+            banned_at: Some(at),
+        };
+        let capped = shared_last_hour(app, src).await? >= BAN_SYNC_HOURLY;
+        for to in targets {
+            offer(app, (to, user, src), &copy, capped).await?;
+        }
+        if capped {
+            paused(app, src).await;
         }
     }
-    if targets.is_empty() {
-        return Ok(());
-    }
-    let copy = Copy {
-        origin,
-        case,
-        reason: embed::clip(p["reason"].as_str().unwrap_or_default(), 400),
-        expires: temp_end(app, src, user).await?,
-    };
-    let capped = shared_last_hour(app, src).await? >= BAN_SYNC_HOURLY;
-    for to in targets {
-        offer(app, (to, user, src), &copy, capped).await?;
-    }
-    if capped {
-        paused(app, src).await;
-    }
-    Ok(())
-}
-
-/// Over the cap the rest waits for the owner: a burst like that is how a hacked account looks.
-async fn paused(app: &App, src: Id<GuildMarker>) {
-    static LAST: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
-    if !reply::alert_due(&mut LAST.lock().unwrap(), src.get(), now_secs(), 3600) {
-        return;
-    }
-    let owner = match app.guild_info(src).await {
-        Ok(i) => i.owner,
-        Err(e) => return tracing::warn!(?e, "ban sync pause DM: guild lookup failed"),
-    };
-    let name = verify::guild_name(app, src).await;
-    let text = format!(
-        "{WARNING} **Ban Sync paused for {name}.** More than {BAN_SYNC_HOURLY} bans were made there in the last hour, so the rest were not sent to your other servers. If you did not expect that many bans, check that server's staff first. If the bans are real, press **Send the rest** to send the next {BAN_SYNC_HOURLY}."
-    );
-    let row = buttons(vec![button(
-        "Send the rest",
-        format!("{BUTTON}{REST}{src}"),
-        ButtonStyle::Primary,
-    )]);
-    reply::dm_buttons(app, owner, &text, &[row]).await;
+    failed.map_or(Ok(()), Err)
 }
 
 fn button(label: &str, id: String, style: ButtonStyle) -> Component {
@@ -447,7 +568,7 @@ fn buttons(components: Vec<Component>) -> Component {
 /// Moves a row on from one of `from`; false when another run already did.
 async fn mark(
     app: &App,
-    (to, user, src): (Id<GuildMarker>, Id<UserMarker>, Id<GuildMarker>),
+    (to, user, src): Key,
     from: &[&str],
     state: &str,
     why: Option<&str>,
@@ -468,6 +589,58 @@ async fn mark(
         == 1)
 }
 
+/// Pending (or banned without a case, after a failed try) becomes banned; returns the case the
+/// row already has, `None` inside when it still needs one, or `None` when another run finished it.
+async fn claim_banned(
+    app: &App,
+    (to, user, src): Key,
+    case: Option<i32>,
+) -> Result<Option<Option<i32>>> {
+    Ok(sqlx::query_scalar(
+        "UPDATE ban_sync_links SET state = 'banned', done_at = now(), case_no = COALESCE(case_no, $4)
+         WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3
+           AND (state = 'pending' OR (state = 'banned' AND case_no IS NULL))
+         RETURNING case_no",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .bind(case)
+    .fetch_optional(&app.pool)
+    .await?)
+}
+
+#[derive(sqlx::FromRow)]
+struct Row {
+    state: String,
+    reason: String,
+    expires: Option<i64>,
+    source_case: Option<i32>,
+    case_no: Option<i32>,
+    actor_id: Option<i64>,
+    mod_id: Option<i64>,
+    banned_at: Option<i64>,
+}
+
+impl Row {
+    fn behind(&self, me: Id<UserMarker>) -> Behind {
+        behind(me, self.actor_id.map(|a| a as u64), self.mod_id)
+    }
+}
+
+async fn load(app: &App, (to, user, src): Key) -> Result<Option<Row>> {
+    Ok(sqlx::query_as(
+        "SELECT state, reason, extract(epoch FROM expires_at)::bigint AS expires, source_case, case_no,
+                actor_id, mod_id, extract(epoch FROM banned_at)::bigint AS banned_at
+         FROM ban_sync_links WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .fetch_optional(&app.pool)
+    .await?)
+}
+
 /// `ban_sync_copy` in the receiving server. A 404 on the way (the user does not exist) skips it.
 pub async fn copy_job(app: &App, to: Id<GuildMarker>, p: &Value) -> Result<()> {
     let key = (to, Id::new(need(p, "user")?), Id::new(need(p, "source")?));
@@ -482,154 +655,161 @@ pub async fn copy_job(app: &App, to: Id<GuildMarker>, p: &Value) -> Result<()> {
     }
 }
 
-async fn copy(app: &App, key: (Id<GuildMarker>, Id<UserMarker>, Id<GuildMarker>)) -> Result<()> {
+async fn copy(app: &App, key: Key) -> Result<()> {
     let (to, user, src) = key;
-    let row: Option<(String, String, Option<i64>, Option<i32>)> = sqlx::query_as(
-        "SELECT state, reason, extract(epoch FROM expires_at)::bigint, source_case
-         FROM ban_sync_links WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3",
-    )
-    .bind(to.get() as i64)
-    .bind(user.get() as i64)
-    .bind(src.get() as i64)
-    .fetch_optional(&app.pool)
-    .await?;
-    // A second run of the same job finds the row done and stops.
-    let Some((_, reason, expires, source_case)) = row.filter(|r| r.0 == "pending") else {
+    let Some(row) = load(app, key).await? else {
         return Ok(());
     };
-    let skip = |why: &'static str| mark(app, key, &["pending"], "skipped", Some(why));
+    let alert = app.cfg(to.get()).await?.ban_sync.receive == BanSyncReceive::Alert;
+    // An earlier try banned but its case failed: only the case is left to write.
+    if row.state == "banned" && row.case_no.is_none() && banned_by_us(app, key).await? {
+        let name = verify::guild_name(app, src).await;
+        return finish_ban(app, key, None, &copy_reason(&name, src.get(), &row.reason)).await;
+    }
+    // A second run of the same job finds the row done and stops.
+    if row.state != "pending" {
+        return Ok(());
+    }
+    let cancel = |why: &'static str| mark(app, key, &["pending"], "cancelled", Some(why));
     // Time has passed since the share: everything is checked again here.
     if !grouped(app, src, to).await? {
-        return mark(
-            app,
-            key,
-            &["pending"],
-            "cancelled",
-            Some("not in the same group"),
-        )
-        .await
-        .map(drop);
+        return cancel("not in the same group").await.map(drop);
     }
     if http_err::ban(&app.http, src, user).await?.is_none() {
-        return mark(
-            app,
-            key,
-            &["pending"],
-            "cancelled",
-            Some("source ban lifted"),
-        )
-        .await
-        .map(drop);
+        return cancel("source ban lifted").await.map(drop);
     }
+    if stopped(app, src, row.behind(app.me), row.banned_at).await? {
+        return cancel("source moderator contained").await.map(drop);
+    }
+    let skip = |why: &'static str| mark(app, key, &["pending"], "skipped", Some(why));
     let owner = app.guild_info(to).await?.owner;
     let level = app.level(to, owner, user).await?;
     if let Some(why) = exempt(&level, user, app.me, app.bot_owner) {
         return skip(why).await.map(drop);
     }
-    // So a later unban there never lifts a ban this server made itself.
-    if http_err::ban(&app.http, to, user).await?.is_some() {
-        return skip("already banned").await.map(drop);
-    }
-    let duration = match expires {
-        Some(t) if t <= now_secs() => return skip("temp ban already ended").await.map(drop),
-        Some(t) => Some(t - now_secs()),
-        None => None,
-    };
     let name = verify::guild_name(app, src).await;
-    match app.cfg(to.get()).await?.ban_sync.receive {
-        BanSyncReceive::Off => Ok(()),
-        BanSyncReceive::Alert => {
-            if !mark(app, key, &["pending"], "alerted", None).await? {
-                return Ok(());
-            }
-            let log = alert_log(&name, src.get(), user.get(), &reason, source_case, expires);
-            let row = buttons(vec![button(
-                "Ban here",
-                format!("{BUTTON}{src}:{user}"),
-                ButtonStyle::Danger,
-            )]);
-            let sent =
-                crate::events::send_log_rows(app, to.get(), LogKind::ModCommand, log, &[row]).await;
-            if let Err(e) = sent {
-                tracing::warn!(?e, "ban sync alert log failed");
-            }
-            Ok(())
-        }
-        BanSyncReceive::Ban => {
-            // Claimed before the ban, so a job that runs twice bans and writes a case once.
-            // shortcut: a crash between this claim and the ban leaves a banned row without a ban; a later unban there finds none.
-            let claimed: Option<i32> = sqlx::query_scalar(
-                "UPDATE ban_sync_links SET state = 'banned', done_at = now()
-                 WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3
-                   AND state = 'pending' AND case_no IS NULL RETURNING 1",
-            )
-            .bind(to.get() as i64)
-            .bind(user.get() as i64)
-            .bind(src.get() as i64)
-            .fetch_optional(&app.pool)
-            .await?;
-            if claimed.is_none() {
-                return Ok(());
-            }
-            let why = copy_reason(&name, src.get(), &reason);
-            let flags = Flags {
-                no_dm: true,
-                compact: true,
-                ..Default::default()
-            };
-            let me = (app.me, &Level::Owner);
-            let done = commands::apply_dm(
-                app,
-                to,
-                owner,
-                me,
-                ModKind::Ban,
-                user,
-                Some(&why),
-                duration,
-                0,
-                flags,
-                None,
-            )
-            .await;
-            let case = match &done {
-                Ok(a) => a.case,
-                Err(_) => None,
-            };
-            match case {
-                Some(n) => {
-                    sqlx::query(
-                        "UPDATE ban_sync_links SET case_no = $4
-                         WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3 AND case_no IS NULL",
-                    )
-                    .bind(to.get() as i64)
-                    .bind(user.get() as i64)
-                    .bind(src.get() as i64)
-                    .bind(n)
-                    .execute(&app.pool)
-                    .await?;
-                }
-                None => {
-                    let text = match &done {
-                        Ok(a) => a.text.clone(),
-                        Err(e) => http_err::why(e),
-                    };
-                    mark(app, key, &["banned"], "skipped", Some(&text)).await?;
-                }
-            }
-            done.map(drop)
-        }
+    let why = copy_reason(&name, src.get(), &row.reason);
+    match http_err::ban(&app.http, to, user).await? {
+        // Our own ban from a try that stopped before the row was updated.
+        Some(b) if ours(b.reason.as_deref(), src) => return finish_ban(app, key, None, &why).await,
+        // So a later unban there never lifts a ban this server made itself.
+        Some(_) => return skip("already banned").await.map(drop),
+        None => {}
     }
+    let duration = match remaining(row.expires) {
+        Ok(d) => d,
+        Err(why) => return skip(why).await.map(drop),
+    };
+    if alert {
+        if !mark(app, key, &["pending"], "alerted", None).await? {
+            return Ok(());
+        }
+        let log = alert_log(
+            &name,
+            src.get(),
+            user.get(),
+            &row.reason,
+            row.source_case,
+            row.expires,
+        );
+        let ban_here = button(
+            "Ban here",
+            format!("{BUTTON}{src}:{user}"),
+            ButtonStyle::Danger,
+        );
+        let rows = [buttons(vec![ban_here])];
+        let sent = crate::events::send_log_rows(app, to.get(), LogKind::ModCommand, log, &rows);
+        if let Err(e) = sent.await {
+            tracing::warn!(?e, "ban sync alert log failed");
+        }
+        return Ok(());
+    }
+    ban_copy(app, key, owner, &why, duration).await
+}
+
+/// Bans through the shared ban path, without a DM. The row stays pending until the ban is made,
+/// so a failure leaves it for the job to retry; only a refusal skips it.
+async fn ban_copy(
+    app: &App,
+    key: Key,
+    owner: Id<UserMarker>,
+    why: &str,
+    duration: Option<i64>,
+) -> Result<()> {
+    let (to, user, _) = key;
+    let flags = Flags {
+        no_dm: true,
+        compact: true,
+        ..Default::default()
+    };
+    let me = (app.me, &Level::Owner);
+    let done = commands::apply_dm(
+        app,
+        to,
+        owner,
+        me,
+        ModKind::Ban,
+        user,
+        Some(why),
+        duration,
+        0,
+        flags,
+        None,
+    )
+    .await?;
+    match done.case {
+        Some(n) => finish_ban(app, key, Some(n), why).await,
+        // A refused case after a ban that went through still counts as ours.
+        None if banned_by_us(app, key).await? => finish_ban(app, key, None, why).await,
+        None => mark(app, key, &["pending"], "skipped", Some(&done.text))
+            .await
+            .map(drop),
+    }
+}
+
+/// The ban is made: the row becomes banned, then it gets its case if it has none yet.
+async fn finish_ban(app: &App, key: Key, case: Option<i32>, why: &str) -> Result<()> {
+    let (to, user, src) = key;
+    let Some(None) = claim_banned(app, key, case).await? else {
+        return Ok(());
+    };
+    let n = cases::create(
+        &app.pool,
+        cases::NewCase {
+            guild_id: to.get() as i64,
+            kind: "ban",
+            user_id: user.get() as i64,
+            mod_id: app.me.get() as i64,
+            reason: Some(why),
+            points: 0,
+            duration_s: None,
+            proof: None,
+            inverse: Some(json!({"op": "unban", "user": user.get()})),
+        },
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE ban_sync_links SET case_no = $4
+         WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3 AND case_no IS NULL",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .bind(n)
+    .execute(&app.pool)
+    .await?;
+    commands::mod_log(app, to, (n, "ban"), (app.me, user), None, Some(why)).await;
+    Ok(())
 }
 
 /// The case and audit reason of a copy; the audit header is cut to Discord's limit by `apply_dm`.
 fn copy_reason(name: &str, src: u64, reason: &str) -> String {
     let reason = if reason.is_empty() {
-        "No reason provided"
+        "No reason provided".into()
     } else {
-        reason
+        md(reason)
     };
-    format!("{PREFIX} {name} ({src}): {reason}")
+    format!("{PREFIX} {} ({src}): {reason}", md(name))
 }
 
 /// The mod log alert in a server that receives as Alert, with a Ban here button under it.
@@ -641,17 +821,18 @@ pub(crate) fn alert_log(
     case: Option<i32>,
     expires: Option<i64>,
 ) -> Log {
+    let reason = if reason.is_empty() {
+        "No reason provided".into()
+    } else {
+        md(reason)
+    };
     let mut log = Log::new("Banned in your other server", ORANGE)
         .user("Member", user)
-        .line("Server", &format!("`{}` *`{src}`*", embed::clip(name, 100)))
         .line(
-            "Reason",
-            if reason.is_empty() {
-                "No reason provided"
-            } else {
-                reason
-            },
-        );
+            "Server",
+            &format!("{} *`{src}`*", md(&embed::clip(name, 100))),
+        )
+        .line("Reason", &reason);
     if let Some(c) = case {
         log = log.line("Case", &format!("`{c}`"));
     }
@@ -666,9 +847,27 @@ pub async fn lift_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()> 
     let user = Id::new(need(p, "user")?);
     let cfg = app.cfg(src.get()).await?;
     let c = &cfg.ban_sync;
-    if !(c.enabled && c.sync_unbans) || !held(app, src, user, p, false).await? {
+    if !(c.enabled && c.sync_unbans) {
         return Ok(());
     }
+    // Banned again in the hold: nothing to lift.
+    if http_err::ban(&app.http, src, user).await?.is_some() {
+        return Ok(());
+    }
+    let at = p["at"].as_i64().unwrap_or_else(now_secs);
+    let actor = id_of(p, "actor");
+    let case = bot_case(app, src, user, actor, &["unban"], at).await?;
+    if stopped(app, src, behind(app.me, actor, case.map(|c| c.1)), Some(at)).await? {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE ban_sync_links SET state = 'lifted', done_at = now()
+         WHERE source_guild = $1 AND user_id = $2 AND state = 'alerted'",
+    )
+    .bind(src.get() as i64)
+    .bind(user.get() as i64)
+    .execute(&app.pool)
+    .await?;
     let copies: Vec<i64> = sqlx::query_scalar(
         "SELECT guild_id FROM ban_sync_links WHERE source_guild = $1 AND user_id = $2 AND state = 'banned'",
     )
@@ -677,42 +876,31 @@ pub async fn lift_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()> 
     .fetch_all(&app.pool)
     .await?;
     let name = verify::guild_name(app, src).await;
+    let mut failed = None;
     for to in copies {
-        lift(app, (Id::new(to as u64), user, src), &name).await?;
+        let to = Id::new(to as u64);
+        if let Err(e) = lift(app, (to, user, src), &name).await {
+            tracing::warn!(?e, %src, %to, "ban sync: lifting a copy failed");
+            failed = Some(e);
+        }
     }
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
-async fn lift(
-    app: &App,
-    key: (Id<GuildMarker>, Id<UserMarker>, Id<GuildMarker>),
-    name: &str,
-) -> Result<()> {
+async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
     let (to, user, src) = key;
     // A server that left the group keeps its copies as ordinary bans.
     if !same_owner(app, src, to).await? {
         return Ok(());
     }
-    let ban = http_err::ban(&app.http, to, user).await?;
-    let ours = ban
-        .as_ref()
-        .and_then(|b| b.reason.as_deref())
-        .is_some_and(|r| r.starts_with(PREFIX));
-    if ban.is_none() {
+    let Some(ban) = http_err::ban(&app.http, to, user).await? else {
         return mark(app, key, &["banned"], "lifted", None).await.map(drop);
+    };
+    if !ban.reason.as_deref().is_some_and(|r| r.starts_with(PREFIX)) {
+        let why = Some("banned again by hand");
+        return mark(app, key, &["banned"], "skipped", why).await.map(drop);
     }
-    if !ours {
-        return mark(
-            app,
-            key,
-            &["banned"],
-            "skipped",
-            Some("banned again by hand"),
-        )
-        .await
-        .map(drop);
-    }
-    let why = format!("Ban Sync: lifted in {name} ({src})");
+    let why = format!("Ban Sync: lifted in {} ({src})", md(name));
     let audit = commands::audit_reason(Some(&why), app.me);
     match app.http.delete_ban(to, user).reason(&audit).await {
         Err(e) if !http_err::gone(&e) => return Err(e.into()),
@@ -746,78 +934,6 @@ async fn lift(
     Ok(())
 }
 
-/// `ban_sync_import` {source, target}: the source's existing bans, through the copy path and the cap.
-pub async fn import_job(app: &App, p: &Value) -> Result<()> {
-    let (src, to) = (Id::new(need(p, "source")?), Id::new(need(p, "target")?));
-    if !grouped(app, src, to).await? {
-        return Ok(());
-    }
-    let mut sent = shared_last_hour(app, src).await?;
-    let mut after = None;
-    loop {
-        let req = app.http.bans(src).limit(1000);
-        let req = match after {
-            Some(a) => req.after(a),
-            None => req,
-        };
-        let page = req.await?.models().await?;
-        for b in &page {
-            let user = b.user.id;
-            // A copy in the source never chains on.
-            if is_copy(app, src, user).await? {
-                continue;
-            }
-            let copy = Copy {
-                origin: Origin::Discord,
-                case: None,
-                reason: embed::clip(b.reason.as_deref().unwrap_or_default(), 400),
-                expires: temp_end(app, src, user).await?,
-            };
-            if offer(app, (to, user, src), &copy, sent >= BAN_SYNC_HOURLY).await? {
-                sent += 1;
-            }
-        }
-        match page.last() {
-            Some(b) if page.len() == 1000 => after = Some(b.user.id),
-            _ => break,
-        }
-    }
-    if sent >= BAN_SYNC_HOURLY {
-        paused(app, src).await;
-    }
-    Ok(())
-}
-
-/// `ban_sync_send_rest` {source}: the next users held back by the cap, sent by the owner's choice.
-pub async fn send_rest_job(app: &App, p: &Value) -> Result<()> {
-    let src = need(p, "source")? as i64;
-    let users: Vec<i64> = sqlx::query_scalar(
-        "SELECT user_id FROM ban_sync_links
-         WHERE source_guild = $1 AND state = 'skipped' AND skip_reason = 'rate cap'
-         GROUP BY user_id ORDER BY min(created_at) LIMIT $2",
-    )
-    .bind(src)
-    .bind(BAN_SYNC_HOURLY)
-    .fetch_all(&app.pool)
-    .await?;
-    for u in users {
-        let targets: Vec<i64> = sqlx::query_scalar(
-            "UPDATE ban_sync_links SET state = 'pending', skip_reason = NULL
-             WHERE source_guild = $1 AND user_id = $2 AND state = 'skipped' AND skip_reason = 'rate cap'
-             RETURNING guild_id",
-        )
-        .bind(src)
-        .bind(u)
-        .fetch_all(&app.pool)
-        .await?;
-        for t in targets {
-            let to = Id::new(t as u64);
-            enqueue_copy(app, to, Id::new(u as u64), Id::new(src as u64)).await?;
-        }
-    }
-    Ok(())
-}
-
 /// Keeps `guild_owners` current (GuildCreate, GuildUpdate). A new owner takes the server out of
 /// its old group at once: its pending copies are cancelled and both owners hear about it.
 pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) -> Result<()> {
@@ -837,7 +953,7 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
     app.invalidate_guild(gid);
     cancel(app, gid, "owner changed").await?;
     if app.cfg(gid.get()).await?.ban_sync.enabled {
-        let name = verify::guild_name(app, gid).await;
+        let name = md(&verify::guild_name(app, gid).await);
         let text = format!("**{name}** has a new owner, so it left its Ban Sync group: bans are no longer copied between it and the other servers of its old owner. Copies already made stay as normal bans.");
         reply::dm(app, old, &text).await;
         reply::dm(app, owner, &text).await;
@@ -857,189 +973,13 @@ pub async fn on_removed(app: &App, gid: Id<GuildMarker>) -> Result<()> {
 async fn cancel(app: &App, gid: Id<GuildMarker>, why: &str) -> Result<()> {
     sqlx::query(
         "UPDATE ban_sync_links SET state = 'cancelled', skip_reason = $2, done_at = now()
-         WHERE state = 'pending' AND (guild_id = $1 OR source_guild = $1)",
+         WHERE state IN ('pending', 'alerted') AND (guild_id = $1 OR source_guild = $1)",
     )
     .bind(gid.get() as i64)
     .bind(why)
     .execute(&app.pool)
     .await?;
     Ok(())
-}
-
-/// Below the `bansync` panel: the group and the last 10 copies to or from this server.
-pub async fn panel_text(app: &App, gid: Id<GuildMarker>) -> Result<String> {
-    let mut names = BTreeMap::new();
-    for g in group(app, gid).await? {
-        names.insert(g.get(), verify::guild_name(app, g).await);
-    }
-    let mut out = match names.values().map(|n| format!("`{n}`")).collect::<Vec<_>>() {
-        v if v.is_empty() => "**Group:** no other server of this owner has TommyBot".to_string(),
-        v => format!("**Group:** {}", v.join(", ")),
-    };
-    let rows: Vec<(i64, i64, i64, String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT guild_id, source_guild, user_id, state, skip_reason, extract(epoch FROM created_at)::bigint
-         FROM ban_sync_links WHERE guild_id = $1 OR source_guild = $1 ORDER BY created_at DESC LIMIT 10",
-    )
-    .bind(gid.get() as i64)
-    .fetch_all(&app.pool)
-    .await?;
-    out.push_str("\n**Last copies:**");
-    if rows.is_empty() {
-        out.push_str(" none yet");
-    }
-    let name = |g: i64| {
-        names
-            .get(&(g as u64))
-            .cloned()
-            .unwrap_or_else(|| g.to_string())
-    };
-    for (to, src, user, state, why, at) in rows {
-        let way = if to as u64 == gid.get() {
-            format!("from `{}`", name(src))
-        } else {
-            format!("to `{}`", name(to))
-        };
-        let why = why.map_or(String::new(), |w| format!(" ({})", embed::clip(&w, 60)));
-        out.push_str(&format!("\n`{state}`{why} <@{user}> {way} <t:{at}:R>"));
-    }
-    Ok(out)
-}
-
-/// `bansync:{src}:{user}` (Ban here, in the receiving server) and `bansync:rest:{src}` (Send the
-/// rest, in the owner's DM). The id only points at a row; the clicker's rights and the DB decide.
-pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
-    let Some(InteractionData::MessageComponent(c)) = &i.data else {
-        return Ok(false);
-    };
-    let Some(rest) = c.custom_id.strip_prefix(BUTTON) else {
-        return Ok(false);
-    };
-    let client = app.http.interaction(Id::new(app.me.get()));
-    let defer = verify::ephemeral(
-        InteractionResponseType::DeferredChannelMessageWithSource,
-        None,
-    );
-    client.create_response(i.id, &i.token, &defer).await?;
-    let text = match rest.strip_prefix(REST) {
-        Some(src) => send_rest_click(app, i, src).await?,
-        None => ban_click(app, i, rest).await?,
-    };
-    client
-        .create_followup(&i.token)
-        .content(&text)
-        .flags(MessageFlags::EPHEMERAL)
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .await?;
-    Ok(true)
-}
-
-async fn ban_click(app: &App, i: &Interaction, rest: &str) -> Result<String> {
-    let parsed = rest.split_once(':').and_then(|(s, u)| {
-        Some((
-            Id::new_checked(s.parse().ok()?)?,
-            Id::new_checked(u.parse().ok()?)?,
-        ))
-    });
-    let (Some(gid), Some(clicker), Some((src, user))) = (i.guild_id, i.author_id(), parsed) else {
-        return Ok("This button does not work here.".into());
-    };
-    let owner = app.guild_info(gid).await?.owner;
-    let level = app.level(gid, owner, clicker).await?;
-    if !level.has("ban") {
-        return Ok("You need the ban permit in this server to do this.".into());
-    }
-    let key = (gid, user, src);
-    // Pending while the ban runs, so its audit event is not shared on as a new ban.
-    let row: Option<(String, Option<i64>)> = sqlx::query_as(
-        "UPDATE ban_sync_links SET state = 'pending'
-         WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3 AND state = 'alerted'
-         RETURNING reason, extract(epoch FROM expires_at)::bigint",
-    )
-    .bind(gid.get() as i64)
-    .bind(user.get() as i64)
-    .bind(src.get() as i64)
-    .fetch_optional(&app.pool)
-    .await?;
-    let Some((reason, expires)) = row else {
-        return Ok("This alert was already handled.".into());
-    };
-    let duration = match expires {
-        Some(t) if t <= now_secs() => {
-            mark(
-                app,
-                key,
-                &["pending"],
-                "skipped",
-                Some("temp ban already ended"),
-            )
-            .await?;
-            return Ok("That temp ban has already ended, so nothing was done.".into());
-        }
-        Some(t) => Some(t - now_secs()),
-        None => None,
-    };
-    let why = copy_reason(&verify::guild_name(app, src).await, src.get(), &reason);
-    let done = commands::apply(
-        app,
-        gid,
-        owner,
-        (clicker, &level),
-        ModKind::Ban,
-        user,
-        Some(&why),
-        duration,
-        0,
-    )
-    .await;
-    let case = done.as_ref().ok().and_then(|a| a.case);
-    let (state, no) = match case {
-        Some(n) => ("banned", Some(n)),
-        None => ("alerted", None),
-    };
-    sqlx::query(
-        "UPDATE ban_sync_links SET state = $4, case_no = $5, done_at = now()
-         WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3 AND state = 'pending'",
-    )
-    .bind(gid.get() as i64)
-    .bind(user.get() as i64)
-    .bind(src.get() as i64)
-    .bind(state)
-    .bind(no)
-    .execute(&app.pool)
-    .await?;
-    Ok(match done {
-        Ok(a) => a.text,
-        Err(e) => format!("Something went wrong: {}", http_err::why(&e)),
-    })
-}
-
-async fn send_rest_click(app: &App, i: &Interaction, src: &str) -> Result<String> {
-    let (Some(clicker), Some(src)) = (
-        i.author_id(),
-        src.parse().ok().and_then(Id::<GuildMarker>::new_checked),
-    ) else {
-        return Ok("This button does not work here.".into());
-    };
-    if app.guild_info(src).await?.owner != clicker {
-        return Ok("Only the owner of that server can do this.".into());
-    }
-    let cfg = app.cfg(src.get()).await?;
-    let c = &cfg.ban_sync;
-    if !(c.enabled && c.share) {
-        return Ok("Ban Sync no longer sends bans from that server.".into());
-    }
-    let job = json!({"source": src.get()});
-    jobs::enqueue(
-        &app.pool,
-        src.get() as i64,
-        "ban_sync_send_rest",
-        job,
-        now_secs(),
-    )
-    .await?;
-    Ok(format!(
-        "Sending the next {BAN_SYNC_HOURLY} held back bans."
-    ))
 }
 
 #[cfg(test)]

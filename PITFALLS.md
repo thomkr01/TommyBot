@@ -47,6 +47,14 @@ A mention of the @everyone role renders as `@@everyone`, so write plain `@everyo
 Auto Setup answered "internal error" because the saved Quarantine role had been deleted in Discord: the PATCH got 404 and the whole setup stopped. Config keeps ids after the role or channel is gone (deleted by hand, or a backup restore).
 *Avoid:* treat a 404 on a saved id as "missing" and make it again (`sections::create` checks an existing id first). Never let a 404 on reuse fail a whole setup.
 
+**For bans the bot makes on staff's behalf, the audit actor is the bot, so checks must use the case moderator.** (Ban Sync review, 11-11)
+Ban Sync held a ban for 60 s and dropped it when anti-nuke contained the audit actor. A `t!ban` or a dashboard ban is made with the bot's token, so the actor was always the bot, never the hacked moderator, and the check could never fire for staff commands. Root cause: the audit entry names who called Discord, not who asked the bot to.
+*Avoid:* when the actor is the bot, take the moderator from the matching case (`cases.mod_id`, written by `apply_dm` within seconds) and check that person; with no case (an automatic ban), treat any containment in the server since the ban as a reason to stop. Store the moderator with anything that acts later (`ban_sync_links.mod_id`), so the later step checks again. Searched for the same mistake: `antinuke::on_audit` skips the bot's own entries on purpose (staff commands are limited by the permit rate limit in `commands::gated` instead), and `verify::deleted::on_audit` treats the bot as the actor only for its own deletes; neither reads a staff member from a bot entry.
+
+**Never mark a row done before the Discord call.** (Ban Sync review, 11-11)
+The first Ban Sync copy set its row to `banned` before the ban, so a job that crashed or failed in between left a "banned" row with no ban, and the retry saw `banned` and stopped. Root cause: the claim that makes a step run once was used as the record that it happened.
+*Avoid:* keep the row in its working state (`pending`) while the call runs, so a failure leaves it for the retry; on the retry, recognise your own earlier result in Discord (a ban whose reason starts with `Ban Sync from` counts as ours) and only then move the row on with `UPDATE … WHERE state = 'pending' RETURNING`; write the case only if the row has none yet. Mark a row skipped only for a refusal, never while the action exists. The Ban here button does the same and gives the row back to `alerted` when the ban does not happen. Searched for the same mistake: `reports::report` deletes its row when the log message fails, `joingate::punish` records after the action, lockdown uses `locking` → `locked` (section 2), and the quarantine row is written after the role change (above).
+
 **Raw requests need a real User-Agent.** (live tests, 11-09)
 Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010.
 

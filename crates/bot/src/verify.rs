@@ -388,9 +388,11 @@ async fn self_grant(
 }
 
 /// The audit log reason at the time limit, when `audit_reason` is on.
+/// The audit reason of a verification timeout, which Ban Sync also reads to tell such bans apart.
+pub(crate) const AUDIT_REASON: &str = "Did not verify within the time limit";
+
 fn audit_reason(v: &VerifyCfg) -> Option<&'static str> {
-    v.audit_reason
-        .then_some("Did not verify within the time limit")
+    v.audit_reason.then_some(AUDIT_REASON)
 }
 
 /// Applies the fail action to a member who never verified.

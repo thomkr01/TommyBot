@@ -1041,24 +1041,26 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await
 }
 
-/// Whether anti-nuke quarantined `actor` or put them in a nuke case since `since` (unix secs), so
-/// Ban Sync does not spread what a hacked staff account did. A nuke case keeps the time it opened,
-/// so cases opened up to [`NUKE_GAP`] earlier count too.
+/// Whether anti-nuke quarantined `actor` (anyone when `None`) or put them in a nuke case since
+/// `since` (unix secs), so Ban Sync does not spread what a hacked staff account did. A nuke case
+/// keeps the time it opened, so cases opened up to [`NUKE_GAP`] earlier count too.
 pub(crate) async fn contained_since(
     app: &App,
     gid: Id<GuildMarker>,
-    actor: Id<UserMarker>,
+    actor: Option<Id<UserMarker>>,
     since: i64,
 ) -> Result<bool> {
     Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM quarantines WHERE guild_id = $1 AND user_id = $2
+        "SELECT EXISTS (SELECT 1 FROM quarantines WHERE guild_id = $1
+                          AND ($2::bigint IS NULL OR user_id = $2)
                           AND created_at >= to_timestamp($3::float8))
              OR EXISTS (SELECT 1 FROM nuke_incidents WHERE guild_id = $1
                           AND created_at >= to_timestamp($3::float8) - make_interval(secs => $4)
-                          AND (data->'quarantined' @> to_jsonb($2) OR data->'failed' @> to_jsonb($2)))",
+                          AND ($2::bigint IS NULL OR data->'quarantined' @> to_jsonb($2::bigint)
+                               OR data->'failed' @> to_jsonb($2::bigint)))",
     )
     .bind(gid.get() as i64)
-    .bind(actor.get() as i64)
+    .bind(actor.map(|a| a.get() as i64))
     .bind(since as f64)
     .bind(NUKE_GAP.as_secs_f64())
     .fetch_one(&app.pool)

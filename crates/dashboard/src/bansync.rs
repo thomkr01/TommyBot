@@ -25,7 +25,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// The other servers with the same Discord owner, confirmed live: `guild_owners` is only a candidate list.
-async fn siblings(st: &AppState, guild: i64) -> Result<Vec<i64>, ApiError> {
+pub(crate) async fn siblings(st: &AppState, guild: i64) -> Result<Vec<i64>, ApiError> {
     let owner = st.discord.guild_owner(guild).await?;
     let Ok(owner_id) = owner.parse::<i64>() else {
         return Ok(vec![]);
