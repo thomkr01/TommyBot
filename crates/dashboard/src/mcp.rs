@@ -360,7 +360,15 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
         .guild_id
         .parse()
         .map_err(|_| bad("guild_id is not an id"))?;
-    let target = p.target.as_deref().filter(|t| !t.is_empty());
+    // Only actions with `{t}` in their path take a target, and only those check it, so drop any other:
+    // it would reach the DM and the audit row unchecked.
+    let takes_target = ACTIONS
+        .iter()
+        .any(|a| a.0 == p.action && a.2.contains("{t}"));
+    let target = p
+        .target
+        .as_deref()
+        .filter(|t| takes_target && !t.is_empty());
     route(&p.action, guild, target)?;
     let body = if p.body.is_null() { json!({}) } else { p.body };
     let open: i64 = sqlx::query_scalar("select count(*) from mcp_writes where status = 'pending'")
@@ -872,6 +880,14 @@ mod tests {
         .await;
         assert_eq!((code, r["ok"].as_bool()), (200, Some(true)), "{r}");
 
+        // A target on an action that takes none never reaches the DM.
+        let fake = json!({"guild_id": g.to_string(), "action": "note_add", "target": "x`\n```\nfake",
+            "body": {"user_id": "1", "text": "hi"}});
+        let (code, pr) = call("/api/mcp/propose", &tok, fake).await;
+        assert_eq!(code, 200, "{pr}");
+        assert!(pr["target"].is_null());
+        assert!(!dms.lock().unwrap().last().unwrap().contains("fake"));
+
         // A change too long for one DM is refused, never cut: the owner approves only what the DM shows.
         let before = dms.lock().unwrap().len();
         let huge = json!({"guild_id": g.to_string(), "action": "note_add",
@@ -964,7 +980,13 @@ mod tests {
         let want = |s: &str| (s.to_string(), "Mac".to_string(), true);
         assert_eq!(
             rows,
-            [want("done"), want("done"), want("stale"), want("revoked")]
+            [
+                want("done"),
+                want("done"),
+                want("revoked"),
+                want("stale"),
+                want("revoked")
+            ]
         );
         for t in ["mcp_writes", "guild_config", "embeds"] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
