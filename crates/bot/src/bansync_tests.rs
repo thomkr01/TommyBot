@@ -1041,16 +1041,23 @@ async fn only_a_nuke_case_or_a_contained_permit_holder_holds_a_bot_ban() {
     // Automod bans: the bot is moderator too.
     t.exec("INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id) VALUES ($1, 1, 'ban', 600, 1), ($1, 2, 'ban', 601, 1), ($1, 3, 'ban', 602, 1)")
         .await;
-    // A raider quarantined on join (or by `t!quarantine`) cannot stop them.
-    t.exec("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 70, '{}')")
+    // A raider quarantined on join (or by `t!quarantine`) cannot stop them, nor can a member
+    // whose permit only warns.
+    t.exec("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, 70, '{}'), ($1, 72, '{554}')")
+        .await;
+    t.exec(
+        "INSERT INTO permits (id, guild_id, name, perms) VALUES ($1 + 1, $1, 'Helpers', '{warn}')",
+    )
+    .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 554)")
         .await;
     t.ban(0, 600, "raiding");
     share_job(&t.app, t.g(0), &t.share(600, Some(ME)))
         .await
         .unwrap();
     assert_eq!(t.rows(600).await, [T::row(1, "pending", None)]);
-    // A quarantined member whose saved roles carry a permit does.
-    t.exec("INSERT INTO permits (id, guild_id, name) VALUES ($1, $1, 'Mods')")
+    // A quarantined member whose saved roles carry a permit that can kick does.
+    t.exec("INSERT INTO permits (id, guild_id, name, perms) VALUES ($1, $1, 'Mods', '{kick}')")
         .await;
     t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 555)")
         .await;
@@ -1118,6 +1125,44 @@ async fn a_ban_left_by_a_stopped_try_is_recorded_or_lifted() {
     assert!(t.banned(1, 613).is_some());
     let by_hand = T::row(1, "skipped", Some("banned again by hand"));
     assert_eq!(t.rows(613).await, [by_hand]);
+    // Made, then the member turned out exempt: the ban stays (and the mod log says so).
+    t.exec("INSERT INTO extra_owners (guild_id, user_id) VALUES ($1 + 1, 614)")
+        .await;
+    t.ban(0, 614, "raiding");
+    t.link(1, 614, 0, "pending").await;
+    t.ban(1, 614, &ours);
+    copy_job(&t.app, t.g(1), &copy(614)).await.unwrap();
+    assert!(t.banned(1, 614).is_some());
+    assert_eq!(t.rows(614).await, [T::row(1, "banned", None)]);
+    // Made, then the server left the group: the copy stays as an ordinary ban.
+    t.ban(0, 615, "raiding");
+    t.link(1, 615, 0, "pending").await;
+    t.ban(1, 615, &ours);
+    t.set(|m| {
+        m.owners.insert(t.g(1).get(), t.base + 8);
+    });
+    copy_job(&t.app, t.g(1), &copy(615)).await.unwrap();
+    assert!(t.banned(1, 615).is_some());
+    assert_eq!(t.rows(615).await, [T::row(1, "banned", None)]);
+    t.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_copy_dropped_after_its_last_try_is_skipped() {
+    let Some(t) = T::new(17).await else { return };
+    t.link(1, 630, 0, "pending").await;
+    let job = jobs::Job {
+        id: 0,
+        guild_id: t.g(1).get() as i64,
+        kind: "ban_sync_copy".into(),
+        payload: json!({"user": 630, "source": t.g(0).get()}),
+        attempts: jobs::MAX_ATTEMPTS,
+    };
+    copy_gave_up(&t.app, &job, &anyhow::anyhow!("Discord is down")).await;
+    let gave_up = T::row(1, "skipped", Some("gave up: see logs"));
+    assert_eq!(t.rows(630).await, [gave_up]);
+    // No longer a copy: a new ban there is shared again.
+    assert!(!is_copy(&t.app, t.g(1), Id::new(630)).await.unwrap());
     t.cleanup().await;
 }
 

@@ -12,9 +12,9 @@ pub struct Job {
     pub attempts: i32,
 }
 
-/// Returns the job id, for [`finish`].
+/// Returns the job id, for [`finish`]. Takes a transaction too, to queue with the row it acts on.
 pub async fn enqueue(
-    pool: &PgPool,
+    pool: impl sqlx::PgExecutor<'_>,
     guild: i64,
     kind: &str,
     payload: Value,

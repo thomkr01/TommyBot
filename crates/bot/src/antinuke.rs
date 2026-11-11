@@ -1043,9 +1043,9 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
 
 /// Whether anti-nuke quarantined `actor` or put them in a nuke case since `since` (unix secs), so
 /// Ban Sync does not spread what a hacked staff account did. With `None`, any nuke case or the
-/// quarantine of someone holding a permit counts: a quarantine on join or by `t!quarantine` hits
-/// members a raider can provoke. A nuke case keeps the time it opened, so cases opened up to
-/// [`NUKE_GAP`] earlier count too.
+/// quarantine of someone who could ban, kick or quarantine (`Level::has("quarantine")`) counts:
+/// a quarantine on join or by `t!quarantine` hits members a raider can provoke. A nuke case keeps
+/// the time it opened, so cases opened up to [`NUKE_GAP`] earlier count too.
 pub(crate) async fn contained_since(
     app: &App,
     gid: Id<GuildMarker>,
@@ -1058,7 +1058,9 @@ pub(crate) async fn contained_since(
                           AND CASE WHEN $2::bigint IS NULL THEN
                                 EXISTS (SELECT 1 FROM extra_owners WHERE guild_id = $1 AND user_id = q.user_id)
                                 OR EXISTS (SELECT 1 FROM trusted_admins WHERE guild_id = $1 AND user_id = q.user_id)
-                                OR EXISTS (SELECT 1 FROM permit_roles WHERE guild_id = $1 AND role_id = ANY(q.saved_roles))
+                                OR EXISTS (SELECT 1 FROM permit_roles r JOIN permits p ON p.id = r.permit_id
+                                           WHERE r.guild_id = $1 AND r.role_id = ANY(q.saved_roles)
+                                             AND p.perms && ARRAY['ban', 'kick', 'quarantine'])
                               ELSE q.user_id = $2 END)
              OR EXISTS (SELECT 1 FROM nuke_incidents WHERE guild_id = $1
                           AND created_at >= to_timestamp($3::float8) - make_interval(secs => $4)

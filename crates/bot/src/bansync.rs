@@ -469,6 +469,8 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy, capped: bool) -> Resul
     } else {
         ("pending", None)
     };
+    // One transaction, so a failure never leaves a pending row without its copy job.
+    let mut tx = app.pool.begin().await?;
     let written = sqlx::query(
         "INSERT INTO ban_sync_links (guild_id, user_id, source_guild, source_case, origin, reason,
              expires_at, state, skip_reason, actor_id, mod_id, banned_at)
@@ -492,20 +494,39 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy, capped: bool) -> Resul
     .bind(c.actor.map(|a| a as i64))
     .bind(c.moderator)
     .bind(c.banned_at.map(|t| t as f64))
-    .execute(&app.pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected()
         == 1;
     if written && !capped {
-        enqueue_copy(app, (to, user, src), now_secs()).await?;
+        enqueue_copy(&mut *tx, (to, user, src), now_secs()).await?;
     }
+    tx.commit().await?;
     Ok(written && !capped)
 }
 
-async fn enqueue_copy(app: &App, (to, user, src): Key, at: i64) -> Result<()> {
+async fn enqueue_copy(db: impl sqlx::PgExecutor<'_>, (to, user, src): Key, at: i64) -> Result<()> {
     let job = json!({"user": user.get(), "source": src.get()});
-    jobs::enqueue(&app.pool, to.get() as i64, "ban_sync_copy", job, at).await?;
+    jobs::enqueue(db, to.get() as i64, "ban_sync_copy", job, at).await?;
     Ok(())
+}
+
+/// The scheduler dropped a copy job after its last try: the row is skipped with the error, so it
+/// no longer counts as a copy and a new ban there shares again.
+pub async fn copy_gave_up(app: &App, job: &jobs::Job, e: &anyhow::Error) {
+    let key = (|| {
+        let p = &job.payload;
+        Some((
+            Id::new_checked(job.guild_id as u64)?,
+            Id::new_checked(id_of(p, "user")?)?,
+            Id::new_checked(id_of(p, "source")?)?,
+        ))
+    })();
+    let Some(key) = key else { return };
+    let why = format!("gave up: {}", http_err::why(e));
+    if let Err(e) = mark(app, key, &["pending"], "skipped", Some(&why)).await {
+        tracing::warn!(?e, "ban sync: marking a dropped copy failed");
+    }
 }
 
 /// The servers of the group that `src` sends to now. One failing server is logged and skipped,
@@ -714,17 +735,25 @@ async fn copy(app: &App, key: Key) -> Result<()> {
     let ban = http_err::ban(&app.http, to, user).await?;
     let mine = ours(ban.as_ref().and_then(|b| b.reason.as_deref()), src);
     let owners = Owners::default();
-    if let Some((state, reason)) = blocked(app, &owners, key, &row).await? {
-        // Lifted while the row is still pending, so a failed unban is retried, never left behind.
-        if mine {
-            return lift(app, key, &name).await;
+    match blocked(app, &owners, key, &row).await? {
+        // The source no longer wants the ban: lifted while the row is still pending, so a failed
+        // unban is retried, never left behind.
+        Some((_, LIFTED | CONTAINED)) if mine => return lift(app, key, &name).await,
+        // A server out of the group keeps its copies as ordinary bans; staff hear about an exempt one.
+        Some((state, reason)) if mine => {
+            finish_ban(app, key, None, &why).await?;
+            if state == "skipped" {
+                kept_exempt(app, key, reason).await;
+            }
+            return Ok(());
         }
-        return mark(app, key, &["pending"], state, Some(reason))
-            .await
-            .map(drop);
-    }
-    if mine {
-        return finish_ban(app, key, None, &why).await;
+        Some((state, reason)) => {
+            return mark(app, key, &["pending"], state, Some(reason))
+                .await
+                .map(drop)
+        }
+        None if mine => return finish_ban(app, key, None, &why).await,
+        None => {}
     }
     let skip = |why: &'static str| mark(app, key, &["pending"], "skipped", Some(why));
     // So a later unban there never lifts a ban this server made itself.
@@ -763,6 +792,23 @@ async fn copy(app: &App, key: Key) -> Result<()> {
     ban_copy(app, key, owner, &why, duration).await
 }
 
+const LIFTED: &str = "source ban lifted";
+const CONTAINED: &str = "source moderator contained";
+
+/// A ban made before the member turned out exempt stays; the mod log says so.
+async fn kept_exempt(app: &App, (to, user, src): Key, why: &str) {
+    let log = Log::new("Ban Sync kept a ban", ORANGE)
+        .user("Member", user.get())
+        .line("Server", &format!("*`{src}`*"))
+        .text(&format!(
+            "This member is exempt here ({why}), but the ban was already made. Unban them if it should not stay."
+        ));
+    let sent = crate::events::send_log(app, to.get(), LogKind::ModCommand, log);
+    if let Err(e) = sent.await {
+        tracing::warn!(?e, "ban sync: exempt log failed");
+    }
+}
+
 /// Why a pending copy may not go ahead now, as (state, reason): time has passed since the share,
 /// so everything is checked again.
 async fn blocked(
@@ -775,10 +821,10 @@ async fn blocked(
         return Ok(Some(("cancelled", "not in the same group")));
     }
     if http_err::ban(&app.http, src, user).await?.is_none() {
-        return Ok(Some(("cancelled", "source ban lifted")));
+        return Ok(Some(("cancelled", LIFTED)));
     }
     if stopped(app, src, row.behind(app.me), row.banned_at).await? {
-        return Ok(Some(("cancelled", "source moderator contained")));
+        return Ok(Some(("cancelled", CONTAINED)));
     }
     let level = app.level(to, owners.need(app, to).await?, user).await?;
     Ok(exempt(&level, user, app.me, app.bot_owner).map(|why| ("skipped", why)))

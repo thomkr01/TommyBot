@@ -177,6 +177,9 @@ async fn round(app: &App, heavy: bool) {
                         let last = job.attempts >= jobs::MAX_ATTEMPTS;
                         if last {
                             give_up_log(app, &job, &e).await;
+                            if job.kind == "ban_sync_copy" {
+                                crate::bansync::copy_gave_up(app, &job, &e).await;
+                            }
                         }
                         last
                     }

@@ -139,8 +139,7 @@ pub(super) async fn ban_click(
         return Ok("This alert was already handled.".into());
     };
     if stopped(app, src, row.behind(app.me), row.banned_at).await? {
-        let why = Some("source moderator contained");
-        mark(app, key, &["alerted"], "cancelled", why).await?;
+        mark(app, key, &["alerted"], "cancelled", Some(CONTAINED)).await?;
         return Ok("Anti-nuke stopped the moderator behind that ban, so nothing was done.".into());
     }
     let duration = match remaining(row.expires) {
@@ -150,7 +149,7 @@ pub(super) async fn ban_click(
             return Ok("That temp ban has already ended, so nothing was done.".into());
         }
     };
-    enqueue_copy(app, key, now_secs() + CLICK_RECOVERY_S).await?;
+    enqueue_copy(&app.pool, key, now_secs() + CLICK_RECOVERY_S).await?;
     // Pending while the ban runs, so its audit event is not shared on as a new ban.
     if !mark(app, key, &["alerted"], "pending", None).await? {
         return Ok("This alert was already handled.".into());
@@ -309,6 +308,8 @@ pub async fn send_rest_job(app: &App, p: &Value) -> Result<()> {
     .await?;
     for u in users {
         let user = Id::new(u as u64);
+        // One transaction per user, so a failure never leaves a pending row without its copy job.
+        let mut tx = app.pool.begin().await?;
         let rows: Vec<Held> = sqlx::query_as(
             "UPDATE ban_sync_links SET state = 'pending', skip_reason = NULL
              WHERE source_guild = $1 AND user_id = $2 AND state = 'skipped' AND skip_reason = 'rate cap'
@@ -316,18 +317,27 @@ pub async fn send_rest_job(app: &App, p: &Value) -> Result<()> {
         )
         .bind(src.get() as i64)
         .bind(u)
-        .fetch_all(&app.pool)
+        .fetch_all(&mut *tx)
         .await?;
         for (to, actor, moderator, at) in rows {
             let key = (Id::new(to as u64), user, src);
             let who = behind(app.me, actor.map(|a| a as u64), moderator);
             if stopped(app, src, who, at).await? {
-                let why = Some("source moderator contained");
-                mark(app, key, &["pending"], "cancelled", why).await?;
+                sqlx::query(
+                    "UPDATE ban_sync_links SET state = 'cancelled', skip_reason = $4, done_at = now()
+                     WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3",
+                )
+                .bind(to)
+                .bind(u)
+                .bind(src.get() as i64)
+                .bind(CONTAINED)
+                .execute(&mut *tx)
+                .await?;
             } else {
-                enqueue_copy(app, key, now_secs()).await?;
+                enqueue_copy(&mut *tx, key, now_secs()).await?;
             }
         }
+        tx.commit().await?;
     }
     Ok(())
 }
