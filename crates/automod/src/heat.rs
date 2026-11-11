@@ -88,7 +88,8 @@ pub const HEAT_DECAY: (f64, f64) = (0.001, 0.99);
 impl HeatCfg {
     /// Max and decay pulled inside their ranges: config also arrives from the prefix panel and MCP.
     pub fn clamped(self) -> Self {
-        let fit = |v: f64, (lo, hi): (f64, f64), d: f64| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        let fit =
+            |v: f64, (lo, hi): (f64, f64), d: f64| if v.is_finite() { v.clamp(lo, hi) } else { d };
         let d = Self::default();
         Self {
             max: fit(self.max, HEAT_MAX, d.max),

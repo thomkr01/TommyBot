@@ -37,6 +37,10 @@ The raw reqwest client had none, so one hung call could hold a lockdown or rule 
 The dashboard's and the MCP server's Discord clients had none either, found 11-11.
 *Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`, the dashboard's and the MCP's Discord client). Twilight already handles 429.
 
+**A REST call before an interaction's answer can miss the 3 seconds.** (spammer-flag review, 11-11)
+The verify Start button asked Discord for the spammer flag on every click before it answered, through `Api::send`, which waits out a 429 up to 30 s and retries; the 15 s client timeout was the only limit. Discord drops an interaction answer after 3 s, so a slow or rate-limited lookup left the member with "This interaction failed", and every click cost another request on one bucket. `verify::guild_name` (before the "verified" answer) had no limit either.
+*Avoid:* do the work that needs no REST first and call only when the answer changes the result (`flagged_step`), cache the answer (`App::spam_flags`, 10 minutes, bounded), and bound the call: one try with no 429 wait (`Api::send_tries(.., 1)`) inside `tokio::time::timeout(1.5 s)`. Decide what a timeout means (here: a captcha, fail closed). Anything slower than that defers the interaction first.
+
 **A DM can be slow or refused.** (#136, #142)
 A DM before a punishment must not hold the punishment back, and a DM to a bot is refused.
 *Avoid:* send DMs through the shared helper with the `DM_WAIT` limit (3 s). The punishment runs anyway. A DM that times out is logged.
@@ -110,7 +114,7 @@ Whitelisted channels and roles still got base message heat, other bots' slash-co
 
 **The verify button judged "suspicious" on other names than Join Gate.** (spammer-flag PR, 11-11)
 Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
-*Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the target is not Everyone, and a failed lookup means a captcha.
+*Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the flag would turn a Grant into a challenge, and a failed lookup means a captcha.
 
 ## 4. Parsing and limits
 

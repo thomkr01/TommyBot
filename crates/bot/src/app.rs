@@ -144,6 +144,8 @@ pub struct App {
     pub slow: Mutex<HashMap<u64, ChannelHeat>>,
     /// Channels with an `auto_slowmode` row, so a channel update needs no query otherwise.
     pub slow_active: Mutex<HashSet<u64>>,
+    /// Discord's spammer flag per (guild, user) and when it was read (ms), for the verify button.
+    pub spam_flags: Mutex<HashMap<(u64, u64), (bool, i64)>>,
     /// Name pair last punished by the post-join username check, so unrelated member updates do not repeat it.
     pub punished_names: Mutex<HashMap<(u64, u64), String>>,
     /// Last public command per (guild, member), in ms.
@@ -213,6 +215,7 @@ impl App {
             channels: Default::default(),
             slow: Default::default(),
             slow_active: Default::default(),
+            spam_flags: Default::default(),
             punished_names: Default::default(),
             cmd_cooldown: Default::default(),
             crowd: Default::default(),
