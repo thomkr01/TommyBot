@@ -143,6 +143,10 @@ sqlx stores a checksum, so editing an applied migration breaks every existing da
 Cargo mixed crates from different worktrees, and one branch's migration broke the others' tests. Four targets (about 7 GB each) filled the disk.
 *Avoid:* one `CARGO_TARGET_DIR` and one database per worktree (`su postgres -c "createdb X"`; `createdb -h localhost` hangs on a password prompt). Delete finished targets.
 
+**Saving a note without a change was stored as an edit.** (11-11)
+`notes::edit` always wrote a `note_edits` row and both callers logged a Modify, so pressing Save twice gave a "x → x" history line and a log.
+*Avoid:* an edit that changes nothing writes nothing (`old.text <> $3` in the SQL) and the callers skip the log when `old == text`.
+
 ## 6. Dashboard
 
 See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the two worst ones (#143): a `>` in a `view!` attribute ends the tag, and reading a signal after its page is gone crashes the whole dashboard. Also:
@@ -201,4 +205,5 @@ Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` on
 - **Make scenarios clean up after themselves** so they can run again. The old nuke scenario kicked the attacker bot every run (#142).
 - **Cloud env vars are read at session start.** A variable added during a session needs a new session.
 - **Two DB tests used the same guild id.** (MCP writes, PR 4) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
+- **An e2e step waited for any row, not the one it made.** (11-11) The notes check waited for "a note is listed", which old notes from an earlier run already met, then the reload that put the new note on top swapped the card under the fill, so Save sent the old text. *Avoid:* wait for the exact value the step created.
 - **`tests/e2e/run.sh` needs root Postgres, trunk and Playwright**; the gateway is not covered by the Discord mock.

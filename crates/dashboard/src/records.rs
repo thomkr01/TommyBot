@@ -380,6 +380,9 @@ async fn note_edit(
     let (user, old) = notes::edit(&st.db, guild, &id, &text, s.user_id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    if old == text {
+        return ok();
+    }
     let log = NoteLog {
         action: NoteAction::Modify,
         id: Some(id),

@@ -729,6 +729,9 @@ pub async fn run(
                 else {
                     return plain(format!("No note `{id}`"));
                 };
+                if old == text {
+                    return plain(format!("Note `{id}` already says that"));
+                }
                 let log = NoteLog {
                     action: NoteAction::Modify,
                     id: Some(id.clone()),
