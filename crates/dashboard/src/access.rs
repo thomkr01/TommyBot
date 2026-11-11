@@ -42,7 +42,6 @@ pub const SECTIONS: &[&str] = &[
     "appeals",
     "misc",
     "logging",
-    "channel_profiles",
 ];
 
 /// What a dashboard page shows the user: everything, a greyed-out read-only view, or nothing.

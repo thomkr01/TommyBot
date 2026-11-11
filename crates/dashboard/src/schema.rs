@@ -1155,18 +1155,6 @@ pub fn schema() -> Vec<Value> {
         ("tickets", "Tickets", tickets),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
-        (
-            "channel_profiles",
-            "Channel setup",
-            vec![{
-                let mut v = fg("Role profiles", "profiles", "profiles");
-                v["options"] = json!(crate::channels::PERMS
-                    .iter()
-                    .map(|(k, _)| k)
-                    .collect::<Vec<_>>());
-                v
-            }],
-        ),
     ]
     .into_iter()
     .map(|(n, t, mut fields)| {
@@ -1221,12 +1209,6 @@ pub fn ids(section: &str, v: &Value) -> (Vec<String>, Vec<String>) {
                     .into_iter()
                     .flatten()
                     .for_each(|(_, c)| flat(c, &mut ch)),
-                "profiles" => items().for_each(|p| {
-                    flat(&p["roles"], &mut ro);
-                    for k in ["channels", "categories", "exclude"] {
-                        flat(&p[k], &mut ch);
-                    }
-                }),
                 _ => {}
             }
         }
@@ -1296,11 +1278,6 @@ mod tests {
         ch.dedup();
         assert_eq!(ch, ["1", "2", "3", "4"]);
         assert!(ro.is_empty());
-        let p = json!({"profiles": [{"roles": ["7"], "categories": ["8"], "exclude": ["9"]}]});
-        assert_eq!(
-            ids("channel_profiles", &p),
-            (vec!["8".into(), "9".into()], vec!["7".into()])
-        );
     }
 
     /// A valid value for a schema field, by its kind.
@@ -1324,9 +1301,6 @@ mod tests {
             "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
             "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
             "snippets" => json!([{"name": "x", "content": "y"}]),
-            "profiles" => {
-                json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
-            }
             _ => json!(["1"]),
         }
     }

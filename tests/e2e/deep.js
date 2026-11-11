@@ -65,7 +65,7 @@ const getJson = (page, path) => page.evaluate(async (p) => {
 async function matrix(browser) {
   const g = `/api/guilds/${G}`;
   const SECT = { misc: ['owner', false], antinuke: ['owner', true], panic: ['owner', true], whitelist: ['admin', true], catch: ['admin', true] };
-  const sections = ['wizard', 'whitelist', 'antinuke', 'panic', 'backups', 'automod', 'filters', 'discord_automod', 'joingate', 'joinraid', 'verification', 'tickets', 'lockdown', 'catch', 'appeals', 'misc', 'logging', 'channel_profiles'];
+  const sections = ['wizard', 'whitelist', 'antinuke', 'panic', 'backups', 'automod', 'filters', 'discord_automod', 'joingate', 'joinraid', 'verification', 'tickets', 'lockdown', 'catch', 'appeals', 'misc', 'logging'];
   // [method, path, body(v) or null, min level, step-up, staff perms]
   const routes = () => [
     ...sections.map((s) => ['PUT', `${g}/config/${s}`, (v, cfg) => ({ expected_version: v, value: cfg[s] ?? {} }), ...(SECT[s] || ['editor', false])]),
@@ -80,7 +80,10 @@ async function matrix(browser) {
     ['POST', `${g}/wizard/verify-channel`, (v) => ({ expected_version: v }), 'admin', true],
     ['POST', `${g}/catch/setup`, (v) => ({ expected_version: v }), 'admin', true],
     ['POST', `${g}/tickets/setup`, (v) => ({ expected_version: v }), 'admin', true],
-    ['POST', `${g}/channel-setup/apply`, () => ({ profiles: [] }), 'admin', true],
+    ['GET', `${g}/channel-setup`, () => undefined, 'viewer', false],
+    ['PUT', `${g}/channel-setup`, () => ({ draft: { items: {} } }), 'editor', false],
+    ['DELETE', `${g}/channel-setup`, () => undefined, 'editor', false],
+    ['POST', `${g}/channel-setup/push`, () => ({}), 'admin', true],
     ['POST', `${g}/lockdown/lock`, () => ({ kind: 'server' }), 'editor', false],
     ['POST', `${g}/lockdown/update`, () => ({ text: 'e2e' }), 'editor', false],
     ['POST', `${g}/lockdown/unlock`, () => ({}), 'editor', false],

@@ -150,7 +150,7 @@ fn overwrite_mask(o: &OverwriteImg, guild: u64, setup: &Setup) -> u64 {
 }
 
 /// A channel is synced when it has its category's overwrites, in any order.
-fn synced(c: &ChannelImg, cat: &ChannelImg) -> bool {
+pub fn synced(c: &ChannelImg, cat: &ChannelImg) -> bool {
     c.overwrites.len() == cat.overwrites.len()
         && c.overwrites.iter().all(|o| cat.overwrites.contains(o))
 }

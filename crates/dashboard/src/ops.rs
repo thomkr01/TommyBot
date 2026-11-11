@@ -106,17 +106,17 @@ async fn roles_and_mine(st: &AppState, guild: i64) -> Result<(Vec<Role>, Vec<Str
 }
 
 /// What the security score reads from Discord, fetched once for the check and its fixes.
-struct Live {
-    safety: GuildSafety,
-    setup: Setup,
-    bot_pos: i64,
-    image: tommybot_antinuke::Image,
+pub(crate) struct Live {
+    pub safety: GuildSafety,
+    pub setup: Setup,
+    pub bot_pos: i64,
+    pub image: tommybot_antinuke::Image,
     /// Raw role and channel JSON, kept for the backup a fix takes first.
-    roles: Value,
-    channels: Value,
+    pub roles: Value,
+    pub channels: Value,
 }
 
-async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Live, ApiError> {
+pub(crate) async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Live, ApiError> {
     let get = |path: String| async move { st.discord.call(Method::GET, &path, None).await };
     let (g, roles, channels, me) = tokio::try_join!(
         get(format!("/guilds/{guild}")),
