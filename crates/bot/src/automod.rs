@@ -297,17 +297,25 @@ async fn check_message(
     if app.whitelisted(gid, m.author.id, "automod").await? {
         return Ok(());
     }
-    if mention_lock && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await? {
-        send_log(
-            app,
-            gid.get(),
-            LogKind::Panic,
-            Log::new("Server Locked", ALERT)
-                .text(&format!("{YES} **The server has been locked down.**"))
-                .user("Member", m.author.id.get())
-                .line("Reason", "Mention spam"),
-        )
-        .await?;
+    // A failed lock or log must not keep the spammer from being punished below.
+    let locked = if mention_lock {
+        lockdown::lock(app, gid, cfg.lockdown_prefs.kind())
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(?e, "mention spam lockdown failed");
+                false
+            })
+    } else {
+        false
+    };
+    if locked {
+        let log = Log::new("Server Locked", ALERT)
+            .text(&format!("{YES} **The server has been locked down.**"))
+            .user("Member", m.author.id.get())
+            .line("Reason", "Mention spam");
+        if let Err(e) = send_log(app, gid.get(), LogKind::Panic, log).await {
+            tracing::warn!(?e, "lockdown log failed");
+        }
     }
     if !triggered {
         return Ok(());
@@ -492,7 +500,10 @@ async fn strike_member(
         act.timeout_ms,
         act.strike,
     );
-    send_log(app, gid.get(), LogKind::AutoMod, log).await?;
+    // A failed log must not skip the strike-cap lockdown.
+    if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+        tracing::warn!(?e, "automod log failed");
+    }
     if lock.enabled
         && lock.strikes.is_some_and(|n| act.strike >= n)
         && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?
@@ -830,7 +841,10 @@ pub(crate) async fn warn_actions(
     let log = Log::new("Warn Action", ORANGE)
         .user("Member", uid.get())
         .line("Result", &text);
-    send_log(app, gid.get(), LogKind::AutoMod, log).await?;
+    // The caller still records the strike for a timeout when the log fails.
+    if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+        tracing::warn!(?e, "warn action log failed");
+    }
     Ok(timed_out)
 }
 

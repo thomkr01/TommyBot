@@ -8,6 +8,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - Max heat must be at least 1 and heat degradation between 0.1% and 99% per second, on the dashboard, in the `heat` panel and through MCP (panic mode's heat decay too). The `heat` panel took any number, so a degradation of 100% or more broke every heat value and 0 kept heat from ever cooling. The bot also pulls a stored value inside these ranges.
 - The verification Start button checks the same names as Join Gate (cured username and display name). A member Join Gate found suspicious by name could skip the captcha in "suspicious only" mode. It also checks Discord's spammer flag.
 - The dashboard's and the MCP server's Discord requests time out after 15 seconds, and every raw Discord request sends the User-Agent Discord asks for.
+- MCP writes: the owner's code DM is never cut. A change too long for it is refused, `embed_post` shows the embed it posts, a rollback shows live Extra Owner and Trusted Admin changes, and a change whose preview changed after the DM is refused. MCP login only returns to claude.ai's own callback page. Migration 3100. (#169)
 - The backup channel list follows Discord's order. It sorted channels by category id instead of position, and matched channels to a category by name. (#164)
 - DEPLOY.md step 6.4 names the right link: **MCP tokens** in the account menu. (#165)
 - A dashboard icon used more than once no longer goes blank when its first copy is hidden. (#163)

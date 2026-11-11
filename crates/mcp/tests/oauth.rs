@@ -169,6 +169,10 @@ async fn owner_gets_a_token_others_do_not() {
         "http://127.0.0.1.evil.example/cb",
         "https://claude.ai.evil.example/cb",
         "https://x@evil.example/cb",
+        "https://claude.ai/some/other/page",
+        "https://claude.ai/api/mcp/auth_callback?next=x",
+        "https://claude.ai:8443/api/mcp/auth_callback",
+        "http://claude.ai/api/mcp/auth_callback",
     ] {
         assert_eq!(t.req(reg(json!([bad]))).await.0, 400, "{bad}");
         assert!(!tommybot_mcp::oauth::allowed_redirect(bad), "{bad}");
@@ -191,6 +195,15 @@ async fn owner_gets_a_token_others_do_not() {
     };
     // An unregistered redirect gets an error page, never a redirect.
     assert_eq!(t.get(&auth("https://evil.example/cb")).await.0, 400);
+    // A client registered under the older host-only rule no longer gets a redirect to its loose page.
+    let old = "https://claude.ai/some/other/page";
+    let old_cid =
+        t.0.oauth
+            .as_ref()
+            .unwrap()
+            .sign("client", 3600, json!({"uris": [old]}));
+    let old_auth = format!("/authorize?response_type=code&client_id={}&redirect_uri={}&code_challenge={chal}&code_challenge_method=S256&state=xyz", enc(&old_cid), enc(old));
+    assert_eq!(t.get(&old_auth).await.0, 400);
     let (code, h, _) = t.get(&auth(CB)).await;
     assert_eq!(code, 303);
     let loc = h["location"].to_str().unwrap();

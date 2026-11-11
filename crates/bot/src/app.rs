@@ -161,8 +161,14 @@ pub struct App {
     /// Heat panic: accounts that tripped it and when it ends (unix secs). Lost on restart, it is short.
     pub heat_raiders: Mutex<HashMap<u64, (HashSet<u64>, i64)>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
-    /// Category of each channel created or deleted since its audit entry, for anti-nuke's ticket categories.
-    pub channel_parents: Mutex<HashMap<u64, u64>>,
+    /// Category (None: no category) of each channel created or deleted, until its audit entry arrives.
+    pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
+    /// Nukers whose quarantine and revert is running; true when more of their actions came in
+    /// meanwhile, so the run reverts once more before it ends.
+    pub nuke_runs: Mutex<HashMap<(u64, u64), bool>>,
+    /// Lock and unlock of one guild run one at a time, so a second lock never saves locked
+    /// permissions as its snapshot.
+    pub lock_ops: Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>,
     /// Recent reactions per (guild, member), for reaction spam.
     pub reactions: Mutex<HashMap<(u64, u64), tommybot_automod::window::Window>>,
     /// Thread -> parent channel; see [`App::channel_scope`].
@@ -227,6 +233,8 @@ impl App {
             heat_raiders: Default::default(),
             guilds: Default::default(),
             channel_parents: Default::default(),
+            nuke_runs: Default::default(),
+            lock_ops: Default::default(),
             thread_parents: Default::default(),
             reactions: Default::default(),
         }

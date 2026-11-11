@@ -121,10 +121,13 @@ pub async fn server_meta(S(st): St) -> Response {
     .into_response()
 }
 
-/// Hosts a login may return to. Any https host would let a stranger register their own site, send the owner
-/// a login link and catch the code with the owner's access.
-/// shortcut: claude.ai only; another MCP client needs its callback host here.
-const REDIRECT_HOSTS: [&str; 2] = ["claude.ai", "claude.com"];
+/// The pages a login may return to, host and path exactly. Any https host would let a stranger register their
+/// own site and catch the owner's code; any path on claude.ai would hand the code to whatever page that is.
+/// shortcut: claude.ai only; another MCP client needs its exact callback here.
+const REDIRECTS: [(&str, &str); 2] = [
+    ("claude.ai", "/api/mcp/auth_callback"),
+    ("claude.com", "/api/mcp/auth_callback"),
+];
 
 /// claude.ai, or a client on the owner's own computer (Claude Code). Parsed, not a prefix check:
 /// `http://localhost.evil.com` starts with `http://localhost`.
@@ -136,7 +139,9 @@ pub fn allowed_redirect(u: &str) -> bool {
         return false;
     }
     match (url.scheme(), url.host_str()) {
-        ("https", Some(h)) => REDIRECT_HOSTS.contains(&h),
+        ("https", Some(h)) => {
+            url.port().is_none() && url.query().is_none() && REDIRECTS.contains(&(h, url.path()))
+        }
         ("http", Some(h)) => matches!(h, "localhost" | "127.0.0.1" | "[::1]"),
         _ => false,
     }
@@ -195,12 +200,14 @@ pub async fn authorize(S(st): St, Query(q): Query<AuthorizeQ>) -> Response {
         Ok(o) => o,
         Err(r) => return r.into_response(),
     };
-    // Never redirect anywhere before the redirect_uri is known to belong to the client.
-    let registered = o.open(&q.client_id, "client").is_some_and(|c| {
-        c["uris"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|u| u == q.redirect_uri.as_str()))
-    });
+    // Never redirect anywhere before the redirect_uri is known to belong to the client. Checked again here:
+    // a client id is signed for 10 years, and one registered under an older, looser rule must not still work.
+    let registered = allowed_redirect(&q.redirect_uri)
+        && o.open(&q.client_id, "client").is_some_and(|c| {
+            c["uris"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|u| u == q.redirect_uri.as_str()))
+        });
     if !registered {
         return bad(
             StatusCode::BAD_REQUEST,
