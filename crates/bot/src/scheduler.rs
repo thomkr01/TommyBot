@@ -136,12 +136,23 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             crate::antinuke::revert_and_report(app, gid, actor, why, since).await?
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
+        "ban_sync_share" => crate::bansync::share_job(app, gid, &job.payload).await?,
+        "ban_sync_copy" => crate::bansync::copy_job(app, gid, &job.payload).await?,
+        "ban_sync_lift" => crate::bansync::lift_job(app, gid, &job.payload).await?,
+        "ban_sync_import" => crate::bansync::import_job(app, &job.payload).await?,
+        "ban_sync_send_rest" => crate::bansync::send_rest_job(app, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())
 }
 
-const ONE_TARGET: [&str; 3] = ["unban", "timeout_renew", "delete_message"];
+const ONE_TARGET: [&str; 5] = [
+    "unban",
+    "timeout_renew",
+    "delete_message",
+    "ban_sync_copy",
+    "ban_sync_lift",
+];
 
 /// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
 async fn round(app: &App, heavy: bool) {

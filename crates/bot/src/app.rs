@@ -18,8 +18,8 @@ use tommybot_automod::{
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
     sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
-        TicketsCfg, WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
+        MiscCfg, PanicCfg, TicketsCfg, WhitelistCfg,
     },
 };
 use tommybot_logging::{LogConfig, Logger};
@@ -47,6 +47,7 @@ pub struct GuildCfg {
     pub verification: VerificationCfg,
     pub tickets: TicketsCfg,
     pub catch: CatchCfg,
+    pub ban_sync: BanSyncCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -79,6 +80,7 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
         "whitelist" => t::<WhitelistCfg>(v),
         "verification" => t::<VerificationCfg>(v),
         "tickets" => t::<TicketsCfg>(v),
+        "ban_sync" => t::<BanSyncCfg>(v),
         _ => Ok(()),
     }
 }
@@ -108,6 +110,7 @@ impl GuildCfg {
             verification,
             tickets: section(cfg, "tickets"),
             catch: section(cfg, "catch"),
+            ban_sync: section(cfg, "ban_sync"),
         }
     }
 }
@@ -119,6 +122,8 @@ pub struct App {
     pub pool: PgPool,
     pub api: Api,
     pub me: Id<UserMarker>,
+    /// The bot application's owner (the team owner for a team app); Ban Sync never acts on them.
+    pub bot_owner: Option<Id<UserMarker>>,
     cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
     pub logger: Mutex<Logger>,
     /// Whether @everyone can read a log channel, and when that was checked.
@@ -194,6 +199,7 @@ impl App {
             pool,
             api,
             me,
+            bot_owner: None,
             cfgs: Default::default(),
             logger: Mutex::new(Logger::new(me)),
             log_public: Default::default(),

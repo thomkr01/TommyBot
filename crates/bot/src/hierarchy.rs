@@ -73,6 +73,21 @@ impl App {
         self.guilds.lock().unwrap().remove(&gid);
     }
 
+    /// Tests: a cached server with this owner, so no Discord call is needed for it.
+    #[cfg(test)]
+    pub fn seed_guild(&self, gid: Id<GuildMarker>, owner: Id<UserMarker>) {
+        let info = GuildInfo {
+            owner,
+            roles: HashMap::new(),
+            role_perms: HashMap::new(),
+            parents: HashMap::new(),
+            channels: HashSet::new(),
+            bot_top: 0,
+            fetched: Instant::now(),
+        };
+        self.guilds.lock().unwrap().insert(gid, Arc::new(info));
+    }
+
     /// Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
     pub async fn staff_by_perms(
         &self,

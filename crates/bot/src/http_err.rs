@@ -3,7 +3,7 @@
 use anyhow::Result;
 use twilight_http::{api_error::ApiError, error::ErrorType, Client, Error};
 use twilight_model::{
-    guild::Member,
+    guild::{Ban, Member},
     id::{
         marker::{GuildMarker, UserMarker},
         Id,
@@ -88,6 +88,15 @@ pub async fn member(
     uid: Id<UserMarker>,
 ) -> Result<Option<Member>> {
     match http.guild_member(gid, uid).await {
+        Ok(r) => Ok(Some(r.model().await?)),
+        Err(e) if gone(&e) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// A guild ban, `None` only when Discord says the user is not banned; like [`member`].
+pub async fn ban(http: &Client, gid: Id<GuildMarker>, uid: Id<UserMarker>) -> Result<Option<Ban>> {
+    match http.ban(gid, uid).await {
         Ok(r) => Ok(Some(r.model().await?)),
         Err(e) if gone(&e) => Ok(None),
         Err(e) => Err(e.into()),

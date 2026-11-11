@@ -343,6 +343,7 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
                 cfg.joinraid.as_ref().is_some_and(|r| r.enabled),
             ),
             ("Verification", cfg.verification.enabled),
+            (tommybot_antinuke::security::BAN_SYNC, cfg.ban_sync.enabled),
         ],
         trusted: extra
             .into_iter()
