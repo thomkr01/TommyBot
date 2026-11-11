@@ -384,7 +384,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <button class="ghost" disabled=move || access.rank() < 2 on:click=move |_| { if let Some(i) = file.get() { i.click() } }>"Import settings"</button>
             <input type="file" accept=".json,application/json" hidden=true node_ref=file on:change=import />
         </div>
-        <AnimatedShow when=Signal::derive(move || preview.get().is_some()) hide_class="out" hide_delay=OUT>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
+        <Fade when=Signal::derive(move || preview.get().is_some())>{let apply = apply.clone(); move || shown.get().map(|(_, p)| {
             let apply = apply.clone();
             let r = NodeRef::new();
             focus_on_open(r);
@@ -397,7 +397,7 @@ fn History(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 {(!cleared.is_empty()).then(|| view! { <p class="info">{format!("Ids from the other server are cleared; set these again after the import: {cleared}")}</p> })}
                 <div class="row"><button class="ghost" on:click=move |_| preview.set(None)>"Abort"</button><button disabled=changes.is_empty() on:click=apply>"Import"</button></div>
             </div></div> }
-        })}</AnimatedShow>
+        })}</Fade>
         <For each=move || rows.get() key=|r| r["version"].as_i64() let:r>
             {
                 let v = r["version"].as_i64().unwrap_or(0);
@@ -558,7 +558,7 @@ fn App() -> impl IntoView {
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
                     <summary aria-label="account menu">{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
-                    <div><a href="#/">"Servers"</a><Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a href="#/mcp-tokens">"MCP tokens"</a></Show><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
+                    <div><a href="#/">"Servers"</a><a class="m-only" href="#/commands">"Commands"</a><Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="m-only" href="#/update">"Update"</a><a href="#/mcp-tokens">"MCP tokens"</a></Show><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
                 </details>
             </header>
             <StepUp need=step_up enrolled />

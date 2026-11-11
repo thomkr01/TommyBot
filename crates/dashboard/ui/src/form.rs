@@ -185,7 +185,11 @@ fn items(dc: &Value, key: &str) -> Vec<(String, String)> {
                 .map(|x| {
                     (
                         x["id"].as_str().unwrap_or("").to_string(),
-                        format!("{pre}{}", x["name"].as_str().unwrap_or("?")),
+                        // @everyone's name already starts with "@".
+                        format!(
+                            "{pre}{}",
+                            x["name"].as_str().unwrap_or("?").trim_start_matches(pre)
+                        ),
                     )
                 })
                 .collect()
@@ -349,8 +353,8 @@ fn RoutePick(
                     <span class="back" role="button" tabindex="0" on:click=move |_| step2.set(false)>"‹ Go back"</span>
                     <b>{move || picked.get().iter().map(|k| title(k)).collect::<Vec<_>>().join(", ")}</b>
                     <div class="row"><label>"Pick a channel"</label><select aria-label="channel" on:change=move |e| channel.set(event_target_value(&e))>
-                        <option value="" selected=move || channel.get().is_empty()>"choose a channel"</option>
-                        {move || items(&dc.get(), "channels").into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || channel.get() == id>{l}</option> }).collect_view()}
+                        <option value="" prop:selected=move || channel.get().is_empty()>"choose a channel"</option>
+                        {move || items(&dc.get(), "channels").into_iter().map(|(id, l)| view! { <option value=id.clone() prop:selected=move || channel.get() == id>{l}</option> }).collect_view()}
                     </select></div>
                     <div class="row"><button class="ghost" on:click=move |_| close()>"Abort"</button><button disabled=move || channel.get().is_empty() on:click=apply>"Apply"</button></div>
                 }>
@@ -415,7 +419,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 <input prop:value=move || format!("{}", secs() / UNITS[unit()].1) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<f64>() { set_n(x, false) } } />
                 <button class="ghost" aria-label="more" disabled=move || hi <= num() on:click=move |_| set_n(secs() / UNITS[unit()].1 + 1.0, true)>"+"</button>
                 <select aria-label="unit" on:change=move |e| chosen.set(UNITS.iter().position(|(u, _)| *u == event_target_value(&e)))>
-                    {UNITS.iter().map(|(u, _)| view! { <option value=*u selected=move || UNITS[unit()].0 == *u>{*u}</option> }).collect_view()}
+                    {UNITS.iter().map(|(u, _)| view! { <option value=*u prop:selected=move || UNITS[unit()].0 == *u>{*u}</option> }).collect_view()}
                 </select></div>
                 <span class="chip">{move || { let s = secs(); let u = best_unit(s); let n = s / UNITS[u].1; format!("{n} {}{}", UNITS[u].0, if n == 1.0 { "" } else { "s" }) }}</span>
                 {move || range_error((lo, hi), num(), Some(per)).map(|e| view! { <span class="err">{e}</span> })} }.into_any()
@@ -424,10 +428,14 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             let float = kind != "int";
             // "pct" is stored as a fraction (0.05) and shown as a percent (5).
             let k = if kind == "pct" { 100.0 } else { 1.0 };
-            let shown = move || if k == 1.0 { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
+            // Floats print through f64, so a stepped 100.0 shows as 100.
+            let shown = move || if !float { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
             let step = move |d: f64| {
                 let x = (get().as_f64().unwrap_or(0.0) * k + d).clamp(lo * k, hi * k);
                 // Rounded, so 0.01 + 1 - 1 is 0.01 again and not 0.010000000000000009.
+                // Without a default, empty means off; stepping back down to 0 empties it again, like the duration field.
+                // (Join Raid "ID flag" at 0 would flag every joiner in a raid.)
+                if x == 0.0 && default.get_value().is_null() { return set(Value::Null) }
                 set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!((x * 1e6).round() / 1e6) } else { json!(x as i64) })
             };
             let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
@@ -473,7 +481,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             let none = f["none_label"].as_str().unwrap_or("off").to_string();
             view! { <select on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) }>
                 {opts.iter().map(|o| { let v = show(o); let l = if v.is_empty() { none.clone() } else { opt_label(&v) };
-                    view! { <option value=v.clone() selected=move || show(&get()) == v>{l}</option> } }).collect_view()}
+                    view! { <option value=v.clone() prop:selected=move || show(&get()) == v>{l}</option> } }).collect_view()}
             </select> }.into_any()
         }
         "form" => {
@@ -516,7 +524,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 {move || (0..count()).map(|i| view! { <div class="row">
                     <input aria-label="points" prop:value=move || show(&get()[i]["points"]) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<i64>() { upd(i, "points", json!(x)) } } /><span>"points"</span>
                     <select aria-label="action" on:change=move |e| upd(i, "action", json!(event_target_value(&e)))>
-                        {["timeout", "kick", "ban"].map(|a| view! { <option value=a selected=move || get()[i]["action"] == a>{a}</option> }).collect_view()}
+                        {["timeout", "kick", "ban"].map(|a| view! { <option value=a prop:selected=move || get()[i]["action"] == a>{a}</option> }).collect_view()}
                     </select>
                     <Show when=move || get()[i]["action"] == "timeout">
                         <input aria-label="seconds" placeholder="default" prop:value=move || show(&get()[i]["secs"]) on:change=move |e| { if let Ok(x) = event_target_value(&e).trim().parse::<i64>() { upd(i, "secs", json!(x)) } } /><span>"seconds"</span>
@@ -557,8 +565,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     }).collect_view();
                     view! { <div class="row">
                         <select aria-label="channel" on:change=move |e| { let mut cur = get(); cur[i]["channel"] = json!(event_target_value(&e)); set(cur) }>
-                            <option value="" selected=move || get()[i]["channel"].is_null()>"choose a channel"</option>
-                            {move || items(&dc.get(), "channels").into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || get()[i]["channel"].as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
+                            <option value="" prop:selected=move || get()[i]["channel"].is_null()>"choose a channel"</option>
+                            {move || items(&dc.get(), "channels").into_iter().map(|(id, l)| view! { <option value=id.clone() prop:selected=move || get()[i]["channel"].as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
                         </select>
                         <div class="pick">{boxes}</div>
                         <button class="ghost" on:click=move |_| { let mut cur = get(); if let Some(a) = cur.as_array_mut() { a.remove(i); } set(cur) }>"Remove"</button>
@@ -581,7 +589,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     let sub = |k: &str, kind: &str, title: &str| json!({"path": format!("{}.{i}.{k}", p.get_value()), "kind": kind, "title": title});
                     let boxes = perms.iter().map(|k| { let (k, k2) = (k.clone(), k.clone()); view! {
                         <label>{k.replace('_', " ")}" "<select on:change=move |e| { let mut cur = get(); let s = event_target_value(&e); if s.is_empty() { if let Some(m) = cur[i]["perms"].as_object_mut() { m.remove(&k2); } } else { cur[i]["perms"][&k2] = json!(s); } set(cur) }>
-                            {["", "allow", "deny"].map(|o| { let k = k.clone(); view! { <option value=o selected=move || show(&get()[i]["perms"][&k]) == o>{if o.is_empty() { "-" } else { o }}</option> } }).collect_view()}
+                            {["", "allow", "deny"].map(|o| { let k = k.clone(); view! { <option value=o prop:selected=move || show(&get()[i]["perms"][&k]) == o>{if o.is_empty() { "-" } else { o }}</option> } }).collect_view()}
                         </select></label> } }).collect_view();
                     view! { <div class="card">
                         <div class="row">
@@ -613,8 +621,8 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                 (Some((m, k)), true) => val.update(|v| { let mut o = get_path(v, m); if let Some(o) = o.as_object_mut() { o.remove(k); } set_path(v, m, o) }),
                 _ => set(if s.is_empty() { Value::Null } else { json!(s) }),
             } }>
-                <option value="" selected=move || get().is_null()>"none"</option>
-                {move || items(&dc.get(), key).into_iter().map(|(id, l)| view! { <option value=id.clone() selected=move || get().as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
+                <option value="" prop:selected=move || get().is_null()>"none"</option>
+                {move || items(&dc.get(), key).into_iter().map(|(id, l)| view! { <option value=id.clone() prop:selected=move || get().as_str() == Some(id.as_str())>{l}</option> }).collect_view()}
             </select> }.into_any()
         }
         "users" => view! { <UserPick get=Signal::derive(get) set=Callback::new(set) /> }.into_any(),
@@ -635,6 +643,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         }
         _ => view! { <input prop:value=move || show(&get()) on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) } /> }.into_any(),
     };
+    let tip = f["tip"].as_str().map(|t| view! { <crate::common::Tip text=t.to_string() /> });
     let help = f["help"]
         .as_str()
         .map(|h| view! { <span class="muted">{h.to_string()}</span> });
@@ -670,7 +679,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         .as_str()
         .map_or_else(|| tail.replace('_', " "), String::from);
     // The group's name labels the control inside, whatever kind it is.
-    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
+    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}{tip}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
 }
 
 /// Raw JSON of one section of the config in `val`.
@@ -985,7 +994,7 @@ pub fn Section(
                         let note = note.clone();
                         let text = move || if !plain && off.get() { note.clone() } else { "Your current choices do not use this card, so its settings have no effect.".into() };
                         let fields = fs.into_iter().map(|f| { let only = f["only"].clone(); view! { <Show when=move || val.with(|v| holds(v, &only))><Field f=f.clone() val dc /></Show> } }).collect_view();
-                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{text.clone()}</p></details></Show></div> }
+                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><p class="offnote"><crate::common::Tip text=Signal::derive(text.clone()) />"Not in use right now"</p></Show></div> }
                     }).collect_view()
                 }}
             </div>
@@ -993,9 +1002,9 @@ pub fn Section(
                 {raw_editor(val, n.get_value(), msg)}
             </details>
         </Show>
-        <AnimatedShow when=Signal::derive(move || val.get() != orig.get()) hide_class="out" hide_delay=OUT>
+        <Fade when=Signal::derive(move || val.get() != orig.get())>
             <div class="bar"><b>"Changes detected!"</b><button class="ghost" on:click=move |_| val.set(orig.get_untracked())>"Cancel"</button><button on:click=save.clone()>"Save"</button></div>
-        </AnimatedShow>
+        </Fade>
         <Toast msg />
         <StepUp need enrolled />
     }
@@ -1012,6 +1021,14 @@ mod raid_tests {
         let age = serde_json::json!({"min": 5_000, "max": 8_640_000_000_i64});
         assert_eq!(range_error(range(&age), 0.0, Some(0.001)).as_deref(), Some("Must be between 5 second(s) and 100 day(s)"));
         assert_eq!(range_error(range(&serde_json::json!({})), -9.0, None), None);
+    }
+
+    #[test]
+    fn role_names() {
+        use super::name_of;
+        let dc = serde_json::json!({"roles": [{"id": "1", "name": "@everyone"}, {"id": "2", "name": "Member"}]});
+        assert_eq!(name_of(&dc, "roles", "1"), "@everyone");
+        assert_eq!(name_of(&dc, "roles", "2"), "@Member");
     }
 
     #[test]

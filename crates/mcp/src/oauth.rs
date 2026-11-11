@@ -121,10 +121,25 @@ pub async fn server_meta(S(st): St) -> Response {
     .into_response()
 }
 
-fn allowed_redirect(u: &str) -> bool {
-    u.starts_with("https://")
-        || u.starts_with("http://localhost")
-        || u.starts_with("http://127.0.0.1")
+/// Hosts a login may return to. Any https host would let a stranger register their own site, send the owner
+/// a login link and catch the code with the owner's access.
+/// shortcut: claude.ai only; another MCP client needs its callback host here.
+const REDIRECT_HOSTS: [&str; 2] = ["claude.ai", "claude.com"];
+
+/// claude.ai, or a client on the owner's own computer (Claude Code). Parsed, not a prefix check:
+/// `http://localhost.evil.com` starts with `http://localhost`.
+pub fn allowed_redirect(u: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(u) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    match (url.scheme(), url.host_str()) {
+        ("https", Some(h)) => REDIRECT_HOSTS.contains(&h),
+        ("http", Some(h)) => matches!(h, "localhost" | "127.0.0.1" | "[::1]"),
+        _ => false,
+    }
 }
 
 /// Dynamic client registration. Anyone may register; only the owner can finish a login.
@@ -148,7 +163,7 @@ pub async fn register(S(st): St, Json(req): Json<Value>) -> Response {
         return bad(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uri",
-            "https redirect_uris required",
+            "redirect_uris must be claude.ai or localhost",
         );
     }
     let id = o.sign("client", 10 * 365 * 86400, json!({"uris": uris}));
@@ -307,12 +322,23 @@ pub async fn callback(S(st): St, Query(q): Query<CallbackQ>) -> Response {
     Redirect::to(&to).into_response()
 }
 
-fn tokens(o: &OAuth, sub: &str, cid: &str) -> Response {
+/// `auth` is when the owner logged in with Discord. A refresh keeps it, so a login (or a stolen refresh
+/// token) lasts at most `REFRESH_S` in all instead of renewing itself forever.
+fn tokens(o: &OAuth, sub: &str, cid: &str, auth: u64) -> Response {
+    let left = (auth + REFRESH_S).saturating_sub(now());
+    if left == 0 {
+        return bad(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "login too old, log in again",
+        );
+    }
+    let access = ACCESS_S.min(left);
     Json(json!({
-        "access_token": o.sign("access", ACCESS_S, json!({"sub": sub})),
+        "access_token": o.sign("access", access, json!({"sub": sub})),
         "token_type": "Bearer",
-        "expires_in": ACCESS_S,
-        "refresh_token": o.sign("refresh", REFRESH_S, json!({"sub": sub, "cid": cid})),
+        "expires_in": access,
+        "refresh_token": o.sign("refresh", left, json!({"sub": sub, "cid": cid, "auth": auth})),
         "scope": "read",
     }))
     .into_response()
@@ -343,19 +369,28 @@ pub async fn token(S(st): St, Form(f): Form<HashMap<String, String>>) -> Respons
             {
                 return invalid();
             }
-            tokens(o, c["sub"].as_str().unwrap_or_default(), get("client_id"))
+            tokens(
+                o,
+                c["sub"].as_str().unwrap_or_default(),
+                get("client_id"),
+                now(),
+            )
         }
         "refresh_token" => {
             let Some(r) = o.open(get("refresh_token"), "refresh") else {
                 return invalid();
             };
             let cid = r["cid"].as_str().unwrap_or_default();
+            // Refresh tokens from before the login limit have no `auth`: one new login.
+            let Some(auth) = r["auth"].as_u64() else {
+                return invalid();
+            };
             if r["sub"] != o.owner_id.as_str()
                 || (!get("client_id").is_empty() && get("client_id") != cid)
             {
                 return invalid();
             }
-            tokens(o, &o.owner_id, cid)
+            tokens(o, &o.owner_id, cid, auth)
         }
         _ => bad(
             StatusCode::BAD_REQUEST,

@@ -248,32 +248,28 @@ const SYSTEMS: [(&str, &str, &str, bool, bool); 5] = [
 ];
 
 /// Master switch of a system: reads and writes its `enabled` key.
+/// `all` is the guild's config with its version, loaded once and shared by every switch: with a
+/// version each, the second switch flipped was refused with "config changed, reload".
 #[component]
-fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl IntoView {
-    let (cfg, version, on) = (
-        RwSignal::new(json!({})),
-        RwSignal::new(0i64),
-        RwSignal::new(default),
-    );
+fn SystemToggle(guild: String, section: &'static str, default: bool, all: RwSignal<Option<Value>>) -> impl IntoView {
+    // Greyed like the section's own page: a viewer could flip it, and only the server refused.
+    let access = expect_context::<Access>();
+    let on = RwSignal::new(default);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Locked while the config loads and while a save runs, so the knob never shows a state the server does not have.
     let busy = RwSignal::new(true);
-    let g = guild.clone();
-    spawn_local(async move {
-        if let Ok(v) = api("GET", &format!("/api/guilds/{g}/config"), None).await {
-            version.set(v["version"].as_i64().unwrap_or(0));
+    Effect::new(move |_| {
+        if let Some(v) = all.get() {
             on.set(v["config"][section]["enabled"].as_bool().unwrap_or(default));
-            if v["config"][section].is_object() {
-                cfg.set(v["config"][section].clone());
-            }
+            busy.set(false);
         }
-        busy.set(false);
     });
     let change = move |e| {
         let x = event_target_checked(&e);
-        let before = cfg.get_untracked();
-        cfg.update(|c| c["enabled"] = json!(x));
-        let (g, v, value) = (guild.clone(), version.get_untracked(), cfg.get_untracked());
+        let cur = all.get_untracked().unwrap_or_default();
+        let mut value = if cur["config"][section].is_object() { cur["config"][section].clone() } else { json!({}) };
+        value["enabled"] = json!(x);
+        let (g, v, saved) = (guild.clone(), cur["version"].as_i64().unwrap_or(0), value.clone());
         on.set(x);
         busy.set(true);
         run_act(
@@ -285,7 +281,6 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
                 )
                 .await;
                 if r.is_err() {
-                    cfg.set(before);
                     on.set(!x);
                 }
                 busy.set(false);
@@ -295,11 +290,16 @@ fn SystemToggle(guild: String, section: &'static str, default: bool) -> impl Int
             need,
             move |r| {
                 msg.ok(format!("{section} turned {}", if x { "on" } else { "off" }));
-                version.set(r["version"].as_i64().unwrap_or(0))
+                all.update(|a| {
+                    if let Some(a) = a {
+                        a["version"] = r["version"].clone();
+                        a["config"][section] = saved.clone();
+                    }
+                })
             },
         );
     };
-    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() prop:checked=move || on.get() on:change=change /><Toast msg /> }
+    view! { <input type="checkbox" class="sw" aria-label=format!("enable {section}") aria-busy=move || busy.get().to_string() prop:disabled=move || busy.get() || access.of(section) != "full" prop:checked=move || on.get() on:change=change /><Toast msg /> }
 }
 
 #[component]
@@ -307,7 +307,14 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     let rows = RwSignal::new(Vec::<Value>::new());
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     let guilds = expect_context::<ReadSignal<Vec<Value>>>();
+    let access = expect_context::<Access>();
     let members = RwSignal::new(Value::Null);
+    let g = guild.clone();
+    let all = RwSignal::new(None::<Value>);
+    spawn_local(async move {
+        let v = api("GET", &format!("/api/guilds/{g}/config"), None).await;
+        all.set(Some(v.unwrap_or_else(|_| json!({"version": 0, "config": {}}))));
+    });
     let g = guild.clone();
     spawn_local(async move {
         if let Ok(d) = api("GET", &format!("/api/guilds/{g}/discord"), None).await {
@@ -353,7 +360,8 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                 let fix = r["fix"]["label"].as_str().map(|l| {
                     let body = r["fix"].clone();
                     let l = l.to_string();
-                    view! { <button on:click=move |_| { let (g, body, load, l) = (g.clone(), body.clone(), load.clone(), l.clone());
+                    // The fix route needs a Trusted Admin, like Roll back on History.
+                    view! { <button disabled=move || access.rank() < 3 title=move || (access.rank() < 3).then_some("Needs a Trusted Admin or the owner") on:click=move |_| { let (g, body, load, l) = (g.clone(), body.clone(), load.clone(), l.clone());
                         if !confirm(&format!("{l}?")) { return }
                         run_act(async move { api("POST", &format!("/api/guilds/{g}/score/fix"), Some(body)).await }, msg, need, move |_| { msg.ok(format!("Fixed: {l}. The check below now shows the new state, and the change is in the config history.")); load() }) }>{l.clone()}</button> }
                 });
@@ -362,7 +370,7 @@ pub fn Score(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
         </For></div>
         <h2 style="text-align:center">"Quick Systems Overview"</h2>
         <div class="cards five">
-            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def /> })}</div></div> }).collect_view()}
+            {SYSTEMS.iter().map(|(k, t, d, sw, def)| view! { <div class="card sys"><h3>{*t}</h3><p>{*d}</p><div class="foot"><a class="btn" href=format!("#/{g2}/{k}")>"Settings"</a>{sw.then(|| view! { <SystemToggle guild=g2.clone() section=*k default=*def all /> })}</div></div> }).collect_view()}
         </div>
         <Toast msg />
         <StepUp need enrolled />
@@ -589,13 +597,13 @@ pub fn PurgeData(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
             <p class="muted">"Deletes everything TommyBot stores for this server: settings, cases, logs, backups, tickets and permits. This cannot be undone. Data is also deleted automatically 30 days after TommyBot is removed."</p>
             <button class="danger" on:click=move |_| open.set(true)>"Delete all data"</button>
         </div>
-        <AnimatedShow when=open hide_class="out" hide_delay=OUT>
+        <Fade when=open>
             <div class="modal" node_ref=r role="dialog" aria-modal="true" aria-label="Delete server data" on:keydown=move |e| dialog_keys(&e, || open.set(false))><div class="card">
                 <p>"Type the server name "<b>{name}</b>" to delete all of its stored data."</p>
                 <input aria-label="server name" autocomplete="off" prop:value=typed on:input=move |e| typed.set(event_target_value(&e)) />
                 <div class="row"><button class="ghost" on:click=move |_| open.set(false)>"Abort"</button><button class="danger" disabled=move || !matches() on:click=purge>"Delete"</button></div>
             </div></div>
-        </AnimatedShow>
+        </Fade>
         <Toast msg />
         <StepUp need enrolled />
     }

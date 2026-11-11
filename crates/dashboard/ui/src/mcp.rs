@@ -96,7 +96,7 @@ pub fn McpTokens(enrolled: ReadSignal<bool>) -> impl IntoView {
         <div class="head"><small>"TommyBot"</small><h1>"MCP tokens"</h1></div>
         <StepUp need enrolled />
         <div class="card">
-            <p class="muted">"A token lets the MCP server propose changes for Claude. Nothing changes until you type Claude the code the bot sends you by DM. Make one token per place that uses it, and revoke it when you stop using it. Making or revoking a token needs 2FA."</p>
+            <p class="muted">"One token per place that uses the MCP server. Making or revoking a token needs 2FA."<Tip text="A token lets the MCP server propose changes for Claude. Nothing changes until you type Claude the code the bot sends you by DM, and the DM names the token. Revoke a token you no longer use, or at once if you get a DM you did not ask for." /></p>
             <div class="row">
                 <input placeholder="Name, for example VPS" aria-label="token name" maxlength="40" prop:value=name on:input=move |e| name.set(event_target_value(&e)) />
                 <button class="go" disabled=move || name.get().trim().is_empty() on:click=create>"Make token"</button>
@@ -110,11 +110,12 @@ pub fn McpTokens(enrolled: ReadSignal<bool>) -> impl IntoView {
             </Show>
         </div>
         <div class="card">
-            <table>
-                <thead><tr><th>"Name"</th><th>"Made"</th><th>"Last used"</th><th></th></tr></thead>
-                <tbody>{rows}</tbody>
-            </table>
-            <Show when=move || list.get().is_empty()><p class="muted">"No tokens yet."</p></Show>
+            <Show when=move || !list.get().is_empty() fallback=|| view! { <p class="muted">"No tokens yet."</p> }>
+                <table>
+                    <thead><tr><th>"Name"</th><th>"Made"</th><th>"Last used"</th><th></th></tr></thead>
+                    <tbody>{rows}</tbody>
+                </table>
+            </Show>
         </div>
         <Toast msg />
     }

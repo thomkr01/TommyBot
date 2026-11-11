@@ -2,7 +2,7 @@
 
 Pitfalls for the rest of the bot are in [PITFALLS.md](../../../PITFALLS.md) at the repo root.
 
-Two Leptos mistakes broke the dashboard in November 2026. Both compile without a warning, so read this before you change the UI. The e2e sweep (`tests/e2e/dashboard.js`) now checks for both.
+These are Leptos mistakes that broke the dashboard in November 2026. They compile without a warning, so read this before you change the UI. The e2e sweep (`tests/e2e/dashboard.js`) checks for each of them.
 
 ## 1. A `>` in an attribute ends the tag
 
@@ -97,7 +97,51 @@ Clearing a number field stored `null`, and almost every number setting is a plai
 
 `.row label { flex:0 0 100%; font-weight:700 }` is meant for a field's title, but it also hit the Import button of every list field (a `<label>` around the file input). Import grew to the full row, turned bold, and the help text was drawn on top of it (Join Gate's Strict and Wildcard Words).
 
-**Rule:** a control that is a `<label>` or `<a>` inside a row resets what `.row label` sets, as `.io label, .io a` does now. A list field's box takes the full row so its help text goes below it.
+The first fix (`.io label`) did nothing: it had the same specificity as `.row label`, which comes later in the file, so `.row label` still won. The same rule also made every checkbox in role and channel lists bold and capitalized.
+
+**Rule:** a label that wraps a control (`.row label:has(> input)`) resets what `.row label` sets. When a rule must beat another one, give it a higher specificity, not just an earlier or later spot in the file, and check the result in the browser (`DEEP_ONLY=overflow` measures it). A list field's box takes the full row so its help text goes below it.
+
+## 8. Layout breaks that only show at some widths or with long text
+
+Help text next to a switch was squeezed into two thin columns (Join Gate "Exclude bots added by the owner", Miscellaneous, Auto Mod, Verification), and at 390 px the header was wider than the screen, so the avatar was cut off and the search box covered the logo.
+
+**Rule:** a switch's help text sits on its own line under the label (`.tog > .muted`). On a phone, header links that do not fit move into the account menu (`.m-only`). `DEEP_ONLY=overflow node tests/e2e/deep.js` checks every page at 1400, 1024 and 390 px for text outside its box, cut off, on top of other text, or squeezed.
+
+## 9. One version per widget on a page that saves several sections
+
+Each Overview switch loaded the config and kept its own version, so after one switch saved, the next one sent an old version and was refused with "config changed, reload". Five switches also meant five identical config requests.
+
+**Rule:** widgets on one page that save into the same config share one loaded config and one version signal, and update it after each save.
+
+## 10. Many copies of one SVG icon share its ids
+
+Every icon in `assets/icons` has fixed ids (`info-grad`, `info-cut`). With the info icon shown many times on a page, every copy paints with the first copy's gradient and mask, and draws nothing once that first copy is hidden (Chrome does not render a gradient from a `display:none` SVG).
+
+**Rule:** an icon that can appear more than once on a page uses `icons::icon_unique`, which numbers its ids.
+
+## 11. A transform on a parent moves its popup too
+
+The info icon grew on hover with `transform:scale` on `.tip`, which also scaled the card inside it, so the card was wider than measured and crossed the screen edge on a phone.
+
+**Rule:** animate the icon (`.tip .i`), not the element that holds the popup. The info card is placed when it opens (`Tip` in `common.rs`): shifted to stay inside `main` and the screen, and moved below the icon near the header. `DEEP_ONLY=overflow` opens every info card and checks it.
+
+## 12. `AnimatedShow` can hide itself while `when` is true
+
+Leptos's `AnimatedShow` starts a hide timer each time it reruns with `when` false, but only remembers the last timer. A form that loads sets `val` and `orig` one after the other, so `when` (`val != orig`) reruns false twice. The first timer is lost and fires later. If the user changes something within 200 ms, the "Changes detected!" bar shows and is hidden again at once. Nothing can be saved or cancelled until the next change. The Cancel e2e check hit this on a fresh server (#158).
+
+**Rule:** use `common::Fade` instead of `AnimatedShow`. It puts `when` behind a `Memo`, so it reruns only when the value really changes. All 8 uses were switched.
+
+Same class of bug, also in #158: the page wrapper read the access level straight from the access signal, so every access answer (one per page change) rebuilt the open page and could throw away edits made before it arrived. It now reads a `Memo` of the level.
+
+**Rule:** when a reactive closure builds a whole page or form, read derived values through a `Memo`, not a signal that is set again with the same content.
+
+## 13. A hidden popup still makes the page wider
+
+The info card (`.tip .bubble`) is only `opacity:0` until hovered, so it still takes layout room. An info icon near the right edge on a phone (MCP tokens page, 390 px) put the hidden card past the screen, and the whole page scrolled sideways.
+
+**Rule:** `main` has `overflow-x:clip` (clip, not hidden, so vertical overflow and sticky parts keep working). A new popup that is hidden with opacity or a transform must also stay inside `main`, as `Tip`'s `place()` does when it is shown.
+
+**Check:** on a 390 px viewport `document.documentElement.scrollWidth` equals the viewport width on every page.
 
 ## Where it was fixed (#143)
 

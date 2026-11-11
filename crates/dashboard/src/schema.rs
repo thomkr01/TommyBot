@@ -225,6 +225,32 @@ const NUKE_CARDS: &[(&str, &str)] = &[
 const GATE_ACTIONS: &[&str] = &["Log", "Warn", "Timeout", "Kick", "Ban"];
 
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
+/// Plain-language hover text for settings that are hard to read from their name: (section, path or
+/// last path part, text). Shown by the info icon next to the field title.
+const TIPS: &[(&str, &str, &str)] = &[
+    ("joingate", "require_all", "Normally one matching filter is enough to stop a new member. With this on, a member is only stopped when ALL the filters you turned on match."),
+    ("joingate", "exclude_trusted_bots", "Bots you or an Extra Owner add skip the checks. Bots added by anyone else are still checked."),
+    ("joingate", "unauthorized_bot.enabled", "Someone without permission adds a bot to the server. TommyBot removes the bot right away."),
+    ("joingate", "min_age_override_ms", "New accounts are often made for raids. Accounts younger than this are stopped at the door."),
+    ("automod", "heat.max", "Every message adds \"heat\" to a member. When the heat reaches this number, the member gets a strike."),
+    ("automod", "heat.decay_per_sec", "How fast heat cools down again. Higher means members can chat faster before they get a strike."),
+    ("automod", "strike.multiplier_pct", "Each new strike in a short time makes the next timeout longer by this much. 200 % means it doubles."),
+    ("automod", "strike.cap", "After this many strikes the member gets the longer CAP timeout instead of the normal one."),
+    ("automod", "strike.reoffend_window_ms", "Strikes inside this time count together. After it, the count starts over."),
+    ("automod", "strike.strike_expiry_ms", "How long a strike is remembered before it is forgotten."),
+    ("automod", "heat.webhook_multiplier", "Messages from webhooks get this much more heat, because spam bots often use webhooks."),
+    ("panic", "executors", "If this many accounts are quarantined in a short time, TommyBot treats it as an attack and starts Panic Mode. 0 turns this off."),
+    ("panic", "heat_executors", "Same, but counted from members Auto Mod punished."),
+    ("antinuke", "per_minute", "How many times one account may do this action (for example ban or delete a channel) before TommyBot stops it."),
+    ("antinuke", "per_hour", "How many times one account may do this action (for example ban or delete a channel) before TommyBot stops it."),
+    ("antinuke", "heat", "How much of the limit one action uses. 100 % means one action counts as reaching the limit."),
+    ("joinraid", "count", "If this many members join within this time, TommyBot treats it as a raid."),
+    ("joinraid", "span_ms", "If this many members join within this time, TommyBot treats it as a raid."),
+    ("joinraid", "id_flag_min", "Raid accounts are often made at the same moment. TommyBot looks for many joins whose accounts were created close together."),
+    ("lockdown", "main_roles", "The roles normal members have. Lockdown takes the chat permissions away from these roles."),
+    ("whitelist", "partner_channels", "Channels where invite links from other servers are allowed."),
+];
+
 pub fn schema() -> Vec<Value> {
     let mut log = vec![
         ti(
@@ -728,8 +754,9 @@ pub fn schema() -> Vec<Value> {
             ),
             "Granularity",
         ),
+        // Same as RaidCfg::default; the field is not optional, so emptying it must not save null.
         ti(
-            fg("ID flag", "id_margin_ms", "int"),
+            dv(fg("ID flag", "id_margin_ms", "int"), 60 * 60_000),
             "Margin (milliseconds)",
         ),
         dv(
@@ -1146,6 +1173,11 @@ pub fn schema() -> Vec<Value> {
         // The form keeps numbers inside the same ranges `api::validate` enforces.
         for v in &mut fields {
             let sec = v["section"].as_str().unwrap_or(n).to_string();
+            if let Some((.., tip)) = TIPS.iter().find(|(ts, tp, _)| {
+                *ts == sec && v["path"].as_str().is_some_and(|p| p == *tp || p.ends_with(&format!(".{tp}")))
+            }) {
+                v["tip"] = json!(tip);
+            }
             if let Some((lo, hi)) = v["path"].as_str().and_then(|p| limits::for_path(&sec, p)) {
                 v["min"] = json!(lo);
                 v["max"] = json!(hi);
@@ -1271,35 +1303,40 @@ mod tests {
         );
     }
 
+    /// A valid value for a schema field, by its kind.
+    fn sample(fd: &Value) -> Value {
+        match fd["kind"].as_str().unwrap() {
+            "bool" => json!(true),
+            "int" => fd.get("min").cloned().unwrap_or(json!(5)),
+            "float" | "pct" => json!(0.5),
+            "text" | "color" => json!("x"),
+            "list" => json!(["1"]),
+            "choice" => fd["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o.as_str() != Some(""))
+                .unwrap()
+                .clone(),
+            "channel" | "role" | "category" => json!("1"),
+            "form" => json!([{"label": "x"}]),
+            "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
+            "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
+            "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
+            "snippets" => json!([{"name": "x", "content": "y"}]),
+            "profiles" => {
+                json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
+            }
+            _ => json!(["1"]),
+        }
+    }
+
     #[test]
     fn every_schema_path_deserializes() {
         let mut objs: std::collections::BTreeMap<String, Value> = Default::default();
         for sec in schema() {
             for fd in sec["fields"].as_array().unwrap() {
-                let sample = match fd["kind"].as_str().unwrap() {
-                    "bool" => json!(true),
-                    "int" => fd.get("min").cloned().unwrap_or(json!(5)),
-                    "float" | "pct" => json!(0.5),
-                    "text" | "color" => json!("x"),
-                    "list" => json!(["1"]),
-                    "choice" => fd["options"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|o| o.as_str() != Some(""))
-                        .unwrap()
-                        .clone(),
-                    "channel" | "role" | "category" => json!("1"),
-                    "form" => json!([{"label": "x"}]),
-                    "customs" => json!([{"events": [fd["options"][0]], "channel": "1"}]),
-                    "route_pick" => json!({fd["options"][0]["key"].as_str().unwrap(): "1"}),
-                    "warn_actions" => json!([{"points": 5, "action": "timeout", "secs": 60}]),
-                    "snippets" => json!([{"name": "x", "content": "y"}]),
-                    "profiles" => {
-                        json!([{"name": "x", "roles": ["1"], "perms": {"view": "allow"}, "private": true, "categories": ["1"]}])
-                    }
-                    _ => json!(["1"]),
-                };
+                let sample = sample(fd);
                 let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
                 let mut cur = objs.entry(name.to_string()).or_insert_with(|| json!({}));
                 let parts: Vec<_> = fd["path"].as_str().unwrap().split('.').collect();
@@ -1312,6 +1349,94 @@ mod tests {
         for (name, obj) in objs {
             api::validate(&name, &obj)
                 .unwrap_or_else(|e| panic!("{name} schema does not deserialize: {e:?}"));
+        }
+    }
+
+    /// The form saves an emptied number field as its default, or null when it has none,
+    /// so a field without a default must be optional in the config, or saving fails.
+    #[test]
+    fn number_fields_without_default_accept_null() {
+        let mut bad = vec![];
+        for sec in schema() {
+            for fd in sec["fields"].as_array().unwrap() {
+                if !matches!(fd["kind"].as_str(), Some("int" | "float" | "pct"))
+                    || !fd["default"].is_null()
+                {
+                    continue;
+                }
+                let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
+                let mut obj = json!({});
+                let mut cur = &mut obj;
+                let parts: Vec<_> = fd["path"].as_str().unwrap().split('.').collect();
+                for p in &parts[..parts.len() - 1] {
+                    cur = &mut cur[*p];
+                }
+                cur[parts[parts.len() - 1]] = Value::Null;
+                if let Err(e) = api::validate(name, &obj) {
+                    bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "number fields that cannot be emptied:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// A section saved with only some fields (a server that never set the rest) still loads:
+    /// every config struct needs `#[serde(default)]`, like Join Raid lacked (`suspicious_only`).
+    #[test]
+    fn one_field_alone_deserializes() {
+        let mut bad = vec![];
+        for sec in schema() {
+            for fd in sec["fields"].as_array().unwrap() {
+                let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
+                let mut obj = json!({});
+                let mut cur = &mut obj;
+                let parts: Vec<_> = fd["path"].as_str().unwrap().split('.').collect();
+                for p in &parts[..parts.len() - 1] {
+                    cur = &mut cur[*p];
+                }
+                cur[parts[parts.len() - 1]] = sample(fd);
+                if let Err(e) = api::validate(name, &obj) {
+                    bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "sections that need every field:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_tip_finds_its_field() {
+        let all = schema();
+        for (sec, path, _) in TIPS {
+            let found = all
+                .iter()
+                .flat_map(|s| {
+                    let n = s["name"].clone();
+                    s["fields"].as_array().unwrap().iter().map(move |f| {
+                        (
+                            f["section"]
+                                .as_str()
+                                .map(str::to_string)
+                                .or(n.as_str().map(str::to_string)),
+                            f.clone(),
+                        )
+                    })
+                })
+                .any(|(s, f)| {
+                    s.as_deref() == Some(*sec)
+                        && !f["tip"].is_null()
+                        && f["path"]
+                            .as_str()
+                            .is_some_and(|p| p == *path || p.ends_with(&format!(".{path}")))
+                });
+            assert!(found, "tip for {sec}.{path} matches no field");
         }
     }
 }

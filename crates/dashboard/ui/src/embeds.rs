@@ -249,14 +249,14 @@ pub fn Embeds(guild: String) -> impl IntoView {
         <div class="card row">
             <select aria-label="saved embeds" on:change=move |e| { let v = event_target_value(&e); msg.clear();
                 cur.set(rows.with_untracked(|r| r.iter().find(|x| x["id"].as_i64() == v.parse().ok()).cloned()).unwrap_or_else(blank)) }>
-                <option value="" selected=move || cur.with(|c| c["id"].is_null())>"New embed"</option>
+                <option value="" prop:selected=move || cur.with(|c| c["id"].is_null())>"New embed"</option>
                 {move || rows.get().into_iter().map(|r| { let id = r["id"].as_i64(); view! {
-                    <option value=r["id"].to_string() selected=move || cur.with(|c| c["id"].as_i64() == id)>{format!("{}{}", r["name"].as_str().unwrap_or(""), if r["message"].is_null() { " (draft)" } else { "" })}</option> } }).collect_view()}
+                    <option value=r["id"].to_string() prop:selected=move || cur.with(|c| c["id"].as_i64() == id)>{format!("{}{}", r["name"].as_str().unwrap_or(""), if r["message"].is_null() { " (draft)" } else { "" })}</option> } }).collect_view()}
             </select>
             <input placeholder="Name" maxlength="100" prop:value=move || cur.with(|c| get_at(c, "name")) on:input=move |e| { let v = event_target_value(&e); cur.update(|c| c["name"] = json!(v)) } />
             <select aria-label="channel" on:change=move |e| { let v = event_target_value(&e); cur.update(|c| c["channel"] = if v.is_empty() { Value::Null } else { json!(v) }) }>
                 <option value="">"choose a channel"</option>
-                {move || channels.get().into_iter().map(|(id, l)| { let i = id.clone(); view! { <option value=id selected=move || cur.with(|c| c["channel"].as_str() == Some(i.as_str()))>{l}</option> } }).collect_view()}
+                {move || channels.get().into_iter().map(|(id, l)| { let i = id.clone(); view! { <option value=id prop:selected=move || cur.with(|c| c["channel"].as_str() == Some(i.as_str()))>{l}</option> } }).collect_view()}
             </select>
         </div>
         <div class="cards eb">

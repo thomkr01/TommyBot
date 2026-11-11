@@ -184,7 +184,7 @@ claude.ai cannot send a fixed token; it uses OAuth, and the MCP server sends you
 4. claude.ai > **Settings > Connectors > Add custom connector**: name `TommyBot`, URL `https://mcp.example.com/mcp`. Keep what claude.ai detects (Authentication: **Sign in now**, OAuth client: **Register automatically**) and add no headers. **Add**, then **Connect**, and log in with Discord. Anyone else who tries is refused.
 5. Turn the connector on where you want it: in a chat with the tools button, or in a Project's settings.
 
-Access tokens last an hour and claude.ai renews them for 30 days. Changing `MCP_OAUTH_SECRET` (then `docker compose up -d mcp`) logs every claude.ai client out at once.
+Access tokens last an hour and claude.ai renews them until 30 days after you logged in; then you log in with Discord again. Changing `MCP_OAUTH_SECRET` (then `docker compose up -d mcp`) logs every claude.ai client out at once. A login can only return to claude.ai or to `localhost` (Claude Code); another MCP client needs its host added to `REDIRECT_HOSTS` in `crates/mcp/src/oauth.rs`.
 
 ### 6.4 Letting Claude make changes (optional)
 

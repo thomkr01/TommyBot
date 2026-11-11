@@ -2,6 +2,8 @@
 
 Technical mistakes that already happened in TommyBot and were fixed. Each entry says what went wrong, why, and how to avoid it next time. Read the section for the area you change before you start. Add a new entry when you fix a bug whose cause could happen again.
 
+**When you fix a bug, search the whole codebase for the same mistake and for similar ones, and fix every place, not only the one that was reported.** Name in the entry where else it was found. (Thomas, 2026-11-10)
+
 Dashboard UI (Leptos) details are in [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md).
 
 ## 1. Discord API and permissions
@@ -104,6 +106,14 @@ Duration parsing sliced off the last character by byte and panicked on input lik
 The prefix panels, the dashboard and the save path each had their own bounds, and an out-of-range value was changed silently.
 *Avoid:* all bounds live in `core::limits` and are used everywhere. A value out of range is refused with a message.
 
+**A URL checked by prefix lets look-alike hosts through.** (MCP security review, 2026-11-10)
+The MCP OAuth registration took any `https://` redirect and checked localhost with `starts_with("http://localhost")`, which `http://localhost.evil.com` also passes. A stranger could register their own site, send the owner a login link and get the code, and with it a token for everything the MCP reads.
+*Avoid:* parse the URL (`reqwest::Url`) and compare scheme and host exactly against an allow list. OAuth redirects go only to known clients (claude.ai) or the owner's own computer.
+
+**A refresh token that issues a fresh one with a full lifetime never expires.** (MCP security review, 2026-11-10)
+Each MCP refresh gave a new 30-day refresh token, so a stolen one could be renewed forever and only rotating `MCP_OAUTH_SECRET` stopped it.
+*Avoid:* carry the login time (`auth`) through every refresh and cap the new token at login time plus the limit.
+
 ## 5. Database and migrations
 
 **Two PRs used the same migration number.** (#64/#65)
@@ -119,7 +129,7 @@ sqlx stores a checksum, so editing an applied migration breaks every existing da
 
 **A new migration file was not picked up.** (MCP views, migration 2800)
 `sqlx::migrate!` embeds the migrations at compile time, and adding a file does not make cargo rebuild `tommybot-core`. Tests then failed with "relation mcp_... does not exist".
-*Avoid:* after adding a migration, `touch crates/core/src/db.rs` before testing. CI builds clean and is not affected.
+*Avoid:* after adding a migration, `touch crates/core/src/db.rs` before testing. CI builds clean and is not affected. The same happened after `git merge` brought in a changed `RaidCfg` (MCP PR 4): two schema tests failed against the old build until `touch crates/automod/src/join.rs`. If a test fails right after a merge on code you did not touch, touch the changed crate's file and run it again before you debug.
 
 **Parallel worktrees shared one target and one DB.** (11-01)
 Cargo mixed crates from different worktrees, and one branch's migration broke the others' tests. Four targets (about 7 GB each) filled the disk.
@@ -136,10 +146,13 @@ See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the t
 - **Auto Setup's steps read their state from the toast text** (#151). The toast closes itself after 3 s, so "Running" and "Done" vanished and the steps never stayed green. *Avoid:* keep a run's state in its own signal and show the result in the page; the toast only announces it.
 - **Check access before you look at the body.** `put_section` and `import` validated the input before the level check, so someone without access learned the shape of a section from the error. Call `require` first, then validate.
 - **A section struct without `#[serde(default)]` breaks the first save.** `RaidCfg` had required fields, so turning Join Raid on for a server that never saved it was refused ("missing field `suspicious_only`"). A config struct with a `Default` impl gets `#[serde(default)]` on the struct.
-- **Pages everyone may open still need greyed write buttons.** Lockdown was `Full` for viewers, and History's Roll back was enabled for everyone; the server refused, but the buttons looked usable. Give a page whose main action is a write `need(level)` in `access::page`, or disable the button with `Access::rank()`.
+- **Pages everyone may open still need greyed write buttons.** Lockdown was `Full` for viewers, and History's Roll back was enabled for everyone; the server refused, but the buttons looked usable The same held for Overview's Fix buttons and system switches.
+- **A number field without a schema default must be optional in the config struct.** The form saves an emptied field as its default, or `null` without one. Join Raid's `id_margin_ms` is a plain `i64`, so emptying it made every save fail. `schema::tests::number_fields_without_default_accept_null` checks every field, and `one_field_alone_deserializes` checks every section loads with one field set. Stepping an optional field back to 0 empties it: Join Raid's ID flag at 0 would flag every joiner in a raid. Give a page whose main action is a write `need(level)` in `access::page`, or disable the button with `Access::rank()`.
 - **A user choice kept only in the DOM is lost on reload.** The light/dark toggle only set `data-theme`, so a reload went back to dark. A choice the user makes in the UI is saved (here in `localStorage`, read again in `main()`).
 - **Every bug from the deep test of 2026-11-10** is listed with its cause in `tests/e2e/dashboard-deep-test-2026-11-10.md`; the UI ones (hover contrast, double page load, copy button, null number fields, `.row label` on the Import button) are in the UI file, sections 3 to 7.
 - **`tests/e2e/deep.js`** checks every write route for seven access levels, every page as every level, the owner's number fields, toggles, save and cancel, the server switcher, 2FA, Auto Setup, toasts, theme, mobile and hover contrast.
+- **A dropdown option's `selected=` stops working once the user has picked** (#158). The attribute only sets the default; after a pick the browser keeps the user's choice. Cancel reset the setting and the preview, but the dropdown still showed the old pick. *Avoid:* use `prop:selected=` (the live property) on every `<option>`, and `prop:value`/`prop:checked` on inputs. Fixed in all 16 options in `form.rs`, `embeds.rs` and `lockdown.rs`; no plain `selected=`/`checked=`/`value=` bindings are left. The e2e sweep picks a channel on Logging, presses Cancel and checks the dropdown; it waits for the page to load first, because a pick made before the config arrives is overwritten by it.
+- **Role names from Discord already start with `@` for @everyone** (#158). The dashboard added its own `@` and showed `@@everyone`. *Avoid:* trim a leading `@` before adding one. Fixed in `form::items` (every role list and picker) and the `md.rs` role mentions; `recovery.rs` and the wizard's ticket pings already did. The bot itself never writes a role name after `@`.
 - **The toast looked like two pieces.** A coloured `border-left` on a rounded box curves at the corners, and the absolutely placed progress strip starts inside that border, so the two met as a hook. *Avoid:* one colour mark per box. Put strips and edges inside an `overflow:hidden` box with `left:0; right:0` and no border on that side. Also `cargo fmt` in `crates/dashboard/ui` reformats unrelated files; revert them before committing.
 
 - **The 2FA check ran before the DM code.** (MCP writes, PR 4, caught in review) `confirm` checked the TOTP code first, so anyone holding an MCP token could send wrong TOTP codes and lock the owner out of dashboard 2FA for 10 minutes. *Avoid:* when a request carries several secrets, check the one the caller must already hold (the DM code) first, and touch shared lockout counters only after it passes.

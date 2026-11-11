@@ -161,7 +161,25 @@ async fn owner_gets_a_token_others_do_not() {
             .body(Body::from(json!({"redirect_uris": uris}).to_string()))
             .unwrap()
     };
-    assert_eq!(t.req(reg(json!(["http://evil.example/cb"]))).await.0, 400);
+    // Only claude.ai and the owner's own computer: any other site could catch the owner's code.
+    for bad in [
+        "http://evil.example/cb",
+        "https://evil.example/cb",
+        "http://localhost.evil.example/cb",
+        "http://127.0.0.1.evil.example/cb",
+        "https://claude.ai.evil.example/cb",
+        "https://x@evil.example/cb",
+    ] {
+        assert_eq!(t.req(reg(json!([bad]))).await.0, 400, "{bad}");
+        assert!(!tommybot_mcp::oauth::allowed_redirect(bad), "{bad}");
+    }
+    for ok in [
+        "http://localhost:4321/callback",
+        "http://127.0.0.1:9/cb",
+        "https://claude.com/api/mcp/auth_callback",
+    ] {
+        assert!(tommybot_mcp::oauth::allowed_redirect(ok), "{ok}");
+    }
     let (code, _, c) = t.req(reg(json!([CB]))).await;
     assert_eq!(code, 201);
     let cid = c["client_id"].as_str().unwrap().to_string();
@@ -229,6 +247,29 @@ async fn owner_gets_a_token_others_do_not() {
         .await;
     assert_eq!(code, 200);
     assert_eq!(t.mcp(again["access_token"].as_str().unwrap()).await, 200);
+    // A refresh keeps the login time, so the chain ends 30 days after the Discord login.
+    let claims = |t: &str| -> Value {
+        serde_json::from_slice(&B64.decode(t.split('.').next().unwrap()).unwrap()).unwrap()
+    };
+    let (r1, r2) = (
+        claims(tok["refresh_token"].as_str().unwrap()),
+        claims(again["refresh_token"].as_str().unwrap()),
+    );
+    assert_eq!(r1["auth"], r2["auth"]);
+    assert!(r2["exp"].as_u64() <= r1["exp"].as_u64());
+    // A refresh token without a login time (made before the limit) is refused.
+    let old =
+        t.0.oauth
+            .as_ref()
+            .unwrap()
+            .sign("refresh", 3600, json!({"sub": OWNER, "cid": cid}));
+    let (code, _) = t
+        .form(
+            "/token",
+            format!("grant_type=refresh_token&refresh_token={}", enc(&old)),
+        )
+        .await;
+    assert_eq!(code, 400);
     // The static token still works next to OAuth.
     assert_eq!(t.mcp("static-static-static-static-static-x").await, 200);
 }

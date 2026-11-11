@@ -7,7 +7,7 @@ const fs = require('fs');
 const base = process.env.DASHBOARD_URL || 'http://127.0.0.1:8080';
 const out = process.env.E2E_OUT || '/tmp/e2e-deep';
 const db = process.env.DATABASE_URL;
-const only = (process.env.DEEP_ONLY || 'matrix,pages,owner,extras,contrast').split(',');
+const only = (process.env.DEEP_ONLY || 'matrix,pages,owner,extras,contrast,overflow').split(',');
 fs.mkdirSync(out, { recursive: true });
 const G = '100000000000000001', G2 = '100000000000000002';
 const sql = (q) => execSync(`psql "${db}" -qAtc "${q.replace(/"/g, '\\"')}"`).toString().trim();
@@ -218,8 +218,8 @@ async function pages(browser) {
 // ---------- 3. Owner: every number field, toggle, select and save on every settings page ----------
 async function owner(browser) {
   const [uid] = USERS.x;
-  stepUp(uid, true);
   const { ctx, page } = await login(browser, 'x');
+  stepUp(uid, true); // after login: it marks existing sessions only
   for (const p of PAGES) {
     page.errs.length = 0;
     await page.goto(`${base}/#/${G}/${p}`);
@@ -241,7 +241,9 @@ async function owner(browser) {
         if (up === before) fail('owner', `${p}: number field #${i} + did not change ${before}`);
         if (await minus.isEnabled().catch(() => false)) {
           await minus.click();
-          if ((await inp.inputValue()) !== before) fail('owner', `${p}: number field #${i} + then - gave ${await inp.inputValue()}, not ${before}`);
+          // A field without a default stored as 0 (empty means off) may come back empty.
+          const after = await inp.inputValue();
+          if (after !== before && !(before === '0' && after === '')) fail('owner', `${p}: number field #${i} + then - gave ${after}, not ${before}`);
         } else fail('owner', `${p}: number field #${i} - disabled after +`);
       }
       // Typing out of range must be refused or clamped, never kept silently (first 3 fields per page).
@@ -260,7 +262,8 @@ async function owner(browser) {
     // Toggles: flip one, see the save bar, save, reload, check it stayed.
     const sw = main.locator('input.sw:enabled');
     const nsw = await sw.count();
-    if (nsw) {
+    // Overview toggles save at once, without the save bar (by design).
+    if (nsw && p !== 'overview') {
       const t = sw.first();
       const was = await t.isChecked();
       await t.click({ force: true });
@@ -488,9 +491,97 @@ async function contrast(browser) {
   await ctx.close();
 }
 
+// Text that leaves its box, is cut off, or lies on top of other text. Returns one line per problem.
+const findOverflow = () => {
+  const vis = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+  const isBox = (el) => {
+    const c = getComputedStyle(el);
+    const bg = c.backgroundColor !== 'rgba(0, 0, 0, 0)' && c.backgroundColor !== 'transparent';
+    return el === document.body || bg || parseFloat(c.borderTopWidth) > 0 || parseFloat(c.borderLeftWidth) > 0 || c.backgroundImage !== 'none';
+  };
+  const name = (el) => `${el.tagName.toLowerCase()}${el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : ''}`;
+  const bad = [], seen = [], rects = [];
+  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = w.nextNode());) {
+    const t = n.textContent.trim();
+    const el = n.parentElement;
+    if (!t || !el || el.closest('script,style,svg,option,select,[aria-hidden=true]') || !vis(el)) continue;
+    const r = document.createRange(); r.selectNodeContents(n);
+    const rs = [...r.getClientRects()].filter((x) => x.width > 1 && x.height > 1);
+    // skip text that is off screen on purpose (closed mobile menu) or scrolled inside a scroll box
+    if (!rs.length || rs.every((x) => x.right <= 0 || x.left >= innerWidth)) continue;
+    let box = el; while (box !== document.body && !isBox(box)) box = box.parentElement;
+    const b = box.getBoundingClientRect();
+    const out = rs.some((x) => x.left < b.left - 1 || x.right > b.right + 1 || x.top < b.top - 2 || x.bottom > b.bottom + 2);
+    const scrolls = (e) => /auto|scroll/.test(getComputedStyle(e).overflowY + getComputedStyle(e).overflowX);
+    if (out && box !== document.body && !scrolls(box)) bad.push(`out of ${name(box)}: "${t.slice(0, 40)}"`);
+    if (rs.some((x) => x.right > innerWidth + 1)) bad.push(`past screen edge: "${t.slice(0, 40)}"`);
+    // cut off by an ancestor with overflow hidden (no ellipsis on purpose)
+    for (let a = el; a && a !== document.body; a = a.parentElement) {
+      const c = getComputedStyle(a);
+      if (c.overflowX !== 'visible' && c.overflowX !== 'auto' && c.overflowX !== 'scroll' && c.textOverflow !== 'ellipsis') {
+        const ab = a.getBoundingClientRect();
+        if (rs.some((x) => x.right > ab.right + 1 || x.left < ab.left - 1)) { bad.push(`cut off by ${name(a)}: "${t.slice(0, 40)}"`); break; }
+      }
+    }
+    // squeezed: text wrapped into a thin column of many lines inside a much wider box
+    if (rs.length >= 4 && box !== document.body && el.getBoundingClientRect().width < 0.3 * b.width && t.split(/\s+/).length > rs.length) bad.push(`squeezed in ${name(box)}: "${t.slice(0, 40)}"`);
+    rs.forEach((x) => rects.push({ x, t, el }));
+  }
+  // boxes (buttons, fields, cards) that stick out of the box around them
+  for (const el of document.querySelectorAll('main *')) {
+    if (!vis(el) || !isBox(el) || /fixed|absolute|sticky/.test(getComputedStyle(el).position)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.right <= 0 || r.left >= innerWidth) continue;
+    let p = el.parentElement; while (p && p !== document.body && !isBox(p)) p = p.parentElement;
+    if (!p || p === document.body || /auto|scroll/.test(getComputedStyle(p).overflowX)) continue;
+    const pr = p.getBoundingClientRect();
+    if (r.left < pr.left - 1 || r.right > pr.right + 1) bad.push(`${name(el)} sticks out of ${name(p)}${el.textContent.trim() ? ` ("${el.textContent.trim().slice(0, 30)}")` : ''}`);
+  }
+  // text on top of other text
+  for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+    const a = rects[i], c = rects[j];
+    if (a.el === c.el || a.el.contains(c.el) || c.el.contains(a.el)) continue;
+    const ox = Math.min(a.x.right, c.x.right) - Math.max(a.x.left, c.x.left), oy = Math.min(a.x.bottom, c.x.bottom) - Math.max(a.x.top, c.x.top);
+    // line boxes include leading, so only count a real overlap of the glyphs
+    if (ox > 3 && oy > 0.4 * Math.min(a.x.height, c.x.height)) bad.push(`overlaps: "${a.t.slice(0, 30)}" / "${c.t.slice(0, 30)}"`);
+  }
+  return [...new Set(bad)];
+};
+
+async function overflow(browser) {
+  stepUp(USERS.x[0], true);
+  for (const [vw, vh] of [[1400, 900], [1024, 800], [390, 844]]) {
+    const { ctx, page } = await login(browser, 'x', { viewport: { width: vw, height: vh } });
+    for (const h of ['#/', '#/update', '#/commands', ...PAGES.map((p) => `#/${G}/${p}`)]) {
+      await page.goto(`${base}/${h}`);
+      await page.waitForTimeout(800);
+      // open collapsed parts so their text is measured too
+      await page.evaluate(() => document.querySelectorAll('main details:not(.ico):not(header details)').forEach((d) => (d.open = true)));
+      await page.waitForTimeout(150);
+      const bad = await page.evaluate(findOverflow);
+      // Every info card opens on focus and stays inside the page area and the screen.
+      const tips = page.locator('main .tip');
+      for (let i = 0, n = await tips.count(); i < n; i++) {
+        const t = tips.nth(i);
+        if (!(await t.isVisible().catch(() => false))) continue;
+        await t.focus();
+        await page.waitForTimeout(260);
+        const r = await t.evaluate((e) => { const b = e.querySelector('.bubble').getBoundingClientRect(), m = e.closest('main').getBoundingClientRect(); return { ok: +getComputedStyle(e.querySelector('.bubble')).opacity > 0.9 && b.left >= m.left - 1 && b.right <= Math.min(m.right, innerWidth) + 1 && b.top >= 0, text: e.textContent.trim().slice(0, 30) }; });
+        if (!r.ok) bad.push(`info card off the page or not shown: "${r.text}"`);
+      }
+      if (bad.length) {
+        fail('overflow', `${vw}px ${h}: ${bad.slice(0, 8).join(' | ')}${bad.length > 8 ? ` (+${bad.length - 8})` : ''}`);
+        await page.screenshot({ path: `${out}/overflow_${vw}_${h.replace(/\W+/g, '_')}.png`, fullPage: true });
+      }
+    }
+    await ctx.close();
+  }
+}
+
 (async () => {
   const browser = await chromium.launch();
-  for (const [n, f] of Object.entries({ matrix, pages, owner, extras, contrast })) {
+  for (const [n, f] of Object.entries({ matrix, pages, owner, extras, contrast, overflow })) {
     if (!only.includes(n)) continue;
     console.log(`== ${n}`);
     try { await f(browser); } catch (e) { fail(n, `crashed: ${e.stack.split('\n').slice(0, 3).join(' ')}`); }
