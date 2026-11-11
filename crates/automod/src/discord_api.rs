@@ -48,6 +48,12 @@ impl Api {
             // A hung request would otherwise hold its caller (a lockdown, a rule sync) forever.
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
+                // Discord asks for this form; Cloudflare can refuse requests without one.
+                .user_agent(concat!(
+                    "DiscordBot (https://github.com/thomkr01/TommyBot, ",
+                    env!("CARGO_PKG_VERSION"),
+                    ")"
+                ))
                 .build()
                 .unwrap_or_default(),
             token: token.into(),
@@ -55,6 +61,16 @@ impl Api {
     }
 
     async fn send(&self, req: reqwest::RequestBuilder, body: Option<Value>) -> Result<Value> {
+        self.send_tries(req, body, MAX_RETRIES).await
+    }
+
+    /// `send` with at most `tries` attempts; the last 429 fails at once instead of waiting.
+    async fn send_tries(
+        &self,
+        req: reqwest::RequestBuilder,
+        body: Option<Value>,
+        tries: u32,
+    ) -> Result<Value> {
         let req = req.header("Authorization", format!("Bot {}", self.token));
         let req = if let Some(b) = body {
             req.json(&b)
@@ -62,7 +78,7 @@ impl Api {
             req
         };
         // On 429 wait what Discord says and retry; a few tries, then give up with the error.
-        for _ in 0..MAX_RETRIES {
+        for n in 1..=tries {
             let res = req
                 .try_clone()
                 .expect("json body is cloneable")
@@ -71,6 +87,9 @@ impl Api {
             let status = res.status();
             let text = res.text().await?;
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if n == tries {
+                    break;
+                }
                 tokio::time::sleep(retry_after(&text)).await;
                 continue;
             }
@@ -79,7 +98,7 @@ impl Api {
             }
             return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
         }
-        bail!("discord rate limit: still limited after {MAX_RETRIES} tries")
+        bail!("discord rate limit: still limited after {tries} tries")
     }
 
     /// Pause invites and DMs between members until `until_ms` (unix ms, clamped to 24h from
@@ -93,6 +112,15 @@ impl Api {
         )
         .await?;
         Ok(())
+    }
+
+    /// The raw `public_flags` of a user, with the bits twilight drops (see [`crate::join::SPAMMER_FLAG`]).
+    /// One try, no wait on a 429: the verify button has to answer within 3 seconds.
+    pub async fn public_flags(&self, user: u64) -> Result<u64> {
+        let v = self
+            .send_tries(self.http.get(format!("{API}/users/{user}")), None, 1)
+            .await?;
+        Ok(v["public_flags"].as_u64().unwrap_or(0))
     }
 
     pub async fn list_rules(&self, guild: u64) -> Result<Vec<Rule>> {

@@ -62,6 +62,8 @@ fn ti(mut v: Value, title: &str) -> Value {
     v
 }
 
+const SPAM_FLAG_HELP: &str = "Discord sets this flag on accounts it thinks are spammers. Discord does not document it, can change it without notice, and it can be wrong.";
+
 /// Help text under the field.
 fn hp(mut v: Value, help: &str) -> Value {
     v["help"] = json!(help);
@@ -437,6 +439,27 @@ pub fn schema() -> Vec<Value> {
             "joinraid",
             ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
         ),
+        hp(
+            ti(fg("Auto slowmode", "auto_slowmode.enabled", "bool"), "Use the auto slowmode"),
+            "Gives a flooding channel a slowmode and puts the old one back when it is calm. Needs Anti Spam on and Manage Channels in the channel. Threads, spam-whitelisted and locked channels are skipped.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.channel_pct", "int"), 300), "Trigger (% of max heat)"),
+            "All messages in the channel add their heat to one pool. 300 means three members' worth of max heat.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.min_users", "int"), 4), "Minimum members"),
+            "Members who sent messages in the last 30 seconds. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator don't count, as Discord lets them skip slowmode. Members who have these only in this channel still count.",
+        ),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode"),
+            "A slowmode staff set that is as high or higher is left alone.",
+        ),
+        ti(dv(fg("Auto slowmode", "auto_slowmode.min_on_secs", "int"), 60), "Minimum time on"),
+        hp(
+            ti(dv(fg("Auto slowmode", "auto_slowmode.calm_secs", "int"), 120), "Calm time"),
+            "Off once the pool stayed under half the trigger this long. Changing the slowmode by hand ends it, unless you set exactly the auto value in Discord.",
+        ),
     ];
     for (k, page, title) in FILTERS {
         let mut action = pg(
@@ -677,9 +700,20 @@ pub fn schema() -> Vec<Value> {
             "Target accounts whose username matches your list",
             GateFilter::UsernameFilter,
         ),
+        (
+            "spammer",
+            "Suspected spammer",
+            "Target accounts Discord flags as likely spammers",
+            GateFilter::SuspectedSpammer,
+        ),
     ] {
+        let on = ti(fg(card, &format!("{k}.enabled"), "bool"), status);
         gate.extend([
-            ti(fg(card, &format!("{k}.enabled"), "bool"), status),
+            if filter == GateFilter::SuspectedSpammer {
+                hp(on, SPAM_FLAG_HELP)
+            } else {
+                on
+            },
             hp(
                 ti(
                     dv(
@@ -740,6 +774,13 @@ pub fn schema() -> Vec<Value> {
         ti(
             f("flag_no_avatar", "bool"),
             "Flag accounts without an avatar",
+        ),
+        hp(
+            ti(
+                f("flag_spammer", "bool"),
+                "Flag accounts Discord marks as likely spammers",
+            ),
+            SPAM_FLAG_HELP,
         ),
         ti(
             fg("ID flag", "id_flag_min", "int"),
@@ -1210,6 +1251,10 @@ pub fn schema() -> Vec<Value> {
                 v["min"] = json!(lo);
                 v["max"] = json!(hi);
             }
+            if let Some((lo, hi)) = v["path"].as_str().and_then(|p| limits::float_for_path(&sec, p)) {
+                v["min"] = json!(lo);
+                v["max"] = json!(hi);
+            }
         }
         json!({"name": n, "title": t, "fields": fields})
     })
@@ -1306,6 +1351,7 @@ mod tests {
         assert_eq!(default("username_filter.action"), "Ban");
         assert_eq!(default("invite_in_name.action"), "Timeout");
         assert_eq!(default("no_avatar.action"), "Kick");
+        assert_eq!(default("spammer.action"), "Kick");
     }
 
     #[test]

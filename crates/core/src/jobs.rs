@@ -12,9 +12,10 @@ pub struct Job {
     pub attempts: i32,
 }
 
-/// Returns the job id, for [`finish`]. Takes a transaction too, to queue with the row it acts on.
-pub async fn enqueue(
-    pool: impl sqlx::PgExecutor<'_>,
+/// Returns the job id, for [`finish`]. Takes a pool or a transaction, so a job can be written
+/// together with the state it undoes.
+pub async fn enqueue<'e>(
+    db: impl sqlx::PgExecutor<'e>,
     guild: i64,
     kind: &str,
     payload: Value,
@@ -28,7 +29,7 @@ pub async fn enqueue(
     .bind(kind)
     .bind(payload)
     .bind(run_at_secs as f64)
-    .fetch_one(pool)
+    .fetch_one(db)
     .await?)
 }
 

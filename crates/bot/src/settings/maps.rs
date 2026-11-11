@@ -2,7 +2,7 @@
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
-use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE};
+use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, SLOW_USERS};
 use tommybot_core::warn::Action as WarnAction;
 use twilight_model::id::{marker::RoleMarker, Id};
 
@@ -161,6 +161,13 @@ pub(super) static HEAT: Module = Module {
         r!("10a", "Status", "automod.auto_lockdown.enabled", Kind::Bool, |c| on(c.automod.auto_lockdown.enabled)),
         r!("10b", "Mentions", "automod.auto_lockdown.mention_count", Kind::Int(1, 1000), |c| c.automod.auto_lockdown.mention_count.to_string()),
         r!("10c", "Under", "automod.auto_lockdown.mention_window_ms", Kind::Ms, |c| ms(c.automod.auto_lockdown.mention_window_ms)),
+        group!("11", "Auto Slowmode"),
+        r!("11a", "Status", "automod.auto_slowmode.enabled", Kind::Bool, |c| on(c.automod.auto_slowmode.enabled)),
+        r!("11b", "Trigger", "automod.auto_slowmode.channel_pct", Kind::Int(SLOW_PCT.0, SLOW_PCT.1), |c| format!("{}% of max heat", c.automod.auto_slowmode.channel_pct)),
+        r!("11c", "Minimum Members", "automod.auto_slowmode.min_users", Kind::Int(SLOW_USERS.0, SLOW_USERS.1), |c| c.automod.auto_slowmode.min_users.to_string()),
+        r!("11d", "Slowmode", "automod.auto_slowmode.slowmode_secs", Kind::Int(SLOW_SECS.0, SLOW_SECS.1), |c| embed::duration(c.automod.auto_slowmode.slowmode_secs.into())),
+        r!("11e", "Minimum Time On", "automod.auto_slowmode.min_on_secs", Kind::Int(SLOW_ON.0, SLOW_ON.1), |c| embed::duration(c.automod.auto_slowmode.min_on_secs.into())),
+        r!("11f", "Calm Time", "automod.auto_slowmode.calm_secs", Kind::Int(SLOW_CALM.0, SLOW_CALM.1), |c| embed::duration(c.automod.auto_slowmode.calm_secs.into())),
     ],
 };
 
@@ -277,7 +284,7 @@ pub(super) static RESTORE: Module = Module {
     ],
 };
 
-static JOINGATE_ROWS: [Row; 27] = {
+static JOINGATE_ROWS: [Row; 30] = {
     let [a1, a2, a3] = gate_filter!("2", "No PfP Filter", no_avatar);
     let [b1, b2, b3] = gate_filter!("3", "Account Age Filter", account_age);
     let [c1, c2, c3] = gate_filter!("4", "Bot Addition Filter", unauthorized_bot);
@@ -285,6 +292,7 @@ static JOINGATE_ROWS: [Row; 27] = {
     let [e1, e2, e3] = gate_filter!("6", "Unverified Bots", unverified_bot);
     let [f1, f2, f3] = gate_filter!("7", "Suspicious Accounts", suspicious);
     let [g1, g2, g3] = gate_filter!("8", "Username Filter", username_filter);
+    let [h1, h2, h3] = gate_filter!("9", "Spam Flag Filter", spammer);
     [
         group!("1", "General"),
         r!("1a", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
@@ -293,7 +301,7 @@ static JOINGATE_ROWS: [Row; 27] = {
         a1, a2, a3, b1, b2, b3,
         r!("3c", "Minimum Age", "joingate.min_age_override_ms", Kind::Age, |c| ms(c.joingate.min_age_ms())),
         r!("3d", "Expose Minimum Age", "joingate.expose_min_age", Kind::Bool, |c| on(c.joingate.expose_min_age)),
-        c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3,
+        c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3, h1, h2, h3,
     ]
 };
 
@@ -329,6 +337,7 @@ pub(super) static JOINRAID: Module = Module {
         r!("8b", "Granularity", "joinraid.id_granularity", Kind::Choice(&[("adapt", "\"Adaptive\""), ("h", "\"Hour\""), ("d", "\"Day\""), ("m", "\"Month\"")]), |c| format!("{:?}", raid(c).id_granularity)),
         r!("8c", "Margin", "joinraid.id_margin_ms", Kind::Ms, |c| ms(raid(c).id_margin_ms)),
         r!("8d", "Minimum Matches", "joinraid.id_flag_min", Kind::Int(2, 500), |c| raid(c).id_flag_min.map_or(NO.into(), |n| n.to_string())),
+        r!("9", "Spammer Flag", "joinraid.flag_spammer", Kind::Bool, |c| on(raid(c).flag_spammer)),
     ],
 };
 

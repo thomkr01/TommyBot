@@ -204,7 +204,15 @@ async fn main() -> anyhow::Result<()> {
         totp: Default::default(),
         rate: Default::default(),
         discord: discord::Discord {
-            http: reqwest::Client::new(),
+            // A hung Discord call would otherwise hold a dashboard request forever.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .user_agent(concat!(
+                    "DiscordBot (https://github.com/thomkr01/TommyBot, ",
+                    env!("CARGO_PKG_VERSION"),
+                    ")"
+                ))
+                .build()?,
             client_id: env("DISCORD_CLIENT_ID")?,
             client_secret: env("DISCORD_CLIENT_SECRET")?,
             bot_token: env("DISCORD_TOKEN")?,

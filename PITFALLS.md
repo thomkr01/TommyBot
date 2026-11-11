@@ -46,7 +46,12 @@ The quarantine row was written before the role change. When the change failed, t
 
 **Outgoing HTTP needs a timeout.** (#97)
 The raw reqwest client had none, so one hung call could hold a lockdown or rule sync forever.
-*Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`). Twilight already handles 429.
+The dashboard's and the MCP server's Discord clients had none either, found 11-11.
+*Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`, the dashboard's and the MCP's Discord client). Twilight already handles 429.
+
+**A REST call before an interaction's answer can miss the 3 seconds.** (spammer-flag review, 11-11)
+The verify Start button asked Discord for the spammer flag on every click before it answered, through `Api::send`, which waits out a 429 up to 30 s and retries; the 15 s client timeout was the only limit. Discord drops an interaction answer after 3 s, so a slow or rate-limited lookup left the member with "This interaction failed", and every click cost another request on one bucket. `verify::guild_name` (before the "verified" answer) had no limit either.
+*Avoid:* do the work that needs no REST first and call only when the answer changes the result (`flagged_step`), cache the answer (`App::spam_flags`, 10 minutes, bounded), and bound the call: one try with no 429 wait (`Api::send_tries(.., 1)`) inside `tokio::time::timeout(1.5 s)`. Decide what a timeout means (here: a captcha, fail closed). Anything slower than that defers the interaction first.
 
 **A DM can be slow or refused.** (#136, #142)
 A DM before a punishment must not hold the punishment back, and a DM to a bot is refused.
@@ -72,10 +77,13 @@ The first Ban Sync copy set its row to `banned` before the ban, so a job that cr
 *Avoid:* only a 4xx is a refusal (`http_err::refused`); anything else goes back as `Err`, so jobs retry and commands show "Something went wrong". Searched the other places that turn an error into reply text with `http_err::why`: `confirm`, `reports`, `appeals`, `slash` and `tickets::dm` answer a person, who can press again; `verify::deleted` sends the failure to the owner as its alert; and `joingate::punish` returns the error after its log, so the job retries.
 
 **Raw requests need a real User-Agent.** (live tests, 11-09)
-Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010.
+Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010. Until 11-11 none of the bot's, dashboard's or MCP's raw Discord clients set one.
+*Avoid:* every reqwest client that talks to Discord sets `DiscordBot (<repo url>, <version>)`.
 
-**Twilight drops permission bits it does not know.** (#133)
+**Twilight drops permission and user flag bits it does not know.** (#133)
 Saving a bot role's old permissions loses bits newer than twilight. This is a known limit (marked `shortcut:` in the code). Upgrade twilight before relying on new bits.
+User flags too: `UserFlags` is read with `from_bits_truncate`, so `public_flags` never holds Discord's undocumented spammer bit (`1 << 20`).
+*Avoid:* read such a bit from the raw gateway JSON before twilight parses it, like `spam_flag` in `crates/bot/src/main.rs` (the loop reads raw messages instead of `next_event`).
 
 ## 2. Concurrency and restarts
 
@@ -124,6 +132,14 @@ The timeout DM went out before the timeout worked, and a failed anti-nuke report
 *Avoid:* fixed order Contain → Revert → Report → Panic. Logs and DMs are side effects; their failure never skips the next protective step.
 The race review (11-11) found the same in Join Raid (a failed raid log or report job skipped the lockdown and every punishment, and one raider who had already left stopped the punish loop), in automod (the mention-lock log and lock came before the strike, the timeout log before the strike-cap lock) and in `warn_actions`. A loop that punishes several members logs a failure and goes on with the next.
 
+**A gateway event's value can be older than the bot's own write.** (auto slowmode review, 11-11)
+Events run in parallel tasks and Discord sends a channel update for every edit (a rename too), so a ChannelUpdate handled after the bot's own PATCH can still carry the old slowmode. Auto slowmode read that value as "staff changed it" and put it back, which undid its own slowmode.
+*Avoid:* don't decide from a field of the event when the bot itself writes that field. Read the live value (`GET channel`) and compare it with both the old and the bot's value (`slowmode::staff_value`), or skip the event when a later compare-and-set already handles it (the off job reverts only its own value). Also checked: `enforce_quarantine` and `catch::keep_top` act on event values too, but their writes are idempotent, so a stale event only repeats them.
+
+**A claim row without its job blocked the channel for good.** (auto slowmode review, 11-11)
+An `auto_slowmode` row is claimed with `ON CONFLICT DO NOTHING`. When its `slowmode_off` job gave up after its retries (Discord down, a missing permission retried until the last attempt), the row stayed and every later start found "already owned". Also: a failed start deleted row and job even when the PATCH might have landed, the not-calm re-queue made a job for a row staff had already removed, and a 403 was retried until the job gave up.
+*Avoid:* a claim takes over a row with no pending job (`DELETE … WHERE NOT EXISTS (job)` in the claim's transaction, so a parallel claim conflicts instead of doubling it). Treat 50001/50013 as final (`http_err::forbidden_any`): end the claim and log it. Re-queue only while the row exists, under `FOR UPDATE`. Scope a job's rows to its own guild (`AND guild_id = $2`). A start that stops early because the channel already shows the auto value also gives a stuck row a new off job (`requeue_stuck`), since the takeover in the claim never runs then.
+
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
 
@@ -153,6 +169,10 @@ Its `AddAssign` impl makes `s += &other` ambiguous once decancer is in scope, an
 Whitelisted channels and roles still got base message heat, other bots' slash-command replies counted as webhook spam, and saying "gg" twice in a quiet channel gave a timeout.
 *Avoid:* every new heat source checks the whitelist, and quiet-channel heat counts once per user. Add a test with both spammers and normal chatters in one channel.
 
+**The verify button judged "suspicious" on other names than Join Gate.** (spammer-flag PR, 11-11)
+Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
+*Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the flag would turn a Grant into a challenge, and a failed lookup means a captcha.
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)
@@ -162,6 +182,10 @@ Duration parsing sliced off the last character by byte and panicked on input lik
 **Limits drifted between places.** (#134)
 The prefix panels, the dashboard and the save path each had their own bounds, and an out-of-range value was changed silently.
 *Avoid:* all bounds live in `core::limits` and are used everywhere. A value out of range is refused with a message.
+
+**Heat max and decay had no range outside the dashboard.** (auto slowmode review, 11-11)
+Only the dashboard's `heat_ok` checked them, and it let decay 0 through. The `heat` prefix panel took any number (`4 1000` saved a decay of 10, so `(1 - 10)^t` made every heat NaN; `3 0` made every message trip), and the bot used the values as read. Decay 0 meant heat never cooled, so an auto slowmode channel was never calm. Panic mode's `heat_decay` had no range either.
+*Avoid:* `HEAT_MAX` and `HEAT_DECAY` live in `automod::heat` and go through `core::limits::float_for_path` (dashboard, import and MCP saves, the prefix panel's `Kind::Num` rows), and the bot clamps when it reads (`HeatCfg::clamped` in `AutomodCfg`'s deserializer, the panic decay in `add_heat`). A number the bot divides by, raises to a power or waits on gets a range in `limits` and a clamp on read.
 
 **A URL checked by prefix lets look-alike hosts through.** (MCP security review, 2026-11-10)
 The MCP OAuth registration took any `https://` redirect and checked localhost with `starts_with("http://localhost")`, which `http://localhost.evil.com` also passes. A stranger could register their own site, send the owner a login link and get the code, and with it a token for everything the MCP reads.

@@ -136,6 +136,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             crate::antinuke::resume_nuke(app, gid, actor, why, since).await?
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
+        "slowmode_off" => crate::slowmode::off(app, gid, &job.payload).await?,
         "ban_sync_share" => crate::bansync::share_job(app, gid, &job.payload).await?,
         "ban_sync_copy" => crate::bansync::copy_job(app, gid, &job.payload).await?,
         "ban_sync_lift" => crate::bansync::lift_job(app, gid, &job.payload).await?,
@@ -146,10 +147,11 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
     Ok(())
 }
 
-const ONE_TARGET: [&str; 5] = [
+const ONE_TARGET: [&str; 6] = [
     "unban",
     "timeout_renew",
     "delete_message",
+    "slowmode_off",
     "ban_sync_copy",
     "ban_sync_lift",
 ];

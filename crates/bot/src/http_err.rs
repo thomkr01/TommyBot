@@ -48,6 +48,11 @@ pub fn gone_any(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Error>().is_some_and(gone)
 }
 
+/// 50001 Missing Access or 50013 Missing Permissions: retrying will not help until staff fix it.
+pub fn forbidden_any(e: &anyhow::Error) -> bool {
+    matches!(code(e), Some(50001 | 50013))
+}
+
 /// Discord answered with a 4xx: it refused the request, and the same request would be refused
 /// again. A 5xx or no answer at all is an outage, not a refusal.
 pub fn refused(e: &anyhow::Error) -> bool {
