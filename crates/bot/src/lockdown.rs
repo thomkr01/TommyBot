@@ -134,7 +134,7 @@ pub async fn lock_for(
 /// The lock plan for the guild as it is now.
 async fn plan_now(app: &App, gid: Id<GuildMarker>, kind: &LockKind) -> Result<Plan> {
     let cfg = app.cfg(gid.get()).await?;
-    let roles = app.http.roles(gid).await?.models().await?;
+    let roles = crate::hierarchy::ranked(gid, app.http.roles(gid).await?.models().await?);
     let mine = app
         .http
         .guild_member(gid, app.me)

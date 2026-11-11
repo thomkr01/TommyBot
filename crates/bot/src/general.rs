@@ -1116,7 +1116,7 @@ async fn tshoot_lockdown(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
         r => r.iter().map(|r| r.get()).collect(),
     };
     let mut tweaked = 0;
-    for r in app.http.roles(gid).await?.models().await? {
+    for r in crate::hierarchy::ranked(gid, app.http.roles(gid).await?.models().await?) {
         if r.managed || r.position >= info.bot_top {
             continue;
         }

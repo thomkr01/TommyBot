@@ -69,7 +69,7 @@ pub fn channel_img(c: Channel) -> ChannelImg {
 
 pub async fn snapshot(http: &Client, gid: Id<GuildMarker>) -> Result<Image> {
     let g = http.guild(gid).await?.model().await?;
-    let roles = http.roles(gid).await?.models().await?;
+    let roles = crate::hierarchy::ranked(gid, http.roles(gid).await?.models().await?);
     let channels = http.guild_channels(gid).await?.models().await?;
     // Needs Manage Webhooks; without it the image has none and restores leave webhooks alone.
     let webhooks = match http.guild_webhooks(gid).await {
@@ -126,7 +126,7 @@ pub async fn track_created(app: &App, gid: Id<GuildMarker>, action: Action, id: 
         return Ok(());
     };
     if action == Action::RoleCreate {
-        let roles = app.http.roles(gid).await?.models().await?;
+        let roles = crate::hierarchy::ranked(gid, app.http.roles(gid).await?.models().await?);
         match roles.into_iter().find(|r| r.id.get() == id) {
             Some(r) if !image.roles.iter().any(|x| x.id == id) => image.roles.push(role_img(r)),
             _ => return Ok(()),
