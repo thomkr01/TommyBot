@@ -41,9 +41,9 @@ pub async fn edit(
 ) -> sqlx::Result<Option<(i64, String)>> {
     sqlx::query_as(
         "WITH old AS (SELECT id, user_id, text FROM notes WHERE guild_id = $1 AND short_id = $2 FOR UPDATE),
-              up AS (UPDATE notes n SET text = $3 FROM old WHERE n.id = old.id),
+              up AS (UPDATE notes n SET text = $3 FROM old WHERE n.id = old.id AND old.text <> $3),
               ed AS (INSERT INTO note_edits (note_id, guild_id, old_text, new_text, editor_id)
-                     SELECT id, $1, text, $3, $4 FROM old)
+                     SELECT id, $1, text, $3, $4 FROM old WHERE text <> $3)
          SELECT user_id, text FROM old",
     )
     .bind(guild)
@@ -81,6 +81,11 @@ mod tests {
             Some((7, "first".into()))
         );
         super::edit(&pool, g, &short, "third", 10).await.unwrap();
+        // Saving the same text again is not an edit.
+        assert_eq!(
+            super::edit(&pool, g, &short, "third", 11).await.unwrap(),
+            Some((7, "third".into()))
+        );
         assert_eq!(super::edit(&pool, g, "nope", "x", 9).await.unwrap(), None);
         let rows: Vec<(String, String, i64)> = sqlx::query_as(
             "SELECT old_text, new_text, editor_id FROM note_edits WHERE note_id = $1 ORDER BY id",
