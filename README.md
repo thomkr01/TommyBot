@@ -5,7 +5,7 @@ TommyBot is a fast, all-in-one Discord security and moderation bot written in Ru
 ## Why TommyBot
 
 - **Built in Rust**: one small process, low memory use and no garbage-collector pauses, so it reacts while an attack is still happening.
-- **Undo for everything**: optional backups every 3 hours, automatic revert of deleted channels and roles, and a log entry for every action it takes.
+- **Undo for everything**: optional backups every 3 hours that you can browse as a channel tree with roles, automatic revert of deleted channels and roles, and a log entry for every action it takes.
 - **Staff without dangerous rights**: moderators work through permits instead of Discord permissions, so a hacked staff account can do little and everything it does can be reverted.
 - **Survives restarts**: timed locks, temp bans and half-finished reverts pick up where they stopped.
 - **Everything free**: every feature, for every server.
@@ -21,7 +21,7 @@ TommyBot is a fast, all-in-one Discord security and moderation bot written in Ru
 - **Logging**: message, member, role, channel, voice and moderation logs in tidy embeds, sent only to private log channels.
 - **Appeals, reports and cases**: ban and timeout appeals, a report button for members, a searchable case history, and staff notes with their full edit history (a server-wide sweep always asks first).
 - **Tickets, embeds and Discord AutoMod**: members DM TommyBot to open a ticket with any server they share with it, staff answer in a private channel (anonymous replies, snippets, greeting and closing messages, blacklist, full transcripts viewable on the dashboard); plus an embed builder and control of Discord's own AutoMod rules.
-- **Web dashboard**: log in with Discord, run the setup wizard and change every setting in the browser, protected by two-factor login. Each staff member sees only the pages their permits allow.
+- **Web dashboard**: log in with Discord, run the setup wizard, change every setting in the browser and edit channels and who can see them as a draft that is checked before it reaches Discord, protected by two-factor login. Each staff member sees only the pages their permits allow.
 - **MCP server for Claude (optional)**: lets the bot owner ask Claude about cases, settings and logs. With a token made on the dashboard, Claude can also propose changes, which run only after the owner confirms a code the bot sends by DM. See [DEPLOY.md](DEPLOY.md).
 
 ## Installation
