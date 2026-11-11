@@ -123,6 +123,10 @@ Push decided "this channel follows its category" from live Discord (synced with 
 Push guarded itself with a static `HashSet` of guilds, so a second dashboard process could push at the same time, and a draft PUT or DELETE during a push was overwritten by the push's write-back. A stale PUT after a push brought back `new-*` keys that were already created, and the next push created them twice.
 *Avoid:* hold a Postgres advisory lock for the whole run (`pg_try_advisory_xact_lock` in a transaction the run owns, so it is freed when the task ends or the process dies) and refuse other writers with 409 while it is held. Keys a run has used up are recorded (`next`) and refused when they come back. Run the steps in `tokio::spawn` and await the handle, so a dropped request does not stop a run half way; log what will happen before the first step and the result after, and record a failed save instead of returning with `?`.
 
+**A dropped sqlx transaction kept the push lock after the answer.** (Channel Setup lock, 11-11)
+`lock()` took `pg_try_advisory_xact_lock` in a sqlx transaction, and every handler let it drop on return. sqlx only queues the ROLLBACK on drop; it runs when the pooled connection is returned in a spawned task, so the lock outlived the response. The next PUT or Push that came in first got "a push is running" (about 1 in 60 runs of `draft_is_saved_discarded_and_pushed_only_when_safe`).
+*Avoid:* a transaction that holds an advisory lock which others try-lock ends with an awaited `rollback()` or `commit()` on every path before the answer, early returns included (`release()` in `dashboard/src/channels.rs`; the whole push runs in one task that releases at the end). Drop is only the fallback for a cancelled request or a dead process. Checked the other `pg_advisory_xact_lock` users (`bot/settings`, `bot/tickets`, `dashboard/store.rs`, `core/cases.rs`): they wait for the lock instead of trying it, so a late ROLLBACK only delays the next writer by a moment and nothing is refused.
+
 ## 3. Automod
 
 **Filters only saw plain text.** (#101)

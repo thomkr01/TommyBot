@@ -920,6 +920,8 @@ async fn save(st: &AppState, guild: i64, draft: &Draft, user: i64) -> sqlx::Resu
 /// The guild's draft lock, held until the transaction ends (also when it is dropped or the process
 /// dies). Push holds it exclusively for its whole run; PUT and DELETE share it while they save, so
 /// they are refused during a push instead of overwriting the draft it writes back.
+/// Every holder ends it with `release` before answering: a dropped transaction only queues its
+/// ROLLBACK, so the lock outlives the request and the next try-lock is refused (PITFALLS.md).
 async fn lock(
     st: &AppState,
     guild: i64,
@@ -943,6 +945,12 @@ async fn lock(
         }));
     }
     Ok(tx)
+}
+
+async fn release(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
+    if let Err(e) = tx.rollback().await {
+        tracing::warn!("channel draft lock release failed: {e}");
+    }
 }
 
 /// The Overview's row for an unpushed draft that Push would refuse, by Channel Setup's own rules.
@@ -1025,41 +1033,51 @@ async fn put_draft(
     let mut draft = serde_json::from_value::<PutBody>(b)
         .map_err(|e| ApiError::BadRequest(format!("invalid draft: {e}")))?
         .draft;
-    let _lock = lock(&st, guild, false).await?;
-    let w = world(&st, guild).await?;
-    prune(&mut draft, &w.channels);
-    validate(&mut draft, &w.channels, &w.ctx).map_err(ApiError::BadRequest)?;
-    let (mut before, _) = load(&st, guild).await?;
-    prune(&mut before, &w.channels);
-    draft.next = before.next;
-    let reused = draft
-        .items
-        .keys()
-        .any(|k| !before.items.contains_key(k) && new_num(k).is_some_and(|n| n < before.next));
-    if reused {
-        return Err(ApiError::Busy(
-            "this draft is older than the last push; reload the page",
-        ));
+    let lock = lock(&st, guild, false).await?;
+    let r: Res = async {
+        let w = world(&st, guild).await?;
+        prune(&mut draft, &w.channels);
+        validate(&mut draft, &w.channels, &w.ctx).map_err(ApiError::BadRequest)?;
+        let (mut before, _) = load(&st, guild).await?;
+        prune(&mut before, &w.channels);
+        draft.next = before.next;
+        let reused = draft
+            .items
+            .keys()
+            .any(|k| !before.items.contains_key(k) && new_num(k).is_some_and(|n| n < before.next));
+        if reused {
+            return Err(ApiError::Busy(
+                "this draft is older than the last push; reload the page",
+            ));
+        }
+        // What an owner already put in the draft may stay while someone else edits the rest.
+        let hidden = |d: &Draft| unstaffed(&desired(&w.channels, d, &w.ctx), &w.channels, &w.ctx);
+        if level < Level::Owner && !hidden(&draft).is_subset(&hidden(&before)) {
+            return Err(unstaff_refusal(&w.ctx));
+        }
+        let version = save(&st, guild, &draft, s.user_id).await?;
+        Ok(Json(view(&w, &draft, level, &version).2))
     }
-    // What an owner already put in the draft may stay while someone else edits the rest.
-    let hidden = |d: &Draft| unstaffed(&desired(&w.channels, d, &w.ctx), &w.channels, &w.ctx);
-    if level < Level::Owner && !hidden(&draft).is_subset(&hidden(&before)) {
-        return Err(unstaff_refusal(&w.ctx));
-    }
-    let version = save(&st, guild, &draft, s.user_id).await?;
-    Ok(Json(view(&w, &draft, level, &version).2))
+    .await;
+    release(lock).await;
+    r
 }
 
 async fn discard(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     let level = require(&st, &s, guild, Level::Owner, false).await?;
-    let _lock = lock(&st, guild, false).await?;
-    let empty = Draft {
-        next: load(&st, guild).await?.0.next,
-        ..Default::default()
-    };
-    let version = save(&st, guild, &empty, s.user_id).await?;
-    let w = world(&st, guild).await?;
-    Ok(Json(view(&w, &empty, level, &version).2))
+    let lock = lock(&st, guild, false).await?;
+    let r: Res = async {
+        let empty = Draft {
+            next: load(&st, guild).await?.0.next,
+            ..Default::default()
+        };
+        let version = save(&st, guild, &empty, s.user_id).await?;
+        let w = world(&st, guild).await?;
+        Ok(Json(view(&w, &empty, level, &version).2))
+    }
+    .await;
+    release(lock).await;
+    r
 }
 
 async fn push(
@@ -1069,8 +1087,23 @@ async fn push(
     Json(b): Json<Value>,
 ) -> Result<Response, ApiError> {
     let level = require(&st, &s, guild, Level::Owner, true).await?;
-    // Held by the step task until the push is done, also when this request is dropped.
     let lock = lock(&st, guild, true).await?;
+    // A task, so the push finishes and releases the lock also when this request is dropped.
+    tokio::spawn(async move {
+        let r = push_locked(st, s, guild, b, level).await;
+        release(lock).await;
+        r
+    })
+    .await?
+}
+
+async fn push_locked(
+    st: AppState,
+    s: Sess,
+    guild: i64,
+    b: Value,
+    level: Level,
+) -> Result<Response, ApiError> {
     let w = world(&st, guild).await?;
     let (mut draft, version) = load(&st, guild).await?;
     // Push runs exactly the draft the user reviewed.
@@ -1117,10 +1150,7 @@ async fn push(
         ),
     )
     .await;
-    let task = tokio::spawn(run_steps(
-        st, guild, s.user_id, who, draft, steps, w.config, backup, lock,
-    ));
-    let (done, failed) = task.await?;
+    let (done, failed) = run_steps(st, guild, s.user_id, who, draft, steps, w.config, backup).await;
     Ok(Json(json!({"done": done, "failed": failed, "backup": backup})).into_response())
 }
 
@@ -1170,7 +1200,6 @@ async fn run_steps(
     steps: Vec<Step>,
     config: Value,
     backup: i64,
-    _lock: sqlx::Transaction<'static, sqlx::Postgres>,
 ) -> (usize, Vec<String>) {
     let (mut done, mut failed) = (0, vec![]);
     let mut made: HashMap<String, String> = HashMap::new();
@@ -1946,7 +1975,6 @@ mod db_tests {
                 .await
                 .unwrap()
         };
-
         let (code, r) = send("GET", "", owner, false, None).await;
         assert_eq!(code, 200, "{r}");
         assert_eq!(
