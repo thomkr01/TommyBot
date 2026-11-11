@@ -960,7 +960,7 @@ fn view(w: &World, draft: &Draft, level: Level, version: &str) -> (Vec<Node>, Ve
 }
 
 async fn get_draft(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
-    let level = require(&st, &s, guild, Level::Viewer, false).await?;
+    let level = require(&st, &s, guild, Level::Admin, false).await?;
     let w = world(&st, guild).await?;
     let (mut draft, version) = load(&st, guild).await?;
     prune(&mut draft, &w.channels);
@@ -980,7 +980,7 @@ async fn put_draft(
     Json(b): Json<Value>,
 ) -> Res {
     // Access first, so someone without it learns nothing about the draft's shape.
-    let level = require(&st, &s, guild, Level::Editor, false).await?;
+    let level = require(&st, &s, guild, Level::Owner, false).await?;
     let mut draft = serde_json::from_value::<PutBody>(b)
         .map_err(|e| ApiError::BadRequest(format!("invalid draft: {e}")))?
         .draft;
@@ -1010,7 +1010,7 @@ async fn put_draft(
 }
 
 async fn discard(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
-    let level = require(&st, &s, guild, Level::Editor, false).await?;
+    let level = require(&st, &s, guild, Level::Owner, false).await?;
     let _lock = lock(&st, guild, false).await?;
     let empty = Draft {
         next: load(&st, guild).await?.0.next,
@@ -1027,7 +1027,7 @@ async fn push(
     Path(guild): Path<i64>,
     Json(b): Json<Value>,
 ) -> Result<Response, ApiError> {
-    let level = require(&st, &s, guild, Level::Admin, true).await?;
+    let level = require(&st, &s, guild, Level::Owner, true).await?;
     // Held by the step task until the push is done, also when this request is dropped.
     let lock = lock(&st, guild, true).await?;
     let w = world(&st, guild).await?;
