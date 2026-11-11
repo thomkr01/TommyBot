@@ -152,12 +152,20 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
 }
 
 pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()> {
-    app.panic_runs.lock().unwrap().insert(
-        gid.get(),
-        PanicRun {
-            lock_mod_commands: cfg.lock_mod_commands,
-        },
-    );
+    // The check and the insert are one step: two trips at once must not start it twice, or the
+    // second saves the already exempted overwrites and the categories stay open after panic ends.
+    let run = PanicRun {
+        lock_mod_commands: cfg.lock_mod_commands,
+    };
+    if app
+        .panic_runs
+        .lock()
+        .unwrap()
+        .insert(gid.get(), run)
+        .is_some()
+    {
+        return Ok(());
+    }
     let mut exempted = vec![];
     for &c in &cfg.whitelisted_categories {
         match exempt(app, gid, c).await {
@@ -168,9 +176,19 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     let ends = crate::app::now_secs() + cfg.duration_secs as i64;
     let payload = json!({
         "lock_mod_commands": cfg.lock_mod_commands, "unlock": cfg.unlock_when_ending,
-        "exempt": exempted
+        "exempt": &exempted
     });
-    jobs::replace(&app.pool, gid.get() as i64, "panic_end", payload, ends).await?;
+    if let Err(e) = jobs::replace(&app.pool, gid.get() as i64, "panic_end", payload, ends).await {
+        // Without its end job panic mode would never end: mod commands stay locked and the
+        // categories open. Undo the start so the next trip can try again.
+        for saved in &exempted {
+            if let Err(e) = unexempt(app, gid, saved).await {
+                tracing::warn!(?e, "panic: putting a category back failed");
+            }
+        }
+        app.panic_runs.lock().unwrap().remove(&gid.get());
+        return Err(e);
+    }
     crate::reply::alert_owner(app, gid, "Panic mode started").await;
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {

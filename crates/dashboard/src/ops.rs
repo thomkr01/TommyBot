@@ -66,13 +66,24 @@ impl Role {
     }
 }
 
+/// Positions are ranks in Discord's order (ties broken by id), as in `recovery::live_image`.
 async fn roles_of(st: &AppState, guild: i64) -> Result<Vec<Role>, ApiError> {
-    Ok(serde_json::from_value(
+    let mut roles: Vec<Role> = serde_json::from_value(
         st.discord
             .call(Method::GET, &format!("/guilds/{guild}/roles"), None)
             .await?,
     )
-    .map_err(anyhow::Error::from)?)
+    .map_err(anyhow::Error::from)?;
+    let rank = tommybot_core::roles::ranks(
+        roles
+            .iter()
+            .map(|r| (r.id.parse().unwrap_or(0), r.position)),
+        guild as u64,
+    );
+    for r in &mut roles {
+        r.position = rank[&r.id.parse().unwrap_or(0)];
+    }
+    Ok(roles)
 }
 
 /// Guild roles and the position of the bot's top role.

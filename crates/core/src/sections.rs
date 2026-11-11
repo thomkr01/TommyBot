@@ -11,7 +11,7 @@ use twilight_model::id::{
 #[derive(Deserialize)]
 #[serde(default)]
 pub struct AntinukeCfg {
-    /// Master switch for the dashboard overview; on unless a saved config turns it off.
+    /// Master switch; off until a saved config turns it on.
     pub enabled: bool,
     /// Per action; actions left out use [`NukeAction::default_limit`].
     pub limits: HashMap<NukeAction, LimitCfg>,
