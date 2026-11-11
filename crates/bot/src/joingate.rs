@@ -300,7 +300,7 @@ async fn join_raid(
 }
 
 /// The cured names, one per line, as `GateCfg::name_matches` reads them.
-fn names(raw: &[Option<&String>]) -> String {
+pub(crate) fn names(raw: &[Option<&String>]) -> String {
     raw.iter()
         .flatten()
         .map(|n| filters::cure(n))

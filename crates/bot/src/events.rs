@@ -320,7 +320,7 @@ pub async fn flush_logs(app: Arc<App>) {
 }
 
 /// What the raw gateway frame carries that twilight's model drops.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Default)]
 pub struct Extra {
     /// Discord's "likely spammer" user flag on a member join.
     pub spammer: bool,

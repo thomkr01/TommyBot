@@ -106,6 +106,10 @@ Its `AddAssign` impl makes `s += &other` ambiguous once decancer is in scope, an
 Whitelisted channels and roles still got base message heat, other bots' slash-command replies counted as webhook spam, and saying "gg" twice in a quiet channel gave a timeout.
 *Avoid:* every new heat source checks the whitelist, and quiet-channel heat counts once per user. Add a test with both spammers and normal chatters in one channel.
 
+**The verify button judged "suspicious" on other names than Join Gate.** (spammer-flag PR, 11-11)
+Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
+*Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button cannot see it.
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)

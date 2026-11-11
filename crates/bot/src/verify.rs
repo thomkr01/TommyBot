@@ -884,9 +884,11 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             let member = i.member.as_ref();
             let has_role =
                 member.is_some_and(|m| m.roles.iter().any(|r| cfg.verification.roles.contains(r)));
+            // Same cured names as Join Gate, or a member it found suspicious skips the captcha here.
+            let name = crate::joingate::names(&[Some(&u.name), u.global_name.as_ref()]);
             let joiner = tommybot_automod::join::Joiner {
                 id: u.id.get(),
-                name: &u.name,
+                name: &name,
                 has_avatar: u.avatar.is_some(),
                 ..Default::default()
             };
