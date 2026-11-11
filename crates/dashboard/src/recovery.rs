@@ -129,7 +129,7 @@ fn num<T: std::str::FromStr + Default>(v: &Value) -> T {
 /// Roles and channels as Discord's REST API returns them, in the shape backups use.
 pub(crate) fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
     let items = |v: &Value| v.as_array().cloned().unwrap_or_default();
-    Image {
+    let mut img = Image {
         guild: guild as u64,
         name: String::new(),
         settings: None,
@@ -168,7 +168,13 @@ pub(crate) fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
                     .collect(),
             })
             .collect(),
+    };
+    let rank =
+        tommybot_core::roles::ranks(img.roles.iter().map(|r| (r.id, r.position)), guild as u64);
+    for r in &mut img.roles {
+        r.position = rank[&r.id];
     }
+    img
 }
 
 /// Live ids a restore never deletes: the quarantine role and the log channels (as the bot does).
