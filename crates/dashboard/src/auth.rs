@@ -263,8 +263,12 @@ pub async fn totp_enroll(
         .dm(s.user_id, &format!("Your TommyBot authenticator setup code is **{dm_code}**. If you didn't start this, don't share it: someone may have your dashboard session."))
         .await
         .map_err(|_| ApiError::BadRequest("couldn't DM you; allow DMs from server members and try again".into()))?;
-    sqlx::query("insert into dash_totp (user_id, secret, dm_code) values ($1,$2,$3) on conflict (user_id) do update set secret = $2, dm_code = $3")
-        .bind(s.user_id).bind(&secret).bind(&dm_code).execute(&st.db).await?;
+    // The check above ran before the slow DM: a confirm in between must not get its secret replaced.
+    let wrote = sqlx::query("insert into dash_totp (user_id, secret, dm_code) values ($1,$2,$3) on conflict (user_id) do update set secret = $2, dm_code = $3 where not dash_totp.confirmed")
+        .bind(s.user_id).bind(&secret).bind(&dm_code).execute(&st.db).await?.rows_affected();
+    if wrote == 0 {
+        return Err(ApiError::Forbidden("totp already enrolled"));
+    }
     Ok(Json(
         json!({"secret": secret, "uri": crate::otp::uri(&secret, &s.username)?}),
     ))
@@ -295,10 +299,20 @@ pub async fn totp_verify(
     // A wrong DM code counts as a miss, so it shares the TOTP lockout.
     let step = step.filter(|_| confirmed || dm_code.as_deref() == Some(c.dm_code.as_str()));
     attempt(&st, s.user_id, step)?;
-    sqlx::query("update dash_totp set confirmed = true, dm_code = null where user_id = $1")
-        .bind(s.user_id)
-        .execute(&st.db)
-        .await?;
+    // Only the secret just checked: a new enrollment that landed meanwhile must not be confirmed by this code.
+    let kept = sqlx::query(
+        "update dash_totp set confirmed = true, dm_code = null where user_id = $1 and secret = $2",
+    )
+    .bind(s.user_id)
+    .bind(&secret)
+    .execute(&st.db)
+    .await?
+    .rows_affected();
+    if kept == 0 {
+        return Err(ApiError::Busy(
+            "your authenticator setup was restarted meanwhile; scan the new code and try again",
+        ));
+    }
     sqlx::query("update dash_session set step_up_until = $2 where id = $1")
         .bind(&s.id)
         .bind(Utc::now() + Duration::minutes(STEP_UP_MINUTES))
@@ -337,6 +351,81 @@ pub async fn check_totp(st: &AppState, user: i64, code: &str) -> Result<(), ApiE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. The user confirms their own setup while
+    /// the bot is still sending another enroll request's DM: that request must not replace the secret.
+    #[tokio::test]
+    async fn enroll_racing_a_confirm_keeps_the_confirmed_secret() {
+        use axum::{routing::post, Router};
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let user = 9_480_000_000 + std::process::id() as i64;
+        sqlx::query(
+            "insert into dash_totp (user_id, secret, dm_code) values ($1, 'MINE', '111111')",
+        )
+        .bind(user)
+        .execute(&db)
+        .await
+        .unwrap();
+        let during_dm = db.clone();
+        let mock = Router::new()
+            .route(
+                "/users/@me/channels",
+                post(|| async { axum::Json(json!({"id": "500"})) }),
+            )
+            .route(
+                "/channels/500/messages",
+                post(move || async move {
+                    sqlx::query("update dash_totp set confirmed = true where user_id = $1")
+                        .bind(user)
+                        .execute(&during_dm)
+                        .await
+                        .unwrap();
+                    axum::Json(json!({"id": "1"}))
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, mock).await });
+        let st = AppState {
+            db: db.clone(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api,
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+        };
+        let s = Sess {
+            id: String::new(),
+            user_id: user,
+            username: "t".into(),
+            access_token: String::new(),
+            stepped_up: false,
+            csrf: String::new(),
+        };
+        assert!(totp_enroll(State(st), s).await.is_err());
+        let (secret, confirmed): (String, bool) =
+            sqlx::query_as("select secret, confirmed from dash_totp where user_id = $1")
+                .bind(user)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!((secret.as_str(), confirmed), ("MINE", true));
+        sqlx::query("delete from dash_totp where user_id = $1")
+            .bind(user)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn csrf_token_required_on_writes() {
