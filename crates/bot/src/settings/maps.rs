@@ -421,7 +421,23 @@ pub(super) static BANSYNC: Module = Module {
     ],
 };
 
-pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &CAPS, &PANIC, &RESTORE, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP, &BANSYNC];
+/// Read only here: it needs 2FA on the dashboard.
+pub(super) static RAIDERLIST: Module = Module {
+    names: &["raiderlist"],
+    title: "Raider List Panel:",
+    per_page: 0,
+    footer: "Change the Raider List on the dashboard · Look someone up: t!raider check @user",
+    rows: &[
+        r!("1", "Status", "raider_list.enabled", Kind::Bool, |c| on(c.raider_list.enabled)),
+        r!("2", "Action", "raider_list.action", Kind::Choice(&[("alert", "\"alert\""), ("quarantine", "\"quarantine\""), ("kick", "\"kick\""), ("ban", "\"ban\"")]), |c| format!("{:?}", c.raider_list.action)),
+        r!("3", "Categories", "raider_list.categories", Kind::Dashboard, |c| c.raider_list.categories.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>().join(", ")),
+        r!("4", "Alert For Members Already Here", "raider_list.scan_members", Kind::Bool, |c| on(c.raider_list.scan_members)),
+        r!("5", "Lift When Removed From The List", "raider_list.lift_on_removal", Kind::Bool, |c| on(c.raider_list.lift_on_removal)),
+        r!("6", "Do Not Send Detections", "raider_list.no_collect", Kind::Bool, |c| on(c.raider_list.no_collect)),
+    ],
+};
+
+pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &CAPS, &PANIC, &RESTORE, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP, &BANSYNC, &RAIDERLIST];
 
 pub fn module(name: &str) -> Option<&'static Module> {
     MODULES.iter().copied().find(|m| m.names.contains(&name))

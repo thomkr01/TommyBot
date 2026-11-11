@@ -73,12 +73,6 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
     let Some(rest) = c.custom_id.strip_prefix(BUTTON) else {
         return Ok(false);
     };
-    let client = app.http.interaction(Id::new(app.me.get()));
-    let defer = verify::ephemeral(
-        InteractionResponseType::DeferredChannelMessageWithSource,
-        None,
-    );
-    client.create_response(i.id, &i.token, &defer).await?;
     fn id<T>(s: &str) -> Option<Id<T>> {
         s.parse().ok().and_then(Id::new_checked)
     }
@@ -92,9 +86,26 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
             }
         })
     };
+    answer_click(app, i, clicked).await?;
+    Ok(true)
+}
+
+/// Defers an ephemeral answer, runs the click, then sends its text. `None` from the click means
+/// the button does not work where it was pressed.
+pub(crate) async fn answer_click(
+    app: &App,
+    i: &Interaction,
+    clicked: impl std::future::Future<Output = Option<Result<String>>>,
+) -> Result<()> {
+    let client = app.http.interaction(Id::new(app.me.get()));
+    let defer = verify::ephemeral(
+        InteractionResponseType::DeferredChannelMessageWithSource,
+        None,
+    );
+    client.create_response(i.id, &i.token, &defer).await?;
     let done = (clicked.await).unwrap_or_else(|| Ok("This button does not work here.".into()));
     let text = done.unwrap_or_else(|e| {
-        tracing::warn!(?e, "ban sync button failed");
+        tracing::warn!(?e, "button failed");
         format!("Something went wrong: {}", http_err::why(&e))
     });
     client
@@ -103,7 +114,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         .flags(MessageFlags::EPHEMERAL)
         .allowed_mentions(Some(&AllowedMentions::default()))
         .await?;
-    Ok(true)
+    Ok(())
 }
 
 /// Ban here: the clicker's ban permit here, the group, the source ban still there and its

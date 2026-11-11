@@ -277,6 +277,10 @@ async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
     if app.whitelisted(gid, m.author.id, "automod").await? {
         return Ok(());
     }
+    // A tripped message with a scam link or QR code is deleted below, whichever path punishes.
+    if triggered && facts.malicious_link && m.webhook_id.is_none() {
+        crate::raiders::scam_hit(app, gid, m.author.id, m.id).await;
+    }
     if mention_lock && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await? {
         send_log(
             app,
@@ -396,6 +400,7 @@ async fn punish_crowd(
             tracing::warn!(?e, user = p.user, "punishing a crowd member failed");
         }
     }
+    crate::raiders::spam_crowd(app, gid, &done, m.id).await;
 }
 
 /// Strike and time out a spammer as the strike settings say, then log it.

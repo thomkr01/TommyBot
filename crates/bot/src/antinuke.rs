@@ -852,6 +852,7 @@ async fn report(
 ) -> Result<()> {
     let case = open_case(app, gid, actor, why).await?;
     let nuke = record_nuke(app, gid, actor, &sum.done, done.stopped()).await?;
+    crate::raiders::nuked(app, gid, actor, (case, &nuke, sum.ops), done.stopped()).await;
     let log = report_log((case, &nuke), actor.get(), done, why, sum);
     send_log(app, gid.get(), LogKind::AntiNuke, log).await?;
     crate::reply::alert_owner(app, gid, "A nuke attempt was stopped").await;

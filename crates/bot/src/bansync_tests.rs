@@ -11,8 +11,8 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
-const ME: u64 = 1;
-const BOT_OWNER: u64 = 2;
+pub(crate) const ME: u64 = 1;
+pub(crate) const BOT_OWNER: u64 = 2;
 
 #[test]
 fn every_exemption_is_named() {
@@ -97,14 +97,16 @@ fn the_ban_time_comes_from_the_audit_entry() {
 
 /// What the mock Discord holds: bans by (guild, user) with their reason, guild owners, and every request.
 #[derive(Default)]
-struct Mock {
-    bans: HashMap<(u64, u64), String>,
-    owners: HashMap<u64, u64>,
-    fail_get: bool,
-    fail_put: bool,
-    fail_put_5xx: bool,
-    fail_member: bool,
-    log: Vec<String>,
+pub(crate) struct Mock {
+    pub(crate) bans: HashMap<(u64, u64), String>,
+    pub(crate) owners: HashMap<u64, u64>,
+    /// Members by (guild, user) with their role ids.
+    pub(crate) members: HashMap<(u64, u64), Vec<u64>>,
+    pub(crate) fail_get: bool,
+    pub(crate) fail_put: bool,
+    pub(crate) fail_put_5xx: bool,
+    pub(crate) fail_member: bool,
+    pub(crate) log: Vec<String>,
 }
 
 fn decode(s: &str) -> String {
@@ -152,6 +154,11 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
     let user = |id: &str| json!({"id": id, "username": "u", "discriminator": "0", "avatar": null});
     let err = |s: u16, code: u64| (s, json!({"code": code, "message": "x"}).to_string());
     let n = |s: &str| s.parse::<u64>().unwrap();
+    let member = |u: &str, roles: &[u64]| {
+        let roles: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
+        json!({"user": user(u), "roles": roles, "joined_at": "2020-01-01T00:00:00.000000+00:00",
+               "deaf": false, "mute": false, "flags": 0})
+    };
     match (method, parts.as_slice()) {
         ("GET", ["guilds", _, "bans", _]) if m.fail_get => err(500, 0),
         ("GET", ["guilds", g, "bans", u]) => match m.bans.get(&(n(g), n(u))) {
@@ -180,6 +187,25 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             None => err(404, 10026),
         },
         ("GET", ["guilds", _, "members", _]) if m.fail_member => err(500, 0),
+        ("GET", ["guilds", g, "members", u]) => match m.members.get(&(n(g), n(u))) {
+            Some(r) => (200, member(u, r).to_string()),
+            None => err(404, 10007),
+        },
+        ("GET", ["guilds", g, "members"]) => {
+            let mut all: Vec<_> = m.members.iter().filter(|x| x.0 .0 == n(g)).collect();
+            all.sort_by_key(|x| x.0 .1);
+            let page: Vec<Value> = all
+                .into_iter()
+                .filter(|x| x.0 .1 > q("after").unwrap_or(0))
+                .take(q("limit").unwrap_or(1) as usize)
+                .map(|x| member(&x.0 .1.to_string(), x.1))
+                .collect();
+            (200, json!(page).to_string())
+        }
+        ("DELETE", ["guilds", g, "members", u]) => match m.members.remove(&(n(g), n(u))) {
+            Some(_) => (204, String::new()),
+            None => err(404, 10007),
+        },
         ("GET", ["guilds", g]) => match m.owners.get(&n(g)) {
             Some(o) => (200, guild(g, *o).to_string()),
             None => err(404, 10004),
@@ -235,14 +261,14 @@ async fn answer(mut s: TcpStream, mock: Arc<StdMutex<Mock>>) {
     let _ = s.shutdown().await;
 }
 
-struct T {
-    app: App,
-    mock: Arc<StdMutex<Mock>>,
-    base: u64,
+pub(crate) struct T {
+    pub(crate) app: App,
+    pub(crate) mock: Arc<StdMutex<Mock>>,
+    pub(crate) base: u64,
 }
 
 impl T {
-    async fn new(n: u64) -> Option<T> {
+    pub(crate) async fn new(n: u64) -> Option<T> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let mock = Arc::new(StdMutex::new(Mock::default()));
@@ -278,24 +304,30 @@ impl T {
         Some(t)
     }
 
-    fn g(&self, i: u64) -> Id<GuildMarker> {
+    pub(crate) fn g(&self, i: u64) -> Id<GuildMarker> {
         Id::new(self.base + i)
     }
 
-    fn owner(&self) -> u64 {
+    pub(crate) fn owner(&self) -> u64 {
         self.base + 9
     }
 
     /// Server `i` with Ban Sync on (receiving as `receive`), owned by `owner` in the DB, Discord and the cache.
-    async fn server(&self, i: u64, owner: u64, receive: &str) {
+    pub(crate) async fn server(&self, i: u64, owner: u64, receive: &str) {
         self.server_cfg(i, owner, json!({"enabled": true, "receive": receive}))
             .await
     }
 
-    async fn server_cfg(&self, i: u64, owner: u64, cfg: Value) {
+    pub(crate) async fn server_cfg(&self, i: u64, owner: u64, cfg: Value) {
+        self.server_config(i, owner, json!({ "ban_sync": cfg }))
+            .await
+    }
+
+    /// Server `i` with the whole config `cfg`, owned by `owner` in the DB, Discord and the cache.
+    pub(crate) async fn server_config(&self, i: u64, owner: u64, cfg: Value) {
         sqlx::query("INSERT INTO guild_config (guild_id, version, config) VALUES ($1, 1, $2)")
             .bind(self.g(i).get() as i64)
-            .bind(json!({ "ban_sync": cfg }))
+            .bind(cfg)
             .execute(&self.app.pool)
             .await
             .unwrap();
@@ -313,12 +345,12 @@ impl T {
             .insert(self.g(i).get(), owner);
     }
 
-    fn ban(&self, i: u64, user: u64, reason: &str) {
+    pub(crate) fn ban(&self, i: u64, user: u64, reason: &str) {
         let mut m = self.mock.lock().unwrap();
         m.bans.insert((self.g(i).get(), user), reason.into());
     }
 
-    fn banned(&self, i: u64, user: u64) -> Option<String> {
+    pub(crate) fn banned(&self, i: u64, user: u64) -> Option<String> {
         self.mock
             .lock()
             .unwrap()
@@ -327,17 +359,17 @@ impl T {
             .cloned()
     }
 
-    fn set(&self, f: impl FnOnce(&mut Mock)) {
+    pub(crate) fn set(&self, f: impl FnOnce(&mut Mock)) {
         f(&mut self.mock.lock().unwrap())
     }
 
-    fn calls(&self, what: &str) -> usize {
+    pub(crate) fn calls(&self, what: &str) -> usize {
         let m = self.mock.lock().unwrap();
         m.log.iter().filter(|l| l.contains(what)).count()
     }
 
     /// (receiving server index, state, skip reason) of the rows for `user`.
-    async fn rows(&self, user: u64) -> Vec<(u64, String, Option<String>)> {
+    pub(crate) async fn rows(&self, user: u64) -> Vec<(u64, String, Option<String>)> {
         let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
             "SELECT guild_id, state, skip_reason FROM ban_sync_links
              WHERE user_id = $1 AND guild_id BETWEEN $2 AND $2 + 9 ORDER BY guild_id",
@@ -352,11 +384,11 @@ impl T {
             .collect()
     }
 
-    fn row(i: u64, state: &str, why: Option<&str>) -> (u64, String, Option<String>) {
+    pub(crate) fn row(i: u64, state: &str, why: Option<&str>) -> (u64, String, Option<String>) {
         (i, state.into(), why.map(Into::into))
     }
 
-    async fn link(&self, to: u64, user: u64, src: u64, state: &str) {
+    pub(crate) async fn link(&self, to: u64, user: u64, src: u64, state: &str) {
         sqlx::query(
             "INSERT INTO ban_sync_links (guild_id, user_id, source_guild, origin, reason, state)
              VALUES ($1, $2, $3, 'discord', 'raiding', $4)",
@@ -371,7 +403,7 @@ impl T {
     }
 
     /// (server index, payload, seconds until it runs) of the queued `kind` jobs, which are removed.
-    async fn take(&self, kind: &str) -> Vec<(u64, Value, i64)> {
+    pub(crate) async fn take(&self, kind: &str) -> Vec<(u64, Value, i64)> {
         let jobs: Vec<(i64, Value, i64)> = sqlx::query_as(
             "DELETE FROM scheduled_jobs WHERE kind = $1 AND guild_id BETWEEN $2 AND $2 + 9
              RETURNING guild_id, payload, extract(epoch FROM run_at - now())::bigint",
@@ -386,14 +418,14 @@ impl T {
             .collect()
     }
 
-    async fn run_copies(&self) {
+    pub(crate) async fn run_copies(&self) {
         for (to, p, _) in self.take("ban_sync_copy").await {
             copy_job(&self.app, self.g(to), &p).await.unwrap();
         }
     }
 
     /// An audit entry made now (its id is a snowflake of the current time).
-    fn entry(&self, i: u64, kind: u16, user: u64, actor: Option<u64>) -> AuditLogEntry {
+    pub(crate) fn entry(&self, i: u64, kind: u16, user: u64, actor: Option<u64>) -> AuditLogEntry {
         let id = ((now_secs() as u64 * 1000) - 1_420_070_400_000) << 22;
         serde_json::from_value(json!({
             "id": id.to_string(), "action_type": kind, "changes": [], "guild_id": self.g(i).to_string(),
@@ -402,11 +434,11 @@ impl T {
         .unwrap()
     }
 
-    fn share(&self, user: u64, actor: Option<u64>) -> Value {
+    pub(crate) fn share(&self, user: u64, actor: Option<u64>) -> Value {
         json!({"user": user, "actor": actor, "reason": "raiding", "at": now_secs() - 61})
     }
 
-    async fn exec(&self, sql: &'static str) {
+    pub(crate) async fn exec(&self, sql: &'static str) {
         sqlx::query(sql)
             .bind(self.base as i64)
             .execute(&self.app.pool)
@@ -414,7 +446,7 @@ impl T {
             .unwrap();
     }
 
-    async fn count(&self, sql: &'static str) -> i64 {
+    pub(crate) async fn count(&self, sql: &'static str) -> i64 {
         sqlx::query_scalar(sql)
             .bind(self.base as i64)
             .fetch_one(&self.app.pool)
@@ -422,7 +454,7 @@ impl T {
             .unwrap()
     }
 
-    async fn cleanup(&self) {
+    pub(crate) async fn cleanup(&self) {
         for sql in [
             "DELETE FROM guild_config WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM guild_owners WHERE guild_id BETWEEN $1 AND $1 + 9",
@@ -437,6 +469,8 @@ impl T {
             "DELETE FROM permits WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM nuke_incidents WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM dash_session WHERE user_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM raider_actions WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM raider_allow WHERE guild_id BETWEEN $1 AND $1 + 9",
         ] {
             self.exec(sql).await;
         }

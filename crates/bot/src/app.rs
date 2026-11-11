@@ -19,7 +19,7 @@ use tommybot_core::{
     permits::{self, Level, RateLimiter},
     sections::{
         AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
-        MiscCfg, PanicCfg, TicketsCfg, WhitelistCfg,
+        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
     },
 };
 use tommybot_logging::{LogConfig, Logger};
@@ -48,6 +48,7 @@ pub struct GuildCfg {
     pub tickets: TicketsCfg,
     pub catch: CatchCfg,
     pub ban_sync: BanSyncCfg,
+    pub raider_list: RaiderListCfg,
 }
 
 /// One dashboard section; a section that fails to parse falls back to its default.
@@ -81,6 +82,7 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
         "verification" => t::<VerificationCfg>(v),
         "tickets" => t::<TicketsCfg>(v),
         "ban_sync" => t::<BanSyncCfg>(v),
+        "raider_list" => t::<RaiderListCfg>(v),
         _ => Ok(()),
     }
 }
@@ -111,6 +113,7 @@ impl GuildCfg {
             tickets: section(cfg, "tickets"),
             catch: section(cfg, "catch"),
             ban_sync: section(cfg, "ban_sync"),
+            raider_list: section(cfg, "raider_list"),
         }
     }
 }
@@ -316,10 +319,11 @@ impl App {
             match l.try_recv().await? {
                 Some(n) => {
                     if let Ok(g) = n.payload().parse::<u64>() {
-                        self.cfgs.write().unwrap().remove(&g);
+                        let old = self.cfgs.write().unwrap().remove(&g);
                         tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
                         if let Some(gid) = Id::new_checked(g) {
-                            tokio::spawn(on_saved(self.clone(), gid));
+                            let was_on = old.map(|c| c.raider_list.enabled);
+                            tokio::spawn(on_saved(self.clone(), gid, was_on));
                         }
                     }
                 }
@@ -332,8 +336,12 @@ impl App {
 }
 
 /// Setup that follows from a saved setting: Tickets turned on gets its category, a catch channel
-/// gets its warning.
-async fn on_saved(app: Arc<App>, gid: Id<GuildMarker>) {
+/// gets its warning, and the Raider List turned on scans the members (`was_on`: before the save,
+/// if the config was cached).
+async fn on_saved(app: Arc<App>, gid: Id<GuildMarker>, was_on: Option<bool>) {
+    if let Err(e) = crate::raiders::on_saved(&app, gid, was_on).await {
+        tracing::warn!(?e, %gid, "queueing the Raider List scan failed");
+    }
     if let Err(e) = crate::tickets::ensure_category(&app, gid).await {
         tracing::warn!(?e, %gid, "making the ticket category failed");
     }

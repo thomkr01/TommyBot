@@ -14,6 +14,7 @@ use tommybot_logging::{
     embed::{duration, ALERT, ARROW, DONE, NO, ORANGE, RED, YES},
     Log, LogKind,
 };
+use twilight_http::request::AuditLogReason;
 use twilight_model::{
     gateway::payload::incoming::{MemberAdd, MemberUpdate},
     id::{marker::GuildMarker, Id},
@@ -48,6 +49,9 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
             Detail::default(),
         )
         .await;
+    }
+    if crate::raiders::on_join(app, &cfg, gid, user.id).await {
+        return Ok(());
     }
     // One invites call per join: only when something shows the result.
     let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
@@ -273,6 +277,7 @@ async fn join_raid(
     {
         lockdown::lock(app, gid, kind).await?;
     }
+    let flagged_ids = out.flagged.clone();
     for id in out.flagged {
         punish(
             app,
@@ -285,6 +290,7 @@ async fn join_raid(
         )
         .await?;
     }
+    crate::raiders::raid_flagged(app, gid, &flagged_ids, &code).await;
     Ok(())
 }
 
@@ -388,12 +394,12 @@ pub(crate) fn gate_log(
     }
 }
 
-/// Saves the punishment for the dashboard's Join Gate records.
-async fn record(
+/// Saves the punishment for the dashboard's Join Gate records; `action` as the `Action` name.
+pub(crate) async fn record(
     app: &App,
     gid: Id<GuildMarker>,
     user: u64,
-    (action, why, d): (Action, &str, Detail<'_>),
+    (action, why, d): (&str, &str, Detail<'_>),
     failed: Option<&str>,
 ) {
     let saved = sqlx::query(
@@ -406,7 +412,7 @@ async fn record(
     .bind(d.adder.map(|a| a as i64))
     .bind(serde_json::json!(d.filters))
     .bind(why)
-    .bind(format!("{action:?}"))
+    .bind(action)
     .bind(failed.is_none())
     .bind(failed)
     .execute(&app.pool)
@@ -501,9 +507,11 @@ pub(crate) async fn punish(
                     .await
                     .map(drop)
                     .map_err(Into::into),
+                // The reason tells a Raider List ban apart when the list lifts its bans.
                 _ => app
                     .http
                     .create_ban(gid, uid)
+                    .reason(why)
                     .await
                     .map(drop)
                     .map_err(Into::into),
@@ -528,11 +536,12 @@ async fn finish(
     what: (Action, &str, Detail<'_>),
     failed: Option<&str>,
 ) -> Result<()> {
-    record(app, gid, user, what, failed).await;
+    let (action, why, detail) = what;
+    let name = format!("{action:?}");
+    record(app, gid, user, (&name, why, detail), failed).await;
     if cfg.logging.target(LogKind::JoinGate, None).is_none() {
         no_log_channel(app, gid).await;
     }
-    let (action, why, detail) = what;
     send_log(
         app,
         gid.get(),
@@ -613,7 +622,7 @@ mod tests {
             &app,
             gid,
             2000,
-            (Action::Kick, "join gate", d),
+            ("Kick", "join gate", d),
             Some("Missing Permissions"),
         )
         .await;

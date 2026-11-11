@@ -31,6 +31,10 @@ fn user(payload: &Value) -> Result<Id<UserMarker>> {
 }
 
 async fn dispatch(app: &App, job: &Job) -> Result<()> {
+    // The dashboard's Raider List decisions name no server: the job fans out to each one.
+    if job.guild_id == 0 {
+        return crate::raiders::fan_out(app, job).await;
+    }
     let gid = Id::new(job.guild_id as u64);
     match job.kind.as_str() {
         "unban" => {
@@ -141,17 +145,22 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "ban_sync_lift" => crate::bansync::lift_job(app, gid, &job.payload).await?,
         "ban_sync_import" => crate::bansync::import_job(app, &job.payload).await?,
         "ban_sync_send_rest" => crate::bansync::send_rest_job(app, &job.payload).await?,
+        "raider_check" => crate::raiders::check_job(app, gid, &job.payload).await?,
+        "raider_scan" => crate::raiders::scan_job(app, gid).await?,
+        "raider_lift" => crate::raiders::lift_job(app, gid, &job.payload).await?,
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())
 }
 
-const ONE_TARGET: [&str; 5] = [
+const ONE_TARGET: [&str; 7] = [
     "unban",
     "timeout_renew",
     "delete_message",
     "ban_sync_copy",
     "ban_sync_lift",
+    "raider_check",
+    "raider_lift",
 ];
 
 /// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
