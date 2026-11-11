@@ -257,6 +257,15 @@ fn BackupView(
     remove: Callback<i64>,
 ) -> impl IntoView {
     let (show_ch, show_roles) = (RwSignal::new(true), RwSignal::new(true));
+    // Remembered per browser, like the theme: big servers want it on every time.
+    let storage = || web_sys::window().and_then(|w| w.local_storage().ok().flatten());
+    let compact = RwSignal::new(storage().and_then(|s| s.get_item("backup_compact").ok().flatten()).is_some());
+    let toggle_compact = move |_| {
+        compact.update(|c| *c = !*c);
+        if let Some(s) = storage() {
+            let _ = if compact.get_untracked() { s.set_item("backup_compact", "1") } else { s.remove_item("backup_compact") };
+        }
+    };
     let role_open = RwSignal::new(None::<usize>);
     let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
     let (channels, roles, hooks) = (list("channels"), list("roles"), list("webhooks"));
@@ -286,10 +295,13 @@ fn BackupView(
             </div>
             <div class="bgrid">
                 <div class="card">
+                    <div class="ttlrow">
                     <button class="ttl" aria-expanded=move || show_ch.get().to_string() on:click=move |_| show_ch.update(|o| *o = !*o)>
                         {crate::icons::icon("channel_text")}" Channels"<span class="sp"></span><span class="chev" class:shut=move || !show_ch.get()>{crate::icons::icon("dropdown")}</span>
                     </button>
-                    <div class:hide=move || !show_ch.get()><ChannelTree channels /></div>
+                        <button class="ghost compact-btn" class:on=move || compact.get() aria-pressed=move || compact.get().to_string() on:click=toggle_compact>"Compact"</button>
+                    </div>
+                    <div class="tree" class:compact=move || compact.get() class:hide=move || !show_ch.get()><ChannelTree channels /></div>
                 </div>
                 <div class="card">
                     <h3 class="ttl">{crate::icons::icon("info")}" General Settings"</h3>
