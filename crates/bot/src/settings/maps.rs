@@ -411,7 +411,26 @@ pub(super) static SETUP: Module = Module {
     ],
 };
 
-pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &CAPS, &PANIC, &RESTORE, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP];
+/// Read only here: only the server owner changes it, with 2FA on the dashboard.
+pub(super) static BANSYNC: Module = Module {
+    names: &["bansync"],
+    title: "Ban Sync Panel:",
+    per_page: 0,
+    footer: "Only the server owner can change Ban Sync, on the dashboard",
+    rows: &[
+        r!("1", "Status", "ban_sync.enabled", Kind::Bool, |c| on(c.ban_sync.enabled)),
+        r!("2", "Send Bans", "ban_sync.share", Kind::Bool, |c| on(c.ban_sync.share)),
+        group!("3", "Send Automatic Bans"),
+        r!("3a", "Join Raid", "ban_sync.share_joinraid", Kind::Bool, |c| on(c.ban_sync.share_joinraid)),
+        r!("3b", "Automod", "ban_sync.share_automod", Kind::Bool, |c| on(c.ban_sync.share_automod)),
+        r!("3c", "Join Gate", "ban_sync.share_joingate", Kind::Bool, |c| on(c.ban_sync.share_joingate)),
+        r!("3d", "Verification", "ban_sync.share_verify", Kind::Bool, |c| on(c.ban_sync.share_verify)),
+        r!("4", "Receive", "ban_sync.receive", Kind::Choice(&[("off", "\"off\""), ("alert", "\"alert\""), ("ban", "\"ban\"")]), |c| format!("{:?}", c.ban_sync.receive)),
+        r!("5", "Sync Unbans", "ban_sync.sync_unbans", Kind::Bool, |c| on(c.ban_sync.sync_unbans)),
+    ],
+};
+
+pub(super) static MODULES: &[&Module] = &[&STATICS, &HEAT, &HFILTERS, &ANTINUKE, &CAPS, &PANIC, &RESTORE, &JOINGATE, &JOINRAID, &VERIFICATION, &MISC, &SETUP, &BANSYNC];
 
 pub fn module(name: &str) -> Option<&'static Module> {
     MODULES.iter().copied().find(|m| m.names.contains(&name))

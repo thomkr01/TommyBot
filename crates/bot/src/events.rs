@@ -118,13 +118,36 @@ async fn warn_public(app: &App, channel: Id<ChannelMarker>) {
     }
 }
 
+/// A link button row under a log, or nothing.
+fn link_row(link: Option<&(&str, String)>) -> Vec<Component> {
+    link.map(|(label, url)| {
+        Component::ActionRow(ActionRow {
+            id: None,
+            components: vec![Component::Button(tommybot_logging::emoji::LINK.on(
+                Button {
+                    id: None,
+                    custom_id: None,
+                    disabled: false,
+                    emoji: None,
+                    label: Some((*label).into()),
+                    style: ButtonStyle::Link,
+                    url: Some(url.clone()),
+                    sku_id: None,
+                },
+            ))],
+        })
+    })
+    .into_iter()
+    .collect()
+}
+
 /// Logged text is user-controlled, so it is sent with mentions disabled.
 async fn send(
     app: &App,
     channel: Id<ChannelMarker>,
     pings: &str,
     embed: &Embed,
-    link: Option<&(&str, String)>,
+    rows: &[Component],
     mentions: &AllowedMentions,
 ) -> Result<Id<MessageMarker>> {
     if public(app, channel).await? {
@@ -133,32 +156,12 @@ async fn send(
             "not logging to {channel}: @everyone can read it, pick a private log channel"
         );
     }
-    let rows: Vec<Component> = link
-        .map(|(label, url)| {
-            Component::ActionRow(ActionRow {
-                id: None,
-                components: vec![Component::Button(tommybot_logging::emoji::LINK.on(
-                    Button {
-                        id: None,
-                        custom_id: None,
-                        disabled: false,
-                        emoji: None,
-                        label: Some((*label).into()),
-                        style: ButtonStyle::Link,
-                        url: Some(url.clone()),
-                        sku_id: None,
-                    },
-                ))],
-            })
-        })
-        .into_iter()
-        .collect();
     Ok(app
         .http
         .create_message(channel)
         .content(pings)
         .embeds(std::slice::from_ref(embed))
-        .components(&rows)
+        .components(rows)
         .allowed_mentions(Some(mentions))
         .await?
         .model()
@@ -168,7 +171,8 @@ async fn send(
 
 async fn send_entry(app: &App, m: &LogMessage) -> Result<()> {
     let mentions = AllowedMentions::default();
-    let id = send(app, m.channel_id, "", &m.embed, m.link.as_ref(), &mentions).await?;
+    let rows = link_row(m.link.as_ref());
+    let id = send(app, m.channel_id, "", &m.embed, &rows, &mentions).await?;
     if let Some((name, text)) = &m.file {
         let file = Attachment::from_bytes(name.clone(), text.as_bytes().to_vec(), 0);
         reply_file(app, m.channel_id, id, file).await?;
@@ -203,7 +207,7 @@ pub(crate) async fn send_private(
     embed: &Embed,
     file: Option<Attachment>,
 ) -> Result<(Id<MessageMarker>, Option<Id<MessageMarker>>)> {
-    let id = send(app, channel, "", embed, None, &AllowedMentions::default()).await?;
+    let id = send(app, channel, "", embed, &[], &AllowedMentions::default()).await?;
     let file = match file {
         Some(f) => Some(reply_file(app, channel, id, f).await?),
         None => None,
@@ -219,7 +223,7 @@ pub async fn send_log(app: &App, guild: u64, kind: LogKind, embed: Log) -> Resul
             ch,
             "",
             &embed.time().build(),
-            None,
+            &[],
             &AllowedMentions::default(),
         )
         .await
@@ -249,7 +253,7 @@ pub async fn send_log_pinging(
         ch,
         pings.trim_end(),
         &embed.time().build(),
-        None,
+        &[],
         &mentions,
     )
     .await
@@ -264,19 +268,24 @@ pub async fn send_log_link(
     embed: Log,
     link: (&str, String),
 ) -> Result<()> {
+    send_log_rows(app, guild, kind, embed, &link_row(Some(&link))).await
+}
+
+/// Like [`send_log`] with button rows under the embed.
+pub async fn send_log_rows(
+    app: &App,
+    guild: u64,
+    kind: LogKind,
+    embed: Log,
+    rows: &[Component],
+) -> Result<()> {
     let Some(ch) = app.cfg(guild).await?.logging.target(kind, None) else {
         return Ok(());
     };
-    send(
-        app,
-        ch,
-        "",
-        &embed.time().build(),
-        Some(&link),
-        &AllowedMentions::default(),
-    )
-    .await
-    .map(drop)
+    let mentions = AllowedMentions::default();
+    send(app, ch, "", &embed.time().build(), rows, &mentions)
+        .await
+        .map(drop)
 }
 
 /// A deleted log channel leaves the config, so its logs reach the main log channel, which says so.
@@ -449,7 +458,10 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                 forget_log_channel(app, g, &c.0).await?;
             }
         }
-        Event::GuildUpdate(g) => app.invalidate_guild(g.id),
+        Event::GuildUpdate(g) => {
+            app.invalidate_guild(g.id);
+            crate::bansync::on_owner(app, g.id, g.owner_id).await?
+        }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::GuildDelete(g) => crate::welcome::on_guild_delete(app, g).await?,
         Event::Ready(r) => crate::welcome::on_ready(app, r).await?,
@@ -475,6 +487,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                 && !crate::appeals::handle(app, &i.0).await?
                 && !crate::settings::handle(app, &i.0).await?
                 && !crate::whitelist::handle(app, &i.0).await?
+                && !crate::bansync::handle(app, &i.0).await?
             {
                 slash::handle(app, &i.0).await?
             }
@@ -482,6 +495,8 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         // Anti-nuke first: the verification check can wait for the gateway delete.
         Event::GuildAuditLogEntryCreate(e) => {
             let nuke = antinuke::on_audit(app, &e.0).await;
+            let ban = crate::bansync::on_ban(app, &e.0).await;
+            let unban = crate::bansync::on_unban(app, &e.0).await;
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
             }
@@ -489,7 +504,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Err(err) = crate::modstats::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "recording a mod action failed");
             }
-            nuke?
+            nuke.and(ban).and(unban)?
         }
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,

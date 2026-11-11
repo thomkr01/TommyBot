@@ -4,6 +4,7 @@ mod app;
 mod appeals;
 mod automod;
 mod backup;
+mod bansync;
 mod catch;
 mod commands;
 mod confirm;
@@ -57,6 +58,20 @@ async fn load_emojis(http: &twilight_http::Client) -> Result<()> {
     Ok(())
 }
 
+/// The application's owner, the team owner for a team app (as the dashboard's `app_owner`).
+async fn bot_owner(
+    http: &twilight_http::Client,
+) -> Option<twilight_model::id::Id<twilight_model::id::marker::UserMarker>> {
+    let found = async { anyhow::Ok(http.current_user_application().await?.model().await?) }.await;
+    match found {
+        Ok(a) => a.team.map(|t| t.owner_user_id).or(a.owner.map(|o| o.id)),
+        Err(e) => {
+            tracing::warn!(?e, "bot owner unknown, Ban Sync cannot exempt them");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _log = tommybot_core::log::init("bot", tracing_subscriber::EnvFilter::from_default_env());
@@ -73,13 +88,16 @@ async fn main() -> Result<()> {
     if let Err(e) = previews::publish(&pool).await {
         tracing::warn!(?e, "saving the dashboard previews failed");
     }
-    let app = Arc::new(app::App::new(
+    let bot_owner = bot_owner(&http).await;
+    let mut app = app::App::new(
         http,
         twilight_http::Client::new(cfg.discord_token.clone()),
         pool,
         tommybot_automod::discord_api::Api::new(&cfg.discord_token),
         me,
-    ));
+    );
+    app.bot_owner = bot_owner;
+    let app = Arc::new(app);
     tokio::spawn({
         let app = app.clone();
         async move {

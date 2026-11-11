@@ -618,6 +618,94 @@ pub fn JoinGateLog(guild: String) -> impl IntoView {
     }
 }
 
+/// The Ban Sync group: the other servers with the same Discord owner, where this server's bans go,
+/// and the owner's Import and Send the rest buttons (both queue a job for the bot).
+#[component]
+pub fn BanSyncGroup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+    let data = RwSignal::new(Value::Null);
+    let (msg, need) = (Msg::default(), RwSignal::new(false));
+    let base = StoredValue::new(format!("/api/guilds/{guild}/ban_sync"));
+    let path = base.get_value();
+    spawn_local(async move {
+        let r = api("GET", &path, None).await;
+        if data.is_disposed() {
+            return;
+        }
+        match r {
+            Ok(v) => data.set(v),
+            Err(e) => msg.err(e),
+        }
+    });
+    let post = move |what: &str, body: Value, done: String| {
+        let path = format!("{}/{what}", base.get_value());
+        run_act(async move { api("POST", &path, Some(body)).await }, msg, need, move |_| msg.ok(done));
+    };
+    view! {
+        <div class="card">
+            <h3>"Your other servers"</h3>
+            <p class="muted">"Bans are shared only with servers that have the same Discord owner and Ban Sync on."</p>
+            {move || {
+                let servers = data.get()["servers"].as_array().cloned().unwrap_or_default();
+                if data.get().is_null() {
+                    return ().into_any();
+                }
+                if servers.is_empty() {
+                    return view! { <p class="muted">"TommyBot is in no other server you own."</p> }.into_any();
+                }
+                servers.into_iter().map(|sv| {
+                    let (id, name) = (s(&sv["id"]), s(&sv["name"]));
+                    let state = if sv["enabled"] == true { format!("Ban Sync on, receives: {}", s(&sv["receive"])) } else { "Ban Sync off".into() };
+                    let label = format!("Import existing bans from {name}");
+                    let ask = format!("Copy the bans that already exist in {name} to this server? They go through the same checks and hourly limit as new bans.");
+                    let done = format!("Import from {name} started. The copies show in the Log tab.");
+                    view! { <div class="row"><b>{name.clone()}</b><span class="muted">{state}</span><button class="ghost" on:click=move |_| { if confirm(&ask) { post("import", json!({"source": id.clone()}), done.clone()) } }>{label.clone()}</button></div> }
+                }).collect_view().into_any()
+            }}
+        </div>
+        <div class="card">
+            <h3>"Send the rest"</h3>
+            <p class="muted">"More than 30 shared bans in an hour pauses sharing, because that is what a hacked staff account looks like. Check the bans first, then send the ones that waited."</p>
+            {move || { let n = data.get()["waiting"].as_i64().unwrap_or(0); (n > 0).then(|| view! { <p>{format!("{n} bans are waiting.")}</p> }) }}
+            <button class="ghost" on:click=move |_| { if confirm("Send the bans the hourly limit held back to your other servers?") { post("send_rest", json!({}), "The waiting bans are being sent.".into()) } }>"Send the rest"</button>
+        </div>
+        <Toast msg />
+        <StepUp need enrolled />
+    }
+}
+
+/// Ban Sync copies to and from this server, 50 a page.
+#[component]
+pub fn BanSyncLog(guild: String) -> impl IntoView {
+    let (rows, set_rows) = signal(Vec::<Value>::new());
+    let (msg, loaded, page) = (Msg::default(), RwSignal::new(false), RwSignal::new(0i64));
+    let list = StoredValue::new(format!("/api/guilds/{guild}/ban_sync_log?page="));
+    let load = move || {
+        if page.is_disposed() {
+            return;
+        }
+        fetch(format!("{}{}", list.get_value(), page.get_untracked()), set_rows, msg, loaded)
+    };
+    load();
+    let export = move || list.get_value();
+    view! {
+        <Toast msg />
+        <div class="row">{export_csv(export, "ban_sync", &["at", "from", "from_id", "to", "to_id", "user_id", "origin", "state", "skip_reason", "case_no", "expires_at", "reason"], msg)}</div>
+        <Show when=move || loaded.get() && rows.get().is_empty()><p class="card empty muted">"No bans were synced yet."</p></Show>
+        {move || rows.get().into_iter().map(|r| {
+            let state = match (s(&r["state"]).as_str(), r["skip_reason"].as_str()) {
+                ("skipped", Some(why)) => format!("skipped: {why}"),
+                (st, _) => st.to_string(),
+            };
+            let case = r["case_no"].as_i64().map(|n| format!("case #{n}"));
+            view! { <div class="card">
+                <div class="row"><b>{format!("{} to {}", s(&r["from"]), s(&r["to"]))}</b><code>{s(&r["user_id"])}</code><span>{state}</span>{case.map(|c| view! { <span class="muted">{c}</span> })}<span class="muted">{s(&r["at"])}</span></div>
+                <p>{s(&r["reason"])}<span class="muted">{format!(" ({})", s(&r["origin"]).replace('_', " "))}</span></p>
+            </div> }
+        }).collect_view()}
+        {pager(page, move || rows.get().len(), load)}
+    }
+}
+
 /// One transcript line, `[time] Name (Role): text`, as (time, name, role, text).
 fn log_line(l: &str) -> (&str, &str, &str, &str) {
     let Some((time, rest)) = l.strip_prefix('[').and_then(|r| r.split_once("] ")) else {

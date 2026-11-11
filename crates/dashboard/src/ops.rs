@@ -179,6 +179,7 @@ pub(crate) async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Li
                 ("Join gate", "joingate"),
                 ("Join raid", "joinraid"),
                 ("Verification", "verification"),
+                ("ban_sync", "ban_sync"),
             ]
             .map(|(name, k)| (name, config[k]["enabled"] == true))
             .to_vec(),

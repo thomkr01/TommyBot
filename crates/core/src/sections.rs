@@ -491,7 +491,7 @@ impl WhitelistList {
 pub const MAX_APPEAL_FIELDS: usize = 6;
 
 /// Sections the dashboard saves only after a TOTP step-up, so prefix panels may not edit them.
-pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch"];
+pub const SENSITIVE: &[&str] = &["antinuke", "whitelist", "panic", "catch", "ban_sync"];
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppealField {
@@ -801,10 +801,59 @@ pub struct CatchCfg {
     pub users: Vec<Id<UserMarker>>,
 }
 
+/// Ban Sync: copies bans between servers that have the same Discord owner. Off until the owner turns it on.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct BanSyncCfg {
+    pub enabled: bool,
+    /// Send this server's bans to the other servers in the group.
+    pub share: bool,
+    /// Which automatic bans are sent too (staff bans always are while `share` is on).
+    pub share_joinraid: bool,
+    pub share_automod: bool,
+    pub share_joingate: bool,
+    pub share_verify: bool,
+    pub receive: BanSyncReceive,
+    /// Lift the copies when the source ban is lifted.
+    pub sync_unbans: bool,
+}
+
+impl Default for BanSyncCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            share: true,
+            share_joinraid: true,
+            share_automod: true,
+            share_joingate: false,
+            share_verify: false,
+            receive: BanSyncReceive::Alert,
+            sync_unbans: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BanSyncReceive {
+    Off,
+    #[default]
+    Alert,
+    Ban,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn ban_sync_is_off_until_saved_on() {
+        let c: BanSyncCfg = serde_json::from_value(json!({})).unwrap();
+        assert!(!c.enabled && c.share && c.sync_unbans);
+        assert_eq!(c.receive, BanSyncReceive::Alert);
+        assert!(c.share_joinraid && c.share_automod && !c.share_joingate && !c.share_verify);
+    }
 
     #[test]
     fn regex_words_match_and_bad_ones_are_refused() {

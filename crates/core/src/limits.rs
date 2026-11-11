@@ -18,6 +18,10 @@ const SLOWMODE: [(&str, (i64, i64)); 5] = [
     ("min_on_secs", SLOW_ON),
     ("calm_secs", SLOW_CALM),
 ];
+/// Ban Sync: seconds a ban waits before it is shared, so anti-nuke can stop a hacked account first.
+pub const BAN_SYNC_HOLD_S: i64 = 60;
+/// Ban Sync: bans one server may share per hour before sharing pauses for the owner.
+pub const BAN_SYNC_HOURLY: i64 = 30;
 
 /// The range of the number at `path` (below the section, e.g. `limits.Ban.per_hour`), if it has one.
 pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {

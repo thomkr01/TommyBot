@@ -176,6 +176,7 @@ pub async fn page_access(State(st): State<AppState>, s: Sess, Path(guild): Path<
         .collect();
     if level == Level::Owner && !is_discord_owner(&st, &s, guild).await? {
         pages.insert("rescue".into(), json!(access::PageAccess::Hidden));
+        pages.insert("ban_sync".into(), json!(access::PageAccess::Read));
     }
     let cmds = sqlx::query_scalar::<_, Option<Value>>(
         "select messages->'commands'->'commands' from bot_previews",
@@ -304,6 +305,8 @@ pub async fn put_section(
     // Access first, so someone without it learns nothing about the section's shape.
     let (min, step_up) = access::write_bar(&section);
     require(&st, &s, guild, min, step_up).await?;
+    let owner_only = access::DISCORD_OWNER_ONLY.contains(&section.as_str());
+    discord_owner_for(&st, &s, guild, owner_only).await?;
     if !b.value.is_object() {
         return Err(ApiError::BadRequest("section must be an object".into()));
     }
@@ -341,6 +344,28 @@ pub async fn put_section(
     )
     .await;
     Ok(Json(json!({"version": version})))
+}
+
+/// Whether `new` and `now` differ in a section only the Discord owner may change.
+fn owner_only_changed(new: &Value, now: &Value) -> bool {
+    access::DISCORD_OWNER_ONLY
+        .iter()
+        .any(|k| new.get(*k) != now.get(*k))
+}
+
+/// With `needed`, refuses anyone but the Discord owner (extra owners included).
+async fn discord_owner_for(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+    needed: bool,
+) -> Result<(), ApiError> {
+    if needed && !is_discord_owner(st, s, guild).await? {
+        return Err(ApiError::Forbidden(
+            "only the server owner can change Ban Sync",
+        ));
+    }
+    Ok(())
 }
 
 /// Replaces EO/TA lists and custom permits; recorded as a config version so it can be rolled back.
@@ -485,6 +510,7 @@ pub async fn rollback(
             "this rollback changes a section only owners can edit",
         ));
     }
+    discord_owner_for(&st, &s, guild, owner_only_changed(&old, &now)).await?;
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
     if let Some(p) = old.get("permits") {
@@ -603,6 +629,10 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
         }
         let mut v = v.clone();
         strip_ids(&mut v, k, &mut cleared);
+        // An import never switches a cross-server feature on.
+        if k == "ban_sync" {
+            v["enabled"] = json!(false);
+        }
         if k == "permits" {
             v["eo"] = now["permits"]["eo"].clone();
             v["ta"] = now["permits"]["ta"].clone();
@@ -657,6 +687,7 @@ pub async fn import(
     let (new, cleared) = import_config(&b.config, &now)?;
     let (min, step_up) = import_bar(&new, &now);
     let level = require(&st, &s, guild, min, step_up).await?;
+    discord_owner_for(&st, &s, guild, owner_only_changed(&new, &now)).await?;
     let web = ["verification", "lockdown"]
         .iter()
         .any(|k| new.get(*k) != now.get(*k));
@@ -690,8 +721,8 @@ pub async fn import(
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is.
 pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
-        TicketsCfg, WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
+        MiscCfg, PanicCfg, TicketsCfg, WhitelistCfg,
     };
     if section == "logging" {
         for (i, c) in v["custom"].as_array().into_iter().flatten().enumerate() {
@@ -772,6 +803,7 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "tickets" => serde_json::from_value::<TicketsCfg>(v).map(drop),
         "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
         "catch" => serde_json::from_value::<CatchCfg>(v).map(drop),
+        "ban_sync" => serde_json::from_value::<BanSyncCfg>(v).map(drop),
         _ => Ok(()),
     };
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
@@ -809,6 +841,16 @@ mod logging_validate_tests {
         let old = json!({"channel_profiles": {"profiles": []}, "automod": {}});
         let (new, _) = import_config(&old, &json!({})).unwrap();
         assert!(new.get("channel_profiles").is_none());
+    }
+
+    #[test]
+    fn import_never_turns_ban_sync_on() {
+        let file = json!({"ban_sync": {"enabled": true, "receive": "ban"}});
+        let (new, _) = import_config(&file, &json!({})).unwrap();
+        assert_eq!(new["ban_sync"], json!({"enabled": false, "receive": "ban"}));
+        assert!(import_config(&json!({"ban_sync": {"receive": "nuke"}}), &json!({})).is_err());
+        assert_eq!(import_bar(&new, &json!({})), (Level::Owner, true));
+        assert!(owner_only_changed(&new, &json!({})));
     }
 
     #[test]
