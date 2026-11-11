@@ -814,6 +814,22 @@ async fn buttons_recheck_exemptions_and_the_dashboard_can_send_dms() {
         .unwrap();
     assert!(said.contains("exempt"), "{said}");
     assert_eq!(t.calls("PUT /guilds"), bans);
+    // A press that does nothing (the mock member ranks above the bot) leaves the buttons working.
+    t.exec("DELETE FROM extra_owners WHERE guild_id = $1").await;
+    let said = click(&t.app, (t.g(0), Id::new(88)), Id::new(o), "ban", u)
+        .await
+        .unwrap();
+    assert!(said.contains("Cannot ban"), "{said}");
+    assert_eq!(t.acted(0, u).await.as_deref(), Some("alert"));
+    // Another press already claimed the alert: this one does nothing.
+    t.exec("UPDATE raider_actions SET action = 'kick' WHERE guild_id = $1")
+        .await;
+    let bans = t.calls("PUT /guilds");
+    let said = click(&t.app, (t.g(0), Id::new(88)), Id::new(o), "ban", u)
+        .await
+        .unwrap();
+    assert!(said.contains("already handled"), "{said}");
+    assert_eq!(t.calls("PUT /guilds"), bans);
     // `raider_notify` from the dashboard: one DM with the text.
     let job = jobs::Job {
         id: 0,

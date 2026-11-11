@@ -111,6 +111,21 @@ pub(super) async fn click(
     }
     let why = format!("{PREFIX} {}", entry.category);
     let me = (clicker, &level);
+    let (g, u) = (gid.get() as i64, user.get() as i64);
+    // Claimed before acting, so two staff pressing at once cannot both ban (or ban and kick).
+    let claimed = sqlx::query(
+        "UPDATE raider_actions SET action = $3 WHERE guild_id = $1 AND user_id = $2 AND action = 'alert'",
+    )
+    .bind(g)
+    .bind(u)
+    .bind(action)
+    .execute(&app.pool)
+    .await?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        return Ok("This alert was already handled.".into());
+    }
     let done = match action {
         "ban" | "kick" => {
             let kind = if action == "ban" {
@@ -118,24 +133,30 @@ pub(super) async fn click(
             } else {
                 ModKind::Kick
             };
-            commands::apply(app, gid, owner, me, kind, user, Some(&why), None, 0).await?
+            commands::apply(app, gid, owner, me, kind, user, Some(&why), None, 0).await
         }
         _ => {
             let cmd = ModCmd::Quarantine { user: user.get() };
-            modcmds::run(app, gid, owner, me, channel, cmd, (Some(&why), None), false).await?
+            modcmds::run(app, gid, owner, me, channel, cmd, (Some(&why), None), false).await
         }
     };
-    if done.case.is_some() {
-        sqlx::query(
-            "UPDATE raider_actions SET action = $3, case_no = $4 WHERE guild_id = $1 AND user_id = $2 AND action = 'alert'",
+    let case = done.as_ref().ok().and_then(|d| d.case);
+    // With a case the claim stands; otherwise nothing was done and the buttons work again.
+    let back = match case {
+        Some(n) => sqlx::query(
+            "UPDATE raider_actions SET case_no = $3 WHERE guild_id = $1 AND user_id = $2",
         )
-        .bind(gid.get() as i64)
-        .bind(user.get() as i64)
-        .bind(action)
-        .bind(done.case)
-        .execute(&app.pool)
-        .await?;
-    }
+        .bind(g)
+        .bind(u)
+        .bind(n),
+        None => sqlx::query(
+            "UPDATE raider_actions SET action = 'alert' WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(g)
+        .bind(u),
+    };
+    back.execute(&app.pool).await?;
+    let done = done?;
     Ok(done.text)
 }
 
