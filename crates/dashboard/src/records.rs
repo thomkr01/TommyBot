@@ -40,6 +40,8 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{g}/cases"), get(cases))
         .route(&format!("{g}/cases/{{no}}"), post(case_edit))
         .route(&format!("{g}/cases/{{no}}/delete"), post(case_delete))
+        .route(&format!("{g}/mod_stats"), get(mod_stats))
+        .route(&format!("{g}/mod_stats/{{user}}"), get(mod_actions))
         .route(&format!("{g}/raid_log"), get(raid_log))
         .route(&format!("{g}/joingate_log"), get(joingate_log))
         .route(&format!("{g}/notes"), get(notes).post(note_add))
@@ -257,19 +259,54 @@ async fn case_edit(
     let text = |t: &str| {
         (!t.trim().is_empty()).then(|| t.trim().chars().take(CASE_TEXT_MAX).collect::<String>())
     };
-    let n = sqlx::query("update cases set reason = $3, proof = $4, active = $5 where guild_id = $1 and case_no = $2")
-        .bind(guild)
-        .bind(no)
-        .bind(text(&b.reason))
-        .bind(text(&b.proof))
-        .bind(b.active)
-        .execute(&st.db)
-        .await?
-        .rows_affected();
-    if n == 0 {
+    let mut tx = st.db.begin().await?;
+    // The old values come from the same row lock, so only a real change is counted.
+    let changed: Option<(i64, bool)> = sqlx::query_as(
+        "with old as (select reason, proof, active from cases where guild_id = $1 and case_no = $2 for update)
+         update cases c set reason = $3, proof = $4, active = $5 from old
+         where c.guild_id = $1 and c.case_no = $2
+         returning c.user_id, (old.reason, old.proof, old.active) is distinct from ($3, $4, $5)",
+    )
+    .bind(guild)
+    .bind(no)
+    .bind(text(&b.reason))
+    .bind(text(&b.proof))
+    .bind(b.active)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((user, changed)) = changed else {
         return Err(ApiError::NotFound);
+    };
+    if changed {
+        staff_action(&mut tx, guild, &s, "case_edit", user, no).await?;
     }
+    tx.commit().await?;
     ok()
+}
+
+/// A dashboard change to a case counts as an action of its editor, so cases cannot be quietly rewritten.
+async fn staff_action(
+    tx: &mut sqlx::PgConnection,
+    guild: i64,
+    s: &Sess,
+    kind: &str,
+    user: i64,
+    no: i32,
+) -> Result<(), ApiError> {
+    tommybot_core::cases::record(
+        tx,
+        tommybot_core::cases::ModAction {
+            guild_id: guild,
+            mod_id: s.user_id,
+            kind,
+            source: "dashboard",
+            target_id: Some(user),
+            case_no: Some(no),
+            audit_id: None,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// Deleting erases the audit trail, so it stays with the trusted admins and owners.
@@ -279,12 +316,172 @@ async fn case_delete(
     Path((guild, no)): Path<(i64, i32)>,
 ) -> Res {
     api::require(&st, &s, guild, crate::access::Level::Admin, false).await?;
-    sqlx::query("delete from cases where guild_id = $1 and case_no = $2")
-        .bind(guild)
-        .bind(no)
-        .execute(&st.db)
-        .await?;
+    let mut tx = st.db.begin().await?;
+    let user: i64 = sqlx::query_scalar(
+        "delete from cases where guild_id = $1 and case_no = $2 returning user_id",
+    )
+    .bind(guild)
+    .bind(no)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    staff_action(&mut tx, guild, &s, "case_delete", user, no).await?;
+    tx.commit().await?;
     ok()
+}
+
+/// Owners, and roles an owner gave View Mod Stats; checked before anything in the request is read.
+async fn stats_access(st: &AppState, s: &Sess, guild: i64) -> Result<(), ApiError> {
+    let l = api::require(st, s, guild, crate::access::Level::Viewer, false).await?;
+    let perms = if l == crate::access::Level::Owner {
+        vec![]
+    } else {
+        api::permit_perms(st, s, guild).await?
+    };
+    if crate::access::mod_stats(l, &perms) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("needs the View Mod Stats permit"))
+    }
+}
+
+#[derive(Deserialize)]
+struct StatsQuery {
+    days: Option<String>,
+}
+
+/// Days in the period and days per bar: daily bars up to a month, weekly after.
+fn period(raw: Option<&str>) -> Result<(i32, i32), ApiError> {
+    match raw.unwrap_or("30") {
+        "7" => Ok((7, 1)),
+        "30" => Ok((30, 1)),
+        "90" => Ok((90, 7)),
+        "365" => Ok((365, 7)),
+        _ => Err(ApiError::BadRequest("days must be 7, 30, 90 or 365".into())),
+    }
+}
+
+/// Actions per staff member in the period, against the period before, with bars over time.
+async fn mod_stats(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Query(q): Query<StatsQuery>,
+) -> Res {
+    stats_access(&st, &s, guild).await?;
+    let (days, step) = period(q.days.as_deref())?;
+    // The bot's own automatic actions are not staff work.
+    let me = st.discord.bot_user().await?;
+    // One transaction, so all three queries see the same now().
+    let mut tx = st.db.begin().await?;
+    let counts: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "select mod_id::text, kind,
+                count(*) filter (where created_at >= now() - make_interval(days => $3)),
+                count(*) filter (where created_at < now() - make_interval(days => $3))
+         from mod_actions
+         where guild_id = $1 and mod_id <> $2 and created_at >= now() - make_interval(days => $3 * 2)
+         group by 1, 2",
+    )
+    .bind(guild)
+    .bind(me)
+    .bind(days)
+    .fetch_all(&mut *tx)
+    .await?;
+    let last: Vec<(String, At)> = sqlx::query_as(
+        "select mod_id::text, max(created_at) from mod_actions
+         where guild_id = $1 and mod_id <> $2 group by 1",
+    )
+    .bind(guild)
+    .bind(me)
+    .fetch_all(&mut *tx)
+    .await?;
+    let bars: Vec<(String, i32, i64)> = sqlx::query_as(
+        "select mod_id::text,
+                floor(extract(epoch from now() - created_at) / ($4 * 86400))::int, count(*)
+         from mod_actions
+         where guild_id = $1 and mod_id <> $2 and created_at >= now() - make_interval(days => $3)
+         group by 1, 2",
+    )
+    .bind(guild)
+    .bind(me)
+    .bind(days)
+    .bind(step)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(Json(stats_json(days, step, counts, last, bars)))
+}
+
+#[derive(Default, serde::Serialize)]
+struct ModRow {
+    mod_id: String,
+    by_kind: std::collections::BTreeMap<String, i64>,
+    total: i64,
+    prev_total: i64,
+    last_at: Option<At>,
+    series: Vec<i64>,
+}
+
+/// Builds the page's rows: oldest bar first, busiest member first, at most 200.
+fn stats_json(
+    days: i32,
+    step: i32,
+    counts: Vec<(String, String, i64, i64)>,
+    last: Vec<(String, At)>,
+    bars: Vec<(String, i32, i64)>,
+) -> Value {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Whole bars only: the days left over join the oldest bar instead of making a short one.
+    let n = (days / step) as usize;
+    let mut kinds = BTreeSet::new();
+    let mut rows: BTreeMap<String, ModRow> = BTreeMap::new();
+    fn row(rows: &mut BTreeMap<String, ModRow>, id: String, n: usize) -> &mut ModRow {
+        rows.entry(id.clone()).or_insert_with(|| ModRow {
+            mod_id: id,
+            series: vec![0; n],
+            ..Default::default()
+        })
+    }
+    for (id, at) in last {
+        row(&mut rows, id, n).last_at = Some(at);
+    }
+    for (id, kind, now, prev) in counts {
+        let r = row(&mut rows, id, n);
+        if now > 0 {
+            r.by_kind.insert(kind.clone(), now);
+            kinds.insert(kind);
+        }
+        r.total += now;
+        r.prev_total += prev;
+    }
+    for (id, ago, c) in bars {
+        // `ago` counts bars back from now; anything past the last whole bar joins the oldest.
+        let i = n - 1 - (ago.max(0) as usize).min(n - 1);
+        row(&mut rows, id, n).series[i] += c;
+    }
+    let mut out: Vec<ModRow> = rows.into_values().collect();
+    out.sort_by(|a, b| b.total.cmp(&a.total).then(b.last_at.cmp(&a.last_at)));
+    out.truncate(200);
+    json!({"days": days, "step": step, "kinds": kinds, "mods": out})
+}
+
+/// One staff member's last 50 actions.
+async fn mod_actions(
+    State(st): State<AppState>,
+    s: Sess,
+    Path((guild, user)): Path<(i64, String)>,
+) -> Res {
+    stats_access(&st, &s, guild).await?;
+    let user = user_id(&user)?;
+    let rows: Option<Value> = sqlx::query_scalar(
+        "select jsonb_agg(r order by r.at desc, r.id desc) from (
+            select id, kind, source, target_id::text as target_id, case_no, created_at as at from mod_actions
+            where guild_id = $1 and mod_id = $2 order by created_at desc, id desc limit 50) r",
+    )
+    .bind(guild)
+    .bind(user)
+    .fetch_one(&st.db)
+    .await?;
+    Ok(Json(rows.unwrap_or_else(|| json!([]))))
 }
 
 #[derive(Deserialize)]
@@ -572,6 +769,71 @@ async fn blacklist_remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mod_stats_rows() {
+        let at = |d: i64| chrono::Utc::now() - chrono::Duration::days(d);
+        let v = stats_json(
+            7,
+            1,
+            vec![
+                ("1".into(), "ban".into(), 3, 1),
+                ("1".into(), "warn".into(), 0, 2),
+                ("2".into(), "kick".into(), 5, 0),
+            ],
+            vec![
+                ("1".into(), at(0)),
+                ("2".into(), at(1)),
+                ("3".into(), at(200)),
+            ],
+            vec![("1".into(), 0, 2), ("1".into(), 6, 1), ("2".into(), 9, 5)],
+        );
+        assert_eq!(
+            stats_json(
+                365,
+                7,
+                vec![],
+                vec![("1".into(), chrono::Utc::now())],
+                vec![("1".into(), 52, 4)]
+            )["mods"][0]["series"]
+                .as_array()
+                .map(|s| (s.len(), s[0].clone())),
+            Some((52, json!(4))),
+            "a year is 52 whole weeks; the extra day joins the oldest"
+        );
+        let m = v["mods"].as_array().unwrap();
+        assert_eq!(
+            v["kinds"],
+            json!(["ban", "kick"]),
+            "a kind with nothing in the period gets no column"
+        );
+        assert_eq!(m[0]["mod_id"], "2");
+        assert_eq!(
+            m[0]["series"],
+            json!([5, 0, 0, 0, 0, 0, 0]),
+            "a late bar joins the oldest"
+        );
+        assert_eq!(m[1]["mod_id"], "1");
+        assert_eq!(m[1]["by_kind"], json!({"ban": 3}));
+        assert_eq!(
+            (m[1]["total"].as_i64(), m[1]["prev_total"].as_i64()),
+            (Some(3), Some(3))
+        );
+        assert_eq!(m[1]["series"], json!([1, 0, 0, 0, 0, 0, 2]));
+        assert_eq!(
+            m[2]["mod_id"], "3",
+            "quiet staff stay listed, with nothing in the period"
+        );
+        assert_eq!(m[2]["total"], 0);
+    }
+
+    #[test]
+    fn mod_stats_periods() {
+        assert_eq!(period(None).ok(), Some((30, 1)));
+        assert_eq!(period(Some("365")).ok(), Some((365, 7)));
+        assert!(period(Some("31")).is_err());
+        assert!(period(Some("-7")).is_err());
+    }
 
     #[test]
     fn input_checks() {

@@ -54,6 +54,8 @@ async fn read_only_role_and_tools() {
     .execute(&admin)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO mod_actions (guild_id, mod_id, kind, source, target_id) VALUES ($1, 7, 'kick', 'discord', 42)")
+        .bind(g).execute(&admin).await.unwrap();
     sqlx::query("INSERT INTO guild_config (guild_id, version, config) VALUES ($1, 1, '{\"automod\": {\"on\": true}}')")
         .bind(g).execute(&admin).await.unwrap();
 
@@ -76,6 +78,7 @@ async fn read_only_role_and_tools() {
         "SELECT answers FROM appeals LIMIT 1",
         "SELECT 1 FROM mcp_writes LIMIT 1",
         "SELECT 1 FROM mcp_tokens LIMIT 1",
+        "SELECT 1 FROM mod_actions LIMIT 1",
     ] {
         assert!(
             sqlx::query(sql).execute(&db).await.is_err(),
@@ -161,7 +164,33 @@ async fn read_only_role_and_tools() {
     assert_eq!(acts[0]["action"], "ban");
     assert_eq!(acts[0]["target_id"], "42");
 
-    for t in ["cases", "guild_config", "notes", "action_log"] {
+    let stats = tool(
+        &st,
+        "mod_actions",
+        json!({"guild_id": g.to_string(), "mod_id": "7"}),
+    )
+    .await;
+    assert_eq!(
+        (stats[0]["kind"].as_str(), stats[0]["source"].as_str()),
+        (Some("kick"), Some("discord"))
+    );
+    assert_eq!(
+        tool(
+            &st,
+            "mod_actions",
+            json!({"guild_id": g.to_string(), "mod_id": "8"})
+        )
+        .await,
+        json!([])
+    );
+
+    for t in [
+        "cases",
+        "guild_config",
+        "notes",
+        "action_log",
+        "mod_actions",
+    ] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {t} WHERE guild_id = $1"
         )))

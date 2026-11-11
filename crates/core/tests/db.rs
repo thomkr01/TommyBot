@@ -21,6 +21,7 @@ async fn cleanup(p: &PgPool, g: i64) {
     for t in [
         "cases",
         "action_log",
+        "mod_actions",
         "extra_owners",
         "trusted_admins",
         "permit_roles",
@@ -378,7 +379,8 @@ async fn left(p: &PgPool, g: i64, user: i64) -> (i64, bool) {
     let n: i64 = sqlx::query_scalar(
         "SELECT (SELECT count(*) FROM cases WHERE guild_id = $1) + (SELECT count(*) FROM action_log WHERE guild_id = $1)
               + (SELECT count(*) FROM guild_config WHERE guild_id = $1) + (SELECT count(*) FROM extra_owners WHERE guild_id = $1)
-              + (SELECT count(*) FROM welcomed_guilds WHERE guild_id = $1) + (SELECT count(*) FROM guild_left WHERE guild_id = $1)",
+              + (SELECT count(*) FROM welcomed_guilds WHERE guild_id = $1) + (SELECT count(*) FROM guild_left WHERE guild_id = $1)
+              + (SELECT count(*) FROM mod_actions WHERE guild_id = $1)",
     )
     .bind(g).fetch_one(p).await.unwrap();
     let points: bool = sqlx::query_scalar(
@@ -393,6 +395,61 @@ async fn left(p: &PgPool, g: i64, user: i64) -> (i64, bool) {
 }
 
 #[tokio::test]
+async fn cases_and_audit_entries_count_once_for_mod_stats() {
+    let Some(p) = pool().await else { return };
+    let g = gid(30);
+    cleanup(&p, g).await;
+    let no = cases::create(&p, case(g, "warn", 42, 1, None))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        // A gateway event replayed after a reconnect carries the same audit log id.
+        cases::record(
+            &mut p.acquire().await.unwrap(),
+            cases::ModAction {
+                guild_id: g,
+                mod_id: 9,
+                kind: "ban",
+                source: "discord",
+                target_id: Some(43),
+                case_no: None,
+                audit_id: Some(77),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    type Row = (i64, String, String, Option<i64>, Option<i32>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT mod_id, kind, source, target_id, case_no FROM mod_actions WHERE guild_id = $1 ORDER BY id",
+    )
+    .bind(g)
+    .fetch_all(&p)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "warn".into(), "bot".into(), Some(42), Some(no)),
+            (9, "ban".into(), "discord".into(), Some(43), None),
+        ]
+    );
+    // Deleting the case leaves the history.
+    sqlx::query("DELETE FROM cases WHERE guild_id = $1")
+        .bind(g)
+        .execute(&p)
+        .await
+        .unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM mod_actions WHERE guild_id = $1")
+        .bind(g)
+        .fetch_one(&p)
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+    cleanup(&p, g).await;
+}
+
+#[tokio::test]
 async fn purge_deletes_one_guild_only() {
     let Some(p) = pool().await else { return };
     let (a, b) = (gid(20), gid(21));
@@ -402,7 +459,7 @@ async fn purge_deletes_one_guild_only() {
     }
     db::purge_guild(&p, a).await.unwrap();
     assert_eq!(left(&p, a, a).await, (0, false));
-    assert_eq!(left(&p, b, b).await, (5, true));
+    assert_eq!(left(&p, b, b).await, (6, true));
     db::purge_guild(&p, b).await.unwrap();
 }
 
@@ -419,6 +476,6 @@ async fn purge_left_takes_only_guilds_gone_over_30_days() {
     let ids = db::purge_left(&p, 30).await.unwrap();
     assert!(ids.contains(&old) && !ids.contains(&new));
     assert_eq!(left(&p, old, old).await, (0, false));
-    assert_eq!(left(&p, new, new).await, (6, true));
+    assert_eq!(left(&p, new, new).await, (7, true));
     db::purge_guild(&p, new).await.unwrap();
 }

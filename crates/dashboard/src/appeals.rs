@@ -522,6 +522,19 @@ async fn accept_appeal(
     };
     sqlx::query("insert into action_log (guild_id, actor_id, action, target_id, inverse) values ($1,$2,$3,$4,$5)")
         .bind(guild).bind(s.user_id).bind(if kind == "ban" { "unban" } else { "untimeout" }).bind(user).bind(inverse).execute(&mut *tx).await?;
+    tommybot_core::cases::record(
+        tx,
+        tommybot_core::cases::ModAction {
+            guild_id: guild,
+            mod_id: s.user_id,
+            kind: if kind == "ban" { "unban" } else { "untimeout" },
+            source: "appeal",
+            target_id: Some(user),
+            case_no: None,
+            audit_id: None,
+        },
+    )
+    .await?;
     Ok(())
 }
 
