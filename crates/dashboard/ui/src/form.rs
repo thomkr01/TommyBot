@@ -390,7 +390,13 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             v
         }
     };
-    let set = move |x: Value| val.update(|v| set_path(v, &p.get_value(), x));
+    // An emptied number field goes back to its default: most number settings cannot be null, and the
+    // save was refused with "invalid type: null".
+    let numeric = matches!(kind.as_str(), "int" | "float" | "pct");
+    let set = move |x: Value| {
+        let x = if numeric && x.is_null() { default.get_value() } else { x };
+        val.update(|v| set_path(v, &p.get_value(), x))
+    };
     let tail = path.rsplit('.').next().unwrap_or("").to_string();
     let dur = kind == "int" && (tail.ends_with("_secs") || tail.ends_with("_ms"));
     // Typed values outside the range stay (with a note, and the server refuses to save them); +/- stop at the bounds.
@@ -422,10 +428,15 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
             let float = kind != "int";
             // "pct" is stored as a fraction (0.05) and shown as a percent (5).
             let k = if kind == "pct" { 100.0 } else { 1.0 };
-            let shown = move || if k == 1.0 { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
+            // Floats print through f64, so a stepped 100.0 shows as 100.
+            let shown = move || if !float { show(&get()) } else { get().as_f64().map_or(String::new(), |x| format!("{}", (x * k * 1e6).round() / 1e6)) };
             let step = move |d: f64| {
                 let x = (get().as_f64().unwrap_or(0.0) * k + d).clamp(lo * k, hi * k);
-                set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!(x) } else { json!(x as i64) })
+                // Rounded, so 0.01 + 1 - 1 is 0.01 again and not 0.010000000000000009.
+                // Without a default, empty means off; stepping back down to 0 empties it again, like the duration field.
+                // (Join Raid "ID flag" at 0 would flag every joiner in a raid.)
+                if x == 0.0 && default.get_value().is_null() { return set(Value::Null) }
+                set(if k != 1.0 { json!((x / k * 1e6).round() / 1e6) } else if float { json!((x * 1e6).round() / 1e6) } else { json!(x as i64) })
             };
             let unit = match path.rsplit('.').next().unwrap_or("") { n if n.ends_with("_secs") => "seconds", n if n.ends_with("_ms") => "ms", n if n.ends_with("_days") => "days", n if n.ends_with("points") => "Points", n if n.ends_with("_pct") || n == "heat" || kind == "pct" => "%", "per_minute" => "/min", "per_hour" => "/hour", "width" | "height" | "font_size" => "Pixels", "length" => "Characters", _ => "" };
             view! { <div class="step"><button class="ghost" aria-label="less" disabled=move || num() <= lo on:click=move |_| step(-1.0)>"-"</button>
@@ -459,7 +470,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
                     set(json!(cur));
                 });
             };
-            view! { <div style="flex:1">{box_}<div class="io">
+            view! { <div style="flex:1 1 100%">{box_}<div class="io">
                 <a class="ghost" download=format!("{tail}.txt") href=export>"Export"</a>
                 <label class="ghost">"Import"<input type="file" accept=".txt,text/plain" hidden=true on:change=import /></label>
             </div></div> }.into_any()
@@ -632,6 +643,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         }
         _ => view! { <input prop:value=move || show(&get()) on:change=move |e| { let s = event_target_value(&e); set(if s.is_empty() { Value::Null } else { json!(s) }) } /> }.into_any(),
     };
+    let tip = f["tip"].as_str().map(|t| view! { <crate::common::Tip text=t.to_string() /> });
     let help = f["help"]
         .as_str()
         .map(|h| view! { <span class="muted">{h.to_string()}</span> });
@@ -667,7 +679,7 @@ pub fn Field(f: Value, val: RwSignal<Value>, dc: RwSignal<Value>) -> impl IntoVi
         .as_str()
         .map_or_else(|| tail.replace('_', " "), String::from);
     // The group's name labels the control inside, whatever kind it is.
-    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
+    view! { <div class="row" class:tog=kind == "bool" role="group" aria-label=label.clone()><label>{label.clone()}{tip}</label>{input}{help}{helper}{nuke}{action}{raid}</div> }
 }
 
 /// Raw JSON of one section of the config in `val`.
@@ -982,7 +994,7 @@ pub fn Section(
                         let note = note.clone();
                         let text = move || if !plain && off.get() { note.clone() } else { "Your current choices do not use this card, so its settings have no effect.".into() };
                         let fields = fs.into_iter().map(|f| { let only = f["only"].clone(); view! { <Show when=move || val.with(|v| holds(v, &only))><Field f=f.clone() val dc /></Show> } }).collect_view();
-                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><details class="notes"><summary><span class="bell">"!"</span>"Notes"</summary><p>{text.clone()}</p></details></Show></div> }
+                        view! { <div class="card" class:off=ring><h2>{g}</h2>{fields}<Show when=move || ring.get()><p class="offnote"><crate::common::Tip text=Signal::derive(text.clone()) />"Not in use right now"</p></Show></div> }
                     }).collect_view()
                 }}
             </div>

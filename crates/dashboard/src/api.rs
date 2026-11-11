@@ -300,12 +300,13 @@ pub async fn put_section(
     if !access::SECTIONS.contains(&section.as_str()) {
         return Err(ApiError::NotFound);
     }
+    // Access first, so someone without it learns nothing about the section's shape.
+    let (min, step_up) = access::write_bar(&section);
+    require(&st, &s, guild, min, step_up).await?;
     if !b.value.is_object() {
         return Err(ApiError::BadRequest("section must be an object".into()));
     }
     validate(&section, &b.value)?;
-    let (min, step_up) = access::write_bar(&section);
-    require(&st, &s, guild, min, step_up).await?;
     let (cur, mut config) = store::current(&st.db, guild).await?;
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
     limits::check(&section, &b.value, &config[&section]).map_err(ApiError::BadRequest)?;
@@ -640,6 +641,8 @@ pub async fn import(
     Path(guild): Path<i64>,
     Json(b): Json<Import>,
 ) -> Res {
+    // The floor first, so a file is never checked against a server the user cannot edit.
+    require(&st, &s, guild, Level::Editor, false).await?;
     let (_, mut now) = store::current(&st.db, guild).await?;
     let mut tx = st.db.begin().await?;
     now["permits"] = store::read_permits(&mut tx, guild).await?;

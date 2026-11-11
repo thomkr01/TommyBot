@@ -67,7 +67,65 @@ We did not switch every task to `spawn_local_scoped_with_cancellation`. It also 
 
 **Check:** the sweep switches through every page while each API response is held back 800 ms, then again while every request fails. Any panic fails the test.
 
-## 3. `AnimatedShow` can hide itself while `when` is true
+## 3. A hover rule beats the "selected" rule
+
+`nav a:not(.srv):hover` has a higher specificity than `nav a.on`, because `:not(.srv)` counts as a class. Under the mouse the selected link (the server on the server list, the open page in the menu) got the dark hover background while its text stayed dark: 1.1:1 contrast, almost invisible.
+
+**Rule:** a rule for a selected or active state lists its `:hover` variant with the same selectors as the hover rule: `nav a.on, nav a.on:not(.srv):hover { ... }`.
+
+**Check:** the `contrast` phase of `tests/e2e/deep.js` hovers every link and button on every page in light and dark mode and fails under 3:1.
+
+## 4. A page that reads a context signal is rebuilt when the signal is set again
+
+The page closure in `App` read `access.of(p)`. The access is fetched again on every page change, and setting a `RwSignal` notifies even when the value is the same, so every page was built twice and loaded its settings, schema and Discord data twice. The page was also built before the access answer came, so hidden pages started their requests anyway.
+
+**Rule:** read a value that is fetched again through a `Memo` (`page_access`), which only notifies when the value changes. Decide what to show before you build the page's components.
+
+## 5. A dropped browser promise hides a refusal
+
+`clipboard().write_text()` returns a promise. `let _ =` dropped it, the button said "Copied!" when the browser refused, and the refusal surfaced as an uncaught page error. That included the Rescue Key, which is shown once.
+
+**Rule:** await browser promises with `JsFuture` and show the result. Use `copy_text` and `copy_label` in `common.rs` for copy buttons.
+
+## 6. An emptied number field saved `null`
+
+Clearing a number field stored `null`, and almost every number setting is a plain `i64`/`u32`/`f64` in Rust, so the save was refused with "invalid type: null, expected i64". A float step also kept the float error (`0.01 + 1 - 1` gave `0.010000000000000009`).
+
+**Rule:** `Field` sets the field's default when a number input is emptied, and float steps are rounded like percent steps. A new number field gets a default (`dv`) unless `null` means something.
+
+## 7. A descendant selector styles more than the field title
+
+`.row label { flex:0 0 100%; font-weight:700 }` is meant for a field's title, but it also hit the Import button of every list field (a `<label>` around the file input). Import grew to the full row, turned bold, and the help text was drawn on top of it (Join Gate's Strict and Wildcard Words).
+
+The first fix (`.io label`) did nothing: it had the same specificity as `.row label`, which comes later in the file, so `.row label` still won. The same rule also made every checkbox in role and channel lists bold and capitalized.
+
+**Rule:** a label that wraps a control (`.row label:has(> input)`) resets what `.row label` sets. When a rule must beat another one, give it a higher specificity, not just an earlier or later spot in the file, and check the result in the browser (`DEEP_ONLY=overflow` measures it). A list field's box takes the full row so its help text goes below it.
+
+## 8. Layout breaks that only show at some widths or with long text
+
+Help text next to a switch was squeezed into two thin columns (Join Gate "Exclude bots added by the owner", Miscellaneous, Auto Mod, Verification), and at 390 px the header was wider than the screen, so the avatar was cut off and the search box covered the logo.
+
+**Rule:** a switch's help text sits on its own line under the label (`.tog > .muted`). On a phone, header links that do not fit move into the account menu (`.m-only`). `DEEP_ONLY=overflow node tests/e2e/deep.js` checks every page at 1400, 1024 and 390 px for text outside its box, cut off, on top of other text, or squeezed.
+
+## 9. One version per widget on a page that saves several sections
+
+Each Overview switch loaded the config and kept its own version, so after one switch saved, the next one sent an old version and was refused with "config changed, reload". Five switches also meant five identical config requests.
+
+**Rule:** widgets on one page that save into the same config share one loaded config and one version signal, and update it after each save.
+
+## 10. Many copies of one SVG icon share its ids
+
+Every icon in `assets/icons` has fixed ids (`info-grad`, `info-cut`). With the info icon shown many times on a page, every copy paints with the first copy's gradient and mask, and draws nothing once that first copy is hidden (Chrome does not render a gradient from a `display:none` SVG).
+
+**Rule:** an icon that can appear more than once on a page uses `icons::icon_unique`, which numbers its ids.
+
+## 11. A transform on a parent moves its popup too
+
+The info icon grew on hover with `transform:scale` on `.tip`, which also scaled the card inside it, so the card was wider than measured and crossed the screen edge on a phone.
+
+**Rule:** animate the icon (`.tip .i`), not the element that holds the popup. The info card is placed when it opens (`Tip` in `common.rs`): shifted to stay inside `main` and the screen, and moved below the icon near the header. `DEEP_ONLY=overflow` opens every info card and checks it.
+
+## 12. `AnimatedShow` can hide itself while `when` is true
 
 Leptos's `AnimatedShow` starts a hide timer each time it reruns with `when` false, but only remembers the last timer. A form that loads sets `val` and `orig` one after the other, so `when` (`val != orig`) reruns false twice. The first timer is lost and fires later. If the user changes something within 200 ms, the "Changes detected!" bar shows and is hidden again at once. Nothing can be saved or cancelled until the next change. The Cancel e2e check hit this on a fresh server (#158).
 

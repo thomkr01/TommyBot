@@ -29,7 +29,7 @@ nav .srv img, nav .srv i, .gcard img, .gcard i { width:36px; height:36px; border
 nav .refresh { position:absolute; right:8px; top:6px; font-size:10px; padding:0 6px; background:var(--ok); color:#000; border-radius:4px; text-transform:lowercase; border:0; cursor:pointer; }
 nav a:not(.srv) { padding:8px 16px; border-radius:6px; text-decoration:none; transition:background-color var(--dur) var(--ease); }
 nav a:not(.srv):hover { background:color-mix(in srgb, var(--b3) 50%, transparent); }
-nav a.on { background:var(--primary); color:var(--on-primary); }
+nav a.on, nav a.on:not(.srv):hover { background:var(--primary); color:var(--on-primary); }
 nav a.gl { display:flex; align-items:center; gap:10px; overflow:hidden; } nav a.gl span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 nav a.gl img, nav a.gl i { width:24px; height:24px; border-radius:50%; background:var(--primary); display:grid; place-items:center; font-style:normal; font-size:12px; object-fit:cover; flex:none; }
 nav details { margin:6px 0 0; } nav summary { padding:8px 16px; font-weight:700; cursor:pointer; } nav details a { display:block; margin-left:12px; }
@@ -41,6 +41,8 @@ button, input, textarea, select { font:inherit; color:inherit; background:var(--
 button { cursor:pointer; background:var(--primary); color:var(--on-primary); border-color:var(--primary); font-weight:600; text-transform:uppercase; } button:active { transform:scale(.97); }
 button.ghost { background:none; color:var(--fg); border-color:var(--line); }
 .io { display:flex; gap:8px; margin-top:4px; }
+/* A label around a control (Import, a checkbox in a list) is that control, not the field title `.row label` styles. */
+.row label:has(> input), .io a { flex:none; font-weight:400; text-transform:none; }
 a.ghost, label.ghost { color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 12px; text-decoration:none; cursor:pointer; }
 button.go { background:var(--ok); border-color:var(--ok); color:#000; } button.danger { background:var(--bad); border-color:var(--bad); }
 :focus-visible { outline:2px solid var(--info); outline-offset:2px; }
@@ -51,7 +53,9 @@ textarea { width:100%; min-height:320px; font-family:ui-monospace, monospace; fo
 .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; } .row .sp { flex:1; }
 .row label { flex:0 0 100%; font-weight:700; text-transform:capitalize; }
 .row input:not([type=checkbox]), .row select { flex:1; min-width:120px; }
-.tog { flex-wrap:nowrap; } .tog label { flex:1; font-weight:400; text-transform:none; order:2; }
+.tog label { flex:1 1 0; min-width:0; font-weight:400; text-transform:none; order:2; }
+/* Help under a switch gets its own line below the label; beside it, both were squeezed into thin columns. */
+.tog > .muted { flex:0 0 100%; order:3; padding-left:52px; }
 input[type=checkbox].sw { appearance:none; width:44px; height:24px; padding:0; border-radius:12px; background:var(--bad); position:relative; flex:none; cursor:pointer; border:0; }
 input[type=checkbox].sw::after { content:""; position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:50%; background:#fff; transition:transform var(--dur) var(--ease); }
 input[type=checkbox].sw:checked { background:var(--ok); } input[type=checkbox].sw:checked::after { transform:translateX(20px); }
@@ -98,8 +102,19 @@ header details.ico summary { background:none; font-size:18px; }
 .card .back { cursor:pointer; color:var(--info); display:block; margin-bottom:8px; } button.menu { display:block; width:100%; margin:6px 0; text-align:left; text-transform:none; }
 table.permits { width:100%; max-width:900px; margin:0 auto; border-collapse:collapse; } table.permits th { text-align:left; text-transform:uppercase; } table.permits th, table.permits td { padding:10px 12px; border-bottom:1px solid var(--line); } table.permits td:last-child { text-align:right; }
 .cards.five { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
-details.notes { margin:8px 0 0; } details.notes summary { cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; } details.notes .bell { float:none; } details.notes p { margin:6px 0 0; color:var(--warn); }
-.bell { width:28px; height:28px; border-radius:50%; background:var(--bad); display:grid; place-items:center; font-size:14px; }
+/* Info icon (assets/icons/info.svg) with the design spec's tooltip card. */
+.tip { display:inline-grid; place-items:center; width:20px; height:20px; margin-left:8px; vertical-align:middle; position:relative; cursor:help; flex:none; border-radius:50%; }
+.tip .i, .tip svg { width:20px; height:20px; display:block; }
+/* Only the icon grows: scaling the whole .tip would scale the card too and push it past the edge. */
+.tip .i { transition:transform var(--dur-fast) var(--ease); }
+.tip:hover .i, .tip:focus-visible .i { transform:scale(1.12); } .tip:focus-visible { outline:none; }
+.tip:focus-visible { box-shadow:0 0 0 2px var(--focus); }
+.tip .bubble { position:absolute; z-index:20; bottom:calc(100% + 10px); left:50%; transform:translate(calc(-50% + var(--dx, 0px)), 4px); width:max-content; max-width:min(280px, 80vw); background:rgba(12,12,12,.95); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); border:1px solid var(--line); border-radius:10px; padding:10px 14px; color:#f5f5f5; font:400 13px/1.5 Poppins, sans-serif; text-align:left; text-transform:none; box-shadow:0 10px 30px #0007; opacity:0; pointer-events:none; transition:opacity var(--dur) var(--ease), transform var(--dur) var(--ease); }
+[data-theme=light] .tip .bubble { background:rgba(235,235,235,.95); color:#1f2937; box-shadow:0 10px 30px #0002; }
+.tip:hover .bubble, .tip:focus .bubble { opacity:1; transform:translate(calc(-50% + var(--dx, 0px)), 0); }
+.tip.below .bubble { bottom:auto; top:calc(100% + 10px); }
+.offnote { display:flex; align-items:center; margin:10px 0 0; color:var(--muted); font-size:13px; }
+.offnote .tip { margin:0 8px 0 0; }
 .stack.narrow { max-width:36rem; }
 /* Wizard cards: arrows on the sides, settings left, Discord-like preview right. */
 .card.wiz { display:flex; gap:12px; align-items:stretch; }
@@ -148,7 +163,9 @@ header details div p { margin:0; padding:8px 12px; }
 /* Light theme: the dark-theme text colours are too pale on white. */
 [data-theme=light] .ok { color:#0a7a36; } [data-theme=light] .info { color:#0369a1; } [data-theme=light] .warn { color:#b45309; } [data-theme=light] .err { color:#c8102e; }
 [data-theme=light] .chip.ok, [data-theme=light] button.warn { color:#000; }
-@media (max-width:600px) { header { gap:8px; padding:0 12px; } header .logo, header .sp { display:none; } header .search { flex:1; min-width:0; } header .search input { width:100%; max-width:none; } .embed .fields { grid-template-columns:1fr; } }
+.m-only { display:none; }
+/* On a phone the header row has no room for Commands and Update; they move into the account menu. */
+@media (max-width:600px) { header { gap:8px; padding:0 12px; } header .logo, header .sp, header > a.ghost { display:none; } header details div a.m-only { display:block; } header .search { flex:1; min-width:0; } header .search input { width:100%; max-width:none; } .embed .fields { grid-template-columns:1fr; } }
 button.link.err { color:var(--bad); } button.link.err.on { border:1px solid var(--bad); border-radius:6px; padding:2px 8px; background:color-mix(in srgb, var(--bad) 15%, transparent); }
 /* Wizard: the sub-options of a switch, ringed red with a note while the switch is off. */
 .atit { background:var(--b3); border-radius:6px; padding:8px 12px; margin:8px 0; box-shadow:0 0 0 2px transparent; transition:box-shadow var(--dur) var(--ease); } .atit.off { box-shadow:0 0 0 2px var(--bad); }
