@@ -591,18 +591,7 @@ async fn expiry_and_removal_lift_only_what_the_list_did() {
 async fn old_rejected_and_unreviewed_entries_go_with_their_evidence_but_reviews_stay() {
     let Some(t) = T::new(55).await else { return };
     let (old_rej, old_pend, new_rej) = (t.u(1), t.u(2), t.u(3));
-    t.list(old_rej, "rejected", "raid", None).await;
-    t.list(new_rej, "rejected", "raid", None).await;
-    sqlx::query("INSERT INTO raiders (user_id, status, category, updated_at) VALUES ($1, 'pending', 'spam', now() - interval '91 days')")
-        .bind(old_pend.get() as i64)
-        .execute(&t.app.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE raiders SET reviewed_at = now() - interval '31 days' WHERE user_id = $1")
-        .bind(old_rej.get() as i64)
-        .execute(&t.app.pool)
-        .await
-        .unwrap();
+    // Evidence first: another test's expire() can delete the old entries as soon as they exist.
     for u in [old_rej, old_pend, new_rej] {
         sqlx::query("INSERT INTO raider_evidence (user_id, source_guild, source_owner, kind, ref) VALUES ($1, 1, 1, 'auto_raid', 'x')")
             .bind(u.get() as i64)
@@ -617,6 +606,18 @@ async fn old_rejected_and_unreviewed_entries_go_with_their_evidence_but_reviews_
         .await
         .unwrap();
     }
+    t.list(old_rej, "rejected", "raid", None).await;
+    t.list(new_rej, "rejected", "raid", None).await;
+    sqlx::query("INSERT INTO raiders (user_id, status, category, updated_at) VALUES ($1, 'pending', 'spam', now() - interval '91 days')")
+        .bind(old_pend.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE raiders SET reviewed_at = now() - interval '31 days' WHERE user_id = $1")
+        .bind(old_rej.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
     expire(&t.app).await.unwrap();
     assert!(t.raider(old_rej).await.is_none() && t.raider(old_pend).await.is_none());
     assert!(t.raider(new_rej).await.is_some());
