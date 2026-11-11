@@ -101,6 +101,9 @@ fn set(setting: &'static str) -> Option<Fix> {
 /// The [`Fix::setting`] that hides a log channel with [`private_overwrites`].
 pub const PRIVATE: &str = "private_channel";
 
+/// The [`Fix::setting`] that puts the quarantine deny on every channel, as Auto Setup does.
+pub const QUARANTINE_CHANNELS: &str = "quarantine_channels";
+
 /// The safer value a setting fix writes: (Discord field, value).
 pub fn setting_fix(setting: &str) -> Option<(&'static str, u8)> {
     match setting {
@@ -150,7 +153,7 @@ fn overwrite_mask(o: &OverwriteImg, guild: u64, setup: &Setup) -> u64 {
 }
 
 /// A channel is synced when it has its category's overwrites, in any order.
-fn synced(c: &ChannelImg, cat: &ChannelImg) -> bool {
+pub fn synced(c: &ChannelImg, cat: &ChannelImg) -> bool {
     c.overwrites.len() == cat.overwrites.len()
         && c.overwrites.iter().all(|o| cat.overwrites.contains(o))
 }
@@ -596,6 +599,39 @@ pub fn checks(
             }),
         );
     }
+    // Auto Setup and Channel Setup deny the quarantine role View Channel everywhere; a synced
+    // channel is covered by its category.
+    if let Some(q) = quarantine {
+        let open: Vec<&str> = channels
+            .iter()
+            .filter(|c| {
+                c.parent
+                    .and_then(|p| channels.iter().find(|x| x.id == p))
+                    .is_none_or(|cat| !synced(c, cat))
+            })
+            .filter(|c| {
+                !c.overwrites
+                    .iter()
+                    .any(|o| o.is_role && o.target == q.id && o.deny & VIEW != 0)
+            })
+            .map(|c| c.name.as_str())
+            .collect();
+        if !open.is_empty() {
+            row(
+                "quarantine_channels",
+                Severity::Bad,
+                "Quarantined members can see channels",
+                format!(
+                    "{} is not denied View Channel in {} channel(s): {}{}.",
+                    q.name,
+                    open.len(),
+                    open[..open.len().min(10)].join(", "),
+                    if open.len() > 10 { ", ..." } else { "" }
+                ),
+                set(QUARANTINE_CHANNELS),
+            );
+        }
+    }
     if !setup.log_fallback {
         row(
             "log_fallback",
@@ -977,6 +1013,41 @@ mod tests {
             allow,
             deny: 0x800,
         }
+    }
+
+    #[test]
+    fn channels_without_the_quarantine_deny_are_one_row() {
+        let roles = [role(1, 0, false, 0), role(5, 1, false, 0)];
+        let deny = OverwriteImg {
+            target: 5,
+            is_role: true,
+            allow: 0,
+            deny: VIEW | 0x800,
+        };
+        let channels = [
+            chan(10, CATEGORY, None, vec![deny.clone()]),
+            chan(11, 0, Some(10), vec![deny.clone()]), // synced, covered
+            chan(12, 0, Some(10), vec![]),             // own overwrites, open
+            chan(13, 0, None, vec![]),                 // open
+        ];
+        let setup = Setup {
+            quarantine_role: Some(5),
+            ..setup(None, true)
+        };
+        let rows = checks(&SAFE, &roles, &channels, 4, &setup);
+        let r = sev(&rows, "quarantine_channels").unwrap();
+        assert_eq!(r.severity, Severity::Bad);
+        assert!(r.detail.contains("2 channel(s): c12, c13"), "{}", r.detail);
+        assert_eq!(r.fix.as_ref().unwrap().setting, Some(QUARANTINE_CHANNELS));
+        let all = [
+            chan(10, CATEGORY, None, vec![deny.clone()]),
+            chan(11, 0, Some(10), vec![deny]),
+        ];
+        assert!(sev(
+            &checks(&SAFE, &roles, &all, 4, &setup),
+            "quarantine_channels"
+        )
+        .is_none());
     }
 
     #[test]

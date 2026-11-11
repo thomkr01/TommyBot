@@ -90,6 +90,17 @@ pub async fn roleless_staff(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<
     .await
 }
 
+/// Role ids of the default staff permits (Admins, Moderators): who Channel Setup lets into limited channels.
+pub async fn staff_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Vec<i64>> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT r.role_id FROM permits p JOIN permit_roles r ON r.permit_id = p.id
+         WHERE p.guild_id = $1 AND p.name IN ('Admins', 'Moderators') ORDER BY 1",
+    )
+    .bind(guild_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// One toggle in the dashboard's permit editor. `flag` entries live in a permit's whitelist, the
 /// rest in its perms. `locked` ones are shown but never stored.
 pub struct PermDef {

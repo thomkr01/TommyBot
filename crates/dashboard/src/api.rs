@@ -587,6 +587,10 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
         .ok_or_else(|| ApiError::BadRequest("this is not a TommyBot settings export".into()))?;
     let (mut new, mut cleared) = (now.clone(), vec![]);
     for (k, v) in file {
+        // Removed with the old Channel Setup; exports made before still carry it.
+        if k == "channel_profiles" {
+            continue;
+        }
         if k != "permits" && !access::SECTIONS.contains(&k.as_str()) {
             return Err(ApiError::BadRequest(format!("unknown section `{k}`")));
         }
@@ -763,7 +767,6 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "appeals" => serde_json::from_value::<AppealsCfg>(v).map(drop),
         "tickets" => serde_json::from_value::<TicketsCfg>(v).map(drop),
         "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
-        "channel_profiles" => serde_json::from_value::<crate::channels::ProfilesCfg>(v).map(drop),
         "catch" => serde_json::from_value::<CatchCfg>(v).map(drop),
         _ => Ok(()),
     };
@@ -804,6 +807,10 @@ mod logging_validate_tests {
         assert!(import_config(&nuke(0), &nuke(0)).is_ok());
         let age = json!({"joingate": {"min_age_override_ms": 4_999}});
         assert!(import_config(&age, &json!({})).is_err());
+        // Exports from before the Channel Setup rebuild still import; the old section is dropped.
+        let old = json!({"channel_profiles": {"profiles": []}, "automod": {}});
+        let (new, _) = import_config(&old, &json!({})).unwrap();
+        assert!(new.get("channel_profiles").is_none());
     }
 
     #[test]

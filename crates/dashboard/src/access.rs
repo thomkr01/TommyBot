@@ -42,7 +42,6 @@ pub const SECTIONS: &[&str] = &[
     "appeals",
     "misc",
     "logging",
-    "channel_profiles",
 ];
 
 /// What a dashboard page shows the user: everything, a greyed-out read-only view, or nothing.
@@ -113,7 +112,10 @@ pub fn page(page: &str, l: Level, perms: &[String]) -> PageAccess {
         "rescue" if l < Level::Owner => Hidden,
         "revert" if l < Level::Editor => Hidden,
         // Pages whose buttons are mostly for reading; the server refuses the few writes.
-        "overview" | "history" | "backups" | "channel_setup" => Full,
+        "overview" | "history" | "backups" => Full,
+        // Thomas 2026-11-11: only owners change channels; trusted admins may look.
+        "channel_setup" if l < Level::Admin => Hidden,
+        "channel_setup" => need(Level::Owner),
         // Lock, unlock and the member update are the page; a viewer only watches.
         "lockdown" => need(Level::Editor),
         "permits" | "revert" => need(Level::Admin),
@@ -189,6 +191,11 @@ mod tests {
         assert_eq!(page("permits", Level::Editor, &[]), PageAccess::Read);
         assert_eq!(page("rescue", Level::Admin, &[]), PageAccess::Hidden);
         assert_eq!(page("cases", Level::Admin, &[]), PageAccess::Full);
+        assert_eq!(
+            page("channel_setup", Level::Editor, &[]),
+            PageAccess::Hidden
+        );
+        assert_eq!(page("channel_setup", Level::Admin, &[]), PageAccess::Read);
         assert!(PAGES
             .iter()
             .all(|s| page(s, Level::Owner, &[]) == PageAccess::Full));

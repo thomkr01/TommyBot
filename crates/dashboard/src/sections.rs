@@ -59,7 +59,7 @@ async fn discord_route(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
     })
     .collect::<Vec<_>>();
     let roles = list(st.discord.call(Method::GET, &format!("/guilds/{guild}/roles"), None).await?).into_iter()
-        .map(|r| json!({"id": r["id"], "name": r["name"], "managed": r["managed"], "position": r["position"], "permissions": r["permissions"]}))
+        .map(|r| json!({"id": r["id"], "name": r["name"], "managed": r["managed"], "position": r["position"], "permissions": r["permissions"], "color": r["color"]}))
         .collect::<Vec<_>>();
     let info = st
         .discord
@@ -683,7 +683,7 @@ async fn log_setup(
 /// Sets the quarantine overwrite on every channel and returns how many it could not set (the
 /// bot lacks Manage Roles there); `None` when the channels could not be listed. Runs after the
 /// commit, so a failure here loses no setup.
-async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<usize> {
+pub(crate) async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<usize> {
     let channels = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)

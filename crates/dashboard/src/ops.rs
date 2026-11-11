@@ -22,6 +22,7 @@ use tommybot_antinuke::{
     security::{
         checks, move_under_bot, overwrite_targets, private_overwrites, setting_fix, strip_targets,
         stripped, stripped_overwrite, synced_children, GuildSafety, Setup, PRIVATE,
+        QUARANTINE_CHANNELS,
     },
     Inverse, RoleImg,
 };
@@ -106,17 +107,17 @@ async fn roles_and_mine(st: &AppState, guild: i64) -> Result<(Vec<Role>, Vec<Str
 }
 
 /// What the security score reads from Discord, fetched once for the check and its fixes.
-struct Live {
-    safety: GuildSafety,
-    setup: Setup,
-    bot_pos: i64,
-    image: tommybot_antinuke::Image,
+pub(crate) struct Live {
+    pub safety: GuildSafety,
+    pub setup: Setup,
+    pub bot_pos: i64,
+    pub image: tommybot_antinuke::Image,
     /// Raw role and channel JSON, kept for the backup a fix takes first.
-    roles: Value,
-    channels: Value,
+    pub roles: Value,
+    pub channels: Value,
 }
 
-async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Live, ApiError> {
+pub(crate) async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Live, ApiError> {
     let get = |path: String| async move { st.discord.call(Method::GET, &path, None).await };
     let (g, roles, channels, me) = tokio::try_join!(
         get(format!("/guilds/{guild}")),
@@ -202,13 +203,15 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     require(&st, &s, guild, Level::Viewer, false).await?;
     let (_, config) = crate::store::current(&st.db, guild).await?;
     let l = live(&st, guild, &config).await?;
-    Ok(Json(json!(checks(
+    let mut rows = checks(
         &l.safety,
         &l.image.roles,
         &l.image.channels,
         l.bot_pos,
-        &l.setup
-    ))))
+        &l.setup,
+    );
+    rows.extend(crate::channels::overview_check(&st, guild).await?);
+    Ok(Json(json!(rows)))
 }
 
 /// One of a row's `fix`: a role id (`*` for every strippable role and overwrite), an overwrite
@@ -231,6 +234,26 @@ async fn fix(
 ) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
     let (_, c) = crate::store::current(&st.db, guild).await?;
+    if b.setting.as_deref() == Some(QUARANTINE_CHANNELS) {
+        let role = c["antinuke"]["quarantine_role"]
+            .as_str()
+            .ok_or_else(|| ApiError::BadRequest("no quarantine role".into()))?;
+        // Only adds the deny; Backups is not needed to undo a stricter quarantine.
+        let failed = crate::sections::quarantine_channels(&st, guild, role)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("could not list the channels"))?;
+        log_change(
+            &st,
+            guild,
+            &c,
+            format!(
+                "{} (<@{}>) denied the quarantine role in every channel from the security score ({failed} failed)",
+                s.username, s.user_id
+            ),
+        )
+        .await;
+        return Ok(Json(json!({"ok": true, "failed": failed})));
+    }
     if b.setting.as_deref() == Some(PRIVATE) {
         return make_private(&st, &s, guild, &c, b.channel_id.as_deref()).await;
     }

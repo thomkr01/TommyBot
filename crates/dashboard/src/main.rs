@@ -64,6 +64,8 @@ pub enum ApiError {
     NotFound,
     TooMany,
     Conflict(i32),
+    /// 409 with its own message.
+    Busy(&'static str),
     BadRequest(String),
     Internal(anyhow::Error),
 }
@@ -91,6 +93,7 @@ impl IntoResponse for ApiError {
                 StatusCode::CONFLICT,
                 json!({"error": "config changed, reload", "current_version": v}),
             ),
+            ApiError::Busy(m) => (StatusCode::CONFLICT, json!({"error": m})),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, json!({"error": m})),
             ApiError::Internal(e) => {
                 tracing::error!("{e:#}");

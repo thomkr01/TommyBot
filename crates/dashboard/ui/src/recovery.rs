@@ -188,14 +188,7 @@ fn filter_text(n: u64) -> (&'static str, &'static str) {
 }
 
 fn channel_icon(kind: u64) -> AnyView {
-    crate::icons::icon(match kind {
-        2 => "channel_voice",
-        4 => "category",
-        5 => "announcement",
-        13 => "channel_stage",
-        15 => "forum",
-        _ => "channel_text",
-    })
+    crate::icons::icon(crate::channels::kind_icon(kind))
 }
 
 /// One channel in the tree; a click shows its permission overwrites.
