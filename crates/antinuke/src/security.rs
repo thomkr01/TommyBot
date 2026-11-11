@@ -484,7 +484,7 @@ pub fn checks(
     for (name, on) in &setup.modules {
         if *name == BAN_SYNC {
             if *on {
-                let (mut sev, text) = pick(
+                let (sev, text) = pick(
                     bot & (ADMINISTRATOR | VIEW_AUDIT_LOG) != 0,
                     "The bot can read the audit log that Ban Sync listens to.",
                     "Ban Sync is on but the bot cannot view the audit log, so no bans are shared. Give the bot's role View Audit Log.".into(),
