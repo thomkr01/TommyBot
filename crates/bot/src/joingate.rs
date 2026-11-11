@@ -49,6 +49,10 @@ pub async fn on_join(app: &App, m: &MemberAdd) -> Result<()> {
         )
         .await;
     }
+    // Before the other checks, so a failed join gate step cannot let a quarantined member back in.
+    if let Err(e) = crate::antinuke::requarantine_rejoin(app, gid, user.id).await {
+        tracing::warn!(?e, "quarantining a rejoined member failed");
+    }
     // One invites call per join: only when something shows the result.
     let invite = if cfg.joinraid.as_ref().is_some_and(|r| r.enabled)
         || cfg.logging.target(LogKind::Member, None).is_some()

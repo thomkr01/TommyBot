@@ -519,6 +519,33 @@ pub(crate) async fn quarantine_actor(
     Ok(done)
 }
 
+/// Leaving does not end a quarantine: a member who rejoins while their quarantine row exists is
+/// contained again. True when they were.
+pub(crate) async fn requarantine_rejoin(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Result<bool> {
+    let held: Option<(i64,)> =
+        sqlx::query_as("SELECT 1::bigint FROM quarantines WHERE guild_id=$1 AND user_id=$2")
+            .bind(gid.get() as i64)
+            .bind(user.get() as i64)
+            .fetch_optional(&app.pool)
+            .await?;
+    if held.is_none() {
+        return Ok(false);
+    }
+    let done = contain(app, gid, user).await?;
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Member", user.get())
+        .text(&action_text(done))
+        .line("Reason", "Rejoined the server while quarantined");
+    if let Err(e) = send_log(app, gid.get(), LogKind::AntiNuke, log).await {
+        tracing::warn!(?e, "rejoin quarantine log failed");
+    }
+    Ok(true)
+}
+
 async fn open_case(
     app: &App,
     gid: Id<GuildMarker>,

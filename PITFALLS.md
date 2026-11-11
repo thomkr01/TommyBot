@@ -16,6 +16,10 @@ Quarantining a nuking bot failed, because Discord does not let anyone take a bot
 The first live nuke test got 403 because TommyBot's role was tied with the attacker's. A role between the bot and the quarantine role also breaks quarantine.
 *Avoid:* the bot role must sit above every role it acts on, and the quarantine role right below the bot. The security score checks the second one (Move role fix). When a live test gets 403, check the role order first.
 
+**Leaving and rejoining ended a quarantine.** (sticky roles plan, 11-11)
+The `quarantines` row survived a leave, but no join code read it, so a quarantined member who left and came back was a normal member again. Only verification with "quarantine on join" put the role back, and only because it quarantines every unverified joiner. Checked for the same gap in other state: timeouts survive a rejoin in Discord itself, strikes and warn points are stored per user, and join lock and join raid act on every join.
+*Avoid:* state that holds a member back must be re-applied on `MemberAdd`, not only while they stay. `antinuke::requarantine_rejoin` runs first in `joingate::on_join` and goes through `contain()`, so a re-added bot loses its managed role's permissions too.
+
 **Not every member lookup error means "not a member".** (#97)
 All `guild_member` errors (5xx, timeouts) were read as "left the server". Staff then lost their permit level for that event, so automod or anti-nuke could act on them.
 *Avoid:* use `http_err::member()`. Only a 404 means not a member. Other errors propagate.
