@@ -530,7 +530,11 @@ pub fn checks(
         0 => (Severity::Ok, "No role sits above it.".to_string()),
         1..8 => (
             Severity::Ok,
-            format!("Only {higher} role{} sit{} above it, so it can act on almost everyone.", if higher == 1 { "" } else { "s" }, if higher == 1 { "s" } else { "" }),
+            if higher == 1 {
+                "Only 1 role sits above it.".to_string()
+            } else {
+                format!("Only {higher} roles sit above it.")
+            },
         ),
         _ => (
             Severity::Warn,

@@ -600,6 +600,7 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         let sid = StoredValue::new(id.clone());
         let pv = StoredValue::new(p.clone());
         let cur = StoredValue::new((picked.clone(), staff));
+        let role_pick = NodeRef::<html::Select>::new();
         let role_chips = picked.iter().map(|r| {
             let (role, r2) = (role_of(r), r.clone());
             let name = role["name"].as_str().unwrap_or(r).to_string();
@@ -642,9 +643,11 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
             </div>
             {limited.then(|| view! {
                 <div class="chips">{role_chips}
-                    <select class="add" aria-label="add a role" prop:value="" on:change=move |e| { let r = event_target_value(&e); if r.is_empty() { return } let (mut roles, st) = cur.get_value(); roles.push(r); set_access(sid.get_value(), access(&roles, st, true)) }>
-                        <option value="">"+ Role"</option>{options}
+                    // Added by the button, not on change (see the channel kind pick).
+                    <select class="add" node_ref=role_pick aria-label="role to add">
+                        <option value="">"Pick a role"</option>{options}
                     </select>
+                    <button class="ghost" aria-label="add a role" on:click=move |_| { let Some(r) = role_pick.get_untracked().map(|s| s.value()).filter(|r| !r.is_empty()) else { return }; let (mut roles, st) = cur.get_value(); roles.push(r); set_access(sid.get_value(), access(&roles, st, true)) }>"+ Role"</button>
                 </div>
                 <div class="row2">
                     <input type="checkbox" class="sw" aria-label="staff can see it" prop:checked=staff disabled={ !can } title=(!can).then_some("Only the owner or an extra owner can change this")
@@ -758,11 +761,11 @@ pub fn ChannelSetup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
             <div class="cs-grid">
                 <div class="card">
                     <div class="ttl"><h2>{icon("channel_text")}"Channels"</h2><span class="sp"></span>
-                        <button class="ghost" disabled=move || data.with(Value::is_null) on:click=move |_| create(4)>"+ Category"</button>
-                        <select class="addch" node_ref=kind_pick aria-label="add a channel" disabled=move || data.with(Value::is_null) prop:value=""
-                            on:change=move |e| { if let Ok(k) = event_target_value(&e).parse() { create(k) }; if let Some(s) = kind_pick.get_untracked() { s.set_value("") } }>
-                            <option value="">"+ Channel"</option><option value="0">"Text"</option><option value="2">"Voice"</option><option value="5">"Announcement"</option>
+                        // A pick plus a button: Chrome fires `change` on every arrow key of a closed select, so acting on change made a keyboard user create channels while browsing.
+                        <span class="addgrp"><select class="addch" node_ref=kind_pick aria-label="kind to add" disabled=move || data.with(Value::is_null)>
+                            <option value="0">"Text channel"</option><option value="2">"Voice channel"</option><option value="5">"Announcement channel"</option><option value="4">"Category"</option>
                         </select>
+                        <button class="ghost" aria-label="add it" disabled=move || data.with(Value::is_null) on:click=move |_| { if let Some(k) = kind_pick.get_untracked().and_then(|s| s.value().parse().ok()) { create(k) } }>"+ Add"</button></span>
                     </div>
                     {move || if data.with(Value::is_null) { view! { <div class="skel"></div> }.into_any() } else { rows().into_any() }}
                 </div>

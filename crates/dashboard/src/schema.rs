@@ -724,21 +724,18 @@ pub fn schema() -> Vec<Value> {
     let raid = vec![
         ti(fg("General", "enabled", "bool"), "Use the join raid module"),
         ti(dv(f("count", "int"), 10), "Minimum trigger (accounts)"),
-        ti(
-            dv(f("span_ms", "int"), 3 * 3_600_000),
-            "Join history",
-        ),
+        ti(dv(f("span_ms", "int"), 3 * 3_600_000), "Join history"),
         ti(f("suspicious_only", "bool"), "Suspicious accounts only"),
-        ti(
-            dv(f("active_ms", "int"), 1_800_000),
-            "Trigger duration",
-        ),
+        ti(dv(f("active_ms", "int"), 1_800_000), "Trigger duration"),
         ti(f("string_patterns", "list"), "Flag names matching"),
         ti(
             f("flag_younger_than_ms", "int"),
             "Flag accounts younger than",
         ),
-        ti(f("flag_no_avatar", "bool"), "Flag accounts without an avatar"),
+        ti(
+            f("flag_no_avatar", "bool"),
+            "Flag accounts without an avatar",
+        ),
         ti(
             fg("ID flag", "id_flag_min", "int"),
             "Minimum matches (empty turns it off)",

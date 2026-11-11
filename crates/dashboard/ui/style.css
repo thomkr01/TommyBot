@@ -231,7 +231,7 @@ nav a.on .i [fill^="url"] { fill:currentColor; } nav a.on .i [stroke^="url"] { s
 .cs .seg { display:inline-flex; flex-wrap:wrap; border:1px solid var(--line); border-radius:8px; overflow:hidden; } .cs .seg button { border:0; border-radius:0; text-transform:none; font-weight:400; } .cs .seg button.on { font-weight:600; }
 .cs .row2 { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:10px 0; } .cs .row2 .tip { margin-left:0; } .cs .row2 button .i { margin-right:6px; }
 .cs select.add { width:auto; padding:2px 10px; font-size:12px; font-weight:600; background:none; }
-.cs button { text-transform:none; } .cs select.addch { width:auto; font-weight:600; background:none; cursor:pointer; }
+.cs button { text-transform:none; } .cs .addgrp { display:inline-flex; } .cs select.addch { width:auto; padding:6px 6px 6px 10px; font-weight:600; background:none; cursor:pointer; border-radius:8px 0 0 8px; } .cs .addgrp button { border-left:0; border-radius:0 8px 8px 0; }
 .cs .line { margin:12px 0 0; font-size:13px; } .cs .line .i { width:18px; height:18px; vertical-align:-4px; margin-right:6px; }
 .cs .line button.link { display:inline; color:var(--info); text-decoration:underline; } [data-theme=light] .cs .line button.link { color:#0369a1; }
 .cs .modal h2 { display:flex; gap:8px; align-items:center; } .cs .modal h2 .i { width:22px; height:22px; flex:none; }
