@@ -112,6 +112,7 @@ pub(crate) struct Mock {
     pub(crate) new_bot: Vec<u64>,
     /// User ids that are bot accounts.
     pub(crate) bots: Vec<u64>,
+    pub(crate) fail_user: bool,
     pub(crate) log: Vec<String>,
 }
 
@@ -225,6 +226,7 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             }
             None => err(404, 10004),
         },
+        ("GET", ["users", _]) if m.fail_user => err(502, 0),
         ("GET", ["users", u]) => {
             let mut j = user(u);
             j["bot"] = json!(m.bots.iter().any(|b| b.to_string() == *u));

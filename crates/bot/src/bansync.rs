@@ -564,7 +564,15 @@ pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()>
         return Ok(());
     }
     // Only a 404 means the ban was lifted or reverted in the hold; other errors retry the job.
-    if http_err::ban(&app.http, src, user).await?.is_none() {
+    let Some(ban) = http_err::ban(&app.http, src, user).await? else {
+        return Ok(());
+    };
+    // A Raider List ban stays in its server: every server decides through its own Raider List
+    // setting, which sharing would go around.
+    if ban
+        .reason
+        .is_some_and(|r| r.starts_with(crate::raiders::PREFIX))
+    {
         return Ok(());
     }
     let at = p["at"].as_i64().unwrap_or_else(now_secs);

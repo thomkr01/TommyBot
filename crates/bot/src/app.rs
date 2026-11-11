@@ -1,5 +1,5 @@
 //! Shared bot state and the per-guild config cache. The dashboard appends a `guild_config` row and
-//! sends `NOTIFY config_changed <guild>`; we drop that guild's cached copy and reload lazily.
+//! sends `NOTIFY config_changed <guild>:<version>`; we drop that guild's cached copy and reload lazily.
 use crate::verify::VerificationCfg;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
@@ -318,11 +318,16 @@ impl App {
         loop {
             match l.try_recv().await? {
                 Some(n) => {
-                    if let Ok(g) = n.payload().parse::<u64>() {
+                    // `<guild>` or `<guild>:<saved version>`.
+                    let (g, version) = match n.payload().split_once(':') {
+                        Some((g, v)) => (g, v.parse::<i32>().ok()),
+                        None => (n.payload(), None),
+                    };
+                    if let Ok(g) = g.parse::<u64>() {
                         self.cfgs.write().unwrap().remove(&g);
                         tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
                         if let Some(gid) = Id::new_checked(g) {
-                            tokio::spawn(on_saved(self.clone(), gid));
+                            tokio::spawn(on_saved(self.clone(), gid, version));
                         }
                     }
                 }
@@ -336,8 +341,8 @@ impl App {
 
 /// Setup that follows from a saved setting: Tickets turned on gets its category, a catch channel
 /// gets its warning, and the Raider List turned on scans the members.
-async fn on_saved(app: Arc<App>, gid: Id<GuildMarker>) {
-    if let Err(e) = crate::raiders::on_saved(&app, gid).await {
+async fn on_saved(app: Arc<App>, gid: Id<GuildMarker>, version: Option<i32>) {
+    if let Err(e) = crate::raiders::on_saved(&app, gid, version).await {
         tracing::warn!(?e, %gid, "queueing the Raider List scan failed");
     }
     if let Err(e) = crate::tickets::ensure_category(&app, gid).await {

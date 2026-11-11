@@ -347,6 +347,14 @@ async fn only_confirmed_unexpired_entries_are_enforced_on_join_before_the_rest()
     .unwrap();
     assert_eq!((case.1, case.2), (ME as i64, Some(case.0)));
     assert_eq!(case.3, json!({"op": "unban", "user": listed.get()}));
+    // Joining again with the same action keeps the row's time: a release check compares with it.
+    t.exec("UPDATE raider_actions SET created_at = now() - interval '1 day' WHERE guild_id = $1")
+        .await;
+    t.join(0, listed).await;
+    let old = t
+        .count("SELECT count(*) FROM raider_actions WHERE guild_id = $1 AND created_at < now() - interval '1 hour'")
+        .await;
+    assert_eq!(old, 1);
     // An automatic listing the bot owner has not verified only alerts.
     let auto = t.u(6);
     t.list(auto, "confirmed", "raid", None).await;
@@ -531,6 +539,24 @@ async fn expiry_and_removal_lift_only_what_the_list_did() {
     };
     lift_gave_up(&t.app, &gave_up, &anyhow::anyhow!("Discord is down")).await;
     assert_eq!(t.calls("Raider List removal failed"), 1);
+    // A try that unbanned and stopped before its case: the retry finds no ban and writes it.
+    let z = t.u(4);
+    t.list(z, "removed", "raid", None).await;
+    sqlx::query(
+        "INSERT INTO raider_actions (guild_id, user_id, action, case_no) VALUES ($1, $2, 'ban', 1)",
+    )
+    .bind(t.g(0).get() as i64)
+    .bind(z.get() as i64)
+    .execute(&t.app.pool)
+    .await
+    .unwrap();
+    lift_job(&t.app, t.g(0), &json!({"user": z.get().to_string()}))
+        .await
+        .unwrap();
+    let unbans = t
+        .count("SELECT count(*) FROM cases WHERE guild_id = $1 AND kind = 'unban'")
+        .await;
+    assert_eq!((unbans, t.acted(0, z).await), (2, None));
     t.forget().await;
 }
 
@@ -662,7 +688,57 @@ async fn only_established_servers_and_human_accounts_list_by_themselves() {
         t.evidence(i, y, Kind::Nuke, "n").await.unwrap();
     }
     assert_eq!(t.raider(y).await.unwrap().0, "pending");
+    // Removed by the bot owner: one new owner's evidence brings it back to review, never to
+    // the list, because the evidence already judged no longer counts.
+    sqlx::query("UPDATE raiders SET status = 'removed', reviewed_at = now() WHERE user_id = $1")
+        .bind(x.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.raider_list(5, t.base + 105, json!({})).await;
+    t.evidence(5, x, Kind::Nuke, "n").await.unwrap();
+    assert_eq!(t.raider(x).await.unwrap().0, "pending");
+    // A failed user lookup is retried in a job, which lists them once Discord answers.
+    let z = t.u(3);
+    t.set(|m| m.fail_user = true);
+    for i in 0..3 {
+        t.evidence(i, z, Kind::Nuke, "n").await.unwrap();
+    }
+    assert_eq!(t.raider(z).await.unwrap().0, "pending");
+    let retry = t.jobs_of("raider_autolist", z).await;
+    assert_eq!(retry.len(), 1);
+    let job = jobs::Job {
+        id: 0,
+        guild_id: 0,
+        kind: "raider_autolist".into(),
+        payload: retry[0].1.clone(),
+        attempts: 1,
+    };
+    assert!(fan_out(&t.app, &job).await.is_err(), "still down: retried");
+    t.set(|m| m.fail_user = false);
+    fan_out(&t.app, &job).await.unwrap();
+    assert_eq!(t.raider(z).await.unwrap().0, "confirmed");
     t.forget().await;
+}
+
+#[tokio::test]
+async fn list_bans_are_never_shared_by_ban_sync() {
+    let Some(t) = T::new(60).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    t.ban(0, 600, "Raider List: raid");
+    crate::bansync::share_job(&t.app, t.g(0), &t.share(600, Some(ME)))
+        .await
+        .unwrap();
+    assert!(t.rows(600).await.is_empty());
+    // The same setup shares a ban made by hand.
+    t.ban(0, 601, "raiding");
+    crate::bansync::share_job(&t.app, t.g(0), &t.share(601, Some(77)))
+        .await
+        .unwrap();
+    assert_eq!(t.rows(601).await.len(), 1);
+    t.cleanup().await;
 }
 
 #[tokio::test]
@@ -723,13 +799,16 @@ async fn buttons_recheck_exemptions_and_the_dashboard_can_send_dms() {
     assert_eq!(t.calls("Your appeal was accepted"), 1);
     // A save that turns the list on queues the scan; saving it again with it still on does not.
     let scan = "SELECT count(*) FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'raider_scan'";
-    on_saved(&t.app, t.g(0)).await.unwrap();
+    on_saved(&t.app, t.g(0), None).await.unwrap();
     assert_eq!(t.count(scan).await, 1);
     t.exec("DELETE FROM scheduled_jobs WHERE guild_id = $1")
         .await;
     t.exec("INSERT INTO guild_config (guild_id, version, config) SELECT guild_id, 2, config FROM guild_config WHERE guild_id = $1")
         .await;
-    on_saved(&t.app, t.g(0)).await.unwrap();
+    on_saved(&t.app, t.g(0), Some(2)).await.unwrap();
     assert_eq!(t.count(scan).await, 0);
+    // Two quick saves: the first one's notice still sees that it turned the list on.
+    on_saved(&t.app, t.g(0), Some(1)).await.unwrap();
+    assert_eq!(t.count(scan).await, 1);
     t.forget().await;
 }

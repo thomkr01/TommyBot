@@ -142,6 +142,8 @@ async fn source(app: &App, gid: Id<GuildMarker>) -> Result<Option<Source>> {
     Ok(Some(Source {
         gid,
         owner: guild.owner_id,
+        // shortcut: this count includes bots and Discord has no cheap human-only one; unverified
+        // listings only alert until the bot owner reviews them, which covers a server padded with bots.
         members: guild.approximate_member_count.unwrap_or(0),
         bot_joined: me.and_then(|m| m.joined_at).map(|t| t.as_secs()),
     }))
@@ -220,31 +222,38 @@ async fn member_roles(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
         .collect())
 }
 
-/// Writes the evidence and its entry, then applies the auto-listing rule, in one transaction with
-/// the check jobs it queues. True when the evidence is new.
+/// Writes the evidence and its entry, then applies the auto-listing rule. True when the evidence
+/// is new.
 async fn record(app: &App, e: &raiders::Evidence<'_>) -> Result<bool> {
-    let user = Id::new(e.user as u64);
     let mut tx = app.pool.begin().await?;
     let fresh = raiders::add(&mut tx, e).await?;
-    let listed = fresh && STRONG.contains(&e.kind) && auto_list(app, &mut tx, user).await?;
     tx.commit().await?;
-    if listed {
-        listed_dm(app, user).await;
+    if fresh && STRONG.contains(&e.kind) {
+        let user = Id::new(e.user as u64);
+        if let Err(err) = auto_list(app, user).await {
+            // A Discord or DB failure must not lose the listing: a job tries again until it works.
+            tracing::warn!(?err, %user, "raider list: auto-listing failed, retrying in a job");
+            fan(&app.pool, "raider_autolist", user).await?;
+        }
     }
     Ok(fresh)
 }
 
 /// Strong evidence that counts: only from servers with enough members that had the bot for a
-/// while, so three throwaway servers are not three independent owners.
+/// while, so three throwaway servers are not three independent owners, and only evidence newer
+/// than the bot owner's last review, so a removed or rejected entry is not listed again by itself
+/// from the evidence the bot owner already judged.
 const QUALIFIED: &str = "user_id = $1 AND kind = ANY($2)
     AND COALESCE((detail->>'members')::bigint, 0) >= $3
     AND COALESCE((detail->>'bot_joined')::bigint, 9223372036854775807)
-        <= extract(epoch FROM now())::bigint - $4 * 86400";
+        <= extract(epoch FROM now())::bigint - $4 * 86400
+    AND created_at > COALESCE((SELECT reviewed_at FROM raiders WHERE user_id = $1), '-infinity')";
 
 /// A pending entry backed by qualified strong evidence from enough different owners is confirmed
 /// by itself, unverified, with the category most of those owners saw, and every enabled server
-/// checks for it. A bot account always waits for the bot owner.
-async fn auto_list(app: &App, tx: &mut sqlx::PgConnection, user: Id<UserMarker>) -> Result<bool> {
+/// checks for it. A bot account always waits for the bot owner. The user lookup happens outside
+/// any transaction; an error makes the caller retry in a `raider_autolist` job.
+async fn auto_list(app: &App, user: Id<UserMarker>) -> Result<()> {
     let u = user.get() as i64;
     let owners: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(DISTINCT source_owner) FROM raider_evidence WHERE {QUALIFIED}"
@@ -253,38 +262,37 @@ async fn auto_list(app: &App, tx: &mut sqlx::PgConnection, user: Id<UserMarker>)
     .bind(STRONG.as_slice())
     .bind(RAIDER_MIN_MEMBERS as i64)
     .bind(RAIDER_MIN_DAYS)
-    .fetch_one(&mut *tx)
+    .fetch_one(&app.pool)
     .await?;
-    if owners < RAIDER_AUTO_OWNERS {
-        return Ok(false);
+    if owners < RAIDER_AUTO_OWNERS || app.http.user(user).await?.model().await?.bot {
+        return Ok(());
     }
-    // A failed lookup leaves it pending; the next evidence tries again.
-    match async { anyhow::Ok(app.http.user(user).await?.model().await?) }.await {
-        Ok(who) if !who.bot => {}
-        Ok(_) => return Ok(false),
-        Err(e) => {
-            tracing::warn!(?e, %user, "raider list: user lookup failed, not listing yet");
-            return Ok(false);
-        }
-    }
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(u)
+        .execute(&mut *tx)
+        .await?;
+    // The count is checked again under the lock: a review may have come in since.
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "WITH s AS (SELECT kind, count(DISTINCT source_owner) AS n FROM raider_evidence
                     WHERE {QUALIFIED} GROUP BY kind)
          UPDATE raiders SET status = 'confirmed', verified = false, expires_at = NULL, updated_at = now(),
              category = (SELECT CASE kind WHEN 'auto_nuke' THEN 'nuke' WHEN 'auto_raid' THEN 'raid' ELSE 'spam' END
                          FROM s ORDER BY n DESC, kind LIMIT 1)
-         WHERE user_id = $1 AND status = 'pending'"
+         WHERE user_id = $1 AND status = 'pending'
+           AND (SELECT count(DISTINCT source_owner) FROM raider_evidence WHERE {QUALIFIED}) >= $5"
     )))
     .bind(u)
     .bind(STRONG.as_slice())
     .bind(RAIDER_MIN_MEMBERS as i64)
     .bind(RAIDER_MIN_DAYS)
+    .bind(RAIDER_AUTO_OWNERS)
     .execute(&mut *tx)
     .await?
     .rows_affected()
         == 1;
     if !done {
-        return Ok(false);
+        return Ok(());
     }
     sqlx::query(
         "INSERT INTO raider_reviews (actor, user_id, from_status, to_status, note)
@@ -298,7 +306,9 @@ async fn auto_list(app: &App, tx: &mut sqlx::PgConnection, user: Id<UserMarker>)
     .execute(&mut *tx)
     .await?;
     fan(&mut *tx, "raider_check", user).await?;
-    Ok(true)
+    tx.commit().await?;
+    listed_dm(app, user).await;
+    Ok(())
 }
 
 /// Queues `kind` for the user as a fan-out job (server 0), which queues one per server.
@@ -480,7 +490,9 @@ async fn enforce(
     // quarantine older than this row is not the list's.
     sqlx::query(
         "INSERT INTO raider_actions (guild_id, user_id, action) VALUES ($1, $2, $3)
-         ON CONFLICT (guild_id, user_id) DO UPDATE SET action = excluded.action, case_no = NULL, created_at = now()",
+         ON CONFLICT (guild_id, user_id) DO UPDATE SET action = excluded.action, case_no = NULL,
+             created_at = CASE WHEN raider_actions.action = excluded.action
+                               THEN raider_actions.created_at ELSE now() END",
     )
     .bind(gid.get() as i64)
     .bind(user.get() as i64)
@@ -653,8 +665,26 @@ pub async fn fan_out(app: &App, job: &jobs::Job) -> Result<()> {
         let text = job.payload["text"]
             .as_str()
             .context("job payload has no text")?;
-        reply::dm(app, Id::new(user), &embed::clip(text, 1900)).await;
-        return Ok(());
+        let sent = async {
+            let dm = app.http.create_private_channel(Id::new(user)).await?;
+            let ch = dm.model().await?.id;
+            app.http
+                .create_message(ch)
+                .content(&embed::clip(text, 1900))
+                .await?;
+            anyhow::Ok(())
+        };
+        return match sent.await {
+            Err(e) if http_err::refused(&e) => {
+                tracing::info!(?e, user, "raider list: notify DM refused (closed DMs)");
+                Ok(())
+            }
+            r => r,
+        };
+    }
+    // `raider_autolist` {user}: an automatic listing whose first try failed.
+    if job.kind == "raider_autolist" {
+        return auto_list(app, Id::new(user)).await;
     }
     let guilds = targets(app, &job.kind, user as i64).await?;
     let mut tx = app.pool.begin().await?;
@@ -724,15 +754,19 @@ pub async fn scan_job(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     Ok(())
 }
 
-/// A saved config that turns the list on (compared with the version saved before it) queues the
-/// member scan, unless one is waiting.
-pub async fn on_saved(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+/// A saved config that turns the list on (`version`, compared with the version before it; the
+/// newest when unknown) queues the member scan, unless one is waiting.
+pub async fn on_saved(app: &App, gid: Id<GuildMarker>, version: Option<i32>) -> Result<()> {
+    // The saved version and the one before it, not the newest two: a second quick save must not
+    // hide that this one turned the list on.
     let on: Vec<bool> = sqlx::query_scalar(
         "SELECT COALESCE((config->'raider_list'->>'enabled')::boolean, false)
            AND COALESCE((config->'raider_list'->>'scan_members')::boolean, true)
-         FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 2",
+         FROM guild_config WHERE guild_id = $1 AND ($2::int IS NULL OR version <= $2)
+         ORDER BY version DESC LIMIT 2",
     )
     .bind(gid.get() as i64)
+    .bind(version)
     .fetch_all(&app.pool)
     .await?;
     if !turned_on(&on) {
@@ -759,14 +793,14 @@ fn turned_on(newest_first: &[bool]) -> bool {
 pub async fn lift_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(need(p, "user")?);
     let (g, u) = (gid.get() as i64, user.get() as i64);
-    let action: Option<String> = sqlx::query_scalar(
-        "SELECT action FROM raider_actions WHERE guild_id = $1 AND user_id = $2",
+    let row: Option<(String, Option<i32>)> = sqlx::query_as(
+        "SELECT action, case_no FROM raider_actions WHERE guild_id = $1 AND user_id = $2",
     )
     .bind(g)
     .bind(u)
     .fetch_optional(&app.pool)
     .await?;
-    let Some(action) = action else {
+    let Some((action, case_no)) = row else {
         return Ok(());
     };
     let removed: bool = sqlx::query_scalar(
@@ -782,7 +816,7 @@ pub async fn lift_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> 
     // deleting it afterwards, so only one run writes the case and the notice.
     let lift = app.cfg(gid.get()).await?.raider_list.lift_on_removal;
     let (result, unbanned) = match action.as_str() {
-        "ban" if lift => unban(app, gid, user).await?,
+        "ban" if lift => unban(app, gid, user, case_no.is_some()).await?,
         "quarantine" if lift => {
             // Only a quarantine made since the list acted is the list's to release.
             let ours: bool = sqlx::query_scalar(
@@ -855,14 +889,21 @@ pub(crate) fn lift_log(user: u64, result: &str) -> Log {
         .text("The bot owner took this account off the Raider List.")
 }
 
-/// Unbans when the ban is still the one the list made; true when it unbanned.
+/// Unbans when the ban is still the one the list made; true when it unbanned. `banned`: the
+/// list's ban worked (its row has a case), so a missing ban means an earlier try of this lift
+/// unbanned and stopped before its case, which this try then writes.
 async fn unban(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
+    banned: bool,
 ) -> Result<(&'static str, bool)> {
     let Some(ban) = http_err::ban(&app.http, gid, user).await? else {
-        return Ok(("Not banned any more, nothing to undo.", false));
+        return Ok(if banned {
+            ("Unbanned (by an earlier try of this removal).", true)
+        } else {
+            ("Not banned any more, nothing to undo.", false)
+        });
     };
     if !ban.reason.as_deref().is_some_and(|r| r.starts_with(PREFIX)) {
         return Ok(("Kept: the ban was made again by hand.", false));
