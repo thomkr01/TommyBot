@@ -283,14 +283,19 @@ pub fn ModStats(guild: String) -> impl IntoView {
         if days.is_disposed() {
             return;
         }
-        let path = format!("/api/guilds/{}/mod_stats?days={}", g.get_value(), days.get_untracked());
+        let d = days.get_untracked();
+        let path = format!("/api/guilds/{}/mod_stats?days={d}", g.get_value());
         spawn_local(async move {
-            match api("GET", &path, None).await {
-                Ok(v) if !data.is_disposed() => {
+            let r = api("GET", &path, None).await;
+            // A slower answer for a period chip clicked earlier must not overwrite the newer one.
+            if days.try_get_untracked().as_deref() != Some(d.as_str()) {
+                return;
+            }
+            match r {
+                Ok(v) => {
                     msg.clear();
                     data.set(v)
                 }
-                Ok(_) => {}
                 Err(e) => msg.err(e),
             }
         });
@@ -310,14 +315,21 @@ pub fn ModStats(guild: String) -> impl IntoView {
         open.set(Some(id.clone()));
         let path = format!("/api/guilds/{}/mod_stats/{id}", g.get_value());
         spawn_local(async move {
-            match api("GET", &path, None).await {
-                Ok(v) if !detail.is_disposed() => {
+            let r = api("GET", &path, None).await;
+            // Another row may have been opened meanwhile, or the page left.
+            if open.try_get_untracked().flatten().as_deref() != Some(id.as_str()) {
+                return;
+            }
+            match r {
+                Ok(v) => {
                     let ids = v.as_array().into_iter().flatten().map(|r| s(&r["target_id"])).collect();
                     learn_names(g.get_value(), ids, names);
                     detail.set(v.as_array().cloned().unwrap_or_default())
                 }
-                Ok(_) => {}
-                Err(e) => msg.err(e),
+                Err(e) => {
+                    open.set(None);
+                    msg.err(e)
+                }
             }
         });
     };

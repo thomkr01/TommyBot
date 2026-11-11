@@ -372,6 +372,8 @@ async fn mod_stats(
     let (days, step) = period(q.days.as_deref())?;
     // The bot's own automatic actions are not staff work.
     let me = st.discord.bot_user().await?;
+    // One transaction, so all three queries see the same now().
+    let mut tx = st.db.begin().await?;
     let counts: Vec<(String, String, i64, i64)> = sqlx::query_as(
         "select mod_id::text, kind,
                 count(*) filter (where created_at >= now() - make_interval(days => $3)),
@@ -383,7 +385,7 @@ async fn mod_stats(
     .bind(guild)
     .bind(me)
     .bind(days)
-    .fetch_all(&st.db)
+    .fetch_all(&mut *tx)
     .await?;
     let last: Vec<(String, At)> = sqlx::query_as(
         "select mod_id::text, max(created_at) from mod_actions
@@ -391,7 +393,7 @@ async fn mod_stats(
     )
     .bind(guild)
     .bind(me)
-    .fetch_all(&st.db)
+    .fetch_all(&mut *tx)
     .await?;
     let bars: Vec<(String, i32, i64)> = sqlx::query_as(
         "select mod_id::text,
@@ -404,7 +406,7 @@ async fn mod_stats(
     .bind(me)
     .bind(days)
     .bind(step)
-    .fetch_all(&st.db)
+    .fetch_all(&mut *tx)
     .await?;
     Ok(Json(stats_json(days, step, counts, last, bars)))
 }
@@ -428,7 +430,8 @@ fn stats_json(
     bars: Vec<(String, i32, i64)>,
 ) -> Value {
     use std::collections::{BTreeMap, BTreeSet};
-    let n = ((days + step - 1) / step) as usize;
+    // Whole bars only: the days left over join the oldest bar instead of making a short one.
+    let n = (days / step) as usize;
     let mut kinds = BTreeSet::new();
     let mut rows: BTreeMap<String, ModRow> = BTreeMap::new();
     fn row(rows: &mut BTreeMap<String, ModRow>, id: String, n: usize) -> &mut ModRow {
@@ -451,7 +454,7 @@ fn stats_json(
         r.prev_total += prev;
     }
     for (id, ago, c) in bars {
-        // `ago` counts bars back from now; one exactly on the period's start joins the oldest bar.
+        // `ago` counts bars back from now; anything past the last whole bar joins the oldest.
         let i = n - 1 - (ago.max(0) as usize).min(n - 1);
         row(&mut rows, id, n).series[i] += c;
     }
@@ -781,6 +784,19 @@ mod tests {
                 ("3".into(), at(200)),
             ],
             vec![("1".into(), 0, 2), ("1".into(), 6, 1), ("2".into(), 9, 5)],
+        );
+        assert_eq!(
+            stats_json(
+                365,
+                7,
+                vec![],
+                vec![("1".into(), chrono::Utc::now())],
+                vec![("1".into(), 52, 4)]
+            )["mods"][0]["series"]
+                .as_array()
+                .map(|s| (s.len(), s[0].clone())),
+            Some((52, json!(4))),
+            "a year is 52 whole weeks; the extra day joins the oldest"
         );
         let m = v["mods"].as_array().unwrap();
         assert_eq!(

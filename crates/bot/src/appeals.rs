@@ -132,18 +132,21 @@ async fn decide(
             .execute(&app.pool)
             .await?;
         // The appeal is already decided; a lost stats row must not report it as failed.
-        let stat = tommybot_core::cases::record(
-            &mut *app.pool.acquire().await?,
-            tommybot_core::cases::ModAction {
-                guild_id: gid.get() as i64,
-                mod_id: actor_id.get() as i64,
-                kind: if kind == "ban" { "unban" } else { "untimeout" },
-                source: "appeal",
-                target_id: Some(user),
-                case_no: None,
-                audit_id: None,
-            },
-        )
+        let stat = async {
+            tommybot_core::cases::record(
+                &mut *app.pool.acquire().await?,
+                tommybot_core::cases::ModAction {
+                    guild_id: gid.get() as i64,
+                    mod_id: actor_id.get() as i64,
+                    kind: if kind == "ban" { "unban" } else { "untimeout" },
+                    source: "appeal",
+                    target_id: Some(user),
+                    case_no: None,
+                    audit_id: None,
+                },
+            )
+            .await
+        }
         .await;
         if let Err(e) = stat {
             tracing::warn!(?e, "recording the appeal for mod stats failed");
