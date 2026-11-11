@@ -213,7 +213,7 @@ Each place that uses the MCP server gets its own token, made on the dashboard. O
 
    The log no longer says `writes off`. Reconnect the connector in claude.ai (or restart Claude Code) so the new tools show up.
 
-To turn writes off, click **Revoke** on the MCP page (2FA). This works at once, also closes the changes that token still had waiting for a code, and is the first thing to do if you get a DM you did not ask for. Then delete the `MCP_WRITE_TOKEN` line from `.env` and run `docker compose up -d mcp`. Every proposal is kept in the `mcp_writes` table with the token name, the action, when and the outcome; the request itself is removed once it no longer waits for a code.
+To turn writes off, click **Revoke** on the MCP tokens page (2FA). This works at once, also closes the changes that token still had waiting for a code, and is the first thing to do if you get a DM you did not ask for. Then delete the `MCP_WRITE_TOKEN` line from `.env` and run `docker compose up -d mcp`. Every proposal is kept in the `mcp_writes` table with the token name, the action, when and the outcome; the request itself is removed once it no longer waits for a code.
 
 ### 6.5 Keeping it safe
 
