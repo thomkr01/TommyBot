@@ -42,6 +42,7 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{g}/cases/{{no}}/delete"), post(case_delete))
         .route(&format!("{g}/raid_log"), get(raid_log))
         .route(&format!("{g}/joingate_log"), get(joingate_log))
+        .route(&format!("{g}/ban_sync_log"), get(ban_sync_log))
         .route(&format!("{g}/notes"), get(notes).post(note_add))
         .route(&format!("{g}/notes/sweep"), post(note_sweep))
         .route(&format!("{g}/notes/{{id}}"), post(note_edit))
@@ -138,6 +139,52 @@ async fn joingate_log(
         .map(|(user, bot, adder, filters, reason, action, ok, error, at)| json!({
             "user_id": user, "is_bot": bot, "adder_id": adder, "filters": filters, "reason": reason,
             "action": action, "ok": ok, "error": error, "at": at
+        }))
+        .collect::<Vec<_>>())))
+}
+
+/// Ban Sync copies to and from this server, newest first, with both servers' names.
+async fn ban_sync_log(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    Query(p): Query<Page>,
+) -> Res {
+    api::require(&st, &s, guild, crate::access::Level::Admin, false).await?;
+    type Row = (
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i32>,
+        Option<At>,
+        At,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "select guild_id, source_guild, user_id::text, origin, reason, state, skip_reason, case_no, expires_at, created_at
+         from ban_sync_links where guild_id = $1 or source_guild = $1
+         order by created_at desc, guild_id, user_id limit 50 offset $2",
+    )
+    .bind(guild)
+    .bind(offset(p.page))
+    .fetch_all(&st.db)
+    .await?;
+    let mut names = std::collections::HashMap::new();
+    for id in rows.iter().flat_map(|r| [r.0, r.1]) {
+        if let std::collections::hash_map::Entry::Vacant(e) = names.entry(id) {
+            let n = st.discord.guild_name(id).await?;
+            e.insert(n.unwrap_or_else(|| id.to_string()));
+        }
+    }
+    Ok(Json(json!(rows
+        .into_iter()
+        .map(|(to, from, user, origin, reason, state, skip, case_no, until, at)| json!({
+            "to_id": to.to_string(), "to": names[&to], "from_id": from.to_string(), "from": names[&from],
+            "user_id": user, "origin": origin, "reason": reason, "state": state, "skip_reason": skip,
+            "case_no": case_no, "expires_at": until, "at": at
         }))
         .collect::<Vec<_>>())))
 }

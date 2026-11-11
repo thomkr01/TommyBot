@@ -249,6 +249,11 @@ const TIPS: &[(&str, &str, &str)] = &[
     ("joinraid", "id_flag_min", "Raid accounts are often made at the same moment. TommyBot looks for many joins whose accounts were created close together."),
     ("lockdown", "main_roles", "The roles normal members have. Lockdown takes the chat permissions away from these roles."),
     ("whitelist", "partner_channels", "Channels where invite links from other servers are allowed."),
+    ("ban_sync", "share_joinraid", "Members Join Raid bans here are banned in your other servers too."),
+    ("ban_sync", "share_automod", "Members Auto Mod bans here are banned in your other servers too."),
+    ("ban_sync", "share_joingate", "Join Gate filters are made for this server, so they may not fit your other servers. Off by default."),
+    ("ban_sync", "share_verify", "These are usually real people who were too slow to verify. Off by default."),
+    ("ban_sync", "receive", "What happens here when a member is banned in one of your other servers. Alert posts it in the mod log with a Ban here button. Ban bans them here as well."),
 ];
 
 pub fn schema() -> Vec<Value> {
@@ -1155,6 +1160,44 @@ pub fn schema() -> Vec<Value> {
         ("tickets", "Tickets", tickets),
         ("whitelist", "Whitelist", whitelist),
         ("misc", "Miscellaneous", misc),
+        (
+            "ban_sync",
+            "Ban Sync",
+            vec![
+                hp(
+                    ti(fg("General", "enabled", "bool"), "Use Ban Sync"),
+                    "Copies bans between servers you own. Only servers with the same Discord owner are in the group.",
+                ),
+                ti(
+                    dv(fg("General", "share", "bool"), true),
+                    "Send this server's bans to my other servers",
+                ),
+                ti(
+                    dv(choice("General", "receive", &["off", "alert", "ban"]), "alert"),
+                    "When a member is banned in my other servers",
+                ),
+                ti(
+                    dv(fg("General", "sync_unbans", "bool"), true),
+                    "Lift the copies when the ban is lifted",
+                ),
+                ti(
+                    dv(fg("Automatic bans to send", "share_joinraid", "bool"), true),
+                    "Join Raid bans",
+                ),
+                ti(
+                    dv(fg("Automatic bans to send", "share_automod", "bool"), true),
+                    "Auto Mod bans",
+                ),
+                ti(
+                    fg("Automatic bans to send", "share_joingate", "bool"),
+                    "Join Gate filter bans",
+                ),
+                ti(
+                    fg("Automatic bans to send", "share_verify", "bool"),
+                    "Verification timeout bans",
+                ),
+            ],
+        ),
     ]
     .into_iter()
     .map(|(n, t, mut fields)| {

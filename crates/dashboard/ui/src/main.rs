@@ -25,7 +25,7 @@ use embeds::Embeds;
 use form::Section;
 use lockdown::{DiscordRules, LockdownManage, LockdownSettings};
 use permits::Permits;
-use records::{CaseList, JoinGateLog, NoteList, RaidLog, ReportList, TicketLog};
+use records::{BanSyncGroup, BanSyncLog, CaseList, JoinGateLog, NoteList, RaidLog, ReportList, TicketLog};
 /// The server list's empty state; its text is the marker that shows the help card.
 const NO_SERVERS: &str = "No servers";
 
@@ -84,6 +84,7 @@ const NAV: &[(&str, &[(&str, &str)])] = &[
             ("report_list", "Reports"),
             ("tickets", "Tickets"),
             ("catch", "Catch Channel"),
+            ("ban_sync", "Ban Sync"),
         ],
     ),
     (
@@ -125,6 +126,7 @@ fn page_icon(p: &str) -> &'static str {
         "report_list" => "report",
         "tickets" => "ticket",
         "catch" => "target",
+        "ban_sync" => "ban",
         "Tools" => "settings",
         "revert" => "restore",
         "history" => "history",
@@ -148,6 +150,7 @@ const APPEAL_TABS: &[(&str, &str)] = &[
     ("appeal_blacklist", "Blacklist"),
 ];
 const RAID_TABS: &[(&str, &str)] = &[("joinraid", "Settings"), ("raid_log", "Raid Log")];
+const BAN_SYNC_TABS: &[(&str, &str)] = &[("ban_sync", "Settings"), ("ban_sync_log", "Log")];
 const GATE_TABS: &[(&str, &str)] = &[("joingate", "Settings"), ("joingate_log", "Join Gate Log")];
 const REPORT_TABS: &[(&str, &str)] = &[("report_list", "List"), ("report_blacklist", "Blacklist")];
 const WL_TABS: &[(&str, &str)] = &[
@@ -214,6 +217,7 @@ fn title(p: &str) -> (String, Option<String>) {
         "joingate" => two("Join gate", "General Settings"),
         "joingate_log" => ("Join gate".into(), None),
         "joinraid" | "raid_log" => ("Join Raid".into(), None),
+        "ban_sync" | "ban_sync_log" => ("Ban Sync".into(), None),
         "verification" => two("Verification", "General Settings"),
         "automod_panic" => ("Auto Mod Panic Mode".into(), None),
         "antinuke_panic" => ("Anti Nuke Panic Mode".into(), None),
@@ -686,6 +690,8 @@ fn App() -> impl IntoView {
                                 ("appeal_blacklist", _) => view! { <Tabs guild=g.clone() items=APPEAL_TABS active=p.clone() /><Blacklist guild=g.clone() base="appeals" purge=true /> }.into_any(),
                                 ("joinraid", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() />{sec("joinraid", "")} }.into_any(),
                                 ("raid_log", _) => view! { <Tabs guild=g.clone() items=RAID_TABS active=p.clone() /><RaidLog guild=g.clone() /> }.into_any(),
+                                ("ban_sync", _) => view! { <Tabs guild=g.clone() items=BAN_SYNC_TABS active=p.clone() />{sec("ban_sync", "")}<BanSyncGroup guild=g.clone() enrolled /> }.into_any(),
+                                ("ban_sync_log", _) => view! { <Tabs guild=g.clone() items=BAN_SYNC_TABS active=p.clone() /><BanSyncLog guild=g.clone() /> }.into_any(),
                                 ("joingate", _) => view! { <Tabs guild=g.clone() items=GATE_TABS active=p.clone() />{sec("joingate", "")} }.into_any(),
                                 ("joingate_log", _) => view! { <Tabs guild=g.clone() items=GATE_TABS active=p.clone() /><JoinGateLog guild=g.clone() /> }.into_any(),
                                 ("catch", _) => view! { <Catch guild=g.clone() enrolled /> }.into_any(),

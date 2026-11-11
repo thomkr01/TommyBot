@@ -2,6 +2,7 @@ mod access;
 mod api;
 mod appeals;
 mod auth;
+mod bansync;
 mod channels;
 mod diff;
 mod discord;
@@ -145,6 +146,7 @@ pub fn router(st: AppState, dist: &str) -> Router {
         .merge(channels::routes())
         .merge(appeals::routes())
         .merge(records::routes())
+        .merge(bansync::routes())
         .merge(verify::routes())
         .merge(embeds::routes())
         .merge(update::routes())
