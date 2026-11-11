@@ -20,6 +20,8 @@ pub fn account_created_ms(user_id: u64) -> i64 {
 #[serde(from = "ActionRepr")]
 pub enum Action {
     Log,
+    /// Sets the nick to "Moderated Nickname"; only the username filter offers it.
+    Rename,
     Warn,
     /// Milliseconds, 0 for the default timeout. For the age filter this is replaced by the remaining time.
     Timeout(i64),
@@ -41,6 +43,7 @@ enum ActionRepr {
 #[derive(Deserialize)]
 enum ActionName {
     Log,
+    Rename,
     Warn,
     Timeout,
     Kick,
@@ -53,6 +56,7 @@ impl From<ActionRepr> for Action {
             ActionRepr::Timeout { ms } => Self::Timeout(ms),
             ActionRepr::Name(n) => match n {
                 ActionName::Log => Self::Log,
+                ActionName::Rename => Self::Rename,
                 ActionName::Warn => Self::Warn,
                 ActionName::Timeout => Self::Timeout(0),
                 ActionName::Kick => Self::Kick,
@@ -104,16 +108,22 @@ impl Filter {
 pub struct GateCfg {
     pub enabled: bool,
     pub dm_punished: bool,
+    #[serde(deserialize_with = "no_rename")]
     pub no_avatar: GateFilter,
+    #[serde(deserialize_with = "no_rename")]
     pub account_age: GateFilter,
     pub min_age_days: u32,
     /// Minimum age in ms (`jg 3c`, seconds to days); wins over `min_age_days`.
     pub min_age_override_ms: Option<i64>,
     /// Tell a punished member the minimum age in the DM (`jg 3d`).
     pub expose_min_age: bool,
+    #[serde(deserialize_with = "no_rename")]
     pub unauthorized_bot: GateFilter,
+    #[serde(deserialize_with = "no_rename")]
     pub unverified_bot: GateFilter,
+    #[serde(deserialize_with = "no_rename")]
     pub invite_in_name: GateFilter,
+    #[serde(deserialize_with = "no_rename")]
     pub suspicious: GateFilter,
     pub username_filter: GateFilter,
     /// Discord's undocumented "likely spammer" user flag (bit 20).
@@ -150,6 +160,27 @@ impl GateFilter {
     /// The action to take, None while the filter is off.
     pub fn get(self, default: Action) -> Option<Action> {
         self.enabled.then(|| self.action.unwrap_or(default))
+    }
+}
+
+/// Renaming only fixes a name, so only the username filter may take Rename.
+fn no_rename<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Into<Option<Action>> + Copy,
+{
+    let v = T::deserialize(d)?;
+    if v.into() == Some(Action::Rename) {
+        return Err(serde::de::Error::custom(
+            "Rename is only for the username filter",
+        ));
+    }
+    Ok(v)
+}
+
+impl From<GateFilter> for Option<Action> {
+    fn from(f: GateFilter) -> Self {
+        f.action
     }
 }
 
@@ -398,7 +429,7 @@ pub struct RaidCfg {
     #[serde(default, alias = "id_margin")]
     pub id_margin_ms: i64,
     /// What happens to flagged raiders.
-    #[serde(default = "default_raid_action")]
+    #[serde(default = "default_raid_action", deserialize_with = "no_rename")]
     pub action: Action,
     /// Also lock the server (join lock) when a raid is detected.
     #[serde(default)]
@@ -842,6 +873,49 @@ mod tests {
         );
         let j = joiner(id_aged(DAY_MS / 2, 0), "nitro giveaway", false);
         assert_eq!(harshest(&gate(&j, &cfg, NOW)), Some(Action::Ban));
+    }
+
+    #[test]
+    fn rename_is_mild_and_only_for_the_username_filter() {
+        let hits = [
+            (Filter::UsernameFilter, Action::Rename),
+            (Filter::NoAvatar, Action::Kick),
+        ];
+        assert_eq!(harshest(&hits), Some(Action::Kick));
+        assert!(Action::Log < Action::Rename && Action::Rename < Action::Warn);
+        let json = serde_json::to_string(&Action::Rename).unwrap();
+        assert_eq!(json, r#""Rename""#);
+        assert_eq!(
+            serde_json::from_str::<Action>(&json).unwrap(),
+            Action::Rename
+        );
+        let ok: GateCfg = serde_json::from_value(
+            serde_json::json!({"username_filter": {"enabled": true, "action": "Rename"}}),
+        )
+        .unwrap();
+        assert_eq!(ok.username_filter.action, Some(Action::Rename));
+        for f in [
+            "no_avatar",
+            "account_age",
+            "unauthorized_bot",
+            "unverified_bot",
+            "invite_in_name",
+            "suspicious",
+        ] {
+            let v = serde_json::json!({ f: {"enabled": true, "action": "Rename"} });
+            assert!(serde_json::from_value::<GateCfg>(v).is_err(), "{f}");
+            let v = serde_json::json!({ f: {"enabled": true, "action": "Kick"} });
+            assert!(serde_json::from_value::<GateCfg>(v).is_ok(), "{f}");
+        }
+        assert!(
+            serde_json::from_value::<RaidCfg>(serde_json::json!({"action": "Rename"})).is_err()
+        );
+        assert_eq!(
+            serde_json::from_value::<RaidCfg>(serde_json::json!({}))
+                .unwrap()
+                .action,
+            Action::Ban
+        );
     }
 
     #[test]

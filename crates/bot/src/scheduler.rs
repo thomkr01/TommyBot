@@ -140,6 +140,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             crate::antinuke::resume_nuke(app, gid, actor, why, since).await?
         }
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
+        crate::sticky::KIND => crate::sticky::run_job(app, gid, &job.payload).await?,
         "slowmode_off" => crate::slowmode::off(app, gid, &job.payload).await?,
         "ban_sync_share" => crate::bansync::share_job(app, gid, &job.payload).await?,
         "ban_sync_copy" => crate::bansync::copy_job(app, gid, &job.payload).await?,

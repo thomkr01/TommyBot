@@ -62,16 +62,21 @@ fn cap(c: &GuildCfg, a: NukeAction) -> (bool, u32, u32, u32) {
 /// One Join Gate card: status and action.
 macro_rules! gate_filter {
     ($n:literal, $name:literal, $f:ident) => {
+        gate_filter!($n, $name, $f, ACTIONS)
+    };
+    ($n:literal, $name:literal, $f:ident, $actions:ident) => {
         [
             group!($n, $name),
             r!(concat!($n, "a"), "Status", concat!("joingate.", stringify!($f), ".enabled"), Kind::Bool, |c| on(c.joingate.$f.enabled)),
-            r!(concat!($n, "b"), "Action", concat!("joingate.", stringify!($f), ".action"), Kind::Choice(ACTIONS), |c| gate(c.joingate.$f)),
+            r!(concat!($n, "b"), "Action", concat!("joingate.", stringify!($f), ".action"), Kind::Choice($actions), |c| gate(c.joingate.$f)),
         ]
     };
 }
 
 const FILTER_ACTIONS: &[(&str, &str)] = &[("delete", "\"delete\""), ("warn", "\"warn\""), ("timeout", "\"timeout\""), ("kick", "\"kick\""), ("ban", "\"ban\"")];
 const ACTIONS: &[(&str, &str)] = &[("log", "\"Log\""), ("warn", "\"Warn\""), ("timeout", "\"Timeout\""), ("kick", "\"Kick\""), ("ban", "\"Ban\"")];
+/// Only a name can be fixed by renaming, so only the username filter offers Rename.
+const NAME_ACTIONS: &[(&str, &str)] = &[("log", "\"Log\""), ("rename", "\"Rename\""), ("warn", "\"Warn\""), ("timeout", "\"Timeout\""), ("kick", "\"Kick\""), ("ban", "\"Ban\"")];
 
 fn on(b: bool) -> String {
     if b { "Enabled" } else { "Disabled" }.into()
@@ -291,7 +296,7 @@ static JOINGATE_ROWS: [Row; 30] = {
     let [d1, d2, d3] = gate_filter!("5", "Advertising Names", invite_in_name);
     let [e1, e2, e3] = gate_filter!("6", "Unverified Bots", unverified_bot);
     let [f1, f2, f3] = gate_filter!("7", "Suspicious Accounts", suspicious);
-    let [g1, g2, g3] = gate_filter!("8", "Username Filter", username_filter);
+    let [g1, g2, g3] = gate_filter!("8", "Username Filter", username_filter, NAME_ACTIONS);
     let [h1, h2, h3] = gate_filter!("9", "Spam Flag Filter", spammer);
     [
         group!("1", "General"),
@@ -388,6 +393,9 @@ pub(super) static MISC: Module = Module {
         r!("7", "Ignore Permit 1 Commands", "misc.ignore_no_permit", Kind::Bool, |c| on(c.misc.ignore_no_permit)),
         r!("8", "Enforce Permits", "misc.enforce_permits", Kind::Bool, |c| on(c.misc.enforce_permits)),
         r!("9", "Ban Appeal Message", "misc.ban_appeal_message", Kind::Text, |c| Some(c.misc.ban_appeal_message.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| NO.into())),
+        r!("10", "Sticky Roles", "misc.sticky_roles", Kind::Bool, |c| on(c.misc.sticky_roles)),
+        r!("11", "Never Sticky Roles", "misc.sticky_never", Kind::Roles, |c| roles(&c.misc.sticky_never)),
+        r!("12", "Auto Dehoist", "misc.auto_dehoist", Kind::Bool, |c| on(c.misc.auto_dehoist)),
     ],
 };
 

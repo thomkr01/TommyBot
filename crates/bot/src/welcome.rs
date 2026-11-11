@@ -79,8 +79,12 @@ pub async fn on_ready(
 /// Deletes the data of servers the bot left more than `KEEP_DAYS` ago, hourly.
 pub async fn purge_left(app: std::sync::Arc<App>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+    let mut sticky_synced = std::collections::HashMap::new();
     loop {
         tick.tick().await;
+        if let Err(e) = crate::sticky::sweep(&app, &mut sticky_synced).await {
+            tracing::warn!(?e, "sticky roles sync and cleanup failed");
+        }
         match tommybot_core::db::purge_left(&app.pool, KEEP_DAYS).await {
             Ok(ids) if !ids.is_empty() => tracing::info!(?ids, "purged data of removed servers"),
             Ok(_) => {}

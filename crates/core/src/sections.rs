@@ -648,6 +648,12 @@ pub struct MiscCfg {
     pub warn_actions: Vec<crate::warn::Threshold>,
     /// Take the main roles away while a member is timed out.
     pub remove_main_roles_on_timeout: bool,
+    /// Give a member's roles back when they rejoin (safe roles only, see `bot::sticky`).
+    pub sticky_roles: bool,
+    /// Roles sticky roles never gives back.
+    pub sticky_never: Vec<Id<RoleMarker>>,
+    /// Strip hoisting symbols from the front of names on join and on every name change.
+    pub auto_dehoist: bool,
 }
 
 impl Default for MiscCfg {
@@ -674,6 +680,9 @@ impl Default for MiscCfg {
             auto_warn_actions: true,
             warn_actions: vec![],
             remove_main_roles_on_timeout: true,
+            sticky_roles: false,
+            sticky_never: vec![],
+            auto_dehoist: false,
         }
     }
 }

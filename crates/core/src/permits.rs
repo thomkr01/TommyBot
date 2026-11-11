@@ -388,6 +388,16 @@ pub fn command_allowed(
     }
 }
 
+/// Every role tied to one of the guild's permits; never handed out by verification or sticky roles.
+pub async fn permit_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Vec<i64>> {
+    sqlx::query_scalar(
+        "SELECT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id WHERE p.guild_id = $1",
+    )
+    .bind(guild_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// Roles of the guild's permits that hold `perm` (staff for tickets).
 pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx::Result<Vec<i64>> {
     sqlx::query_scalar(

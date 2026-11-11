@@ -232,6 +232,8 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("Unban", "Unbans"),
 ];
 const GATE_ACTIONS: &[&str] = &["Log", "Warn", "Timeout", "Kick", "Ban"];
+/// Only a name can be fixed by renaming, so only the username filter offers Rename.
+const NAME_ACTIONS: &[&str] = &["Log", "Rename", "Warn", "Timeout", "Kick", "Ban"];
 
 /// Typed form fields per section; paths mirror the serde types validated in `api::validate`.
 /// Plain-language hover text for settings that are hard to read from their name: (section, path or
@@ -718,6 +720,7 @@ pub fn schema() -> Vec<Value> {
             GateFilter::SuspectedSpammer,
         ),
     ] {
+        let name = filter == GateFilter::UsernameFilter;
         let on = ti(fg(card, &format!("{k}.enabled"), "bool"), status);
         gate.extend([
             if filter == GateFilter::SuspectedSpammer {
@@ -728,7 +731,11 @@ pub fn schema() -> Vec<Value> {
             hp(
                 ti(
                     dv(
-                        choice(card, &format!("{k}.action"), GATE_ACTIONS),
+                        choice(
+                            card,
+                            &format!("{k}.action"),
+                            if name { NAME_ACTIONS } else { GATE_ACTIONS },
+                        ),
                         match filter.default_action() {
                             GateAction::Timeout(_) => "Timeout".to_string(),
                             a => format!("{a:?}"),
@@ -736,7 +743,11 @@ pub fn schema() -> Vec<Value> {
                     ),
                     "Trigger action",
                 ),
-                "Kick is Discord's native kick feature, Timeout its native timeout.",
+                if name {
+                    "Rename sets the nickname to Moderated Nickname. Kick is Discord's native kick feature, Timeout its native timeout."
+                } else {
+                    "Kick is Discord's native kick feature, Timeout its native timeout."
+                },
             ),
         ]);
     }
@@ -906,6 +917,15 @@ pub fn schema() -> Vec<Value> {
         ti(fg("General", "ignore_no_permit", "bool"), "Always ignore commands issued by members without any permits"),
         ti(fg("General", "ban_appeal_message", "text"), "Message shown to banned members with the appeal link"),
         ti(fg("General", "enforce_permits", "bool"), "Remove roles with dangerous permissions from members without any permits"),
+        hp(
+            ti(fg("General", "sticky_roles", "bool"), "Give members their roles back when they rejoin"),
+            "Roles with dangerous permissions, permit roles, bot roles and roles above TommyBot are never given back. A member who has to verify gets them after verifying.",
+        ),
+        ti(fg("General", "sticky_never", "roles"), "Roles never given back on rejoin"),
+        hp(
+            ti(fg("General", "auto_dehoist", "bool"), "Remove symbols from the start of names on join and on every name change"),
+            "Only the owner and extra owners are skipped.",
+        ),
         sx(
             "logging",
             hp(
