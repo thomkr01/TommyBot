@@ -865,6 +865,7 @@ pub async fn run(
                 let (d, r) =
                     reply::dm_and_act(reply::dm_first("unban"), notice("unban", user), act).await;
                 (told, _) = (d, r?);
+                crate::raiders::lifted(app, gid, Id::new(user), actor_id).await;
                 ("unban", user, None, None, format!("Unbanned <@{user}>"))
             }
             ModCmd::Hackban { user } => {
@@ -952,6 +953,7 @@ pub async fn run(
                 )
                 .await;
                 (told, _) = (d, r?);
+                crate::raiders::lifted(app, gid, Id::new(user), actor_id).await;
                 let text = format!("Released <@{user}> from quarantine");
                 ("unquarantine", user, None, None, text)
             }

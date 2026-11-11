@@ -9,6 +9,7 @@ GUILD = {"id": "100000000000000001", "name": "E2E Server", "icon": None}
 GUILD2 = {"id": "100000000000000002", "name": "Second Server", "icon": None}
 GUILDS = {g["id"]: g for g in (GUILD, GUILD2)}
 USER = {"id": "200000000000000001", "username": "e2e-owner"}
+BOT = {"id": "1", "username": "TommyBot", "bot": True}
 # code -> (user, role ids). Roles 4000000000000000xx get permits in tests/e2e/levels.sql.
 USERS = {
     "x": (USER, []),
@@ -46,8 +47,13 @@ class H(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         parts = p.split("/")
         gid = parts[2] if len(parts) > 2 and parts[1] == "guilds" else None
-        if p == "/users/@me":
+        if p == "/users/@me" and (self.headers.get("Authorization") or "").startswith("Bot"):
+            self.reply(BOT)
+        elif p == "/users/@me":
             self.reply(self.user())
+        elif p.startswith("/users/") and p.count("/") == 2 and p.split("/")[2].isdigit():
+            uid = p.split("/")[2]
+            self.reply(next((u for u, _ in USERS.values() if u["id"] == uid), {"id": uid, "username": f"user{uid[-2:]}"}))
         elif p == "/users/@me/guilds":
             self.reply(list(GUILDS.values()))
         elif p == "/applications/@me":
@@ -75,7 +81,10 @@ class H(BaseHTTPRequestHandler):
             self.reply([{"user": u, "roles": r} for u, r in USERS.values()])
         elif "/members/" in p:
             uid = parts[-1]
-            if uid in ROLES_OF:
+            if uid == BOT["id"]:
+                # the Raider List report checks how long the bot has been in the server
+                self.reply({"user": BOT, "roles": [], "joined_at": "2026-01-01T00:00:00+00:00"})
+            elif uid in ROLES_OF:
                 u = next(u for u, _ in USERS.values() if u["id"] == uid)
                 self.reply({"user": u, "roles": ROLES_OF[uid]})
             else:

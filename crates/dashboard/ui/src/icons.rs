@@ -33,7 +33,8 @@ icons!(
     "qr_code", "moderator", "case", "analytics", "note", "report", "ticket", "target", "settings", "restore",
     "history", "palette", "rescue_key", "chevron_right", "chat_shield", "announcement", "age_18",
     "word_censor",
-    "backup", "trash", "back", "channel_voice", "category", "channel_stage", "forum", "server", "verification", "nsfw_filter", "webhook", "role", "dropdown"
+    "backup", "trash", "back", "channel_voice", "category", "channel_stage", "forum", "server", "verification", "nsfw_filter", "webhook", "role", "dropdown",
+    "suspicious_account"
 );
 
 /// Every copy gets its own gradient and mask ids: with shared ids every copy paints with the

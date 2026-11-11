@@ -64,8 +64,8 @@ const getJson = (page, path) => page.evaluate(async (p) => {
 // ---------- 1. API matrix: nobody may change what their level does not allow ----------
 async function matrix(browser) {
   const g = `/api/guilds/${G}`;
-  const SECT = { misc: ['owner', false], antinuke: ['owner', true], panic: ['owner', true], whitelist: ['admin', true], catch: ['admin', true], ban_sync: ['discord', true] };
-  const sections = ['wizard', 'whitelist', 'antinuke', 'panic', 'backups', 'automod', 'filters', 'discord_automod', 'joingate', 'joinraid', 'verification', 'tickets', 'lockdown', 'catch', 'appeals', 'misc', 'logging', 'ban_sync'];
+  const SECT = { misc: ['owner', false], antinuke: ['owner', true], panic: ['owner', true], whitelist: ['admin', true], catch: ['admin', true], ban_sync: ['discord', true], raider_list: ['owner', true] };
+  const sections = ['wizard', 'whitelist', 'antinuke', 'panic', 'backups', 'automod', 'filters', 'discord_automod', 'joingate', 'joinraid', 'verification', 'tickets', 'lockdown', 'catch', 'appeals', 'misc', 'logging', 'ban_sync', 'raider_list'];
   // [method, path, body(v) or null, min level, step-up, staff perms]
   const routes = () => [
     ...sections.map((s) => ['PUT', `${g}/config/${s}`, (v, cfg) => ({ expected_version: v, value: cfg[s] ?? {} }), ...(SECT[s] || ['editor', false])]),
@@ -103,6 +103,10 @@ async function matrix(browser) {
     ['GET', `${g}/ban_sync_log`, () => undefined, 'admin', false],
     ['POST', `${g}/ban_sync/import`, () => ({ source: G2 }), 'discord', true],
     ['POST', `${g}/ban_sync/send_rest`, () => ({}), 'discord', true],
+    // Raider List: matches for trusted admins up; a report needs an owner after 2FA (the mock's 7
+    // members get a 400, which still counts as allowed)
+    ['GET', `${g}/raider_matches`, () => undefined, 'admin', false],
+    ['POST', `${g}/cases/999999/raider_report`, () => ({ category: 'raid' }), 'owner', true],
     ['POST', `${g}/cases/999999`, () => ({ reason: 'x', proof: '', active: true }), 'viewer', false, ['cases']],
     ['POST', `${g}/cases/999999/delete`, () => ({}), 'admin', false],
     // Mod stats: owners only here, since no fixture user holds View Mod Stats (trusted admins are refused)
@@ -125,6 +129,15 @@ async function matrix(browser) {
     // MCP tokens: the bot owner (the mock's app owner is x) after 2FA only
     ['POST', '/api/mcp-tokens', () => ({ name: 'e2e matrix' }), 'discord', true],
     ['POST', '/api/mcp-tokens/999999/revoke', () => ({}), 'discord', true],
+    // Raider List review: the bot owner only, every decision after 2FA (unknown ids give 404/409)
+    ['GET', '/api/raiders/queue', () => undefined, 'discord', false],
+    ['GET', '/api/raiders/listed', () => undefined, 'discord', false],
+    ['GET', '/api/raiders/appeals', () => undefined, 'discord', false],
+    ...['confirm', 'verify', 'reject', 'remove'].map((d) => ['POST', `/api/raiders/999999/${d}`, () => ({ category: 'raid', note: '' }), 'discord', true]),
+    ...['accept', 'deny'].map((d) => ['POST', `/api/raiders/appeals/999999/${d}`, () => ({}), 'discord', true]),
+    // The own appeal page: anyone signed in (not listed gives 400)
+    ['GET', '/api/raider-appeal', () => undefined, 'none', false],
+    ['POST', '/api/raider-appeal', () => ({ text: 'e2e matrix' }), 'none', false],
     // last: wipes the server's data
     ['POST', `${g}/purge`, () => ({}), 'owner', true],
   ];
@@ -161,7 +174,7 @@ async function matrix(browser) {
 }
 
 // ---------- 2. Every page as every level ----------
-const ALL_PAGES = ['overview', 'wizard', 'misc', 'permits', 'logging', 'backups', 'channel_setup', 'lockdown', 'lockdown_settings', 'appeal_list', 'appeals', 'appeal_blacklist', 'automod', 'filters', 'discord_automod', 'whitelist', 'automod_panic', 'antinuke', 'antinuke_filters', 'antinuke_panic', 'joingate', 'joingate_log', 'joinraid', 'raid_log', 'verification', 'cases', 'ban_sync', 'ban_sync_log', 'mod_stats', 'notes', 'report_list', 'report_blacklist', 'tickets', 'catch', 'revert', 'history', 'embeds', 'rescue'];
+const ALL_PAGES = ['overview', 'wizard', 'misc', 'permits', 'logging', 'backups', 'channel_setup', 'lockdown', 'lockdown_settings', 'appeal_list', 'appeals', 'appeal_blacklist', 'automod', 'filters', 'discord_automod', 'whitelist', 'automod_panic', 'antinuke', 'antinuke_filters', 'antinuke_panic', 'joingate', 'joingate_log', 'joinraid', 'raid_log', 'verification', 'cases', 'ban_sync', 'ban_sync_log', 'mod_stats', 'raider_list', 'raider_matches', 'notes', 'report_list', 'report_blacklist', 'tickets', 'catch', 'revert', 'history', 'embeds', 'rescue'];
 const PAGES = process.env.DEEP_PAGES ? process.env.DEEP_PAGES.split(',') : ALL_PAGES;
 // Buttons that only read, switch view, open a dialog or copy.
 const HARMLESS = /^(refresh|show|hide|view|preview|copy|next|back|previous|prev|close|cancel|export|download|search|filter|load more|more|less|details|open|test|check|reset view|history|\d+|‹|›|«|»|<|>|←|→)$/i;
@@ -484,7 +497,7 @@ async function contrast(browser) {
   await page.goto(`${base}/#/${G}/overview`);
   await page.waitForTimeout(800);
     for (const th of ['light', 'dark']) {
-      for (const h of ['#/update', '#/commands', '#/']) {
+      for (const h of ['#/update', '#/commands', '#/raiders', '#/raider-appeal', '#/']) {
         await page.goto(`${base}/${h}`);
         await page.waitForTimeout(700);
         await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), th);
@@ -564,7 +577,7 @@ async function overflow(browser) {
   stepUp(USERS.x[0], true);
   for (const [vw, vh] of [[1400, 900], [1024, 800], [390, 844]]) {
     const { ctx, page } = await login(browser, 'x', { viewport: { width: vw, height: vh } });
-    for (const h of ['#/', '#/update', '#/commands', ...PAGES.map((p) => `#/${G}/${p}`)]) {
+    for (const h of ['#/', '#/update', '#/commands', '#/raiders', '#/raider-appeal', ...PAGES.map((p) => `#/${G}/${p}`)]) {
       await page.goto(`${base}/${h}`);
       await page.waitForTimeout(800);
       // open collapsed parts so their text is measured too

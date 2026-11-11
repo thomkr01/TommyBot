@@ -499,6 +499,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                 && !crate::settings::handle(app, &i.0).await?
                 && !crate::whitelist::handle(app, &i.0).await?
                 && !crate::bansync::handle(app, &i.0).await?
+                && !crate::raiders::handle(app, &i.0).await?
             {
                 slash::handle(app, &i.0).await?
             }
@@ -508,6 +509,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             let nuke = antinuke::on_audit(app, &e.0).await;
             let ban = crate::bansync::on_ban(app, &e.0).await;
             let unban = crate::bansync::on_unban(app, &e.0).await;
+            let allow = crate::raiders::on_unban(app, &e.0).await;
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
             }
@@ -515,7 +517,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Err(err) = crate::modstats::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "recording a mod action failed");
             }
-            nuke.and(ban).and(unban)?
+            nuke.and(ban).and(unban).and(allow)?
         }
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,

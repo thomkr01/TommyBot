@@ -35,6 +35,7 @@ use crate::{
 
 #[path = "bansync_actions.rs"]
 mod actions;
+pub(crate) use actions::answer_click;
 use actions::paused;
 pub use actions::{handle, import_job, panel_text, send_rest_job};
 
@@ -137,7 +138,7 @@ async fn stopped(app: &App, gid: Id<GuildMarker>, b: Behind, at: Option<i64>) ->
 }
 
 /// Why a user is never banned by a copy in this server, if they are not.
-fn exempt(
+pub(crate) fn exempt(
     level: &Level,
     user: Id<UserMarker>,
     me: Id<UserMarker>,
@@ -159,7 +160,7 @@ fn exempt(
 }
 
 /// User text for an embed line: one line, markdown and mentions shown as typed.
-fn md(s: &str) -> String {
+pub(crate) fn md(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -188,11 +189,11 @@ fn remaining(expires: Option<i64>) -> Result<Option<i64>, &'static str> {
     }
 }
 
-fn id_of(p: &Value, k: &str) -> Option<u64> {
+pub(crate) fn id_of(p: &Value, k: &str) -> Option<u64> {
     p[k].as_u64().or_else(|| p[k].as_str()?.parse().ok())
 }
 
-fn need(p: &Value, k: &str) -> Result<u64> {
+pub(crate) fn need(p: &Value, k: &str) -> Result<u64> {
     id_of(p, k).with_context(|| format!("job payload has no {k}"))
 }
 
@@ -361,7 +362,7 @@ async fn temp_end(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Resu
 }
 
 /// The owner from Discord, not the 5-minute cache; None when the bot cannot see the server.
-async fn live_owner(app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<UserMarker>>> {
+pub(crate) async fn live_owner(app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<UserMarker>>> {
     match app.http.guild(gid).await {
         Ok(r) => Ok(Some(r.model().await?.owner_id)),
         Err(e) if http_err::no_access(&e) => Ok(None),
@@ -563,7 +564,15 @@ pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()>
         return Ok(());
     }
     // Only a 404 means the ban was lifted or reverted in the hold; other errors retry the job.
-    if http_err::ban(&app.http, src, user).await?.is_none() {
+    let Some(ban) = http_err::ban(&app.http, src, user).await? else {
+        return Ok(());
+    };
+    // A Raider List ban stays in its server: every server decides through its own Raider List
+    // setting, which sharing would go around.
+    if ban
+        .reason
+        .is_some_and(|r| r.starts_with(crate::raiders::PREFIX))
+    {
         return Ok(());
     }
     let at = p["at"].as_i64().unwrap_or_else(now_secs);
@@ -1065,4 +1074,4 @@ async fn cancel(app: &App, gid: Id<GuildMarker>, why: &str) -> Result<()> {
 
 #[cfg(test)]
 #[path = "bansync_tests.rs"]
-mod tests;
+pub(crate) mod tests;

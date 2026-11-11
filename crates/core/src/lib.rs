@@ -9,6 +9,7 @@ pub mod log;
 pub mod models;
 pub mod notes;
 pub mod permits;
+pub mod raiders;
 pub mod roles;
 pub mod sections;
 pub mod warn;

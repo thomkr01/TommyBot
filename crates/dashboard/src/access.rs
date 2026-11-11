@@ -18,7 +18,7 @@ pub fn write_bar(section: &str) -> (Level, bool) {
     // Trusted Admins cannot change Miscellaneous or Anti-Nuke (and Panic).
     match section {
         "misc" => (Level::Owner, false),
-        "antinuke" | "panic" | "ban_sync" => (Level::Owner, true),
+        "antinuke" | "panic" | "ban_sync" | "raider_list" => (Level::Owner, true),
         s if SENSITIVE.contains(&s) => (Level::Admin, true),
         _ => (Level::Editor, false),
     }
@@ -47,6 +47,7 @@ pub const SECTIONS: &[&str] = &[
     "misc",
     "logging",
     "ban_sync",
+    "raider_list",
 ];
 
 /// What a dashboard page shows the user: everything, a greyed-out read-only view, or nothing.
@@ -90,6 +91,8 @@ pub const PAGES: &[&str] = &[
     "ban_sync",
     "ban_sync_log",
     "mod_stats",
+    "raider_list",
+    "raider_matches",
     "notes",
     "report_list",
     "report_blacklist",
@@ -124,6 +127,9 @@ pub fn page(page: &str, l: Level, perms: &[String]) -> PageAccess {
         // Trusted admins and extra owners may look (`api::page_access` makes it Read for extra owners).
         "ban_sync" | "ban_sync_log" if l < Level::Admin => Hidden,
         "ban_sync_log" => Full,
+        // Trusted admins see the settings read-only (`write_bar`) and the matches in full.
+        "raider_list" | "raider_matches" if l < Level::Admin => Hidden,
+        "raider_matches" => Full,
         "revert" if l < Level::Editor => Hidden,
         // Pages whose buttons are mostly for reading; the server refuses the few writes.
         "overview" | "history" | "backups" => Full,
@@ -227,6 +233,9 @@ mod tests {
         assert_eq!(page("ban_sync", Level::Editor, &[]), PageAccess::Hidden);
         assert_eq!(page("ban_sync", Level::Admin, &[]), PageAccess::Read);
         assert_eq!(page("ban_sync_log", Level::Admin, &[]), PageAccess::Full);
+        assert_eq!(page("raider_list", Level::Editor, &[]), PageAccess::Hidden);
+        assert_eq!(page("raider_list", Level::Admin, &[]), PageAccess::Read);
+        assert_eq!(page("raider_matches", Level::Admin, &[]), PageAccess::Full);
         assert!(PAGES
             .iter()
             .all(|s| page(s, Level::Owner, &[]) == PageAccess::Full));
@@ -240,7 +249,10 @@ mod tests {
         for s in SECTIONS {
             let (min, step_up) = write_bar(s);
             assert_eq!(step_up, SENSITIVE.contains(s));
-            let owner_only = matches!(*s, "misc" | "antinuke" | "panic" | "ban_sync");
+            let owner_only = matches!(
+                *s,
+                "misc" | "antinuke" | "panic" | "ban_sync" | "raider_list"
+            );
             let want = match (owner_only, step_up) {
                 (true, _) => Level::Owner,
                 (_, true) => Level::Admin,

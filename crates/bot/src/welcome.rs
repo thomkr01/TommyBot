@@ -107,6 +107,7 @@ pub async fn purge_left(app: std::sync::Arc<App>) {
         if let Err(e) = old {
             tracing::warn!(?e, "pruning old mod stats failed");
         }
+        crate::raiders::sweep(&app).await;
     }
 }
 

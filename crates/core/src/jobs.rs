@@ -36,11 +36,12 @@ pub async fn enqueue<'e>(
 /// Jobs that fail this many times are dropped by the scheduler.
 pub const MAX_ATTEMPTS: i32 = 5;
 /// Kinds that can run for minutes; a separate worker takes them so they never delay unbans or unlocks.
-pub const HEAVY: [&str; 4] = [
+pub const HEAVY: [&str; 5] = [
     "backup_load",
     "panic_start",
     "nuke_revert",
     "ban_sync_import",
+    "raider_scan",
 ];
 const LEASE_SECS: i32 = 60;
 const HEAVY_LEASE_SECS: i32 = 900;

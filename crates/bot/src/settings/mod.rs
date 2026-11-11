@@ -625,7 +625,7 @@ pub async fn save(
     .execute(&mut *tx)
     .await?;
     sqlx::query("select pg_notify('config_changed', $1)")
-        .bind(guild.to_string())
+        .bind(format!("{guild}:{}", version + 1))
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
