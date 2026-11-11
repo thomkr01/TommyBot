@@ -240,18 +240,21 @@ pub fn CaseList(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
 /// "Report to Raider List": a category and a button. The report waits for the bot owner's review.
 fn report(guild: String, no: i64, msg: Msg, need: RwSignal<bool>) -> impl IntoView {
     let cat = RwSignal::new("raid".to_string());
+    let reason = RwSignal::new(String::new());
     let path = StoredValue::new(format!("/api/guilds/{guild}/cases/{no}/raider_report"));
     let go = move |_| {
         if !confirm("Report this user to the Raider List? The bot owner reviews every report before other servers use it.") {
             return;
         }
-        let (path, body) = (path.get_value(), json!({"category": cat.get_untracked()}));
+        let body = json!({"category": cat.get_untracked(), "reason": reason.get_untracked()});
+        let path = path.get_value();
         run_act(async move { api("POST", &path, Some(body)).await }, msg, need, move |_| msg.ok("Reported. The bot owner reviews it."));
     };
     view! {
         <select aria-label="Raider List category" on:change=move |e| cat.set(event_target_value(&e))>
             {["raid", "nuke", "scam", "spam"].map(|c| view! { <option value=c prop:selected=move || cat.get() == c>{c}</option> }).to_vec()}
         </select>
+        <input placeholder="Reason (only the bot owner sees it)" aria-label="Raider List report reason" maxlength="400" prop:value=reason on:input=move |e| reason.set(event_target_value(&e)) />
         <button class="ghost" on:click=go>"Report to Raider List"</button>
     }
 }

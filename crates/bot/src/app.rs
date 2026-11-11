@@ -319,11 +319,10 @@ impl App {
             match l.try_recv().await? {
                 Some(n) => {
                     if let Ok(g) = n.payload().parse::<u64>() {
-                        let old = self.cfgs.write().unwrap().remove(&g);
+                        self.cfgs.write().unwrap().remove(&g);
                         tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
                         if let Some(gid) = Id::new_checked(g) {
-                            let was_on = old.map(|c| c.raider_list.enabled);
-                            tokio::spawn(on_saved(self.clone(), gid, was_on));
+                            tokio::spawn(on_saved(self.clone(), gid));
                         }
                     }
                 }
@@ -336,10 +335,9 @@ impl App {
 }
 
 /// Setup that follows from a saved setting: Tickets turned on gets its category, a catch channel
-/// gets its warning, and the Raider List turned on scans the members (`was_on`: before the save,
-/// if the config was cached).
-async fn on_saved(app: Arc<App>, gid: Id<GuildMarker>, was_on: Option<bool>) {
-    if let Err(e) = crate::raiders::on_saved(&app, gid, was_on).await {
+/// gets its warning, and the Raider List turned on scans the members.
+async fn on_saved(app: Arc<App>, gid: Id<GuildMarker>) {
+    if let Err(e) = crate::raiders::on_saved(&app, gid).await {
         tracing::warn!(?e, %gid, "queueing the Raider List scan failed");
     }
     if let Err(e) = crate::tickets::ensure_category(&app, gid).await {

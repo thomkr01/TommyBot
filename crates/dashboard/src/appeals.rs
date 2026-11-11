@@ -522,6 +522,10 @@ async fn accept_appeal(
     };
     sqlx::query("insert into action_log (guild_id, actor_id, action, target_id, inverse) values ($1,$2,$3,$4,$5)")
         .bind(guild).bind(s.user_id).bind(if kind == "ban" { "unban" } else { "untimeout" }).bind(user).bind(inverse).execute(&mut *tx).await?;
+    // The dashboard unbans as the bot, so the bot cannot tell staff lifted a Raider List ban.
+    if kind == "ban" {
+        tommybot_core::raiders::allow(&mut *tx, guild, user, s.user_id).await?;
+    }
     Ok(())
 }
 

@@ -102,6 +102,9 @@ async fn decide(
                 "Could not lift the punishment, it may already be lifted".into(),
             ));
         }
+        if kind == "ban" {
+            crate::raiders::lifted(app, gid, user_id, actor_id).await;
+        }
     }
     let status = match act {
         "accept" => "accepted",

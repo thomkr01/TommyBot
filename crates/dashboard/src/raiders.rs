@@ -16,7 +16,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use tommybot_core::{jobs, limits};
+use tommybot_core::{jobs, limits, raiders};
 
 type At = chrono::DateTime<chrono::Utc>;
 
@@ -72,9 +72,9 @@ fn id_time(id: i64) -> Option<String> {
 /// The user (name, avatar, account age), every shown evidence row with its server's name and size,
 /// and the number of distinct server owners, for each of `users`.
 async fn describe(st: &AppState, users: &[i64]) -> Result<HashMap<i64, Value>, ApiError> {
-    type Ev = (i64, i64, i64, String, String, Value, At);
+    type Ev = (i64, i64, i64, String, String, Value, At, Option<String>);
     let rows: Vec<Ev> = sqlx::query_as(
-        "select user_id, source_guild, source_owner, kind, ref, detail, created_at from (
+        "select user_id, source_guild, source_owner, kind, ref, detail, created_at, note from (
             select *, row_number() over (partition by user_id order by created_at desc, id desc) n
             from raider_evidence where user_id = any($1)) e
          where n <= $2 order by user_id, created_at desc, id desc",
@@ -107,10 +107,11 @@ async fn describe(st: &AppState, users: &[i64]) -> Result<HashMap<i64, Value>, A
         let evidence: Vec<Value> = rows
             .iter()
             .filter(|r| r.0 == u)
-            .map(|(_, g, _, kind, r, detail, at)| {
+            .map(|(_, g, _, kind, r, detail, at, note)| {
                 let (name, members) = &servers[g];
+                // The reporter's raw words: the page shows them as text, never as HTML.
                 json!({"server_id": g.to_string(), "server": name, "members": members, "kind": kind,
-                    "case_no": detail["case_no"], "ref": r, "detail": detail, "at": at})
+                    "case_no": detail["case_no"], "ref": r, "detail": detail, "at": at, "note": note})
             })
             .collect();
         let (owners, total) = counts
@@ -246,6 +247,14 @@ fn job(user: i64) -> Value {
     json!({"user": user.to_string()})
 }
 
+/// The bot DMs `to` this text (`raider_notify`), queued with the decision so it is sent only if the
+/// decision commits.
+async fn notify(tx: &mut sqlx::PgConnection, to: i64, text: String) -> Result<(), ApiError> {
+    let p = json!({"user": to.to_string(), "text": text});
+    jobs::enqueue(&mut *tx, 0, "raider_notify", p, now()).await?;
+    Ok(())
+}
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -317,7 +326,7 @@ async fn decide(
             sqlx::query(
                 "update raiders set status = 'confirmed', verified = true, category = $2, public_note = $3,
                     reviewed_by = $4, reviewed_at = now(), updated_at = now(),
-                    expires_at = case when $2 = 'scam' then coalesce(
+                    expires_at = case when $2 = 'scam' then greatest(
                         (select max(created_at) from raider_evidence where user_id = $1), now()) + make_interval(days => $5) end
                  where user_id = $1",
             )
@@ -356,6 +365,14 @@ async fn decide(
         _ => return Err(ApiError::NotFound),
     };
     review(&mut tx, s.user_id, user, Some(&from), to, &note).await?;
+    // The bot owner's log of the decisions that change who is enforced.
+    if matches!(what.as_str(), "confirm" | "remove") {
+        let text = format!(
+            "Raider List log: <@{user}> ({user}) is now {to}, by <@{}>.",
+            s.user_id
+        );
+        notify(&mut tx, s.user_id, text).await?;
+    }
     tx.commit().await?;
     Ok(Json(json!({"ok": true, "status": to})))
 }
@@ -412,6 +429,19 @@ async fn appeal_decide(
     };
     let note = format!("appeal {to_appeal}");
     review(&mut tx, s.user_id, user, from.as_deref(), &to, &note).await?;
+    let result = if to_appeal == "accepted" {
+        "Your Raider List appeal was accepted: you are off the list, and what it did in servers is being lifted.".to_string()
+    } else {
+        format!(
+            "Your Raider List appeal was denied. You can appeal again in {APPEAL_WAIT_DAYS} days."
+        )
+    };
+    notify(&mut tx, user, result).await?;
+    let log = format!(
+        "Raider List log: the appeal of <@{user}> ({user}) was {to_appeal}, by <@{}>.",
+        s.user_id
+    );
+    notify(&mut tx, s.user_id, log).await?;
     tx.commit().await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -501,11 +531,13 @@ async fn my_appeal(State(st): State<AppState>, s: Sess, Json(b): Json<Appeal>) -
 #[derive(Deserialize)]
 struct Report {
     category: String,
+    /// The reporter's own words, shown to the bot owner only.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
-/// Adds a report to the user's entry, which stays (or becomes) pending: only the bot owner confirms a
-/// report. Needs a ban, kick or quarantine case here, a server with 100 members that has had the bot
-/// for 7 days, and at most 10 reports per Discord owner per day across all their servers.
+/// Adds a report to the user's entry through the same checks as `t!raider report`
+/// (tommybot_core::raiders), so both refuse the same reports. A report never confirms.
 async fn report(
     State(st): State<AppState>,
     s: Sess,
@@ -525,94 +557,43 @@ async fn report(
     let Some((kind, user)) = case else {
         return Err(ApiError::NotFound);
     };
-    if !matches!(kind.as_str(), "ban" | "kick" | "quarantine") {
-        return Err(bad("only ban, kick and quarantine cases can be reported"));
-    }
-    let owner = st.discord.guild_owner(guild).await?;
-    let staff: bool = sqlx::query_scalar(
-        "select exists(select 1 from extra_owners where guild_id = $1 and user_id = $2)
-            or exists(select 1 from trusted_admins where guild_id = $1 and user_id = $2)",
-    )
-    .bind(guild)
-    .bind(user)
-    .fetch_one(&st.db)
-    .await?;
-    let u = user.to_string();
-    if staff || u == owner || u == st.discord.bot_owner().await? || u == st.discord.bot_id().await?
-    {
-        return Err(bad(
-            "the server's owners, trusted admins, the bot owner and TommyBot cannot be reported",
-        ));
-    }
+    let id = |t: String| {
+        t.parse::<i64>()
+            .map_err(|_| bad("an id from Discord is unknown"))
+    };
+    let owner = id(st.discord.guild_owner(guild).await?)?;
     let members = st.discord.guild_size(guild).await?.map_or(0, |g| g.1);
-    if members < limits::RAIDER_MIN_MEMBERS {
-        return Err(bad(format!(
-            "a server needs at least {} members to report",
-            limits::RAIDER_MIN_MEMBERS
-        )));
-    }
-    let joined = st
+    let days = st
         .discord
         .bot_joined(guild)
         .await?
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok());
-    let since = chrono::Utc::now() - chrono::Duration::days(limits::RAIDER_MIN_DAYS);
-    if joined.is_none_or(|t| t > since) {
-        return Err(bad(format!(
-            "TommyBot needs to be in the server for {} days before it can report",
-            limits::RAIDER_MIN_DAYS
-        )));
-    }
-    let owner: i64 = owner
-        .parse()
-        .map_err(|_| bad("this server's owner is unknown"))?;
-    let mut tx = st.db.begin().await?;
-    // One owner's reports are counted one at a time, so parallel reports cannot pass the cap.
-    sqlx::query("select pg_advisory_xact_lock($1)")
-        .bind(owner)
-        .execute(&mut *tx)
-        .await?;
-    let today: i64 = sqlx::query_scalar(
-        "select count(*) from raider_evidence
-         where source_owner = $1 and kind = 'report' and created_at > now() - interval '1 day'",
-    )
-    .bind(owner)
-    .fetch_one(&mut *tx)
-    .await?;
-    if today >= limits::RAIDER_REPORTS_DAY {
-        return Err(bad(format!(
-            "the owner of this server already sent {} reports in the last 24 hours",
-            limits::RAIDER_REPORTS_DAY
-        )));
-    }
-    let added: Option<i64> = sqlx::query_scalar(
-        "insert into raider_evidence (user_id, source_guild, source_owner, kind, ref, detail, reporter_id)
-         values ($1, $2, $3, 'report', $4, $5, $6) on conflict do nothing returning id",
-    )
-    .bind(user)
-    .bind(guild)
-    .bind(owner)
-    .bind(no.to_string())
-    .bind(json!({"case_no": no, "case_kind": kind}))
-    .bind(s.user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if added.is_none() {
-        return Err(bad("this case was already reported"));
-    }
-    // A report never confirms: a new entry is pending, and a rejected or removed one is pending again.
-    sqlx::query(
-        "insert into raiders (user_id, status, category) values ($1, 'pending', $2)
-         on conflict (user_id) do update set
-            verified = raiders.verified and raiders.status not in ('rejected', 'removed'),
-            status = case when raiders.status in ('rejected', 'removed') then 'pending' else raiders.status end,
-            updated_at = now()",
-    )
-    .bind(user)
-    .bind(&b.category)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+        .map_or(0, |t| (chrono::Utc::now() - t.to_utc()).num_days());
+    let roles: Vec<i64> = st
+        .discord
+        .member(guild, &user.to_string())
+        .await?
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r.parse().ok())
+        .collect();
+    let r = raiders::Report {
+        guild,
+        owner,
+        user,
+        reporter: s.user_id,
+        case: Some((no, kind.as_str())),
+        category: &b.category,
+        reason: b.reason.as_deref(),
+        members,
+        days_with_bot: days,
+        roles: &roles,
+        protected: [
+            id(st.discord.bot_id().await?)?,
+            id(st.discord.bot_owner().await?)?,
+        ],
+    };
+    raiders::report(&st.db, &r).await?.map_err(bad)?;
     let (_, config) = store::current(&st.db, guild).await?;
     let text = format!(
         "{} (<@{}>) reported <@{user}> (case #{no}) to the Raider List as {}",
@@ -839,7 +820,10 @@ mod tests {
                 .0,
             400
         );
-        let (code, r) = post(report(g1, 1), server_owner, raid.clone()).await;
+        let long = json!({"category": "raid", "reason": "r".repeat(401)});
+        assert_eq!(post(report(g1, 1), server_owner, long).await.0, 400);
+        let why = json!({"category": "raid", "reason": "<b>raided</b> us"});
+        let (code, r) = post(report(g1, 1), server_owner, why).await;
         assert_eq!(code, 200, "{r}");
         assert_eq!(status(users[0]).await.0, "pending");
         assert_eq!(
@@ -883,16 +867,27 @@ mod tests {
             (Some(1), Some(150))
         );
         assert_eq!(e["username"], format!("u{}", users[0]));
+        // The reason is kept raw for the bot owner; the page shows it as text.
+        assert_eq!(ev["note"].as_str(), Some("<b>raided</b> us"));
 
         // Confirm: status, review row and the bot's job together. Scam listings expire.
         let confirm = format!("/api/raiders/{}/confirm", users[0]);
         let long = json!({"category": "raid", "note": "x".repeat(201)});
         assert_eq!(post(confirm.clone(), owner, long).await.0, 400);
+        exec(
+            "update raider_evidence set created_at = now() - interval '30 days' where user_id = $1 and $2 = 0",
+            users[0],
+            0,
+        )
+        .await;
         let scam = json!({"category": "scam", "note": "Phishing links"});
         let (code, r) = post(confirm.clone(), owner, scam).await;
         assert_eq!(code, 200, "{r}");
         let (now_status, verified, expires) = status(users[0]).await;
         assert!(now_status == "confirmed" && verified && expires.is_some());
+        // R5: 14 days from now, not from old evidence.
+        let left = expires.unwrap() - chrono::Utc::now();
+        assert!(left > chrono::Duration::days(13), "{left}");
         assert_eq!(jobs_for(users[0]).await, [(0, "raider_check".to_string())]);
         assert_eq!(
             post(confirm, owner, raid.clone()).await.0,
@@ -995,9 +990,27 @@ mod tests {
         let accept = format!("/api/raiders/appeals/{id}/accept");
         assert_eq!(post(accept, owner, json!({})).await.0, 200);
         assert_eq!(status(users[0]).await.0, "removed");
+        // R4: the user hears each appeal result, and the lift goes with the acceptance.
+        let kinds: Vec<String> = jobs_for(users[0]).await.into_iter().map(|j| j.1).collect();
         assert_eq!(
-            jobs_for(users[0]).await.last().unwrap(),
-            &(0, "raider_lift".to_string())
+            kinds,
+            [
+                "raider_check",
+                "raider_notify",
+                "raider_lift",
+                "raider_notify"
+            ]
+        );
+        let told: Vec<String> = sqlx::query_scalar(
+            "select payload->>'text' from scheduled_jobs where payload->>'user' = $1 and kind = 'raider_notify' order by id",
+        )
+        .bind(uid0.clone())
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert!(
+            told[0].contains("denied") && told[1].contains("accepted"),
+            "{told:?}"
         );
         // Remove queues a lift too.
         let remove = format!("/api/raiders/{}/remove", users[1]);
@@ -1010,6 +1023,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(reviews, 6, "confirm, verify, reject, deny, accept, remove");
+        // The bot owner's log: confirm, deny, accept and remove.
+        let logged = jobs_for(owner).await;
+        assert_eq!(logged.len(), 4, "{logged:?}");
+        assert!(logged
+            .iter()
+            .all(|j| j == &(0, "raider_notify".to_string())));
 
         // Matches: this server's actions with only the category and the public note.
         exec(
@@ -1035,6 +1054,12 @@ mod tests {
         ] {
             sqlx::query(sql).bind(&users).execute(&db).await.unwrap();
         }
+        exec(
+            "delete from scheduled_jobs where payload->>'user' = $1::text and $2 = 0",
+            owner,
+            0,
+        )
+        .await;
         for g in [g1, g2, g3] {
             exec("delete from cases where guild_id = $1 and $2 = 0", g, 0).await;
             exec(

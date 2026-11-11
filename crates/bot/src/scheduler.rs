@@ -189,6 +189,9 @@ async fn round(app: &App, heavy: bool) {
                             if job.kind == "ban_sync_copy" {
                                 crate::bansync::copy_gave_up(app, &job, &e).await;
                             }
+                            if job.kind == "raider_lift" {
+                                crate::raiders::lift_gave_up(app, &job, &e).await;
+                            }
                         }
                         last
                     }

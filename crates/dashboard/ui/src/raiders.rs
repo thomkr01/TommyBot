@@ -74,7 +74,7 @@ fn evidence(e: &Value) -> impl IntoView {
             <td>{s(&ev["kind"]).replace('_', " ")}</td>
             <td>{when(&ev["at"])}</td>
             <td>{ev["case_no"].as_i64().map(|n| format!("#{n}"))}</td>
-            <td><code>{ev["detail"].to_string()}</code></td>
+            <td><code>{ev["detail"].to_string()}</code>{ev["note"].as_str().map(|n| view! { <div>{format!("Reason: {n}")}</div> })}</td>
         </tr> }).collect_view()}</tbody>
     </table> }
 }

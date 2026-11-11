@@ -106,6 +106,12 @@ pub(crate) struct Mock {
     pub(crate) fail_put: bool,
     pub(crate) fail_put_5xx: bool,
     pub(crate) fail_member: bool,
+    /// Member counts by guild; 500 when not set.
+    pub(crate) sizes: HashMap<u64, u64>,
+    /// Guilds where the bot (ME) joined only now.
+    pub(crate) new_bot: Vec<u64>,
+    /// User ids that are bot accounts.
+    pub(crate) bots: Vec<u64>,
     pub(crate) log: Vec<String>,
 }
 
@@ -131,9 +137,10 @@ fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into()
 }
 
-fn guild(id: &str, owner: u64) -> Value {
+fn guild(id: &str, owner: u64, members: u64) -> Value {
     json!({
         "id": id, "name": format!("Server {id}"), "owner_id": owner.to_string(), "afk_timeout": 300,
+        "approximate_member_count": members,
         "default_message_notifications": 0, "emojis": [], "explicit_content_filter": 0, "features": [],
         "large": false, "mfa_level": 0, "nsfw_level": 0, "preferred_locale": "en-US",
         "premium_progress_bar_enabled": false, "roles": [], "stickers": [], "stage_instances": [],
@@ -188,6 +195,11 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         },
         ("GET", ["guilds", _, "members", _]) if m.fail_member => err(500, 0),
         ("GET", ["guilds", g, "members", u]) => match m.members.get(&(n(g), n(u))) {
+            Some(r) if n(u) == ME && m.new_bot.contains(&n(g)) => {
+                let mut j = member(u, r);
+                j["joined_at"] = json!("2099-01-01T00:00:00.000000+00:00");
+                (200, j.to_string())
+            }
             Some(r) => (200, member(u, r).to_string()),
             None => err(404, 10007),
         },
@@ -207,9 +219,17 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             None => err(404, 10007),
         },
         ("GET", ["guilds", g]) => match m.owners.get(&n(g)) {
-            Some(o) => (200, guild(g, *o).to_string()),
+            Some(o) => {
+                let size = m.sizes.get(&n(g)).copied().unwrap_or(500);
+                (200, guild(g, *o, size).to_string())
+            }
             None => err(404, 10004),
         },
+        ("GET", ["users", u]) => {
+            let mut j = user(u);
+            j["bot"] = json!(m.bots.iter().any(|b| b.to_string() == *u));
+            (200, j.to_string())
+        }
         ("POST", ["users", "@me", "channels"]) => (200, json!({"id": "77", "type": 1}).to_string()),
         ("POST", ["channels", _, "messages"]) => (200, "{}".into()),
         _ => err(404, 10004),
