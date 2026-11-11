@@ -5,6 +5,8 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- Appeals: deciding an appeal whose log message has no embed no longer crashes the dashboard request, so the member still gets the verdict DM. A long reply no longer makes Discord refuse the log update (which left the buttons on). The dashboard embed editor no longer breaks on a stored embed whose image is plain text. (#PR)
+- MCP tokens, open MCP changes and message reports can no longer pass their limits when several requests arrive at once. (#PR)
 - Dashboard 2FA: a setup request racing your own confirm can no longer replace your confirmed authenticator secret, and a confirm only confirms the secret it checked. (#181)
 - Max heat must be at least 1 and heat degradation between 0.1% and 99% per second, on the dashboard, in the `heat` panel and through MCP (panic mode's heat decay too). The `heat` panel took any number, so a degradation of 100% or more broke every heat value and 0 kept heat from ever cooling. The bot also pulls a stored value inside these ranges.
 - The verification Start button checks the same names as Join Gate (cured username and display name). A member Join Gate found suspicious by name could skip the captcha in "suspicious only" mode. It also checks Discord's spammer flag.
