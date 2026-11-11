@@ -129,7 +129,7 @@ sqlx stores a checksum, so editing an applied migration breaks every existing da
 
 **A new migration file was not picked up.** (MCP views, migration 2800)
 `sqlx::migrate!` embeds the migrations at compile time, and adding a file does not make cargo rebuild `tommybot-core`. Tests then failed with "relation mcp_... does not exist".
-*Avoid:* after adding a migration, `touch crates/core/src/db.rs` before testing. CI builds clean and is not affected.
+*Avoid:* after adding a migration, `touch crates/core/src/db.rs` before testing. CI builds clean and is not affected. The same happened after `git merge` brought in a changed `RaidCfg` (MCP PR 4): two schema tests failed against the old build until `touch crates/automod/src/join.rs`. If a test fails right after a merge on code you did not touch, touch the changed crate's file and run it again before you debug.
 
 **Parallel worktrees shared one target and one DB.** (11-01)
 Cargo mixed crates from different worktrees, and one branch's migration broke the others' tests. Four targets (about 7 GB each) filled the disk.
@@ -154,6 +154,9 @@ See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the t
 - **A dropdown option's `selected=` stops working once the user has picked** (#158). The attribute only sets the default; after a pick the browser keeps the user's choice. Cancel reset the setting and the preview, but the dropdown still showed the old pick. *Avoid:* use `prop:selected=` (the live property) on every `<option>`, and `prop:value`/`prop:checked` on inputs. Fixed in all 16 options in `form.rs`, `embeds.rs` and `lockdown.rs`; no plain `selected=`/`checked=`/`value=` bindings are left. The e2e sweep picks a channel on Logging, presses Cancel and checks the dropdown; it waits for the page to load first, because a pick made before the config arrives is overwritten by it.
 - **Role names from Discord already start with `@` for @everyone** (#158). The dashboard added its own `@` and showed `@@everyone`. *Avoid:* trim a leading `@` before adding one. Fixed in `form::items` (every role list and picker) and the `md.rs` role mentions; `recovery.rs` and the wizard's ticket pings already did. The bot itself never writes a role name after `@`.
 - **The toast looked like two pieces.** A coloured `border-left` on a rounded box curves at the corners, and the absolutely placed progress strip starts inside that border, so the two met as a hook. *Avoid:* one colour mark per box. Put strips and edges inside an `overflow:hidden` box with `left:0; right:0` and no border on that side. Also `cargo fmt` in `crates/dashboard/ui` reformats unrelated files; revert them before committing.
+
+- **The 2FA check ran before the DM code.** (MCP writes, PR 4, caught in review) `confirm` checked the TOTP code first, so anyone holding an MCP token could send wrong TOTP codes and lock the owner out of dashboard 2FA for 10 minutes. *Avoid:* when a request carries several secrets, check the one the caller must already hold (the DM code) first, and touch shared lockout counters only after it passes.
+- **A body extractor answers before the handler's own check.** (MCP writes, PR 4) The "not through the tunnel" check sat inside the handler, after `Json(..)`, so a request without a JSON body got 415 instead of 404 and the route showed it exists. *Avoid:* a check that must refuse before anything else is a `route_layer` middleware, not the first line of the handler.
 
 ## 7. Build and deploy
 
@@ -181,4 +184,5 @@ Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` on
 - **The live script shares the bot's token** and its rate limits. Cache channel and role lookups and wait longer instead of polling hard (#142).
 - **Make scenarios clean up after themselves** so they can run again. The old nuke scenario kicked the attacker bot every run (#142).
 - **Cloud env vars are read at session start.** A variable added during a session needs a new session.
+- **Two DB tests used the same guild id.** (MCP writes, PR 4) Both took `9_300_000_000 + pid`, ran at the same time in one process and saw each other's config versions, so `history_keeps_newest_200_versions` failed now and then. *Avoid:* give each DB test its own base (`grep -rn '_000_000_000 +' crates/` before picking one) and delete its rows at the end.
 - **`tests/e2e/run.sh` needs root Postgres, trunk and Playwright**; the gateway is not covered by the Discord mock.

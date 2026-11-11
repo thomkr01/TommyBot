@@ -113,6 +113,8 @@ table.permits { width:100%; max-width:900px; margin:0 auto; border-collapse:coll
 [data-theme=light] .tip .bubble { background:rgba(235,235,235,.95); color:#1f2937; box-shadow:0 10px 30px #0002; }
 .tip:hover .bubble, .tip:focus .bubble { opacity:1; transform:translate(calc(-50% + var(--dx, 0px)), 0); }
 .tip.below .bubble { bottom:auto; top:calc(100% + 10px); }
+/* A hidden card still takes layout room: near the right edge on a phone it made the page scroll sideways. clip (not hidden) keeps vertical overflow and sticky parts working; place() keeps a shown card inside main anyway. */
+main { overflow-x:clip; }
 .offnote { display:flex; align-items:center; margin:10px 0 0; color:var(--muted); font-size:13px; }
 .offnote .tip { margin:0 8px 0 0; }
 .stack.narrow { max-width:36rem; }

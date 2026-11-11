@@ -16,6 +16,7 @@ mod permits;
 mod records;
 mod recovery;
 mod search;
+mod mcp;
 mod update;
 mod wizard;
 use appeals::{AppealForm, AppealList, Blacklist};
@@ -33,6 +34,7 @@ use commands::Commands;
 use pages::{Catch, Logging, LostControl, PurgeData, Rescue, Revert, Score, Tickets, Wizard};
 use recovery::{Backups, Panic};
 use search::{Search, SearchBox};
+use mcp::McpTokens;
 use update::Update;
 
 /// Sidebar with only with the pages TommyBot has.
@@ -599,7 +601,7 @@ fn App() -> impl IntoView {
                 <button class="ghost" aria-label="toggle light and dark theme" on:click=|_| toggle_theme()>{icons::icon("moon")}</button>
                 <details>
                     <summary aria-label="account menu">{move || me.get().and_then(|m| m["username"].as_str().and_then(|u| u.chars().next()).map(|c| c.to_uppercase().to_string())).unwrap_or_default()}</summary>
-                    <div><a href="#/">"Servers"</a><a class="m-only" href="#/commands">"Commands"</a><Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="m-only" href="#/update">"Update"</a></Show><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
+                    <div><a href="#/">"Servers"</a><a class="m-only" href="#/commands">"Commands"</a><Show when=move || me.get().is_some_and(|m| m["bot_owner"] == true)><a class="m-only" href="#/update">"Update"</a><a href="#/mcp-tokens">"MCP tokens"</a></Show><button title="Lets you make protected changes in Discord for 10 minutes" on:click=move |_| step_up.set(true)>"Confirm 2FA"</button><button on:click=move |_| spawn_local(async { let _ = api("POST", "/auth/logout", None).await; web_sys::window().unwrap().location().reload().ok(); })>"Logout"</button></div>
                 </details>
             </header>
             <StepUp need=step_up enrolled />
@@ -608,7 +610,7 @@ fn App() -> impl IntoView {
                 <nav class:open=move || nav_open.get() on:click=move |_| set_nav_open.set(false)>
                     {move || match route.get().first() {
                         None => server_list().into_any(),
-                        Some(a) if a == "commands" || a == "update" => server_list().into_any(),
+                        Some(a) if a == "commands" || a == "update" || a == "mcp-tokens" => server_list().into_any(),
                         Some(a) if a == "appeal" => ().into_any(),
                         Some(g) => {
                             let g = g.clone();
@@ -650,6 +652,7 @@ fn App() -> impl IntoView {
                         }.into_any(),
                         [a] if a == "commands" => view! { <Commands /> }.into_any(),
                         [a] if a == "update" => view! { <Update enrolled /> }.into_any(),
+                        [a] if a == "mcp-tokens" => view! { <McpTokens enrolled /> }.into_any(),
                         [a, g] if a == "appeal" =>view! { <AppealForm guild=g.clone() /> }.into_any(),
                         [g] => view! { <Head guild=g.clone() page=title("overview").0 /><Score guild=g.clone() enrolled /> }.into_any(),
                         [g, p, rest @ ..] => {

@@ -137,6 +137,14 @@ Same class of bug, also in #158: the page wrapper read the access level straight
 
 **Rule:** when a reactive closure builds a whole page or form, read derived values through a `Memo`, not a signal that is set again with the same content.
 
+## 13. A hidden popup still makes the page wider
+
+The info card (`.tip .bubble`) is only `opacity:0` until hovered, so it still takes layout room. An info icon near the right edge on a phone (MCP tokens page, 390 px) put the hidden card past the screen, and the whole page scrolled sideways.
+
+**Rule:** `main` has `overflow-x:clip` (clip, not hidden, so vertical overflow and sticky parts keep working). A new popup that is hidden with opacity or a transform must also stay inside `main`, as `Tip`'s `place()` does when it is shown.
+
+**Check:** on a 390 px viewport `document.documentElement.scrollWidth` equals the viewport width on every page.
+
 ## Where it was fixed (#143)
 
 - `form.rs`: the `-` button on number fields (`>=` in the attribute); the settings card's config/schema load; the preview flash frame callback; list import.

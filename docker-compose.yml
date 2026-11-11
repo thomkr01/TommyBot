@@ -116,6 +116,9 @@ services:
       MCP_OWNER_ID: ${MCP_OWNER_ID:-}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      # A token from the dashboard's MCP tokens page; writes are off when empty. See DEPLOY.md 6.4.
+      MCP_WRITE_TOKEN: ${MCP_WRITE_TOKEN:-}
+      DASHBOARD_INTERNAL_URL: http://dashboard:8080
       MCP_DATABASE_URL: postgres://tommybot_mcp:${MCP_DB_PASSWORD:-}@postgres:5432/tommybot
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
