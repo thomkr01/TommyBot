@@ -18,6 +18,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - The dashboard no longer crashes ("reactive value that has already been disposed") when you leave a page while it is still loading or saving, for example during an Update. (#143)
 
 ### Added
+- Join Gate card "Suspected spammer" (off by default, Kick when on) and a Join Raid "Spammer flag" (off) for accounts Discord itself flags as likely spammers. Flagged accounts also count as suspicious, so the Suspicious account card, Join Raid "Accounts type: suspicious" and verification for suspicious accounts react to them too. Discord does not document this flag and can change it. Prefix panels: `jg 9`, `jr 9`.
 - View in Backups opens a page for that backup: the channels as a tree in Discord order (click a channel to see its permissions, Compact hides the icons), the server name, verification level and explicit media filter, the webhooks, and the roles in their colours (click one to see its permissions). Load and Delete are on the same page. (#164)
 - The dashboard shows only what your permits allow: pages without access are hidden, read-only pages are greyed out with a note, and the Commands page greys out commands you cannot use. `COMMAND -h` no longer explains commands you cannot use. (#146)
 - An info icon on 21 hard settings opens a plain-language explanation on hover, focus or tap. (#160)

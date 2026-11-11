@@ -277,7 +277,7 @@ pub(super) static RESTORE: Module = Module {
     ],
 };
 
-static JOINGATE_ROWS: [Row; 27] = {
+static JOINGATE_ROWS: [Row; 30] = {
     let [a1, a2, a3] = gate_filter!("2", "No PfP Filter", no_avatar);
     let [b1, b2, b3] = gate_filter!("3", "Account Age Filter", account_age);
     let [c1, c2, c3] = gate_filter!("4", "Bot Addition Filter", unauthorized_bot);
@@ -285,6 +285,7 @@ static JOINGATE_ROWS: [Row; 27] = {
     let [e1, e2, e3] = gate_filter!("6", "Unverified Bots", unverified_bot);
     let [f1, f2, f3] = gate_filter!("7", "Suspicious Accounts", suspicious);
     let [g1, g2, g3] = gate_filter!("8", "Username Filter", username_filter);
+    let [h1, h2, h3] = gate_filter!("9", "Spam Flag Filter", spammer);
     [
         group!("1", "General"),
         r!("1a", "Status", "joingate.enabled", Kind::Bool, |c| on(c.joingate.enabled)),
@@ -293,7 +294,7 @@ static JOINGATE_ROWS: [Row; 27] = {
         a1, a2, a3, b1, b2, b3,
         r!("3c", "Minimum Age", "joingate.min_age_override_ms", Kind::Age, |c| ms(c.joingate.min_age_ms())),
         r!("3d", "Expose Minimum Age", "joingate.expose_min_age", Kind::Bool, |c| on(c.joingate.expose_min_age)),
-        c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3,
+        c1, c2, c3, d1, d2, d3, e1, e2, e3, f1, f2, f3, g1, g2, g3, h1, h2, h3,
     ]
 };
 
@@ -329,6 +330,7 @@ pub(super) static JOINRAID: Module = Module {
         r!("8b", "Granularity", "joinraid.id_granularity", Kind::Choice(&[("adapt", "\"Adaptive\""), ("h", "\"Hour\""), ("d", "\"Day\""), ("m", "\"Month\"")]), |c| format!("{:?}", raid(c).id_granularity)),
         r!("8c", "Margin", "joinraid.id_margin_ms", Kind::Ms, |c| ms(raid(c).id_margin_ms)),
         r!("8d", "Minimum Matches", "joinraid.id_flag_min", Kind::Int(2, 500), |c| raid(c).id_flag_min.map_or(NO.into(), |n| n.to_string())),
+        r!("9", "Spammer Flag", "joinraid.flag_spammer", Kind::Bool, |c| on(raid(c).flag_spammer)),
     ],
 };
 

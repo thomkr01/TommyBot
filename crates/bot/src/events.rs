@@ -319,12 +319,19 @@ pub async fn flush_logs(app: Arc<App>) {
     }
 }
 
-pub async fn handle(app: Arc<App>, ev: Event) {
+/// What the raw gateway frame carries that twilight's model drops.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Extra {
+    /// Discord's "likely spammer" user flag on a member join.
+    pub spammer: bool,
+}
+
+pub async fn handle(app: Arc<App>, ev: Event, extra: Extra) {
     metrics::EVENTS.fetch_add(1, Relaxed);
     metrics::IN_FLIGHT.fetch_add(1, Relaxed);
     // Every log line from the handler carries the server id, so a failed Discord call can be traced to it.
     let span = tracing::info_span!("event", guild = ev.guild_id().map(|g| g.get()));
-    if let Err(e) = tracing::Instrument::instrument(run(&app, &ev), span).await {
+    if let Err(e) = tracing::Instrument::instrument(run(&app, &ev, extra), span).await {
         tracing::warn!(?e, kind = ?ev.kind(), guild = ev.guild_id().map(|g| g.get()), "event handler failed");
         metrics::EVENT_ERRORS.fetch_add(1, Relaxed);
     }
@@ -353,7 +360,7 @@ pub async fn shutdown(app: &App) {
     app.pool.close().await;
 }
 
-async fn run(app: &App, ev: &Event) -> Result<()> {
+async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
     if let Some(guild) = guild_of(ev) {
         let cfg = app.cfg(guild).await?;
         let msgs = app
@@ -455,7 +462,7 @@ async fn run(app: &App, ev: &Event) -> Result<()> {
             }
             crate::joingate::on_member_update(app, m).await?
         }
-        Event::MemberAdd(m) => crate::joingate::on_join(app, m).await?,
+        Event::MemberAdd(m) => crate::joingate::on_join(app, m, extra.spammer).await?,
         Event::InteractionCreate(i) => {
             if !verify::handle(app, &i.0).await?
                 && !tickets::handle(app, &i.0).await?

@@ -62,6 +62,8 @@ fn ti(mut v: Value, title: &str) -> Value {
     v
 }
 
+const SPAM_FLAG_HELP: &str = "Discord sets this flag on accounts it thinks are spammers. Discord does not document it, can change it without notice, and it can be wrong.";
+
 /// Help text under the field.
 fn hp(mut v: Value, help: &str) -> Value {
     v["help"] = json!(help);
@@ -672,9 +674,20 @@ pub fn schema() -> Vec<Value> {
             "Target accounts whose username matches your list",
             GateFilter::UsernameFilter,
         ),
+        (
+            "spammer",
+            "Suspected spammer",
+            "Target accounts Discord flags as likely spammers",
+            GateFilter::SuspectedSpammer,
+        ),
     ] {
+        let on = ti(fg(card, &format!("{k}.enabled"), "bool"), status);
         gate.extend([
-            ti(fg(card, &format!("{k}.enabled"), "bool"), status),
+            if filter == GateFilter::SuspectedSpammer {
+                hp(on, SPAM_FLAG_HELP)
+            } else {
+                on
+            },
             hp(
                 ti(
                     dv(
@@ -739,6 +752,13 @@ pub fn schema() -> Vec<Value> {
             "Flag accounts younger than (milliseconds)",
         ),
         f("flag_no_avatar", "bool"),
+        hp(
+            ti(
+                f("flag_spammer", "bool"),
+                "Flag accounts Discord marks as likely spammers",
+            ),
+            SPAM_FLAG_HELP,
+        ),
         ti(
             fg("ID flag", "id_flag_min", "int"),
             "Minimum matches (empty turns it off)",
@@ -1266,6 +1286,7 @@ mod tests {
         assert_eq!(default("username_filter.action"), "Ban");
         assert_eq!(default("invite_in_name.action"), "Timeout");
         assert_eq!(default("no_avatar.action"), "Kick");
+        assert_eq!(default("spammer.action"), "Kick");
     }
 
     #[test]

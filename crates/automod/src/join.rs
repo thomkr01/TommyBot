@@ -68,6 +68,7 @@ pub enum Filter {
     InviteInName,
     Suspicious,
     UsernameFilter,
+    SuspectedSpammer,
 }
 
 impl Filter {
@@ -90,6 +91,7 @@ impl Filter {
             Filter::InviteInName => "Advertising Names",
             Filter::Suspicious => "Suspicious Account",
             Filter::UsernameFilter => "Username Filter",
+            Filter::SuspectedSpammer => "Suspected Spammer",
         }
     }
 }
@@ -111,6 +113,8 @@ pub struct GateCfg {
     pub invite_in_name: GateFilter,
     pub suspicious: GateFilter,
     pub username_filter: GateFilter,
+    /// Discord's undocumented "likely spammer" user flag (bit 20).
+    pub spammer: GateFilter,
     /// Wildcard words, checked against the sanitized name; `*` is a wildcard, no `*` means "contains".
     pub username_terms: Vec<String>,
     /// Strict words: the whole name, case-insensitive.
@@ -186,6 +190,7 @@ impl Default for GateCfg {
             invite_in_name: GateFilter::default(),
             suspicious: GateFilter::default(),
             username_filter: GateFilter::default(),
+            spammer: GateFilter::default(),
             username_terms: vec![],
             username_strict: vec![],
             username_post_join: false,
@@ -230,6 +235,8 @@ pub struct Joiner<'a> {
     pub added_by_owner: bool,
     /// The invite code the member joined with, when known.
     pub invite: Option<&'a str>,
+    /// Discord flags the account as a likely spammer (read from the raw gateway frame).
+    pub spammer: bool,
 }
 
 /// `*`-wildcard match, case-insensitive. A term without `*` matches as a substring.
@@ -264,9 +271,12 @@ fn has_invite(name: &str) -> bool {
     .any(|p| n.contains(p))
 }
 
-/// Suspicious = default avatar, young account or username-filter match (configurable OR).
+/// Suspicious = default avatar, young account, username-filter match or Discord's spammer flag.
 pub fn is_suspicious(j: &Joiner, cfg: &GateCfg, min_age_ms: i64, now: i64) -> bool {
-    !j.has_avatar || now - account_created_ms(j.id) < min_age_ms || cfg.name_matches(j.name)
+    !j.has_avatar
+        || now - account_created_ms(j.id) < min_age_ms
+        || cfg.name_matches(j.name)
+        || j.spammer
 }
 
 /// Filters that matched, with the action each wants.
@@ -319,6 +329,7 @@ pub fn gate(j: &Joiner, cfg: &GateCfg, now: i64) -> Vec<(Filter, Action)> {
         Filter::UsernameFilter,
         account && cfg.name_matches(j.name),
     );
+    check(cfg.spammer, Filter::SuspectedSpammer, account && j.spammer);
     // Age timeouts only last for the remaining period.
     for h in &mut hits {
         if let (Filter::AccountAge, Action::Timeout(_)) = *h {
@@ -372,6 +383,8 @@ pub struct RaidCfg {
     pub string_patterns: Vec<String>,
     pub flag_younger_than_ms: Option<i64>,
     pub flag_no_avatar: bool,
+    /// Flag accounts Discord marks as likely spammers.
+    pub flag_spammer: bool,
     /// Minimum accounts in one creation-time bucket to call it a bot farm; None disables.
     #[serde(default = "default_id_min")]
     pub id_flag_min: Option<usize>,
@@ -421,6 +434,7 @@ impl Default for RaidCfg {
             string_patterns: vec![],
             flag_younger_than_ms: None,
             flag_no_avatar: false,
+            flag_spammer: false,
             id_flag_min: default_id_min(),
             id_granularity: IdGranularity::Adaptive,
             id_margin_ms: 60 * 60_000,
@@ -438,6 +452,7 @@ struct JoinRec {
     name: String,
     has_avatar: bool,
     suspicious: bool,
+    spammer: bool,
     invite: Option<String>,
 }
 
@@ -489,6 +504,7 @@ impl RaidDetector {
             name: j.name.lines().next().unwrap_or_default().to_lowercase(),
             has_avatar: j.has_avatar,
             suspicious,
+            spammer: j.spammer,
             invite: j.invite.map(Into::into),
         });
         let counted = self
@@ -544,6 +560,7 @@ impl RaidDetector {
                         .flag_younger_than_ms
                         .is_some_and(|y| now - account_created_ms(r.id) < y)
                     || (cfg.flag_no_avatar && !r.has_avatar)
+                    || (cfg.flag_spammer && r.spammer)
                     || farm.as_ref().is_some_and(|f| f.contains(&r.id))
             })
             .map(|r| r.id)
@@ -910,6 +927,67 @@ mod tests {
     }
 
     #[test]
+    fn spammer_flag_card() {
+        let mut cfg = GateCfg {
+            enabled: true,
+            ..Default::default()
+        };
+        let flagged = Joiner {
+            spammer: true,
+            ..joiner(id_aged(10 * DAY_MS, 0), "a", true)
+        };
+        let names =
+            |j: &Joiner, c: &GateCfg| gate(j, c, NOW).iter().map(|h| h.0).collect::<Vec<_>>();
+        // Card off: no hit.
+        assert!(names(&flagged, &cfg).is_empty());
+        cfg.spammer = GateFilter {
+            enabled: true,
+            action: None,
+        };
+        assert_eq!(
+            gate(&flagged, &cfg, NOW),
+            [(Filter::SuspectedSpammer, Action::Kick)]
+        );
+        assert!(names(&joiner(id_aged(10 * DAY_MS, 0), "a", true), &cfg).is_empty());
+        // Counts as suspicious.
+        cfg.suspicious = GateFilter::on(Action::Ban);
+        assert_eq!(
+            names(&flagged, &cfg),
+            [Filter::Suspicious, Filter::SuspectedSpammer]
+        );
+        // Trusted-bot exception.
+        cfg.exclude_trusted_bots = true;
+        let bot = Joiner {
+            is_bot: true,
+            added_by_owner: true,
+            ..flagged.clone()
+        };
+        assert!(names(&bot, &cfg).is_empty());
+        // require_all with spammer as one of two enabled cards.
+        let cfg = GateCfg {
+            enabled: true,
+            require_all: true,
+            no_avatar: GateFilter::on(Action::Kick),
+            spammer: GateFilter::on(Action::Ban),
+            ..Default::default()
+        };
+        assert!(gate(&flagged, &cfg, NOW).is_empty());
+        let both = Joiner {
+            has_avatar: false,
+            ..flagged.clone()
+        };
+        assert_eq!(harshest(&gate(&both, &cfg, NOW)), Some(Action::Ban));
+    }
+
+    #[test]
+    fn old_configs_load_with_the_spammer_switches_off() {
+        let g: GateCfg = serde_json::from_str(r#"{"enabled":true,"no_avatar":"Kick"}"#).unwrap();
+        assert_eq!(g.spammer, GateFilter::default());
+        let r: RaidCfg = serde_json::from_str(r#"{"enabled":true,"count":3}"#).unwrap();
+        assert!(!r.flag_spammer);
+    }
+
+    #[test]
     fn bots_and_invite_names() {
         let cfg = GateCfg {
             enabled: true,
@@ -1031,6 +1109,31 @@ mod tests {
         let out = d.on_join(&joiner(9, "z", false), false, &cfg, NOW);
         assert_eq!((out.triggered, out.flagged), (false, vec![9]));
         assert!(!d.active(NOW + 5000));
+    }
+
+    #[test]
+    fn flag_spammer_flags_only_flagged_joiners() {
+        let mut cfg = RaidCfg {
+            flag_spammer: true,
+            id_flag_min: None,
+            ..raid_cfg()
+        };
+        let spam = |id| Joiner {
+            spammer: true,
+            ..joiner(id, "a", true)
+        };
+        let mut d = RaidDetector::default();
+        d.on_join(&spam(1), false, &cfg, NOW);
+        d.on_join(&joiner(2, "b", true), false, &cfg, NOW + 1);
+        let out = d.on_join(&spam(3), false, &cfg, NOW + 2);
+        assert!(out.triggered);
+        assert_eq!(out.flagged, vec![1, 3]);
+        cfg.flag_spammer = false;
+        let mut d = RaidDetector::default();
+        d.on_join(&spam(1), false, &cfg, NOW);
+        d.on_join(&spam(2), false, &cfg, NOW + 1);
+        let out = d.on_join(&spam(3), false, &cfg, NOW + 2);
+        assert!(out.triggered && out.flagged.is_empty());
     }
 
     #[test]

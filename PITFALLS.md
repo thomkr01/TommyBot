@@ -50,8 +50,10 @@ Auto Setup answered "internal error" because the saved Quarantine role had been 
 **Raw requests need a real User-Agent.** (live tests, 11-09)
 Without `User-Agent: DiscordBot (...)` Cloudflare answers 403 / error 1010.
 
-**Twilight drops permission bits it does not know.** (#133)
+**Twilight drops permission and user flag bits it does not know.** (#133)
 Saving a bot role's old permissions loses bits newer than twilight. This is a known limit (marked `shortcut:` in the code). Upgrade twilight before relying on new bits.
+User flags too: `UserFlags` is read with `from_bits_truncate`, so `public_flags` never holds Discord's undocumented spammer bit (`1 << 20`).
+*Avoid:* read such a bit from the raw gateway JSON before twilight parses it, like `spam_flag` in `crates/bot/src/main.rs` (the loop reads raw messages instead of `next_event`).
 
 ## 2. Concurrency and restarts
 

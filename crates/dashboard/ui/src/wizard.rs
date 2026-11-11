@@ -273,6 +273,7 @@ pub const JOINGATE: &[Card] = &[Card {
     ("joingate.unverified_bot.enabled", "Discord unverified bots added by anyone"),
     ("joingate.invite_in_name.enabled", "Accounts with invite links in usernames"),
     ("joingate.suspicious.enabled", "Accounts TommyBot deems suspicious"),
+    ("joingate.spammer.enabled", "Accounts Discord flags as likely spammers"),
     ("joingate.username_filter.enabled", "Accounts that have certain names"),
     ("joingate.username_strict", "Strict words"),
     ("joingate.username_terms", "Wildcard words"),
