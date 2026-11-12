@@ -288,15 +288,15 @@ async fn server(app: &App, gid: Id<GuildMarker>) -> Result<Option<Server>> {
     }
 }
 
-/// Discord's upload limit for a bot without boosts; a larger file is linked instead of copied.
+/// Discord's upload limit for a bot without boosts, per message; files past it are linked instead.
 const COPY_MAX: u64 = 25 << 20;
 
-/// Copies of a message's files, to post them again elsewhere, and the ones left as a link (over
-/// [`COPY_MAX`], or the download failed).
+/// Copies of a message's files, to post them again elsewhere, and the ones left as a link (past
+/// [`COPY_MAX`] in total, or the download failed).
 async fn download<'a>(app: &App, list: &'a [Uploaded]) -> (Vec<Attachment>, Vec<&'a Uploaded>) {
-    let (mut out, mut linked) = (vec![], vec![]);
+    let (mut out, mut linked, mut total) = (vec![], vec![], 0);
     for (i, a) in list.iter().enumerate() {
-        if a.size > COPY_MAX {
+        if total + a.size > COPY_MAX {
             linked.push(a);
             continue;
         }
@@ -309,10 +309,13 @@ async fn download<'a>(app: &App, list: &'a [Uploaded]) -> (Vec<Attachment>, Vec<
                 .send()
                 .await?
                 .error_for_status()?;
-            tommybot_automod::sites::read_capped(r, COPY_MAX as usize).await
+            tommybot_automod::sites::read_capped(r, (COPY_MAX - total) as usize).await
         };
         match got.await {
-            Ok(b) => out.push(Attachment::from_bytes(a.filename.clone(), b, i as u64)),
+            Ok(b) => {
+                total += b.len() as u64;
+                out.push(Attachment::from_bytes(a.filename.clone(), b, i as u64))
+            }
             Err(e) => {
                 tracing::warn!(?e, file = %a.filename, "ticket attachment download failed");
                 linked.push(a);

@@ -145,6 +145,6 @@ async fn send_rest(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) 
 async fn announce(st: &AppState, s: &Sess, guild: i64, what: &str) -> Result<(), ApiError> {
     let (_, config) = store::current(&st.db, guild).await?;
     let text = format!("{} (<@{}>) {what}", s.username, s.user_id);
-    log_change(st, guild, &config, text).await;
+    log_change(st, guild, &config, None, text).await;
     Ok(())
 }

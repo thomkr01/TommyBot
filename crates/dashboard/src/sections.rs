@@ -236,6 +236,7 @@ async fn auto_setup(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) ran auto-setup -> config v{version}",
             s.username, s.user_id
@@ -360,6 +361,7 @@ async fn catch_channel(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) set up the catch channel -> config v{version}",
             s.username, s.user_id
@@ -403,6 +405,7 @@ async fn tickets_setup(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) set up tickets -> config v{version}",
             s.username, s.user_id
@@ -671,6 +674,7 @@ async fn log_setup(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) created the log channels -> config v{version}",
             s.username, s.user_id

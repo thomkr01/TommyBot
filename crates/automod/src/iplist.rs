@@ -1,5 +1,5 @@
 //! Tor exit, VPN and hosting-network IP ranges for web verification (downloaded, refreshed on a timer).
-use crate::sites::{client, is_public, read_capped, shrank, LIST_MAX_BYTES};
+use crate::sites::{client, is_public, read_capped, ShrinkGuard};
 use std::{
     net::{IpAddr, Ipv6Addr},
     sync::RwLock,
@@ -9,6 +9,7 @@ const TOR_URL: &str = "https://check.torproject.org/torbulkexitlist";
 const VPN_URLS: &str = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv6.txt";
 const DC_URLS: &str = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv6.txt";
 /// A real list has no range this wide; one that does is broken or poisoned and would block whole countries.
+const MAX_BYTES: usize = 20 << 20;
 const MIN_V4_PREFIX: u8 = 8;
 const MIN_V6_PREFIX: u8 = 16;
 /// Refuse a list that covers more than a quarter of the IPv4 space.
@@ -133,6 +134,7 @@ pub struct IpLists {
     vpn: RwLock<IpList>,
     hosting: RwLock<IpList>,
     http: reqwest::Client,
+    shrink: ShrinkGuard,
 }
 
 impl Default for IpLists {
@@ -142,6 +144,7 @@ impl Default for IpLists {
             vpn: Default::default(),
             hosting: Default::default(),
             http: client(),
+            shrink: Default::default(),
         }
     }
 }
@@ -205,16 +208,9 @@ impl IpLists {
             match IpList::parse(&text) {
                 Ok(new) => {
                     let old = slot.read().unwrap().len();
-                    if shrank(old, new.len()) {
-                        tracing::warn!(
-                            var,
-                            old,
-                            new = new.len(),
-                            "IP list shrank by over half, keeping the old one"
-                        );
-                        continue;
+                    if self.shrink.accept(var, old, new.len()) {
+                        *slot.write().unwrap() = new;
                     }
-                    *slot.write().unwrap() = new;
                 }
                 Err(e) => tracing::warn!(e, var, "IP list refused, keeping the old one"),
             }
@@ -229,7 +225,7 @@ impl IpLists {
 
     async fn download(&self, url: &str) -> anyhow::Result<String> {
         let r = self.http.get(url).send().await?.error_for_status()?;
-        let buf = read_capped(r, LIST_MAX_BYTES).await?;
+        let buf = read_capped(r, MAX_BYTES).await?;
         Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 

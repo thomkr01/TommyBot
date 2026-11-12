@@ -85,7 +85,12 @@ pub async fn read_permits(c: &mut PgConnection, guild: i64) -> Result<Value, Api
 }
 
 /// Replaces the guild's EO/TA lists and custom permits with `p`. Permits are upserted by name.
+/// Takes the config lock first: the bot's TA edit locks, then writes, so the reverse order deadlocks.
 pub async fn write_permits(c: &mut PgConnection, guild: i64, p: &Value) -> Result<(), ApiError> {
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(guild)
+        .execute(&mut *c)
+        .await?;
     let bad = |m: &str| ApiError::BadRequest(m.into());
     let custom = p["custom"]
         .as_array()
@@ -219,6 +224,54 @@ mod tests {
         let live = |eo: &[&str]| json!({"a": 1, "permits": {"eo": eo, "ta": ["6"], "custom": []}});
         assert_eq!(rows, vec![(1, live(&[])), (2, live(&["5"]))]);
         tx.rollback().await.unwrap();
+    }
+
+    /// A permit save running next to the bot's TA edit (config lock, then the table) must wait for it,
+    /// not take the table rows first and deadlock on the lock in `commit`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permit_save_waits_for_the_config_lock_instead_of_deadlocking() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_870_000_000 + (std::process::id() as i64);
+        sqlx::query("insert into trusted_admins (guild_id, user_id) values ($1, 6)")
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut bot = db.begin().await.unwrap();
+        sqlx::query("select pg_advisory_xact_lock($1)")
+            .bind(g)
+            .execute(&mut *bot)
+            .await
+            .unwrap();
+        let dash = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                let mut tx = db.begin().await.unwrap();
+                write_permits(&mut tx, g, &json!({"eo": [], "ta": [], "custom": []})).await?;
+                commit(&mut tx, g, 0, &json!({}), 7).await?;
+                tx.commit().await.map_err(ApiError::from)
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        sqlx::query("delete from trusted_admins where guild_id = $1 and user_id = 6")
+            .bind(g)
+            .execute(&mut *bot)
+            .await
+            .expect("the bot's write must not deadlock");
+        bot.commit().await.unwrap();
+        assert!(dash.await.unwrap().is_ok());
+        for t in ["guild_config", "trusted_admins"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
     }
 
     #[tokio::test]

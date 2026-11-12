@@ -30,7 +30,7 @@ SQL
 # is checked like the new one: it can crash too, for example on a migration it does not know.
 rollback() {
   while read -r svc ref; do docker tag "${ref%:*}:rollback" "$ref"; done < "$OLD"
-  if ! $DC up -d --no-deps --no-build bot dashboard > /dev/null 2>&1; then
+  if ! $DC up -d --no-deps --no-build --force-recreate bot dashboard > /dev/null 2>&1; then
     finish failed "$1 Rolling back failed too: run 'docker compose up -d' on the server."
   elif settled; then
     finish rolled_back "$1 The previous version is running again."

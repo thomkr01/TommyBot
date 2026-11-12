@@ -212,28 +212,49 @@ pub struct Put {
     value: Value,
 }
 
-pub(crate) async fn log_change(st: &AppState, guild: i64, config: &Value, text: String) {
-    // Also the channel of the version before, so a save that clears or moves the log is still seen there.
-    let before: Vec<Option<String>> = sqlx::query_scalar(
-        "select config->'logging'->>'config_changes' from guild_config where guild_id = $1 order by version desc limit 2",
-    )
-    .bind(guild)
-    .fetch_all(&st.db)
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("config-changes log channels not read: {e:#}");
-        vec![]
-    });
+/// Where `log_change` posts: the config's channel, and with `version` also that of the version before.
+async fn change_log_channels(
+    db: &sqlx::PgPool,
+    guild: i64,
+    config: &Value,
+    version: Option<i32>,
+) -> Vec<String> {
+    let mut before = None;
+    if let Some(v) = version {
+        before = sqlx::query_scalar(
+            "select config->'logging'->>'config_changes' from guild_config where guild_id = $1 and version = $2",
+        )
+        .bind(guild)
+        .bind(v - 1)
+        .fetch_optional(db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("config-changes log channel of v{} not read: {e:#}", v - 1);
+            None
+        })
+        .flatten();
+    }
     let mut channels: Vec<String> = config["logging"]["config_changes"]
         .as_str()
         .map(String::from)
         .into_iter()
-        .chain(before.into_iter().flatten())
+        .chain(before)
         .filter(|c| !c.is_empty())
         .collect();
-    channels.sort();
     channels.dedup();
-    for ch in channels {
+    channels
+}
+
+/// Posts to the config-changes log. `version` is the config version this change saved, if any: then the
+/// channel of the version before gets it too, so a save that clears or moves the log is still seen there.
+pub(crate) async fn log_change(
+    st: &AppState,
+    guild: i64,
+    config: &Value,
+    version: Option<i32>,
+    text: String,
+) {
+    for ch in change_log_channels(&st.db, guild, config, version).await {
         let text = text.clone();
         let d = st.discord.clone();
         tokio::spawn(async move {
@@ -355,6 +376,7 @@ pub async fn put_section(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) changed `{section}` -> config v{version}",
             s.username, s.user_id
@@ -414,6 +436,7 @@ pub async fn put_permits(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) changed `permits` -> config v{version}",
             s.username, s.user_id
@@ -561,6 +584,7 @@ pub async fn rollback(
         &st,
         guild,
         &old,
+        Some(version),
         format!(
             "{} (<@{}>) rolled config back to v{v} -> v{version}",
             s.username, s.user_id
@@ -734,6 +758,7 @@ pub async fn import(
         &st,
         guild,
         &new,
+        Some(version),
         format!(
             "{} (<@{}>) imported settings from another server -> config v{version}",
             s.username, s.user_id
@@ -866,6 +891,38 @@ fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
 mod logging_validate_tests {
     use super::*;
     use serde_json::json;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Only a save also reaches the channel
+    /// of the version before; other events go to the current channel alone.
+    #[tokio::test]
+    async fn change_log_goes_to_the_old_channel_only_for_the_save_that_moved_it() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_880_000_000 + std::process::id() as i64;
+        let cfg = |ch: Option<&str>| json!({"logging": {"config_changes": ch}});
+        for (v, ch) in [(1, Some("11")), (2, Some("22")), (3, None)] {
+            sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
+                .bind(g)
+                .bind(v)
+                .bind(cfg(ch))
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let (moved, none) = (cfg(Some("22")), cfg(None));
+        let at = |c, v| change_log_channels(&db, g, c, v);
+        assert_eq!(at(&moved, Some(2)).await, ["22", "11"], "moved");
+        assert_eq!(at(&none, Some(3)).await, ["22"], "cleared");
+        assert!(at(&none, None).await.is_empty(), "no save: current only");
+        assert_eq!(at(&moved, None).await, ["22"]);
+        sqlx::query("delete from guild_config where guild_id = $1")
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn verification_is_checked_with_the_bots_type() {

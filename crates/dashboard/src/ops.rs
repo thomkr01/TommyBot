@@ -259,10 +259,7 @@ async fn fix(
         let failed = crate::sections::quarantine_channels(&st, guild, role)
             .await
             .ok_or_else(|| anyhow::anyhow!("could not list the channels"))?;
-        log_change(
-            &st,
-            guild,
-            &c,
+        log_change(&st, guild, &c, None,
             format!(
                 "{} (<@{}>) denied the quarantine role in every channel from the security score ({failed} failed)",
                 s.username, s.user_id
@@ -290,6 +287,7 @@ async fn fix(
             &st,
             guild,
             &c,
+            None,
             format!(
                 "{} (<@{}>) set `{key}` to `{value}` from the security score",
                 s.username, s.user_id
@@ -343,10 +341,7 @@ async fn fix(
                 Some(json!(body)),
             )
             .await?;
-        log_change(
-            &st,
-            guild,
-            &c,
+        log_change(&st, guild, &c, None,
             format!(
                 "{} (<@{}>) moved role `{}` right below the bot from the security score, backup #{backup}",
                 s.username, s.user_id, q.name
@@ -453,7 +448,7 @@ async fn fix(
     if !failed.is_empty() {
         text.push_str(&format!("\nFailed: {}", failed.join(", ")));
     }
-    log_change(&st, guild, &c, text).await;
+    log_change(&st, guild, &c, None, text).await;
     if !failed.is_empty() {
         return Err(ApiError::BadRequest(format!(
             "Fixed {}, but could not fix: {}. Backup #{backup} holds the state before.",
@@ -507,10 +502,7 @@ async fn make_private(
             )
             .await?;
     }
-    log_change(
-        st,
-        guild,
-        config,
+    log_change(st, guild, config, None,
         format!(
             "{} (<@{}>) made the log channel <#{}> private from the security score, backup #{backup}",
             s.username, s.user_id, ch.id
@@ -724,6 +716,7 @@ async fn revert(
             &st,
             guild,
             &c,
+            None,
             format!(
                 "{} (<@{}>) reverted {done} action(s)",
                 s.username, s.user_id
@@ -880,6 +873,7 @@ async fn rescue_claim(State(st): State<AppState>, s: Sess, Json(b): Json<Claim>)
         &st,
         guild,
         &config,
+        None,
         format!("{} (<@{}>) {what}", s.username, s.user_id),
     )
     .await;

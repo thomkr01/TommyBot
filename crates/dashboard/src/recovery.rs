@@ -58,6 +58,7 @@ async fn announce(st: &AppState, s: &Sess, guild: i64, what: &str) -> Result<(),
         st,
         guild,
         &config,
+        None,
         format!("{} (<@{}>) {what}", s.username, s.user_id),
     )
     .await;

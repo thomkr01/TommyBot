@@ -166,6 +166,14 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     {
         return Ok(());
     }
+    let ends = crate::app::now_secs() + cfg.duration_secs as i64;
+    // The dashboard reads the mod command lock from this job, so it exists before the category calls.
+    // No unlock yet: nothing is locked until the full payload below is saved.
+    let early = json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": false, "exempt": []});
+    if let Err(e) = jobs::replace(&app.pool, gid.get() as i64, "panic_end", early, ends).await {
+        app.panic_runs.lock().unwrap().remove(&gid.get());
+        return Err(e);
+    }
     let mut exempted = vec![];
     for &c in &cfg.whitelisted_categories {
         match exempt(app, gid, c).await {
@@ -173,7 +181,6 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             Err(e) => tracing::warn!(?e, channel = c.get(), "panic: exempting category failed"),
         }
     }
-    let ends = crate::app::now_secs() + cfg.duration_secs as i64;
     let payload = json!({
         "lock_mod_commands": cfg.lock_mod_commands, "unlock": cfg.unlock_when_ending,
         "exempt": &exempted

@@ -15,8 +15,8 @@ const PHISHING_URL: &str =
 const NSFW_URL: &str =
     "https://raw.githubusercontent.com/blocklistproject/Lists/master/alt-version/porn-nl.txt";
 pub const REFRESH: Duration = Duration::from_secs(12 * 3600);
-/// Largest list download (site and IP lists).
-pub(crate) const LIST_MAX_BYTES: usize = 20 << 20;
+/// Largest domain list download (the NSFW list is about 18 MB).
+const LIST_MAX_BYTES: usize = 64 << 20;
 
 /// Bare domains. A host hits when it or any parent domain is listed.
 #[derive(Default)]
@@ -109,9 +109,38 @@ fn follow(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
     }
 }
 
-/// A refreshed list with under half the entries of the one it replaces is refused.
-pub(crate) fn shrank(old: usize, new: usize) -> bool {
-    new * 2 < old
+/// A refreshed list with under half the entries of the one it replaces is refused, unless the next
+/// refresh brings the same non-empty count again: then the source really shrank. Per list name.
+#[derive(Default)]
+pub(crate) struct ShrinkGuard(std::sync::Mutex<std::collections::HashMap<&'static str, usize>>);
+
+impl ShrinkGuard {
+    /// Whether a list of `new` entries may replace one of `old`.
+    pub(crate) fn accept(&self, var: &'static str, old: usize, new: usize) -> bool {
+        let mut seen = self.0.lock().unwrap();
+        if new * 2 >= old {
+            seen.remove(var);
+            return true;
+        }
+        if new > 0 && seen.get(var) == Some(&new) {
+            seen.remove(var);
+            tracing::warn!(
+                var,
+                old,
+                new,
+                "list shrank by over half twice in a row, taking it"
+            );
+            return true;
+        }
+        seen.insert(var, new);
+        tracing::warn!(
+            var,
+            old,
+            new,
+            "list shrank by over half, keeping the old one"
+        );
+        false
+    }
 }
 
 /// The body, refused as soon as it passes `max` bytes (a missing or wrong Content-Length included).
@@ -132,6 +161,7 @@ pub struct Sites {
     phishing: RwLock<SiteList>,
     nsfw: RwLock<SiteList>,
     http: reqwest::Client,
+    shrink: ShrinkGuard,
 }
 
 /// Client for list downloads and fetches: public addresses only, at most 5 redirects.
@@ -150,6 +180,7 @@ impl Default for Sites {
             phishing: Default::default(),
             nsfw: Default::default(),
             http: client(),
+            shrink: Default::default(),
         }
     }
 }
@@ -176,12 +207,16 @@ impl Sites {
             }
             match self.download(&url).await {
                 // An empty or garbled page would switch the filter off until the next refresh.
-                Ok(list) if shrank(slot.read().unwrap().0.len(), list.0.len()) => tracing::warn!(
-                    var,
-                    new = list.0.len(),
-                    "site list shrank by over half, keeping the old one"
-                ),
-                Ok(list) => *slot.write().unwrap() = list,
+                Ok(list) => {
+                    let old = slot.read().unwrap().0.len();
+                    if self.shrink.accept(var, old, list.0.len()) {
+                        *slot.write().unwrap() = list;
+                    }
+                }
+                // With no list yet the filter is off, so that is an error, not a stale list.
+                Err(e) if slot.read().unwrap().0.is_empty() => {
+                    tracing::error!(?e, var, "site list not loaded, its filter is off")
+                }
                 Err(e) => tracing::warn!(?e, var, "refreshing a site list failed"),
             }
         }
@@ -283,7 +318,7 @@ mod tests {
         url
     }
 
-    /// Through `refresh`: a list that comes back empty (or lost over half) or over 20 MB keeps the
+    /// Through `refresh`: a list that comes back empty (or lost over half) or over 64 MB keeps the
     /// old list, so the phishing filter stays on; a list of about the same size replaces it.
     #[tokio::test]
     async fn refresh_keeps_the_old_list_when_the_new_one_is_empty_or_huge() {
@@ -291,7 +326,7 @@ mod tests {
         let same: String = (0..900).map(|i| format!("bad{i}.com\n")).collect();
         let huge: Vec<u8> = (0..1_000_000)
             .flat_map(|i| format!("x{i}.example.org\n").into_bytes())
-            .chain(std::iter::repeat_n(b'#', 21 << 20))
+            .chain(std::iter::repeat_n(b'#', 65 << 20))
             .collect();
         let url = serve(vec![
             (full.into_bytes(), false),
@@ -306,6 +341,7 @@ mod tests {
             phishing: Default::default(),
             nsfw: Default::default(),
             http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            shrink: Default::default(),
         };
         let hit = |h: &str| s.phishing(&[h.to_string()]);
         s.refresh().await;
@@ -318,7 +354,7 @@ mod tests {
         s.refresh().await;
         assert!(
             hit("evil7.com") && !hit("x7.example.org"),
-            "a list over 20 MB is refused"
+            "a list over 64 MB is refused"
         );
         s.refresh().await;
         assert!(
@@ -328,9 +364,20 @@ mod tests {
     }
 
     #[test]
-    fn a_list_that_lost_over_half_is_refused() {
-        assert!(shrank(1000, 0) && shrank(1000, 499));
-        assert!(!shrank(1000, 500) && !shrank(0, 0) && !shrank(10, 50));
+    fn a_list_that_lost_over_half_is_taken_only_when_it_stays_that_size() {
+        let g = ShrinkGuard::default();
+        assert!(g.accept("A", 1000, 500) && g.accept("A", 0, 0) && g.accept("A", 10, 50));
+        assert!(!g.accept("A", 1000, 499), "first shrunk refresh is refused");
+        assert!(!g.accept("A", 1000, 300), "a different size starts over");
+        assert!(
+            g.accept("A", 1000, 300),
+            "the same size twice in a row is taken"
+        );
+        assert!(
+            !g.accept("A", 1000, 0) && !g.accept("A", 1000, 0),
+            "never an empty list"
+        );
+        assert!(!g.accept("B", 1000, 300), "per list");
     }
 
     #[test]

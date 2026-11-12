@@ -252,6 +252,7 @@ pub(crate) async fn audit(
         st,
         guild,
         &c,
+        None,
         format!(
             "{} (<@{}>) {what} from the dashboard",
             s.username, s.user_id

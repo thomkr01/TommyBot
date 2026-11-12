@@ -66,7 +66,8 @@ const FIXED: [(&str, &str, (i64, i64)); 13] = [
         "auto_lockdown.mention_window_ms",
         (1_000, 3_600_000),
     ),
-    ("automod", "filters.mention_hour_cap", (1, 1_000)),
+    // 0 is allowed: any mention then trips the filter.
+    ("automod", "filters.mention_hour_cap", (0, 1_000)),
     ("panic", "window_secs", (1, 86_400)),
     ("panic", "heat_executors", PANIC_HEAT_EXECUTORS),
     ("joinraid", "count", RAID_COUNT),

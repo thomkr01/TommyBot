@@ -1144,6 +1144,7 @@ async fn push_locked(
         &st,
         guild,
         &w.config,
+        None,
         format!(
             "{who} started a channel setup push: {}, backup #{backup}",
             outline(&steps, &tree)
@@ -1234,10 +1235,7 @@ async fn run_steps(
     if let Err(e) = save(&st, guild, &draft, user).await {
         failed.push(format!("save the draft: {e}"));
     }
-    log_change(
-        &st,
-        guild,
-        &config,
+    log_change(&st, guild, &config, None,
         format!(
             "{who} pushed the channel setup: {done} of {} step(s) done, {} failed, backup #{backup}",
             steps.len(),
