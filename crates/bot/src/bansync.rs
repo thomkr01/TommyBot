@@ -440,17 +440,6 @@ async fn group(app: &App, gid: Id<GuildMarker>) -> Result<Vec<Id<GuildMarker>>> 
     Ok(ids.into_iter().map(|g| Id::new(g as u64)).collect())
 }
 
-/// Users shared from `src` in the last hour, the ones held back by the cap left out.
-async fn shared_last_hour(app: &App, src: Id<GuildMarker>) -> Result<i64> {
-    Ok(sqlx::query_scalar(
-        "SELECT count(DISTINCT user_id) FROM ban_sync_links WHERE source_guild = $1
-           AND created_at > now() - interval '1 hour' AND skip_reason IS DISTINCT FROM 'rate cap'",
-    )
-    .bind(src.get() as i64)
-    .fetch_one(&app.pool)
-    .await?)
-}
-
 struct Copy {
     origin: Origin,
     case: Option<i32>,
@@ -461,17 +450,32 @@ struct Copy {
     banned_at: Option<i64>,
 }
 
-/// Writes the row (pending, or skipped when over the cap), then queues the copy. An active
-/// pending or banned row is left alone; a finished one starts over, so a re-ban syncs again.
-/// True when a copy was queued.
-async fn offer(app: &App, (to, user, src): Key, c: &Copy, capped: bool) -> Result<bool> {
+/// Writes the row (pending, or skipped when the source shared [`BAN_SYNC_HOURLY`] other users in
+/// the last hour), then queues the copy. An active pending or banned row is left alone; a finished
+/// one starts over, so a re-ban syncs again. Returns (copy queued, over the cap).
+async fn offer(app: &App, (to, user, src): Key, c: &Copy) -> Result<(bool, bool)> {
+    // One transaction, so a failure never leaves a pending row without its copy job. The cap is
+    // counted under a per-source lock, so a share job and an import running at once cannot both
+    // pass it.
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('ban_sync_cap:' || $1, 0))")
+        .bind(src.get() as i64)
+        .execute(&mut *tx)
+        .await?;
+    let others: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT user_id) FROM ban_sync_links WHERE source_guild = $1 AND user_id <> $2
+           AND created_at > now() - interval '1 hour' AND skip_reason IS DISTINCT FROM 'rate cap'",
+    )
+    .bind(src.get() as i64)
+    .bind(user.get() as i64)
+    .fetch_one(&mut *tx)
+    .await?;
+    let capped = others >= BAN_SYNC_HOURLY;
     let (state, skip) = if capped {
         ("skipped", Some("rate cap"))
     } else {
         ("pending", None)
     };
-    // One transaction, so a failure never leaves a pending row without its copy job.
-    let mut tx = app.pool.begin().await?;
     let written = sqlx::query(
         "INSERT INTO ban_sync_links (guild_id, user_id, source_guild, source_case, origin, reason,
              expires_at, state, skip_reason, actor_id, mod_id, banned_at)
@@ -503,7 +507,7 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy, capped: bool) -> Resul
         enqueue_copy(&mut *tx, (to, user, src), now_secs()).await?;
     }
     tx.commit().await?;
-    Ok(written && !capped)
+    Ok((written && !capped, capped))
 }
 
 async fn enqueue_copy(db: impl sqlx::PgExecutor<'_>, (to, user, src): Key, at: i64) -> Result<()> {
@@ -599,9 +603,9 @@ pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()>
             moderator: staff(who),
             banned_at: Some(at),
         };
-        let capped = shared_last_hour(app, src).await? >= BAN_SYNC_HOURLY;
+        let mut capped = false;
         for to in targets {
-            offer(app, (to, user, src), &copy, capped).await?;
+            capped |= offer(app, (to, user, src), &copy).await?.1;
         }
         if capped {
             paused(app, src).await;

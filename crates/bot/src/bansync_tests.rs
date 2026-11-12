@@ -676,6 +676,50 @@ async fn over_the_hourly_cap_rows_wait_for_the_owner() {
 }
 
 #[tokio::test]
+async fn two_offers_at_once_cannot_both_pass_the_cap() {
+    let Some(t) = T::new(18).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    for u in 0..BAN_SYNC_HOURLY as u64 - 1 {
+        t.link(1, 10_000 + u, 0, "banned").await;
+    }
+    let copy = Copy {
+        origin: Origin::StaffCmd,
+        case: None,
+        reason: "raiding".into(),
+        expires: None,
+        actor: None,
+        moderator: None,
+        banned_at: None,
+    };
+    // One slot is left. Another offer holds the cap lock and has written its row, not committed
+    // yet: this offer waits for it instead of counting without it, then finds the cap reached.
+    let mut other = t.app.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('ban_sync_cap:' || $1, 0))")
+        .bind(t.g(0).get() as i64)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO ban_sync_links (guild_id, user_id, source_guild, origin, reason, state) VALUES ($1, 531, $2, 'staff_cmd', 'x', 'pending')")
+        .bind(t.g(1).get() as i64)
+        .bind(t.g(0).get() as i64)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    let key = (t.g(1), Id::new(532), t.g(0));
+    let wait = std::time::Duration::from_millis(300);
+    let early = tokio::time::timeout(wait, offer(&t.app, key, &copy)).await;
+    assert!(
+        early.is_err(),
+        "the offer counted without waiting for the lock"
+    );
+    other.commit().await.unwrap();
+    assert_eq!(offer(&t.app, key, &copy).await.unwrap(), (false, true));
+    t.cleanup().await;
+}
+
+#[tokio::test]
 async fn another_owner_a_transfer_or_a_left_server_gets_no_copy() {
     let Some(t) = T::new(3).await else { return };
     let (o, other) = (t.owner(), t.base + 8);
