@@ -336,7 +336,7 @@ Changes to `docker-compose.yml` or the updater need `git pull && docker compose 
 The bot prints nothing useful at the default level. `live.sh` and compose set it.
 
 **A new RustSec advisory turns the `audit` job red.** (#115)
-Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` only with a reason, as for RUSTSEC-2023-0071 (rsa only via the unused sqlx-mysql).
+Fix with `cargo update -p <crate>`. A new dependency can also pull a crate back to an older, vulnerable version: tract 0.21 pinned `time` below 0.3.42 (#188). After adding a dependency, diff `Cargo.lock` for downgrades. Ignore an advisory in `.cargo/audit.toml` only with a reason, as for RUSTSEC-2023-0071 (rsa only via the unused sqlx-mysql).
 
 **DEPLOY.md named a menu that does not exist.** (DEPLOY 6.4) It said **MCP** in the top bar; the link is **MCP tokens** in the account menu, so the owner could not find it. *Avoid:* when a guide names a button or menu, check its label and place in `crates/dashboard/ui/src/main.rs` (header) or the page itself. The rename missed "new MCP page" in CHANGELOG.md (found in the docs round after #166): grep every .md, CHANGELOG and README included, for the old label.
 
