@@ -451,3 +451,59 @@ async fn migration_3900_marks_only_empty_saved_rows_as_join() {
     assert!(!new);
     tx.rollback().await.unwrap();
 }
+
+/// D61: a member who left during verification's join quarantine and rejoins is verifying, not
+/// held: their sticky roles wait for verification instead of being dropped.
+#[tokio::test]
+async fn a_join_quarantine_rejoin_keeps_sticky_roles_for_verification() {
+    let Some(t) = T::new(80).await else { return };
+    let mut v = web_verification();
+    v["quarantine_on_join"] = json!(true);
+    let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v,
+                     "misc": {"sticky_roles": true}});
+    server(&t, 0, cfg).await;
+    let (g, u) = (t.g(0).get() as i64, t.base * 10 + 1);
+    // Left while in the join quarantine; their roles from before are saved.
+    for sql in [
+        "INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, '{}', true)",
+        "INSERT INTO member_roles (guild_id, user_id, roles, joined_at, left_at)
+         VALUES ($1, $2, '{501}', '2025-01-01T00:00:00Z', now())",
+    ] {
+        sqlx::query(sql)
+            .bind(g)
+            .bind(u as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+    }
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![]);
+    });
+    let m: MemberAdd = serde_json::from_value(json!({
+        "guild_id": t.g(0).to_string(), "roles": [], "joined_at": "2026-01-01T00:00:00.000000+00:00",
+        "deaf": false, "mute": false, "flags": 0,
+        "user": {"id": u.to_string(), "username": "back", "discriminator": "0", "avatar": null},
+    }))
+    .unwrap();
+    crate::joingate::on_join(&t.app, &m, false).await.unwrap();
+    assert_eq!(
+        roles(&t, 0, u),
+        Some(vec![Q]),
+        "back in the join quarantine"
+    );
+    let r = crate::verify::web_grant(&t.app, t.g(0), Id::new(u), &[]).await;
+    assert!(r.is_ok(), "{r:?}");
+    let mut got = roles(&t, 0, u).unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![ROLE, VERIFIED],
+        "sticky roles came back after verifying"
+    );
+    sqlx::query("DELETE FROM member_roles WHERE guild_id = $1")
+        .bind(g)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.cleanup().await;
+}
