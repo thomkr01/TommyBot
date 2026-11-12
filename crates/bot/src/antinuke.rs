@@ -738,6 +738,24 @@ pub(crate) async fn revert_actor(
         })
         .collect();
     let mut plan = plan_revert(&log, actor.get(), since);
+    // The actor's oldest name and icon rows in the window, reverted or not: a late rerun that read
+    // only newer renames still ends on the name before the first one.
+    let firsts: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT DISTINCT ON (inverse->>'op') inverse FROM action_log
+         WHERE guild_id=$1 AND actor_id=$2 AND inverse->>'op' IN ('guild_name','guild_icon')
+           AND created_at >= to_timestamp($3)
+         ORDER BY inverse->>'op', id",
+    )
+    .bind(gid.get() as i64)
+    .bind(actor.get() as i64)
+    .bind(since)
+    .fetch_all(&app.pool)
+    .await?;
+    let firsts: Vec<Inverse> = firsts
+        .into_iter()
+        .filter_map(|(v,)| serde_json::from_value(v).ok())
+        .collect();
+    tommybot_antinuke::settle_guild(&mut plan.ops, &firsts);
     if let Some(f) = filters {
         plan.ops.retain(|op| match op {
             Inverse::DeleteRole { .. } => f.restore && f.delete_roles,
@@ -942,12 +960,12 @@ async fn quarantine_and_revert(
     why: &str,
 ) -> Result<()> {
     let key = (gid.get(), actor.get());
-    if !claim_nuke_run(app, key) {
+    let Some(token) = claim_nuke_run(app, key) else {
         // Every event past the limit lands here while the first run is busy; its action is
         // logged, and the running revert picks it up before it ends.
         return Ok(());
-    }
-    let _claim = RunClaim(app, key);
+    };
+    let _claim = RunClaim(app, key, token);
     async {
         let since = now_secs() - 3600;
         let payload = json!({"actor": actor.get(), "why": why, "since": since});
@@ -970,13 +988,14 @@ async fn quarantine_and_revert(
 }
 
 /// Frees a nuke-run claim when the run ends, also when it panics (or the actor stays claimed and
-/// its guard job is skipped for good).
-struct RunClaim<'a>(&'a App, (u64, u64));
+/// its guard job is skipped for good). Only its own claim: `rerun` may have freed it already and
+/// a newer run claimed the actor meanwhile.
+struct RunClaim<'a>(&'a App, (u64, u64), u64);
 
 impl Drop for RunClaim<'_> {
     fn drop(&mut self) {
         let mut runs = self.0.nuke_runs.lock().unwrap_or_else(|p| p.into_inner());
-        runs.remove(&self.1);
+        release(&mut runs, self.1, self.2);
     }
 }
 
@@ -990,10 +1009,10 @@ pub(crate) async fn resume_nuke(
     since: i64,
 ) -> Result<()> {
     let key = (gid.get(), actor.get());
-    if !claim_nuke_run(app, key) {
+    let Some(token) = claim_nuke_run(app, key) else {
         return Ok(());
-    }
-    let _claim = RunClaim(app, key);
+    };
+    let _claim = RunClaim(app, key, token);
     nuke_run(app, gid, actor, why, since, true).await
 }
 
@@ -1048,7 +1067,7 @@ async fn nuke_run(
 
 /// True when no quarantine and revert runs for this (guild, actor) yet; otherwise asks the running
 /// one to revert once more.
-fn claim_nuke_run(app: &App, key: (u64, u64)) -> bool {
+fn claim_nuke_run(app: &App, key: (u64, u64)) -> Option<u64> {
     claim_run(&mut app.nuke_runs.lock().unwrap(), key)
 }
 
@@ -1058,28 +1077,44 @@ fn nuke_rerun(app: &App, key: (u64, u64)) -> bool {
     rerun(&mut app.nuke_runs.lock().unwrap(), key)
 }
 
-fn claim_run(runs: &mut HashMap<(u64, u64), bool>, key: (u64, u64)) -> bool {
+/// The claim's token (one per run), or None while another run holds the actor.
+fn claim_run(runs: &mut NukeRuns, key: (u64, u64)) -> Option<u64> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     match runs.get_mut(&key) {
-        Some(again) => {
+        Some((_, again)) => {
             *again = true;
-            false
+            None
         }
         None => {
-            runs.insert(key, false);
-            true
+            let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            runs.insert(key, (token, false));
+            Some(token)
         }
     }
 }
 
-fn rerun(runs: &mut HashMap<(u64, u64), bool>, key: (u64, u64)) -> bool {
-    if runs.get(&key) == Some(&true) {
-        runs.insert(key, false);
-        true
-    } else {
-        runs.remove(&key);
-        false
+fn rerun(runs: &mut NukeRuns, key: (u64, u64)) -> bool {
+    match runs.get_mut(&key) {
+        Some((_, again)) if *again => {
+            *again = false;
+            true
+        }
+        _ => {
+            runs.remove(&key);
+            false
+        }
     }
 }
+
+/// Frees the claim only while it is still the one `token` took.
+fn release(runs: &mut NukeRuns, key: (u64, u64), token: u64) {
+    if runs.get(&key).is_some_and(|r| r.0 == token) {
+        runs.remove(&key);
+    }
+}
+
+/// (guild, actor) -> (the running run's token, actions came in meanwhile).
+pub(crate) type NukeRuns = HashMap<(u64, u64), (u64, bool)>;
 
 pub(crate) async fn revert_and_report(
     app: &App,
@@ -1309,10 +1344,11 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
                 .delete_guild_scheduled_event(gid, Id::new(*id))
                 .await?; // twilight takes no audit reason here
         }
-        // Compare-and-set: a rename in between (a late rerun) is not undone to an older name.
+        // Only when the live name differs. `from` (a row as stored, not settled by
+        // `revert_actor`): only while the server still has the name the entry set.
         Inverse::GuildName { name, from } => {
             let live = app.http.guild(gid).await?.model().await?.name;
-            if !tommybot_antinuke::still_set(from, &live) {
+            if live == *name || !tommybot_antinuke::still_set(from, &live) {
                 return Ok(());
             }
             app.http
@@ -1322,8 +1358,15 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
                 .await?;
         }
         Inverse::GuildIcon { hash, from } => {
-            let live = app.http.guild(gid).await?.model().await?.icon;
-            if !tommybot_antinuke::still_set(from, &live.map(|h| h.to_string())) {
+            let live = app
+                .http
+                .guild(gid)
+                .await?
+                .model()
+                .await?
+                .icon
+                .map(|h| h.to_string());
+            if live == *hash || !tommybot_antinuke::still_set(from, &live) {
                 return Ok(());
             }
             let icon = match hash {
@@ -1431,12 +1474,17 @@ mod tests {
     fn one_nuke_run_per_actor_and_late_actions_rerun_it() {
         let mut runs = HashMap::new();
         let k = (1, 2);
-        assert!(claim_run(&mut runs, k));
-        assert!(!claim_run(&mut runs, k)); // a second event while it runs
-        assert!(claim_run(&mut runs, (1, 3))); // another actor runs on its own
+        let first = claim_run(&mut runs, k).unwrap();
+        assert!(claim_run(&mut runs, k).is_none()); // a second event while it runs
+        assert!(claim_run(&mut runs, (1, 3)).is_some()); // another actor runs on its own
         assert!(rerun(&mut runs, k)); // that event is reverted once more
         assert!(!rerun(&mut runs, k)); // nothing new: the claim is freed
-        assert!(claim_run(&mut runs, k)); // so a later action starts a new run
+        let second = claim_run(&mut runs, k).unwrap(); // so a later action starts a new run
+                                                       // The first run frees its claim after `jobs::finish`: the second run's claim stays.
+        release(&mut runs, k, first);
+        assert!(claim_run(&mut runs, k).is_none());
+        release(&mut runs, k, second);
+        assert!(claim_run(&mut runs, k).is_some());
     }
 
     #[test]

@@ -353,6 +353,36 @@ fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Strin
     Option::<String>::deserialize(d).map(Some)
 }
 
+/// A revert of server name or icon changes ends on the value before the actor's first change in
+/// the window, whatever subset of rows this run read (a late rerun reads only the newest). The
+/// name and icon ops are replaced by one op each, last (oldest), from `firsts`: the actor's
+/// oldest name and icon row since the window start, reverted or not, as the stored inverse.
+/// The caller applies it only when the live value differs.
+pub fn settle_guild(ops: &mut Vec<Inverse>, firsts: &[Inverse]) {
+    let kind = |i: &Inverse| match i {
+        Inverse::GuildName { .. } => Some(0),
+        Inverse::GuildIcon { .. } => Some(1),
+        _ => None,
+    };
+    let mut last = [None, None];
+    ops.retain(|op| match kind(op) {
+        Some(k) => {
+            last[k] = Some(op.clone());
+            false
+        }
+        None => true,
+    });
+    for (k, read) in last.into_iter().enumerate() {
+        let Some(read) = read else { continue };
+        let first = firsts.iter().find(|f| kind(f) == Some(k)).unwrap_or(&read);
+        ops.push(match first.clone() {
+            Inverse::GuildName { name, .. } => Inverse::GuildName { name, from: None },
+            Inverse::GuildIcon { hash, .. } => Inverse::GuildIcon { hash, from: None },
+            op => op,
+        });
+    }
+}
+
 /// Compare-and-set for a server name or icon revert: true while the live value is still the one
 /// the entry set (`from`), or when the row predates `from`.
 pub fn still_set<T: PartialEq>(from: &Option<T>, live: &T) -> bool {
@@ -668,7 +698,7 @@ mod tests {
     #[test]
     fn a_late_rerun_never_puts_back_a_name_from_a_rename_in_between() {
         // O -> X -> Y -> Z. Each row stores the name it undoes to and the name it set.
-        let e = |at, name: &str, from: &str| LogEntry {
+        let row = |at, name: &str, from: &str| LogEntry {
             actor: 9,
             at,
             inverse: Inverse::GuildName {
@@ -677,29 +707,58 @@ mod tests {
             },
             reverted: false,
         };
-        let apply = |live: &mut String, rows: &[LogEntry]| {
-            for op in plan_revert(rows, 9, 0).ops {
-                if let Inverse::GuildName { name, from } = op {
-                    if still_set(&from, live) {
-                        *live = name;
-                    }
+        let log = [row(100, "O", "X"), row(101, "X", "Y"), row(102, "Y", "Z")];
+        // As `revert_actor` does: plan the rows read, settle on the oldest logged, then apply
+        // only when the live name differs.
+        let run = |live: &mut String, read: &[LogEntry], logged: &[LogEntry]| {
+            let mut ops = plan_revert(read, 9, 0).ops;
+            settle_guild(&mut ops, &[logged[0].inverse.clone()]);
+            let names: Vec<_> = ops
+                .iter()
+                .filter(|o| matches!(o, Inverse::GuildName { .. }))
+                .collect();
+            assert_eq!(names.len(), 1, "one name op per run");
+            if let Inverse::GuildName { name, .. } = names[0] {
+                if name != live {
+                    *live = name.clone();
                 }
             }
         };
-        // The first run read two renames and put O back; the row of Y -> Z reaches a late rerun,
-        // which must not set Y again.
-        let mut live = "Y".to_string();
-        apply(&mut live, &[e(100, "O", "X"), e(101, "X", "Y")]);
-        assert_eq!(live, "O");
-        apply(&mut live, &[e(102, "Y", "Z")]);
-        assert_eq!(live, "O");
-        // All rows in one run still walk back to O.
+        // The first run reads before the last rename is logged (live already Z), then a late
+        // rerun reads that row alone.
         let mut live = "Z".to_string();
-        apply(
-            &mut live,
-            &[e(100, "O", "X"), e(101, "X", "Y"), e(102, "Y", "Z")],
-        );
+        run(&mut live, &log[..2], &log[..2]);
         assert_eq!(live, "O");
+        run(&mut live, &log[2..], &log);
+        assert_eq!(live, "O");
+        // The first run read two renames while live was Y, the late rerun the third.
+        let mut live = "Y".to_string();
+        run(&mut live, &log[..2], &log[..2]);
+        run(&mut live, &log[2..], &log);
+        assert_eq!(live, "O");
+        // Other ops stay, and an icon settles on its own oldest value.
+        let mut ops = vec![
+            Inverse::GuildIcon {
+                hash: Some("new".into()),
+                from: None,
+            },
+            Inverse::DeleteEmoji { id: 1 },
+        ];
+        let first = Inverse::GuildIcon {
+            hash: None,
+            from: Some(Some("a".into())),
+        };
+        settle_guild(&mut ops, &[first]);
+        assert_eq!(
+            ops,
+            [
+                Inverse::DeleteEmoji { id: 1 },
+                Inverse::GuildIcon {
+                    hash: None,
+                    from: None
+                }
+            ]
+        );
         // A row without `from` applies whatever the live name is.
         assert!(still_set(&None, &"anything".to_string()));
     }

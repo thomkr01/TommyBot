@@ -175,7 +175,7 @@ pub struct App {
     pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
-    pub nuke_runs: Mutex<HashMap<(u64, u64), bool>>,
+    pub nuke_runs: Mutex<crate::antinuke::NukeRuns>,
     /// Lock and unlock of one guild run one at a time, so a second lock never saves locked
     /// permissions as its snapshot.
     pub lock_ops: Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>,
