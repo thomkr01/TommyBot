@@ -856,3 +856,54 @@ async fn buttons_recheck_exemptions_and_the_dashboard_can_send_dms() {
     assert_eq!(t.count(scan).await, 1);
     t.forget().await;
 }
+
+/// D29: Allow is refused during panic's mod lock, like Ban, Kick and Quarantine.
+#[tokio::test]
+async fn allow_is_gated_like_the_other_buttons() {
+    let Some(t) = T::new(61).await else { return };
+    let o = t.owner();
+    t.raider_list(0, o, json!({"enabled": true, "action": "alert"}))
+        .await;
+    let u = t.u(2);
+    t.list(u, "confirmed", "raid", None).await;
+    t.join(0, u).await;
+    assert_eq!(t.acted(0, u).await.as_deref(), Some("alert"));
+    // A moderator with the ban permit (not immune), during panic mode with mod commands locked.
+    let (g, moderator) = (t.g(0).get(), t.base + 8);
+    t.exec("INSERT INTO permits (guild_id, name, perms) VALUES ($1, 'mod', '{ban}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) SELECT id, guild_id, 900 FROM permits WHERE guild_id = $1")
+        .await;
+    t.set(|m| {
+        m.members.insert((g, moderator), vec![900]);
+    });
+    let locked = crate::app::PanicRun {
+        lock_mod_commands: true,
+    };
+    t.app.panic_runs.lock().unwrap().insert(g, locked);
+    let said = click(
+        &t.app,
+        (t.g(0), Id::new(88)),
+        Id::new(moderator),
+        "allow",
+        u,
+    )
+    .await
+    .unwrap();
+    assert!(said.contains("locked"), "{said}");
+    let allowed = "SELECT count(*) FROM raider_allow WHERE guild_id = $1";
+    assert_eq!(t.count(allowed).await, 0);
+    t.app.panic_runs.lock().unwrap().remove(&g);
+    let said = click(
+        &t.app,
+        (t.g(0), Id::new(88)),
+        Id::new(moderator),
+        "allow",
+        u,
+    )
+    .await
+    .unwrap();
+    assert!(said.contains("is allowed"), "{said}");
+    assert_eq!(t.count(allowed).await, 1);
+    t.forget().await;
+}

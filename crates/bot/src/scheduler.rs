@@ -303,3 +303,7 @@ pub async fn run_restore(app: Arc<App>) {
         round(&app, true).await;
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;

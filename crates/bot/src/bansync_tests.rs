@@ -121,6 +121,12 @@ pub(crate) struct Mock {
     /// User ids that are bot accounts.
     pub(crate) bots: Vec<u64>,
     pub(crate) fail_user: bool,
+    /// Running timeouts (`communication_disabled_until`) by (guild, user).
+    pub(crate) timeouts: HashMap<(u64, u64), String>,
+    /// Log and DM messages fail with 403.
+    pub(crate) fail_message: bool,
+    /// Channel deletes fail with 500.
+    pub(crate) fail_delete_channel: bool,
     pub(crate) log: Vec<String>,
 }
 
@@ -170,10 +176,12 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
     let user = |id: &str| json!({"id": id, "username": "u", "discriminator": "0", "avatar": null});
     let err = |s: u16, code: u64| (s, json!({"code": code, "message": "x"}).to_string());
     let n = |s: &str| s.parse::<u64>().unwrap();
-    let member = |u: &str, roles: &[u64]| {
+    let timeouts = m.timeouts.clone();
+    let member = |g: &str, u: &str, roles: &[u64]| {
         let roles: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
+        let until = timeouts.get(&(n(g), n(u)));
         json!({"user": user(u), "roles": roles, "joined_at": "2020-01-01T00:00:00.000000+00:00",
-               "deaf": false, "mute": false, "flags": 0})
+               "deaf": false, "mute": false, "flags": 0, "communication_disabled_until": until})
     };
     match (method, parts.as_slice()) {
         ("GET", ["guilds", _, "bans", _]) if m.fail_get => err(500, 0),
@@ -205,11 +213,11 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         ("GET", ["guilds", _, "members", _]) if m.fail_member => err(500, 0),
         ("GET", ["guilds", g, "members", u]) => match m.members.get(&(n(g), n(u))) {
             Some(r) if n(u) == ME && m.new_bot.contains(&n(g)) => {
-                let mut j = member(u, r);
+                let mut j = member(g, u, r);
                 j["joined_at"] = json!("2099-01-01T00:00:00.000000+00:00");
                 (200, j.to_string())
             }
-            Some(r) => (200, member(u, r).to_string()),
+            Some(r) => (200, member(g, u, r).to_string()),
             None => err(404, 10007),
         },
         ("GET", ["guilds", g, "members"]) => {
@@ -219,10 +227,24 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 .into_iter()
                 .filter(|x| x.0 .1 > q("after").unwrap_or(0))
                 .take(q("limit").unwrap_or(1) as usize)
-                .map(|x| member(&x.0 .1.to_string(), x.1))
+                .map(|x| member(g, &x.0 .1.to_string(), x.1))
                 .collect();
             (200, json!(page).to_string())
         }
+        ("PATCH", ["guilds", g, "members", u]) if m.members.contains_key(&(n(g), n(u))) => {
+            let b: Value = serde_json::from_str(body).unwrap_or_default();
+            match b["communication_disabled_until"].as_str() {
+                Some(t) => m.timeouts.insert((n(g), n(u)), t.into()),
+                None => m.timeouts.remove(&(n(g), n(u))),
+            };
+            let roles = m.members[&(n(g), n(u))].clone();
+            let mut j = member(g, u, &roles);
+            j["communication_disabled_until"] = b["communication_disabled_until"].clone();
+            (200, j.to_string())
+        }
+        ("PATCH", ["guilds", _, "members", _]) => err(404, 10007),
+        ("GET", ["guilds", _, "roles"]) => (200, "[]".into()),
+        ("DELETE", ["channels", _]) if m.fail_delete_channel => err(500, 0),
         ("DELETE", ["guilds", g, "members", u]) => match m.members.remove(&(n(g), n(u))) {
             Some(_) => (204, String::new()),
             None => err(404, 10007),
@@ -240,6 +262,7 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             j["bot"] = json!(m.bots.iter().any(|b| b.to_string() == *u));
             (200, j.to_string())
         }
+        ("POST", ["channels", _, "messages"]) if m.fail_message => err(403, 50013),
         ("POST", ["users", "@me", "channels"]) => (200, json!({"id": "77", "type": 1}).to_string()),
         ("POST", ["channels", _, "messages"]) => (200, "{}".into()),
         _ => err(404, 10004),
