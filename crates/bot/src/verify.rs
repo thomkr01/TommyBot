@@ -861,7 +861,7 @@ pub(crate) fn new_sum() -> (String, String) {
 /// Which guild a verify interaction belongs to; DM ones carry it in the custom id.
 fn guild_of(i: &Interaction, id: &str) -> Option<Id<GuildMarker>> {
     i.guild_id
-        .or_else(|| id.rsplit(':').next()?.parse().ok().map(Id::new))
+        .or_else(|| id.rsplit(':').next()?.parse().ok().and_then(Id::new_checked))
 }
 
 pub(crate) const PROMPT: &str = "Please type the captcha below to be able to access this server!";
