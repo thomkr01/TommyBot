@@ -289,12 +289,16 @@ async fn server(app: &App, gid: Id<GuildMarker>) -> Result<Option<Server>> {
 }
 
 /// Copies of a message's files, to post them again elsewhere. A file that fails to download is skipped.
-async fn download(list: &[Uploaded]) -> Vec<Attachment> {
+async fn download(app: &App, list: &[Uploaded]) -> Vec<Attachment> {
     let mut out = vec![];
     for (i, a) in list.iter().enumerate() {
         let got = async {
             anyhow::Ok(
-                reqwest::get(&a.url)
+                // The shared client has a timeout; a bare `reqwest::get` could hang the reply.
+                app.api
+                    .client()
+                    .get(&a.url)
+                    .send()
                     .await?
                     .error_for_status()?
                     .bytes()

@@ -52,6 +52,15 @@ The quarantine row was written before the role change. When the change failed, t
 The raw reqwest client had none, so one hung call could hold a lockdown or rule sync forever.
 The dashboard's and the MCP server's Discord clients had none either, found 11-11.
 *Avoid:* every client gets a timeout (15 s in `automod/src/discord_api.rs`, the dashboard's and the MCP's Discord client). Twilight already handles 429.
+Ticket attachment copies still used a bare `reqwest::get` (no timeout), found 11-12 while adding the icon revert: one hung download held the ticket reply. They now use the bot's shared client (`Api::client()`). Never call `reqwest::get` or `Client::new()` outside tests.
+
+**twilight 0.18 has no soundboard audit types.** (anti-nuke triggers, 11-12)
+Types 130-132 arrive as `AuditLogEventType::Unknown(n)`. Matching `Unknown(132)` would silently stop matching once a later twilight names the variant.
+*Avoid:* match a type twilight does not name by its number (`t if u16::from(t) == 132`), as `antinuke::watched` does.
+
+**A server icon is downloaded from a stored hash.** (anti-nuke triggers, 11-12)
+The icon revert fetches the old icon by the hash in `action_log.inverse`, which anyone with database or revert access could shape into another path.
+*Avoid:* build the URL only with `tommybot_antinuke::icon_url` (`a_` + 32 lowercase hex, fixed CDN host) and fetch through `discord_api::icon_data_uri`: client with a timeout, no token, refuse a redirect off the CDN, `image/*` only, 10 MB cap while reading. Bot and dashboard share it.
 
 **A REST call before an interaction's answer can miss the 3 seconds.** (spammer-flag review, 11-11)
 The verify Start button asked Discord for the spammer flag on every click before it answered, through `Api::send`, which waits out a 429 up to 30 s and retries; the 15 s client timeout was the only limit. Discord drops an interaction answer after 3 s, so a slow or rate-limited lookup left the member with "This interaction failed", and every click cost another request on one bucket. `verify::guild_name` (before the "verified" answer) had no limit either.
@@ -110,6 +119,10 @@ A restart between a temp ban and its unban job made the ban permanent. Same for 
 **Anti-nuke tripped once per event, not once per nuke.** (race review, 11-11)
 Past the limit every audit entry returned `Quarantine` again, and each one is its own task, so a 20-channel nuke started about 16 quarantine-and-revert runs at once. They read the same unreverted rows, so the backup recreated the same deleted channel several times (the copy has a new id, so the next run still saw the original as missing), and opened as many cases and owner alerts.
 *Avoid:* one run per (guild, actor) (`App::nuke_runs`). A later event only logs its row and asks the running run to revert once more; the run frees its claim in the same step that finds nothing new, so no action falls between two runs. The `nuke_revert` guard job is due after 120 s, and a run under rate limits can take longer: the scheduler skips a guard whose run is still alive, and the job path takes the same claim. An actor an earlier run already quarantined only gets the revert, with no second case or alert. `panic::start` undoes its claim and its category exemptions when its `panic_end` job cannot be saved; otherwise mod commands stay locked with nothing to end them. The same applies to panic mode: `panic::start` checks and inserts `panic_runs` in one step, or a second start saves the already exempted overwrites as the old ones.
+
+**A revert applied same-second actions in any order.** (anti-nuke triggers, 11-12)
+`revert_actor` read the actor's rows without an `ORDER BY`, and `plan_revert` sorts by whole seconds. Two server renames in one second could be put back in the wrong order, leaving the attacker's first name instead of the original. Root cause: a sort key coarser than the order of events, with the tie left to whatever order Postgres returned. Earlier inverses (deletes, unbans) did not depend on order, so it only showed with name and icon reverts.
+*Avoid:* read rows `ORDER BY id DESC` and keep the sort stable, so ties stay newest first. Checked: the dashboard revert already orders by `created_at desc, id desc`.
 
 **A run marked rows it never read.** (race review, 11-11)
 `revert_actor` read the actor's rows, worked for seconds, then marked every row since `since` as reverted. What the nuker did meanwhile was marked too and never undone, not even by `/revert`.

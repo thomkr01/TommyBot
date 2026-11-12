@@ -73,20 +73,60 @@ fn watched(e: &AuditLogEntry) -> Option<Action> {
         A::AutoModerationRuleDelete => Action::AutoModRuleDelete,
         A::AutoModerationRuleUpdate => Action::AutoModRuleUpdate,
         A::MemberBanRemove => Action::Unban,
+        A::IntegrationCreate => Action::IntegrationCreate,
+        A::IntegrationDelete => Action::IntegrationDelete,
+        A::EmojiCreate => Action::EmojiCreate,
+        A::StickerCreate => Action::StickerCreate,
+        A::GuildScheduledEventCreate => Action::ScheduledEventCreate,
+        A::GuildUpdate
+            if changed(|c| {
+                matches!(
+                    c,
+                    AuditLogChange::Name { .. } | AuditLogChange::IconHash { .. }
+                )
+            }) =>
+        {
+            Action::GuildUpdate
+        }
+        // SOUNDBOARD_SOUND_DELETE: twilight 0.18 has no variant. Matched by number, so a later
+        // twilight that names it keeps matching.
+        t if u16::from(t) == 132 => Action::SoundboardDelete,
         _ => return None,
     })
 }
 
-fn inverse(action: Action, target: Option<u64>) -> Option<Inverse> {
-    let id = target?;
-    Some(match action {
+/// What undoes the entry. A server update that changed both name and icon gives two.
+fn inverse(action: Action, e: &AuditLogEntry) -> Vec<Inverse> {
+    if action == Action::GuildUpdate {
+        return e
+            .changes
+            .iter()
+            .filter_map(|c| match c {
+                AuditLogChange::Name {
+                    old: Some(name), ..
+                } => Some(Inverse::GuildName { name: name.clone() }),
+                AuditLogChange::IconHash { old, .. } => Some(Inverse::GuildIcon {
+                    hash: old.map(|h| h.to_string()),
+                }),
+                _ => None,
+            })
+            .collect();
+    }
+    let Some(id) = e.target_id.map(|t| t.get()) else {
+        return vec![];
+    };
+    vec![match action {
         Action::ChannelCreate => Inverse::DeleteChannel { id },
         Action::RoleCreate => Inverse::DeleteRole { id },
         Action::WebhookCreate => Inverse::DeleteWebhook { id },
         Action::Ban => Inverse::Unban { user: id },
         Action::Kick => Inverse::Reinvite { user: id },
-        _ => return None,
-    })
+        Action::IntegrationCreate => Inverse::DeleteIntegration { id },
+        Action::EmojiCreate => Inverse::DeleteEmoji { id },
+        Action::StickerCreate => Inverse::DeleteSticker { id },
+        Action::ScheduledEventCreate => Inverse::DeleteScheduledEvent { id },
+        _ => return vec![],
+    }]
 }
 
 /// The permit whitelist flag that exempts an action; the rest fall back to the blanket one.
@@ -168,21 +208,29 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
                     .iter()
                     .any(|w| w.get() == t.get())
             }));
-    let inv = inverse(action, e.target_id.map(|t| t.get()));
+    let inv = inverse(action, e);
     if let (true, Some(t), Action::ChannelCreate | Action::RoleCreate) =
         (exempt, e.target_id, action)
     {
         backup::track_created(app, gid, action, t.get()).await?;
     }
     if !exempt {
-        sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
-            .bind(gid.get() as i64)
-            .bind(actor.get() as i64)
-            .bind(format!("{action:?}"))
-            .bind(e.target_id.map(|t| t.get() as i64))
-            .bind(inv.as_ref().map(|i| json!(i)))
-            .execute(&app.pool)
-            .await?;
+        // One row per inverse (a name and icon change are two), still counted once below.
+        let rows: Vec<Option<&Inverse>> = if inv.is_empty() {
+            vec![None]
+        } else {
+            inv.iter().map(Some).collect()
+        };
+        for i in rows {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+                .bind(gid.get() as i64)
+                .bind(actor.get() as i64)
+                .bind(format!("{action:?}"))
+                .bind(e.target_id.map(|t| t.get() as i64))
+                .bind(i.map(|i| json!(i)))
+                .execute(&app.pool)
+                .await?;
+        }
         if heat > 0
             && cfg.panic.heat_algorithm
             && add_heat(app, gid, actor, heat, cfg.panic.heat_decay)
@@ -197,8 +245,14 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     };
     if let Verdict::Quarantine(c) = verdict {
         let why = format!(
-            "{action:?} limit reached ({}/min, {}/hour)",
-            c.minute, c.hour
+            "{action:?} limit reached ({}/min, {}/hour){}",
+            c.minute,
+            c.hour,
+            if action.cannot_undo() {
+                "; cannot be undone in Discord"
+            } else {
+                ""
+            }
         );
         quarantine_and_revert(app, gid, actor, &why).await?;
     }
@@ -616,7 +670,8 @@ pub(crate) async fn revert_actor(
     // Only the rows read here are marked reverted at the end: the actor's newer actions are not undone yet.
     let rows: Vec<(i64, serde_json::Value, i64)> = sqlx::query_as(
         "SELECT id, inverse, EXTRACT(EPOCH FROM created_at)::BIGINT FROM action_log
-         WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)",
+         WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)
+         ORDER BY id DESC",
     )
     .bind(gid.get() as i64)
     .bind(actor.get() as i64)
@@ -624,6 +679,8 @@ pub(crate) async fn revert_actor(
     .fetch_all(&app.pool)
     .await?;
     let mut ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    // Newest first by id: `at` is whole seconds, and two renames in one second must put the
+    // older name back last.
     let log: Vec<LogEntry> = rows
         .into_iter()
         .filter_map(|(_, inv, at)| {
@@ -1118,6 +1175,8 @@ async fn record_nuke(
     Ok(case.id)
 }
 
+const REVERT_REASON: &str = "Anti-nuke revert";
+
 pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
     match op {
         Inverse::Unban { user } => {
@@ -1171,6 +1230,50 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
             app.http
                 .update_role(gid, Id::new(*id))
                 .permissions(Permissions::from_bits_truncate(*perms))
+                .await?;
+        }
+        Inverse::DeleteIntegration { id } => {
+            app.http
+                .delete_guild_integration(gid, Id::new(*id))
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::DeleteEmoji { id } => {
+            app.http
+                .delete_emoji(gid, Id::new(*id))
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::DeleteSticker { id } => {
+            app.http
+                .delete_guild_sticker(gid, Id::new(*id))
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::DeleteScheduledEvent { id } => {
+            app.http
+                .delete_guild_scheduled_event(gid, Id::new(*id))
+                .await?; // twilight takes no audit reason here
+        }
+        Inverse::GuildName { name } => {
+            app.http
+                .update_guild(gid)
+                .name(name)
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::GuildIcon { hash } => {
+            let icon = match hash {
+                Some(h) => Some(
+                    tommybot_automod::discord_api::icon_data_uri(app.api.client(), gid.get(), h)
+                        .await?,
+                ),
+                None => None,
+            };
+            app.http
+                .update_guild(gid)
+                .icon(icon.as_deref())
+                .reason(REVERT_REASON)
                 .await?;
         }
         // Discord cannot undo a kick, so this is reported for re-invite, not executed.
@@ -1359,6 +1462,76 @@ mod tests {
         assert_eq!(watched(&entry(31, rename)), Some(Action::RoleUpdate));
         assert_eq!(watched(&entry(31, json!([]))), None);
         assert_eq!(watched(&entry(23, json!([]))), Some(Action::Unban));
+    }
+
+    #[test]
+    fn new_triggers_are_watched_and_undone() {
+        let entry = |t: u16, changes: serde_json::Value| -> AuditLogEntry {
+            serde_json::from_value(json!({
+                "action_type": t, "changes": changes, "id": "1", "user_id": "2", "target_id": "3"
+            }))
+            .unwrap()
+        };
+        for (t, a, inv) in [
+            (
+                80,
+                Action::IntegrationCreate,
+                vec![Inverse::DeleteIntegration { id: 3 }],
+            ),
+            (82, Action::IntegrationDelete, vec![]),
+            (
+                60,
+                Action::EmojiCreate,
+                vec![Inverse::DeleteEmoji { id: 3 }],
+            ),
+            (
+                90,
+                Action::StickerCreate,
+                vec![Inverse::DeleteSticker { id: 3 }],
+            ),
+            (
+                100,
+                Action::ScheduledEventCreate,
+                vec![Inverse::DeleteScheduledEvent { id: 3 }],
+            ),
+            (132, Action::SoundboardDelete, vec![]),
+        ] {
+            let e = entry(t, json!([]));
+            assert_eq!(watched(&e), Some(a), "{t}");
+            assert_eq!(inverse(a, &e), inv, "{t}");
+        }
+        // Soundboard create and update are not watched.
+        assert_eq!(watched(&entry(130, json!([]))), None);
+        let hash = "0123456789abcdef0123456789abcdef";
+        let both = entry(
+            1,
+            json!([{"key": "name", "old_value": "Home", "new_value": "Nuked"},
+                   {"key": "icon_hash", "old_value": hash, "new_value": format!("a_{hash}")}]),
+        );
+        assert_eq!(watched(&both), Some(Action::GuildUpdate));
+        assert_eq!(
+            inverse(Action::GuildUpdate, &both),
+            vec![
+                Inverse::GuildName {
+                    name: "Home".into()
+                },
+                Inverse::GuildIcon {
+                    hash: Some(hash.into())
+                }
+            ]
+        );
+        // An icon added where there was none is removed again.
+        let added = entry(1, json!([{"key": "icon_hash", "new_value": hash}]));
+        assert_eq!(
+            inverse(Action::GuildUpdate, &added),
+            vec![Inverse::GuildIcon { hash: None }]
+        );
+        // Other server settings (here the vanity URL) are not this card.
+        let vanity = entry(
+            1,
+            json!([{"key": "vanity_url_code", "old_value": "a", "new_value": "b"}]),
+        );
+        assert_eq!(watched(&vanity), None);
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres. A row the revert did not read

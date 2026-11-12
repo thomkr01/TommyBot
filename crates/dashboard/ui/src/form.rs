@@ -160,7 +160,7 @@ fn action_desc(a: &str) -> &'static str {
 }
 
 /// (anti-nuke action, verb, things, per-second noun) for the limit sentences.
-const NUKE_WORDS: [(&str, &str, &str, &str); 7] = [
+const NUKE_WORDS: [(&str, &str, &str, &str); 14] = [
     ("Ban", "kick/ban", "members", "removal"),
     ("RoleCreate", "create", "roles", "creation"),
     ("RoleDelete", "delete", "roles", "deletion"),
@@ -168,6 +168,13 @@ const NUKE_WORDS: [(&str, &str, &str, &str); 7] = [
     ("ChannelDelete", "delete", "channels", "deletion"),
     ("WebhookCreate", "create", "webhooks", "creation"),
     ("WebhookDelete", "delete", "webhooks", "deletion"),
+    ("EmojiCreate", "create", "emojis", "creation"),
+    ("StickerCreate", "create", "stickers", "creation"),
+    ("SoundboardDelete", "delete", "soundboard sounds", "deletion"),
+    ("ScheduledEventCreate", "create", "events", "creation"),
+    ("IntegrationCreate", "add", "apps", "addition"),
+    ("IntegrationDelete", "remove", "apps", "removal"),
+    ("GuildUpdate", "change the server name or icon", "times", "change"),
 ];
 
 /// (id, label) pairs from `/discord` for `key`: "channels" (no categories), "categories" or "roles".

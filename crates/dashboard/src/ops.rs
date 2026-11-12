@@ -535,7 +535,24 @@ struct RevertBody {
 }
 
 async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<()> {
-    let (m, path, body) = inverse_request(guild, inv);
+    let (m, path, body) = match inv {
+        // The old icon is downloaded first, so it cannot be a plain request.
+        Inverse::GuildIcon { hash } => {
+            let icon = match hash {
+                Some(h) => Some(
+                    tommybot_automod::discord_api::icon_data_uri(&st.discord.http, guild as u64, h)
+                        .await?,
+                ),
+                None => None,
+            };
+            (
+                Method::PATCH,
+                format!("/guilds/{guild}"),
+                Some(json!({ "icon": icon })),
+            )
+        }
+        _ => inverse_request(guild, inv),
+    };
     st.discord.call(m, &path, body).await.map(drop)
 }
 
@@ -564,7 +581,30 @@ fn inverse_request(guild: i64, inv: &Inverse) -> (Method, String, Option<Value>)
             format!("/guilds/{guild}/roles/{id}"),
             Some(json!({"permissions": perms.to_string()})),
         ),
-        Inverse::Unquarantine { .. } | Inverse::Reinvite { .. } => {
+        Inverse::DeleteIntegration { id } => (
+            Method::DELETE,
+            format!("/guilds/{guild}/integrations/{id}"),
+            None,
+        ),
+        Inverse::DeleteEmoji { id } => {
+            (Method::DELETE, format!("/guilds/{guild}/emojis/{id}"), None)
+        }
+        Inverse::DeleteSticker { id } => (
+            Method::DELETE,
+            format!("/guilds/{guild}/stickers/{id}"),
+            None,
+        ),
+        Inverse::DeleteScheduledEvent { id } => (
+            Method::DELETE,
+            format!("/guilds/{guild}/scheduled-events/{id}"),
+            None,
+        ),
+        Inverse::GuildName { name } => (
+            Method::PATCH,
+            format!("/guilds/{guild}"),
+            Some(json!({ "name": name })),
+        ),
+        Inverse::Unquarantine { .. } | Inverse::Reinvite { .. } | Inverse::GuildIcon { .. } => {
             unreachable!("handled by the caller")
         }
     }
@@ -804,6 +844,85 @@ mod tests {
         let (m, path, body) = inverse_request(5, &Inverse::RolePerms { id: 7, perms: 8 });
         assert_eq!((m, path.as_str()), (Method::PATCH, "/guilds/5/roles/7"));
         assert_eq!(body, Some(json!({"permissions": "8"})));
+    }
+
+    #[tokio::test]
+    async fn icon_revert_clears_a_new_icon_and_refuses_a_bad_hash() {
+        let seen: crate::Shared<String, Value> = Default::default();
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/guilds/5",
+            axum::routing::patch(move |Json(b): Json<Value>| async move {
+                s2.lock().unwrap().insert("body".into(), b);
+                "{}"
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let st = AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://x@127.0.0.1:1/x").unwrap(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api,
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+        };
+        run_inverse(&st, 5, &Inverse::GuildIcon { hash: None })
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap()["body"], json!({"icon": null}));
+        let bad = Inverse::GuildIcon {
+            hash: Some("../../users/@me".into()),
+        };
+        assert!(run_inverse(&st, 5, &bad).await.is_err());
+    }
+
+    #[test]
+    fn new_inverses_call_the_matching_routes() {
+        for (inv, m, path, body) in [
+            (
+                Inverse::DeleteIntegration { id: 7 },
+                Method::DELETE,
+                "/guilds/5/integrations/7",
+                None,
+            ),
+            (
+                Inverse::DeleteEmoji { id: 7 },
+                Method::DELETE,
+                "/guilds/5/emojis/7",
+                None,
+            ),
+            (
+                Inverse::DeleteSticker { id: 7 },
+                Method::DELETE,
+                "/guilds/5/stickers/7",
+                None,
+            ),
+            (
+                Inverse::DeleteScheduledEvent { id: 7 },
+                Method::DELETE,
+                "/guilds/5/scheduled-events/7",
+                None,
+            ),
+            (
+                Inverse::GuildName {
+                    name: "Home".into(),
+                },
+                Method::PATCH,
+                "/guilds/5",
+                Some(json!({"name": "Home"})),
+            ),
+        ] {
+            assert_eq!(inverse_request(5, &inv), (m, path.to_string(), body));
+        }
     }
 
     #[tokio::test]

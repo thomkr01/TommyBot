@@ -1172,6 +1172,24 @@ mod tests {
         // Opt-in actions are watched only once configured, then with their defaults.
         assert_eq!(c.limit(NukeAction::Timeout).unwrap().0.per_minute, 5);
         assert!(c.limit(NukeAction::Unban).is_none());
-        assert_eq!(c.watched().len(), 9);
+        // App additions are watched by default; the other new cards are opt-in.
+        assert_eq!(
+            c.limit(NukeAction::IntegrationCreate).unwrap().0.per_minute,
+            2
+        );
+        assert_eq!(c.watched().len(), 10);
+        for a in [
+            NukeAction::IntegrationDelete,
+            NukeAction::EmojiCreate,
+            NukeAction::StickerCreate,
+            NukeAction::SoundboardDelete,
+            NukeAction::ScheduledEventCreate,
+            NukeAction::GuildUpdate,
+        ] {
+            assert!(c.limit(a).is_none(), "{a:?}");
+            let on: AntinukeCfg =
+                serde_json::from_value(json!({"limits": {format!("{a:?}"): {}}})).unwrap();
+            assert!(on.limit(a).is_some(), "{a:?}");
+        }
     }
 }

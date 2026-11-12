@@ -5,6 +5,8 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- Ticket attachment copies time out after 15 seconds instead of possibly holding the ticket reply forever.
+- An anti-nuke revert of several changes made in the same second undoes them newest first, so two quick server renames end on the original name.
 - Appeals: deciding an appeal whose log message has no embed no longer crashes the dashboard request, so the member still gets the verdict DM. A long reply no longer makes Discord refuse the log update (which left the buttons on). The dashboard embed editor no longer breaks on a stored embed whose image is plain text. (#183)
 - MCP tokens, open MCP changes and message reports can no longer pass their limits when several requests arrive at once. (#183)
 - Dashboard 2FA: a setup request racing your own confirm can no longer replace your confirmed authenticator secret, and a confirm only confirms the secret it checked. (#181)
@@ -26,6 +28,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - The dashboard no longer crashes ("reactive value that has already been disposed") when you leave a page while it is still loading or saving, for example during an Update. (#143)
 
 ### Added
+- Anti-nuke watches seven more actions: app additions (on by default; the app is removed, which also kicks its bot), app removals, emoji and sticker creations, soundboard sound deletions, scheduled event creations and server name or icon changes (all opt-in). Created emojis, stickers and events are deleted, and the old server name and icon are put back. App removals and soundboard deletions cannot be undone in Discord, and the anti-nuke report says so. The Revert Center undoes the new actions too, and the setup wizard has "Monitor app additions".
 - Sticky roles (Miscellaneous, off by default): a member who leaves and rejoins gets their roles back, so leaving no longer sheds a Muted role. Roles that are managed, not below the bot, dangerous, a permit role, the Quarantine role or on the "never" list are skipped, a ban forgets the roles, a member who has to verify gets them after verifying, and roles of members who left are deleted after 30 days. Migration 3500.
 - Auto-dehoist (Miscellaneous, off by default): symbols at the start of a name are removed on join and on every name change. Only the owner and Extra Owners are skipped. It pauses during a join raid or lockdown and is capped per server, so it never slows down punishments. One Member log line, no case.
 - Join Gate username filter: new **Rename** action. A listed name becomes "Moderated Nickname" with no punishment, no case and no DM. A harsher filter on the same join still wins.

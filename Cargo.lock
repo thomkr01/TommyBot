@@ -2485,6 +2485,7 @@ name = "tommybot-automod"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "chrono",
  "decancer",
  "reqwest",
@@ -2492,6 +2493,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tommybot-antinuke",
  "tommybot-core",
  "tracing",
 ]

@@ -196,6 +196,7 @@ pub const ANTINUKE: &[Card] = &[
         ("antinuke.limits.ChannelDelete.enabled", "Monitor channel deletions"),
         ("antinuke.limits.WebhookCreate.enabled", "Monitor webhook creations"),
         ("antinuke.limits.WebhookDelete.enabled", "Monitor webhook deletions"),
+        ("antinuke.limits.IntegrationCreate.enabled", "Monitor app additions"),
     ], |_, _| show("nuke_quarantined"))),
     Card {
         notes: &["Leave the role empty and Auto Setup makes @Quarantine for you (old Quarantine roles are deleted). Pick a role and Auto Setup removes all of its permissions and denies it in every channel and category."],
