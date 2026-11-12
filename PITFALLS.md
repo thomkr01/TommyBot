@@ -137,7 +137,7 @@ A mass rejoin (after a raid, or a re-invite) giving every member's roles back wo
 
 **A switch checked in only one of two call sites.** (race review item 5, 11-12)
 `on_audit` calls the quarantine hold from two places. Kicks, bans and timeouts checked `quarantine_hold`, role changes did not, so staff were still quarantined with the switch off.
-*Avoid:* when a feature has a switch, grep every caller of its entry point and check the switch in each, or check it once inside the function.
+*Avoid:* when a feature has a switch, grep every caller of its entry point and check the switch in each, or check it once inside the function. `hold()` now checks it inside, after the join-quarantine branch: an unverified joiner's role change is always undone (that punishes nobody), and only the punishment follows the switch.
 
 **A join quarantine counted as a nuke target.** (race review follow-up, 11-11)
 Verification's "quarantine on join" writes a quarantine row with no saved roles. The quarantine hold treated it like an anti-nuke quarantine, so an autorole bot giving a joiner its role was quarantined and lost its role permissions on every join.
