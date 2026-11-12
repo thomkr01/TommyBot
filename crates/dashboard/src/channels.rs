@@ -1418,6 +1418,7 @@ mod tests {
                 mod_log: true,
                 modules: vec![],
                 main_roles: vec![MAIN],
+                mod_roles: vec![],
                 trusted: vec![],
                 log_channels: vec![13],
             },

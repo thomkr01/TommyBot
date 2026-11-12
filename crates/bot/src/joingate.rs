@@ -17,7 +17,10 @@ use tommybot_logging::{
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
     gateway::payload::incoming::{MemberAdd, MemberUpdate},
-    id::{marker::GuildMarker, Id},
+    id::{
+        marker::{GuildMarker, RoleMarker},
+        Id,
+    },
     user::UserFlags,
 };
 
@@ -223,6 +226,15 @@ pub(crate) fn punished(action: Action) -> &'static str {
     }
 }
 
+/// The roles a raid trigger log pings (join and voice). A stored id that is not a snowflake is
+/// skipped: `Id::new` panics on 0.
+pub(crate) fn warned_roles(raid: &RaidCfg) -> Vec<Id<RoleMarker>> {
+    raid.warned_roles
+        .iter()
+        .filter_map(|r| r.parse().ok().and_then(Id::new_checked))
+        .collect()
+}
+
 /// A raid trigger alert (join or voice): `(title, pattern)`, what happens next, the first flags.
 pub(crate) fn trigger_log(
     (title, pattern): (&str, &str),
@@ -338,11 +350,7 @@ async fn join_raid(
         {
             tracing::warn!(?e, "queueing the raid report failed");
         }
-        let warned: Vec<_> = raid
-            .warned_roles
-            .iter()
-            .filter_map(|r| r.parse().ok().map(Id::new))
-            .collect();
+        let warned = warned_roles(raid);
         let flagged: Vec<(u64, &str)> = out
             .flagged
             .iter()

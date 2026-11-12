@@ -274,6 +274,10 @@ Discord adds link previews and GIF previews in a `MESSAGE_UPDATE` without `edite
 Duration parsing sliced off the last character by byte and panicked on input like `5å`. Converting large values to milliseconds overflowed.
 *Avoid:* split on `char` boundaries (`chars()`, `char_indices()`), use checked or saturating maths. Never `&s[..n]` on user input.
 
+**`Id::new` panics on 0.** (voice raid pings, 11-12)
+Join Raid read its Warned Roles (strings in the config) with `r.parse().ok().map(Id::new)`, so a stored `"0"` (an import or a hand edit) panicked the join task before the raid log and the punishments. Root cause: a parsed number is not a valid snowflake.
+*Avoid:* turn parsed or stored numbers into ids with `Id::new_checked` and skip `None`. Both raid triggers now read the roles through `joingate::warned_roles`. Searched: `verify::guild_of` parses the guild from a button's custom id the same way (the bot writes those ids); the rest of the `Id::new` calls take ids Discord or the database already gave.
+
 **Limits drifted between places.** (#134)
 The prefix panels, the dashboard and the save path each had their own bounds, and an out-of-range value was changed silently.
 *Avoid:* all bounds live in `core::limits` and are used everywhere. A value out of range is refused with a message.

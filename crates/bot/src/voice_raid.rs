@@ -3,7 +3,7 @@
 //! permit), bots, the bot itself and members on the Auto Mod spam whitelist.
 use anyhow::Result;
 use serde_json::{json, Value};
-use tommybot_automod::voice::VoiceRaidCfg;
+use tommybot_automod::join::RaidCfg;
 use tommybot_core::{jobs, permits};
 use tommybot_logging::{embed::duration, LogKind};
 use twilight_http::request::AuditLogReason;
@@ -18,7 +18,7 @@ use twilight_model::{
 use crate::{
     app::{App, GuildCfg},
     automod::now_ms,
-    events::send_log,
+    events::send_log_pinging,
     joingate::{self, Detail},
 };
 
@@ -34,14 +34,10 @@ pub async fn on_voice(app: &App, v: &VoiceState, old: Option<Id<ChannelMarker>>)
         return Ok(());
     };
     let cfg = app.cfg(gid.get()).await?;
-    let Some(raid) = cfg
-        .joinraid
-        .as_ref()
-        .map(|r| &r.voice)
-        .filter(|r| r.enabled)
-    else {
+    let Some(join) = cfg.joinraid.as_ref().filter(|r| r.voice.enabled) else {
         return Ok(());
     };
+    let raid = &join.voice;
     // A member whose level could not be read is never flagged.
     let (exempt, name) = match who(app, &cfg, gid, v).await {
         Ok(w) => w,
@@ -72,7 +68,7 @@ pub async fn on_voice(app: &App, v: &VoiceState, old: Option<Id<ChannelMarker>>)
         return Ok(());
     }
     if out.triggered {
-        triggered(app, gid, raid, &out.flagged, (started, &code), now).await;
+        triggered(app, gid, join, &out.flagged, (started, &code), now).await;
     }
     if let Some(until) = extended {
         if let Err(e) = extend(&app.pool, gid.get() as i64, &code, until).await {
@@ -165,11 +161,12 @@ async fn who(
 async fn triggered(
     app: &App,
     gid: Id<GuildMarker>,
-    raid: &VoiceRaidCfg,
+    join: &RaidCfg,
     flagged: &[(u64, String)],
     (started, code): (i64, &str),
     now: i64,
 ) {
+    let raid = &join.voice;
     let until = now + raid.active();
     let job = json!({ "until_ms": until, "started_ms": started, "code": code });
     // Its own job, not a replace: the last raid's report may be due and not yet claimed.
@@ -190,7 +187,8 @@ async fn triggered(
         code,
         url,
     );
-    if let Err(e) = send_log(app, gid.get(), LogKind::JoinRaid, log).await {
+    let warned = joingate::warned_roles(join);
+    if let Err(e) = send_log_pinging(app, gid.get(), LogKind::JoinRaid, log, &warned).await {
         tracing::warn!(?e, "voice raid log failed");
     }
     crate::reply::alert_owner(app, gid, "A voice raid started").await;

@@ -39,6 +39,8 @@ pub struct Setup {
     pub modules: Vec<(&'static str, bool)>,
     /// Lockdown main roles; their channel overwrites are held to the @everyone rules.
     pub main_roles: Vec<u64>,
+    /// Roles on the Moderators permit and not on Admins.
+    pub mod_roles: Vec<u64>,
     /// Members whose own channel overwrites may grant anything: owner, extra owners, the bot.
     pub trusted: Vec<u64>,
     /// Every channel a log goes to.
@@ -106,6 +108,32 @@ pub const PRIVATE: &str = "private_channel";
 
 /// The [`Fix::setting`] that puts the quarantine deny on every channel, as Auto Setup does.
 pub const QUARANTINE_CHANNELS: &str = "quarantine_channels";
+
+/// The [`Fix::setting`] that takes [`EXPRESSION_PERMS`] from every role [`expression_targets`] picks.
+pub const EXPRESSIONS: &str = "expression_perms";
+
+/// Manage Expressions, Manage Events, Create Expressions and Create Events: Admins only.
+pub const EXPRESSION_PERMS: u64 = (1 << 30) | (1 << 33) | (1 << 43) | (1 << 44);
+
+/// Roles that can create or manage emojis, stickers, soundboard sounds or events but should not,
+/// and that the bot can change: @everyone, the main roles and Moderator-only roles, not managed,
+/// below the bot.
+pub fn expression_targets<'a>(
+    roles: &'a [RoleImg],
+    guild: u64,
+    bot_top: i64,
+    setup: &Setup,
+) -> Vec<&'a RoleImg> {
+    roles
+        .iter()
+        .filter(|r| {
+            (r.id == guild || setup.main_roles.contains(&r.id) || setup.mod_roles.contains(&r.id))
+                && !r.managed
+                && r.position < bot_top
+                && r.permissions & EXPRESSION_PERMS != 0
+        })
+        .collect()
+}
 
 /// The safer value a setting fix writes: (Discord field, value).
 pub fn setting_fix(setting: &str) -> Option<(&'static str, u8)> {
@@ -433,6 +461,34 @@ pub fn checks(
             "@everyone is safe",
             "New accounts get no permissions until a role gives them some.".into(),
             None,
+        );
+    }
+    let expressions = expression_targets(roles, g.id, bot_top, setup);
+    if expressions.is_empty() {
+        row(
+            "expression_perms",
+            Severity::Ok,
+            "Emojis, stickers, sounds and events",
+            "Members and Moderators cannot create or manage emojis, stickers, soundboard sounds or events.".into(),
+            None,
+        );
+    } else {
+        let names: Vec<&str> = expressions.iter().map(|r| r.name.as_str()).collect();
+        row(
+            "expression_perms",
+            Severity::Warn,
+            "Members can create emojis, stickers, sounds or events",
+            format!(
+                "{} can create or manage emojis, stickers, soundboard sounds or events. Only Admins should.",
+                names.join(", ")
+            ),
+            Some(Fix {
+                label: "Strip permissions",
+                role_id: None,
+                channel_id: None,
+                setting: Some(EXPRESSIONS),
+                move_under_bot: false,
+            }),
         );
     }
     // (good, text when good, text when not) for the setup rows below.
@@ -772,6 +828,7 @@ mod tests {
             bot_roles: vec![],
             mod_log: true,
             main_roles: vec![99],
+            mod_roles: vec![],
             modules: vec![],
             trusted: vec![],
             log_channels: vec![],
@@ -869,16 +926,55 @@ mod tests {
     }
 
     #[test]
+    fn expression_row_flags_everyone_main_and_mod_roles_only() {
+        const CREATE: u64 = (1 << 43) | (1 << 44);
+        let roles = [
+            role(1, 0, false, CREATE | 0x400),
+            role(99, 1, false, 1 << 30),
+            role(7, 2, false, 1 << 33),
+            role(8, 3, false, CREATE),
+            role(10, 2, true, CREATE),
+            role(11, 6, false, CREATE),
+            role(12, 1, false, CREATE),
+        ];
+        let setup = Setup {
+            // 8 is an Admin role (on Moderators too, so not in mod_roles); 10 managed, 11 above
+            // the bot; 12 holds no permit.
+            mod_roles: vec![7, 10, 11],
+            main_roles: vec![99, 11],
+            ..setup(None, true)
+        };
+        let ids: Vec<u64> = expression_targets(&roles, 1, 5, &setup)
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, [1, 99, 7]);
+        let rows = checks(&SAFE, &roles, &[], 5, &setup);
+        let row = sev(&rows, "expression_perms").unwrap();
+        assert_eq!(row.severity, Severity::Warn);
+        assert_eq!(row.detail.split(" can ").next(), Some("r1, r99, r7"));
+        assert_eq!(row.fix.as_ref().unwrap().setting, Some(EXPRESSIONS));
+        // The fix keeps every other bit.
+        assert_eq!((CREATE | 0x400 | 0x8) & !EXPRESSION_PERMS, 0x408);
+        let clean = [role(1, 0, false, 0x400), role(11, 6, false, CREATE)];
+        let rows = checks(&SAFE, &clean, &[], 5, &setup);
+        assert_eq!(
+            sev(&rows, "expression_perms").unwrap().severity,
+            Severity::Ok
+        );
+    }
+
+    #[test]
     fn score_is_the_share_of_passing_checks() {
         let setup = setup(None, true);
         let rows = checks(&SAFE, &[], &[], 0, &setup);
         // Only the missing quarantine role and the bot role (none here) fail.
-        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.len(), 14);
         assert_eq!(
             sev(&rows, "quarantine_unset").unwrap().severity,
             Severity::Bad
         );
-        assert_eq!(score(&rows), 11 * 100 / 13);
+        assert_eq!(score(&rows), 12 * 100 / 14);
         assert_eq!(score(&[]), 0);
     }
 
