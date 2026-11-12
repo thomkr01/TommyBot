@@ -2,7 +2,7 @@
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
-use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, SLOW_USERS, VOICE_COUNT};
+use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, NSFW_THRESHOLD, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, SLOW_USERS, VOICE_COUNT};
 use tommybot_core::warn::Action as WarnAction;
 use twilight_model::id::{marker::RoleMarker, Id};
 
@@ -177,7 +177,7 @@ pub(super) static HEAT: Module = Module {
 };
 
 /// Panel shows filters 6-9 in this order; the rest of the order is ours.
-static HFILTERS_ROWS: [Row; 58] = {
+static HFILTERS_ROWS: [Row; 61] = {
     let [a1, a2, a3, a4] = filter!("1", "Normal Message Heat", "regular", regular; base, "per message");
     let [b1, b2, b3, b4] = filter!("2", "Similar Message Repetition Heat", "similar", similar; similarity, "at full similarity");
     let [c1, c2, c3, c4] = filter!("3", "Mentions Heat", "mentions", mentions; per_mention, "per mention");
@@ -195,11 +195,15 @@ static HFILTERS_ROWS: [Row; 58] = {
     let [j1, j2, j3, j4] = filter!("10", "Lowercase Characters Heat", "chars_lower", chars_lower; per_lower, "per lowercased character");
     let [k1, k2, k3, k4] = filter!("11", "Inactive Channel Heat", "inactive_channel", inactive_channel; inactive_channel, "per message");
     let [l1, l2, l3, l4] = filter!("12", "NSFW Websites Heat", "nsfw_links", nsfw_links; nsfw, "per message");
+    let l5 = r!("12d", "NSFW Images", "automod.filters.nsfw_images.enabled", Kind::Bool, |c| on(c.automod.filters.nsfw_images.enabled));
+    let l6 = r!("12e", "NSFW Images Action", "automod.filters.nsfw_images.action", Kind::Choice(FILTER_ACTIONS), |c| opt(c.automod.filters.nsfw_images.action));
+    let l7 = r!("12f", "NSFW Image Score", "automod.filters.nsfw_threshold", Kind::Int(NSFW_THRESHOLD.0, NSFW_THRESHOLD.1), |c| format!("{}%", c.automod.filters.nsfw_threshold));
     let [m1, m2, m3, m4] = filter!("13", "Words Blacklist Heat", "words.filter", words.filter; per_blacklisted_word, "per word");
     let [n1, n2, n3, n4] = filter!("14", "Suspicious Account Heat", "suspicion", suspicion; suspicious_account, "per message");
     [
         a1, a2, a3, a4, b1, b2, b3, b4, c1, c2, c3, c4, d1, d2, d3, d4, e1, e2, e3, e4, f1, f2, f3, f4, f5,
         g1, g2, g3, g4, h1, h2, h3, h4, h5, i1, i2, i3, i4, j1, j2, j3, j4, k1, k2, k3, k4, l1, l2, l3, l4,
+        l5, l6, l7,
         m1, m2, m3, m4, n1, n2, n3, n4,
     ]
 };

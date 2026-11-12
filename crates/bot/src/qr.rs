@@ -30,18 +30,22 @@ pub async fn texts(app: &App, attachments: &[Attachment]) -> String {
     out
 }
 
-fn decode(bytes: &[u8]) -> Vec<String> {
-    // A tiny file can claim a huge size; the limits stop it before it allocates.
+/// Decodes an untrusted image (the first frame of an animation). A tiny file can claim a huge size;
+/// the limits stop it before it allocates.
+pub(crate) fn read_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(128 << 20);
-    let Ok(mut reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
-    else {
-        return vec![];
-    };
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
     reader.limits(limits);
-    let Ok(img) = reader.decode() else {
+    reader.decode().ok()
+}
+
+fn decode(bytes: &[u8]) -> Vec<String> {
+    let Some(img) = read_image(bytes) else {
         return vec![];
     };
     let img = if img.width().max(img.height()) > MAX_SIDE {

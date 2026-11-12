@@ -189,6 +189,8 @@ pub struct App {
     pub voice_audit: Mutex<crate::voice_nuke::State>,
     /// Voice join raid state per guild; idle guilds are dropped on each voice join.
     pub voice_raids: Mutex<HashMap<u64, tommybot_automod::voice::VoiceRaidDetector>>,
+    /// NSFW image scan queue, model and score cache.
+    pub nsfw: crate::nsfw::Scanner,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -258,6 +260,7 @@ impl App {
             sticky_budget: Default::default(),
             voice_audit: Mutex::new(crate::voice_nuke::State::new(crate::automod::now_ms())),
             voice_raids: Mutex::new(HashMap::new()),
+            nsfw: Default::default(),
         }
     }
 

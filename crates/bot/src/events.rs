@@ -444,6 +444,19 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         {
             automod::on_edit(app, &m.0).await?;
         }
+        // A link preview or GIF arrived after the post: only the image scan looks at it.
+        Event::MessageUpdate(m)
+            if m.edited_timestamp.is_none()
+                && !m.embeds.is_empty()
+                && (!m.author.bot || m.webhook_id.is_some()) =>
+        {
+            if let Some(gid) = m.guild_id {
+                let am = &app.cfg(gid.get()).await?.automod;
+                if am.enabled && am.filters.nsfw_images.enabled {
+                    app.nsfw.enqueue(&m.0, true, false);
+                }
+            }
+        }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
             app.invalidate_guild(r.guild_id);
@@ -522,6 +535,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                 && !crate::whitelist::handle(app, &i.0).await?
                 && !crate::bansync::handle(app, &i.0).await?
                 && !crate::raiders::handle(app, &i.0).await?
+                && !crate::nsfw::handle(app, &i.0).await?
             {
                 slash::handle(app, &i.0).await?
             }

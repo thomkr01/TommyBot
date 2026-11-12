@@ -26,6 +26,8 @@ const SLOWMODE: [(&str, (i64, i64)); 5] = [
     ("min_on_secs", SLOW_ON),
     ("calm_secs", SLOW_CALM),
 ];
+/// NSFW image scan: score in percent from which an image counts as NSFW.
+pub const NSFW_THRESHOLD: (i64, i64) = (50, 99);
 /// Ban Sync: seconds a ban waits before it is shared, so anti-nuke can stop a hacked account first.
 pub const BAN_SYNC_HOLD_S: i64 = 60;
 /// Ban Sync: bans one server may share per hour before sharing pauses for the owner.
@@ -47,6 +49,7 @@ pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
         ("antinuke", ["limits", _, "per_hour"]) => Some(NUKE_HOUR),
         ("antinuke", ["limits", _, "heat"]) => Some(NUKE_HEAT),
         ("joingate", ["min_age_override_ms"]) => Some(MIN_AGE_MS),
+        ("automod", ["filters", "nsfw_threshold"]) => Some(NSFW_THRESHOLD),
         ("automod", ["auto_slowmode", k]) => SLOWMODE.iter().find(|s| s.0 == *k).map(|s| s.1),
         ("joinraid", ["voice", k]) => VOICE.iter().find(|s| s.0 == *k).map(|s| s.1),
         _ => None,

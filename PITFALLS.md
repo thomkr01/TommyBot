@@ -264,6 +264,10 @@ The post-join username filter dedupes on username + global name + nick. Its Rena
 Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
 *Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the flag would turn a Grant into a challenge, and a failed lookup means a captcha.
 
+**Some content arrives after the post.** (NSFW image scan, 11-12)
+Discord adds link previews and GIF previews in a `MESSAGE_UPDATE` without `edited_timestamp`, and `events.rs` skipped those, so an image filter that only looked at new posts would miss every linked image.
+*Avoid:* a filter on images or embeds also reads preview updates (only that filter, not the whole automod run), and is idempotent per message (a unique key), because the same message arrives again as an update, an edit and through the catch-up sweep.
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)
@@ -369,7 +373,7 @@ Changes to `docker-compose.yml` or the updater need `git pull && docker compose 
 The bot prints nothing useful at the default level. `live.sh` and compose set it.
 
 **A new RustSec advisory turns the `audit` job red.** (#115)
-Fix with `cargo update -p <crate>`. Ignore an advisory in `.cargo/audit.toml` only with a reason, as for RUSTSEC-2023-0071 (rsa only via the unused sqlx-mysql).
+Fix with `cargo update -p <crate>`. A new dependency can also pull a crate back to an older, vulnerable version: tract 0.21 pinned `time` below 0.3.42 (#188). After adding a dependency, diff `Cargo.lock` for downgrades. Ignore an advisory in `.cargo/audit.toml` only with a reason, as for RUSTSEC-2023-0071 (rsa only via the unused sqlx-mysql).
 
 **DEPLOY.md named a menu that does not exist.** (DEPLOY 6.4) It said **MCP** in the top bar; the link is **MCP tokens** in the account menu, so the owner could not find it. *Avoid:* when a guide names a button or menu, check its label and place in `crates/dashboard/ui/src/main.rs` (header) or the page itself. The rename missed "new MCP page" in CHANGELOG.md (found in the docs round after #166): grep every .md, CHANGELOG and README included, for the old label.
 

@@ -23,6 +23,7 @@ mod modslash;
 mod modstats;
 mod modview;
 mod native;
+mod nsfw;
 mod panic;
 mod prefix;
 mod previews;
@@ -163,6 +164,16 @@ async fn main() -> Result<()> {
     tokio::spawn(events::flush_logs(app.clone()));
     tokio::spawn(backup::auto_backup(app.clone()));
     tokio::spawn(welcome::purge_left(app.clone()));
+    // CPU the image scan may use: one model run per worker at a time.
+    let workers = std::env::var("NSFW_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1usize)
+        .clamp(1, 8);
+    for _ in 0..workers {
+        tokio::spawn(nsfw::run(app.clone()));
+    }
+    tokio::spawn(nsfw::sweep(app.clone()));
 
     if let Err(e) = slash::register(&app).await {
         tracing::warn!(?e, "slash command registration failed");
