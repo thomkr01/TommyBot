@@ -136,8 +136,9 @@ mod tests {
         assert!(check("automod", &json!({}), &Value::Null).is_ok());
         assert_eq!(
             for_path("automod", "auto_slowmode.min_users"),
-            Some((1, 50))
+            Some((2, 50))
         );
+        assert!(check("automod", &slow("min_users", 1), &Value::Null).is_err());
         assert!(check("joingate", &json!({}), &Value::Null).is_ok());
         let heat = |k: &str, v: f64| json!({"heat": {k: v}});
         assert!(check("automod", &heat("max", 100.0), &Value::Null).is_ok());

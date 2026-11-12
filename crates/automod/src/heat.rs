@@ -347,7 +347,8 @@ impl Default for AutoSlowmodeCfg {
 }
 
 pub const SLOW_PCT: (i64, i64) = (100, 5_000);
-pub const SLOW_USERS: (i64, i64) = (1, 50);
+/// At least 2: a single spammer is heat's job, never a reason to slow the whole channel.
+pub const SLOW_USERS: (i64, i64) = (2, 50);
 /// Discord's maximum slowmode is 6 hours.
 pub const SLOW_SECS: (i64, i64) = (1, 21_600);
 pub const SLOW_ON: (i64, i64) = (10, 3_600);
@@ -985,7 +986,7 @@ mod tests {
                 c.min_on_secs,
                 c.calm_secs
             ),
-            (true, 100, 1, 21_600, 10, 3_600)
+            (true, 100, 2, 21_600, 10, 3_600)
         );
         let d = AutoSlowmodeCfg::default();
         assert_eq!(d.clone().clamped().channel_pct, d.channel_pct);

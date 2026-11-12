@@ -5,6 +5,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Fixed
+- Auto slowmode needs at least 2 members; a setting of 1 is refused and an old saved 1 reads as 2. One member could otherwise slow a whole channel, which is the job of heat and strikes.
 - Appeals: deciding an appeal whose log message has no embed no longer crashes the dashboard request, so the member still gets the verdict DM. A long reply no longer makes Discord refuse the log update (which left the buttons on). The dashboard embed editor no longer breaks on a stored embed whose image is plain text. (#183)
 - MCP tokens, open MCP changes and message reports can no longer pass their limits when several requests arrive at once. (#183)
 - Dashboard 2FA: a setup request racing your own confirm can no longer replace your confirmed authenticator secret, and a confirm only confirms the secret it checked. (#181)
