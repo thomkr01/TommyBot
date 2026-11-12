@@ -234,6 +234,8 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("IntegrationCreate", "App additions"),
     ("IntegrationDelete", "App removals"),
     ("GuildUpdate", "Server name & icon changes"),
+    ("VoiceDisconnect", "Voice disconnects"),
+    ("VoiceMove", "Voice moves"),
     ("AutoModRuleDelete", "AutoMod rule deletions"),
     ("AutoModRuleUpdate", "AutoMod rule updates"),
     ("Unban", "Unbans"),

@@ -185,6 +185,8 @@ pub struct App {
     pub thread_parents: Mutex<HashMap<Id<ChannelMarker>, Id<ChannelMarker>>>,
     /// Sticky role adds per guild in the current minute: (minute, count).
     pub sticky_budget: Mutex<HashMap<u64, (i64, u32)>>,
+    /// Guilds watched for merged voice disconnect and move entries; see `voice_nuke`.
+    pub voice_audit: Mutex<crate::voice_nuke::State>,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -252,6 +254,7 @@ impl App {
             thread_parents: Default::default(),
             reactions: Default::default(),
             sticky_budget: Default::default(),
+            voice_audit: Mutex::new(crate::voice_nuke::State::new(crate::automod::now_ms())),
         }
     }
 

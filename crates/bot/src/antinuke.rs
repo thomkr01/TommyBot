@@ -174,12 +174,15 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         A::RoleCreate => guard_perms(app, &cfg, e, actor).await?,
         _ => {}
     }
+    if matches!(e.action_type, A::MemberDisconnect | A::MemberMove) {
+        return crate::voice_nuke::note(app, &cfg, gid, e).await;
+    }
     let Some(action) = watched(e) else {
         return Ok(());
     };
-    let Some((_, heat)) = cfg.antinuke.limit(action) else {
+    if cfg.antinuke.limit(action).is_none() {
         return Ok(());
-    };
+    }
     // Ticket bots open and close channels all day; the gateway event names the category first.
     let exempt_categories: Vec<u64> = cfg
         .antinuke
@@ -214,6 +217,37 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     {
         backup::track_created(app, gid, action, t.get()).await?;
     }
+    count(
+        app,
+        &cfg,
+        gid,
+        actor,
+        action,
+        e.target_id.map(|t| t.get()),
+        &inv,
+        exempt,
+        1,
+    )
+    .await
+}
+
+/// Logs, heats and counts `n` actions of one audit entry, and contains the actor at the limit.
+/// The voice path counts how much a merged entry grew (`voice_nuke`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn count(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    action: Action,
+    target: Option<u64>,
+    inv: &[Inverse],
+    exempt: bool,
+    n: u32,
+) -> Result<()> {
+    let Some((_, heat)) = cfg.antinuke.limit(action) else {
+        return Ok(());
+    };
     if !exempt {
         // One row per inverse (a name and icon change are two), still counted once below.
         let rows: Vec<Option<&Inverse>> = if inv.is_empty() {
@@ -226,14 +260,20 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
                 .bind(gid.get() as i64)
                 .bind(actor.get() as i64)
                 .bind(format!("{action:?}"))
-                .bind(e.target_id.map(|t| t.get() as i64))
+                .bind(target.map(|t| t as i64))
                 .bind(i.map(|i| json!(i)))
                 .execute(&app.pool)
                 .await?;
         }
         if heat > 0
             && cfg.panic.heat_algorithm
-            && add_heat(app, gid, actor, heat, cfg.panic.heat_decay)
+            && add_heat(
+                app,
+                gid,
+                actor,
+                heat.saturating_mul(n),
+                cfg.panic.heat_decay,
+            )
         {
             crate::panic::note(app, gid, actor, true).await?;
         }
@@ -241,7 +281,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     let verdict = {
         let mut an = app.antinuke.lock().unwrap();
         an.limits = cfg.antinuke.watched();
-        an.on_action(gid.get(), actor.get(), action, exempt, Instant::now())
+        an.on_actions(gid.get(), actor.get(), action, exempt, Instant::now(), n)
     };
     if let Verdict::Quarantine(c) = verdict {
         let why = format!(
@@ -1500,8 +1540,11 @@ mod tests {
             assert_eq!(watched(&e), Some(a), "{t}");
             assert_eq!(inverse(a, &e), inv, "{t}");
         }
-        // Soundboard create and update are not watched.
-        assert_eq!(watched(&entry(130, json!([]))), None);
+        // Soundboard create and update are not watched. Voice moves and disconnects are counted
+        // only by `voice_nuke`, so a merged entry is never counted by two paths.
+        for t in [130, 26, 27] {
+            assert_eq!(watched(&entry(t, json!([]))), None, "{t}");
+        }
         let hash = "0123456789abcdef0123456789abcdef";
         let both = entry(
             1,

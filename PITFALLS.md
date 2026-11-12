@@ -58,6 +58,10 @@ Ticket attachment copies still used a bare `reqwest::get` (no timeout), found 11
 Types 130-132 arrive as `AuditLogEventType::Unknown(n)`. Matching `Unknown(132)` would silently stop matching once a later twilight names the variant.
 *Avoid:* match a type twilight does not name by its number (`t if u16::from(t) == 132`), as `antinuke::watched` does.
 
+**Voice disconnects and moves are merged into one audit entry.** (anti-nuke voice, 11-12)
+Discord merges `MEMBER_DISCONNECT` (27) and `MEMBER_MOVE` (26) by the same actor in quick succession into the first entry and raises its `options.count`, and those updates fire no gateway event. Counting gateway entries sees 1 for a mass disconnect of 20.
+*Avoid:* count the growth of `count`, not entries. `voice_nuke` watches a guild for 10 minutes after the first entry and rereads the audit log on voice updates (one fetch at a time, at most one per 3 s, plus a trailing fetch so the end of a burst counts). The last seen count per entry is read and stored under one lock, entries older than the bot are seeded at their count (a restart does not recount them), `count` is a string parsed to u32 and capped at 500, and 26/27 are counted only there, never also through `watched()`. Message deletes merge the same way (see "Discord's own rendering quirks").
+
 **A server icon is downloaded from a stored hash.** (anti-nuke triggers, 11-12)
 The icon revert fetches the old icon by the hash in `action_log.inverse`, which anyone with database or revert access could shape into another path.
 *Avoid:* build the URL only with `tommybot_antinuke::icon_url` (`a_` + 32 lowercase hex, fixed CDN host) and fetch through `discord_api::icon_data_uri`: client with a timeout, no token, refuse a redirect off the CDN, `image/*` only, 10 MB cap while reading. Bot and dashboard share it.

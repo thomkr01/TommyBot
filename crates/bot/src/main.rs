@@ -41,6 +41,7 @@ mod targets;
 mod tickets;
 mod timeout_roles;
 mod verify;
+mod voice_nuke;
 mod webhooks;
 mod welcome;
 mod whitelist;

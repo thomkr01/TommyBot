@@ -1185,6 +1185,8 @@ mod tests {
             NukeAction::SoundboardDelete,
             NukeAction::ScheduledEventCreate,
             NukeAction::GuildUpdate,
+            NukeAction::VoiceDisconnect,
+            NukeAction::VoiceMove,
         ] {
             assert!(c.limit(a).is_none(), "{a:?}");
             let on: AntinukeCfg =

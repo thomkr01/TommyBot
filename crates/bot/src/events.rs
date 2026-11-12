@@ -519,6 +519,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             }
             nuke.and(ban).and(unban).and(allow)?
         }
+        Event::VoiceStateUpdate(v) => crate::voice_nuke::on_voice(app, &v.0).await,
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
         Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,

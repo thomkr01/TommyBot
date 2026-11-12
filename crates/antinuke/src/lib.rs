@@ -44,10 +44,12 @@ pub enum Action {
     ScheduledEventCreate,
     /// Name or icon changes only.
     GuildUpdate,
+    VoiceDisconnect,
+    VoiceMove,
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 27] = [
         Action::ChannelCreate,
         Action::ChannelDelete,
         Action::RoleCreate,
@@ -73,6 +75,8 @@ impl Action {
         Action::SoundboardDelete,
         Action::ScheduledEventCreate,
         Action::GuildUpdate,
+        Action::VoiceDisconnect,
+        Action::VoiceMove,
     ];
 
     /// Defaults (per minute, per hour, heat %); None: watched only when configured.
@@ -99,6 +103,7 @@ impl Action {
             Action::StickerCreate => (3, 10, 10),
             Action::SoundboardDelete => (3, 10, 15),
             Action::ScheduledEventCreate => (3, 10, 10),
+            Action::VoiceDisconnect | Action::VoiceMove => (10, 30, 5),
         })
     }
 
@@ -120,12 +125,20 @@ impl Action {
                 | Action::SoundboardDelete
                 | Action::ScheduledEventCreate
                 | Action::GuildUpdate
+                | Action::VoiceDisconnect
+                | Action::VoiceMove
         )
     }
 
     /// Discord keeps nothing to put back, so the anti-nuke report says so instead of a revert.
     pub fn cannot_undo(self) -> bool {
-        matches!(self, Action::IntegrationDelete | Action::SoundboardDelete)
+        matches!(
+            self,
+            Action::IntegrationDelete
+                | Action::SoundboardDelete
+                | Action::VoiceDisconnect
+                | Action::VoiceMove
+        )
     }
 
     /// "Kicks & Bans" card: kicks share the ban limit and counter.
@@ -188,6 +201,20 @@ impl AntiNuke {
         exempt: bool,
         now: Instant,
     ) -> Verdict {
+        self.on_actions(guild, executor, action, exempt, now, 1)
+    }
+
+    /// `n` actions at once (a merged voice audit entry grew by `n`). `n` is capped at the hour
+    /// limit, which already trips, so a huge count cannot make a huge loop or window.
+    pub fn on_actions(
+        &mut self,
+        guild: u64,
+        executor: u64,
+        action: Action,
+        exempt: bool,
+        now: Instant,
+        n: u32,
+    ) -> Verdict {
         let action = action.card();
         let Some(limit) = self.limits.get(&action).copied() else {
             return Verdict::Ignore;
@@ -199,7 +226,7 @@ impl AntiNuke {
         while q.front().is_some_and(|t| now.duration_since(*t) >= HOUR) {
             q.pop_front();
         }
-        q.push_back(now);
+        q.extend(std::iter::repeat_n(now, n.min(limit.per_hour) as usize));
         let minute = q
             .iter()
             .filter(|t| now.duration_since(**t) < MINUTE)
@@ -446,6 +473,34 @@ mod tests {
     }
 
     #[test]
+    fn on_actions_counts_n_capped_at_the_hour_limit() {
+        let (mut a, t0) = (engine(10, 30), Instant::now());
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, false, t0, 4),
+            Verdict::Allow(Counts { minute: 4, hour: 4 })
+        );
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, false, t0, 6),
+            Verdict::Quarantine(Counts {
+                minute: 10,
+                hour: 10
+            })
+        );
+        let (mut a, t0) = (engine(10, 30), Instant::now());
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, false, t0, u32::MAX),
+            Verdict::Quarantine(Counts {
+                minute: 30,
+                hour: 30
+            })
+        );
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, true, t0, 50),
+            Verdict::Ignore
+        );
+    }
+
+    #[test]
     fn tripwires() {
         assert!(gained_dangerous(0, 1 << 3));
         assert!(!gained_dangerous(1 << 3, 1 << 3)); // already had it
@@ -596,6 +651,8 @@ mod tests {
             Action::SoundboardDelete,
             Action::ScheduledEventCreate,
             Action::GuildUpdate,
+            Action::VoiceDisconnect,
+            Action::VoiceMove,
         ] {
             assert!(a.opt_in(), "{a:?}");
         }
