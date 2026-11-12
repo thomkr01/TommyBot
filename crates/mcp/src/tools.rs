@@ -73,6 +73,12 @@ pub fn list() -> Value {
             json!({"guild_id": guild, "limit": limit(200)}),
             &["guild_id"]
         ),
+        tool(
+            "nsfw_scans",
+            "NSFW image scan results for tuning the threshold: counts (scanned, hits, staff said not NSFW / correct), a histogram of scores in 10% steps split by staff feedback, and the newest scans. Scores are per class: drawings, hentai, neutral, porn, sexy.",
+            json!({"guild_id": guild, "limit": limit(200)}),
+            &["guild_id"]
+        ),
         tool("action_log", "Moderation and antinuke actions the bot recorded (who did what, reverted or not), newest first.",
             json!({"guild_id": guild, "actor_id": {"type": "string"}, "limit": limit(200)}), &["guild_id"]),
         tool("mod_actions", "Staff actions for moderator stats (bans, kicks, timeouts, warns, case edits and deletes; source bot, discord, appeal or dashboard), newest first, within the last `days` (default 30).",
@@ -213,6 +219,19 @@ pub async fn call(st: &State, name: &str, a: &Value) -> Result<Value> {
         "raid_log" => one(st,
             "SELECT jsonb_agg(r ORDER BY created_at DESC) FROM (
                 SELECT raid_ms, user_id::text, name, code, created_at FROM mcp_raid_log WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) r",
+            need(a, "guild_id")?, limit(a, 50, 200)).await?,
+        "nsfw_scans" => one(st,
+            "SELECT jsonb_build_object(
+                'scanned', count(*), 'hits', count(*) FILTER (WHERE hit),
+                'not_nsfw', count(*) FILTER (WHERE feedback = 'fp'), 'correct', count(*) FILTER (WHERE feedback = 'ok'),
+                'histogram', (SELECT jsonb_agg(h ORDER BY bucket) FROM (
+                    SELECT least(floor(score * 10)::int, 9) * 10 AS bucket, count(*) AS scans,
+                        count(*) FILTER (WHERE feedback = 'fp') AS not_nsfw, count(*) FILTER (WHERE feedback = 'ok') AS correct
+                    FROM mcp_nsfw_scans WHERE guild_id = $1 GROUP BY 1) h),
+                'recent', (SELECT jsonb_agg(r ORDER BY at DESC) FROM (
+                    SELECT id, channel_id::text, message_id::text, user_id::text, scores, score, threshold, hit, feedback, at
+                    FROM mcp_nsfw_scans WHERE guild_id = $1 ORDER BY at DESC LIMIT $2) r))
+             FROM mcp_nsfw_scans WHERE guild_id = $1",
             need(a, "guild_id")?, limit(a, 50, 200)).await?,
         "joingate_log" => one(st,
             "SELECT jsonb_agg(j ORDER BY created_at DESC) FROM (

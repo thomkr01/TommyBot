@@ -158,6 +158,7 @@ const FILTERS: &[(&str, &str, &str)] = &[
     ("bad_sites", "malicious", "Bad websites"),
     ("scam_links", "malicious", "Scam links and login QR codes"),
     ("nsfw_links", "nsfw", "NSFW links"),
+    ("nsfw_images", "nsfw", "NSFW images"),
     ("words.filter", "words", "Word blacklist"),
     ("links", "links", "Link blacklist"),
     ("mentions", "spam_mentions", "General"),
@@ -178,6 +179,7 @@ const HEAT_FOR: &[(&str, &str, &str)] = &[
     ("invites", "invite", "invites"),
     ("scam_links", "malicious", "scam links"),
     ("nsfw_links", "nsfw", "NSFW links"),
+    ("nsfw_images", "nsfw", "NSFW images"),
     ("words.filter", "per_blacklisted_word", "blacklisted words"),
     ("links", "blacklisted_link", "blacklisted links"),
 ];
@@ -590,6 +592,19 @@ pub fn schema() -> Vec<Value> {
         ),
         pg(
             fg("NSFW links", "filters.nsfw_crawl_shorteners", "bool"),
+            "nsfw",
+        ),
+        pg(
+            hp(
+                dv(
+                    ti(
+                        fg("NSFW images", "filters.nsfw_threshold", "int"),
+                        "Score to count as NSFW (%)",
+                    ),
+                    80,
+                ),
+                "TommyBot checks posted images, link previews and GIFs with its own model, on its own server; images are never stored or sent anywhere. Higher means fewer false hits but more missed images. Age-restricted channels are skipped.",
+            ),
             "nsfw",
         ),
         pg(

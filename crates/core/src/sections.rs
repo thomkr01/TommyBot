@@ -279,6 +279,11 @@ pub struct FiltersCfg {
     pub scam_links: FilterCfg,
     #[serde(deserialize_with = "off_filter")]
     pub nsfw_links: FilterCfg,
+    /// Images checked by the self-hosted NSFW model (NSFW card).
+    #[serde(deserialize_with = "off_filter")]
+    pub nsfw_images: FilterCfg,
+    /// Score in percent from which an image counts as NSFW (`limits::NSFW_THRESHOLD`).
+    pub nsfw_threshold: u32,
     /// Follow link shorteners before checking.
     pub nsfw_crawl_shorteners: bool,
     pub words: WordsCfg,
@@ -322,6 +327,8 @@ impl Default for FiltersCfg {
             bad_sites: off(),
             scam_links: off(),
             nsfw_links: off(),
+            nsfw_images: off(),
+            nsfw_threshold: 80,
             nsfw_crawl_shorteners: false,
             words: WordsCfg::default(),
             links: off(),
@@ -353,6 +360,7 @@ pub const FILTERS_OFF_BY_DEFAULT: &[&str] = &[
     "bad_sites",
     "scam_links",
     "nsfw_links",
+    "nsfw_images",
     "words.filter",
     "links",
 ];
@@ -1073,6 +1081,7 @@ mod tests {
             "bad_sites" => f.bad_sites.enabled,
             "scam_links" => f.scam_links.enabled,
             "nsfw_links" => f.nsfw_links.enabled,
+            "nsfw_images" => f.nsfw_images.enabled,
             "words.filter" => f.words.filter.enabled,
             "links" => f.links.enabled,
             _ => unreachable!("{k}"),

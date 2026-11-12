@@ -39,8 +39,8 @@ pub(crate) fn now_ms() -> i64 {
 
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
     match as_app_user(m) {
-        Some(m) => check(app, &m, true).await,
-        None => check(app, m, false).await,
+        Some(m) => check(app, &m, true, false).await,
+        None => check(app, m, false, false).await,
     }
 }
 
@@ -61,21 +61,29 @@ fn as_app_user(m: &Message) -> Option<Message> {
 
 /// An edit can sneak in a link or word after the message passed, so only those filters run again.
 pub async fn on_edit(app: &App, m: &Message) -> Result<()> {
-    check(app, as_app_user(m).as_ref().unwrap_or(m), true).await
+    check(app, as_app_user(m).as_ref().unwrap_or(m), true, false).await
+}
+
+/// The image scan found an NSFW image in `m`: it runs through the filters like an edit that adds only
+/// that, so whitelists, the filter's action or the strike system, the delete and the log all apply.
+pub async fn on_nsfw_image(app: &App, m: &Message) -> Result<()> {
+    check(app, m, true, true).await
 }
 
 /// Heat parts that punish on their own; the only ones an edit can add.
-const INSTANT: [&str; 5] = [
+const INSTANT: [&str; 6] = [
     "invites",
     "malicious",
     "nsfw",
+    "nsfw_image",
     "links_blacklist",
     "blacklisted_words",
 ];
 
-async fn check(app: &App, m: &Message, edit: bool) -> Result<()> {
+/// `nsfw_image`: called by the image scan with a hit; only that part counts then.
+async fn check(app: &App, m: &Message, edit: bool, nsfw_image: bool) -> Result<()> {
     let mut slow = None;
-    let r = check_message(app, m, edit, &mut slow).await;
+    let r = check_message(app, m, edit, nsfw_image, &mut slow).await;
     // After the punishment: a slowmode start (several Discord calls) must not hold it back.
     if let (Some(gid), Some(cfg)) = (m.guild_id, slow) {
         crate::slowmode::start(app, gid, m.channel_id, &cfg).await;
@@ -88,6 +96,7 @@ async fn check_message(
     app: &App,
     m: &Message,
     edit: bool,
+    nsfw_image: bool,
     slow: &mut Option<tommybot_automod::heat::AutoSlowmodeCfg>,
 ) -> Result<()> {
     let Some(gid) = m.guild_id else { return Ok(()) };
@@ -97,6 +106,9 @@ async fn check_message(
     let app_reply = m.interaction_metadata.is_some();
     if !am.enabled || app_reply || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
+    }
+    if !nsfw_image && am.filters.nsfw_images.enabled {
+        app.nsfw.enqueue(m, edit, false);
     }
     if crate::panic::is_raider(app, gid, m.author.id) {
         crate::http_err::best_effort(
@@ -176,6 +188,7 @@ async fn check_message(
             || qr_scam
             || f.scam_links.enabled && filters::is_nitro_steam_scam(content),
         nsfw_link: f.nsfw_links.enabled && app.sites.nsfw(&checked),
+        nsfw_image: nsfw_image && f.nsfw_images.enabled,
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
         blacklisted_words: if f.words.filter.enabled && !f.words.use_discord_automod {
@@ -280,7 +293,9 @@ async fn check_message(
         if crowd.is_some() {
             b.parts.push(("similarity", heat_cfg.max));
         }
-        if edit {
+        if nsfw_image {
+            b.parts.retain(|(n, _)| *n == "nsfw_image");
+        } else if edit {
             b.parts.retain(|(n, _)| INSTANT.contains(n));
         } else {
             hist.remember(content);
@@ -648,6 +663,7 @@ fn tripped_filter<'a>(
         "malicious" if bad_site => (&f.bad_sites, "Posting a malicious link"),
         "malicious" => (&f.scam_links, "Posting a scam link"),
         "nsfw" => (&f.nsfw_links, "Posting an NSFW link"),
+        "nsfw_image" => (&f.nsfw_images, "Posting an NSFW image"),
         "links_blacklist" => (&f.links, "Posting a blacklisted link"),
         "mentions" | "role_mentions" | "everyone" => (&f.mentions, "Mass mentioning"),
         "images" | "files" | "embeds" | "links" | "stickers" => (&f.attachments, "Attachment spam"),
