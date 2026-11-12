@@ -5,9 +5,7 @@ use serde_json::Value;
 pub const NUKE_MINUTE: (i64, i64) = (2, 50);
 pub const NUKE_HOUR: (i64, i64) = (2, 500);
 pub const NUKE_HEAT: (i64, i64) = (1, 100);
-pub use tommybot_automod::heat::{
-    HEAT_DECAY, HEAT_MAX, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, SLOW_USERS,
-};
+pub use tommybot_automod::heat::{HEAT_DECAY, HEAT_MAX, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS};
 pub use tommybot_automod::join::MIN_AGE_MS;
 pub use tommybot_automod::voice::{VOICE_ACTIVE_MS, VOICE_COUNT, VOICE_SPAN_MS};
 
@@ -19,9 +17,8 @@ const VOICE: [(&str, (i64, i64)); 3] = [
 ];
 
 /// Auto slowmode card: field and range.
-const SLOWMODE: [(&str, (i64, i64)); 5] = [
+const SLOWMODE: [(&str, (i64, i64)); 4] = [
     ("channel_pct", SLOW_PCT),
-    ("min_users", SLOW_USERS),
     ("slowmode_secs", SLOW_SECS),
     ("min_on_secs", SLOW_ON),
     ("calm_secs", SLOW_CALM),
@@ -149,12 +146,10 @@ mod tests {
         let slow = |k: &str, v: i64| json!({"auto_slowmode": {k: v}});
         assert!(check("automod", &slow("slowmode_secs", 21_600), &Value::Null).is_ok());
         assert!(check("automod", &slow("slowmode_secs", 21_601), &Value::Null).is_err());
-        assert!(check("automod", &slow("channel_pct", 99), &Value::Null).is_err());
+        assert!(check("automod", &slow("channel_pct", 199), &Value::Null).is_err());
+        assert!(check("automod", &slow("channel_pct", 200), &Value::Null).is_ok());
         assert!(check("automod", &json!({}), &Value::Null).is_ok());
-        assert_eq!(
-            for_path("automod", "auto_slowmode.min_users"),
-            Some((1, 50))
-        );
+        assert_eq!(for_path("automod", "auto_slowmode.min_users"), None);
         assert!(check("joingate", &json!({}), &Value::Null).is_ok());
         let heat = |k: &str, v: f64| json!({"heat": {k: v}});
         assert!(check("automod", &heat("max", 100.0), &Value::Null).is_ok());
