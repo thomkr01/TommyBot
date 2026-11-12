@@ -180,8 +180,7 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
             }
         }
     }
-    // A raid hit that keeps the member (Log, Warn, Timeout) does not hold their sticky roles: a
-    // timeout holds the main roles itself.
+    // A raid hit that keeps the member holds their sticky roles back, but keeps them saved.
     let mut raided = false;
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
         if join_raid(app, &cfg, gid, raid, &j, suspicious, now).await? {
@@ -193,7 +192,7 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
     if gone {
         return Ok(());
     }
-    let restored = crate::sticky::on_join(app, m, held, verifying).await;
+    let restored = crate::sticky::on_join(app, m, (held, raided), verifying).await;
     // After a gate rename the join-time name is stale: dehoisting it would undo the rename.
     if !held && !raided && !renamed {
         crate::dehoist::on_join(app, gid, &m.member).await;

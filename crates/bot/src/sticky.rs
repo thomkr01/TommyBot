@@ -172,11 +172,17 @@ async fn claim(
     Ok(old)
 }
 
-/// Last step of `joingate::on_join` for a joiner still in the server. `held`: an earlier step
-/// (a quarantine) holds them back, so the row moves to this membership and the old list
-/// is dropped (a quarantine keeps its own saved roles). `verifying`: the roles are held until
-/// [`restore_pending`].
-pub async fn on_join(app: &App, m: &MemberAdd, held: bool, verifying: bool) -> Result<()> {
+/// Last step of `joingate::on_join` for a joiner still in the server. `held`: a quarantine holds
+/// them back, so the row moves to this membership and the old list is dropped (the quarantine
+/// keeps its own saved roles). `raided`: a join raid hit that kept them; nothing is given back
+/// now, but the list stays saved and pending, for a later rejoin or [`restore_pending`].
+/// `verifying`: the roles are held until [`restore_pending`].
+pub async fn on_join(
+    app: &App,
+    m: &MemberAdd,
+    (held, raided): (bool, bool),
+    verifying: bool,
+) -> Result<()> {
     let (gid, user) = (m.guild_id, m.member.user.id);
     let Some(joined) = m.member.joined_at.and_then(at) else {
         return Ok(());
@@ -186,8 +192,8 @@ pub async fn on_join(app: &App, m: &MemberAdd, held: bool, verifying: bool) -> R
         return Ok(());
     }
     let (g, u) = (gid.get() as i64, user.get() as i64);
-    if held {
-        return claim(&app.pool, g, u, joined, false).await.map(drop);
+    if held || raided {
+        return claim(&app.pool, g, u, joined, !held).await.map(drop);
     }
     // Read before the claim: a failure after it would lose the claimed roles.
     let info = app.guild_info(gid).await?;

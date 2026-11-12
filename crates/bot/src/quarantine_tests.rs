@@ -667,10 +667,10 @@ async fn a_join_quarantine_rejoin_keeps_sticky_roles_for_verification() {
     t.cleanup().await;
 }
 
-/// Round 3, D61: a join raid that only logs the member keeps them, so their sticky roles come
-/// back; only a quarantine (or a kick or ban) holds them.
+/// D61: a join raid that only logs the member holds their sticky roles back during the raid, but
+/// keeps them saved (pending) instead of dropping them.
 #[tokio::test]
-async fn a_logged_raider_keeps_sticky_roles() {
+async fn a_logged_raider_keeps_sticky_roles_saved() {
     let Some(t) = T::new(84).await else { return };
     let raid = json!({"enabled": true, "count": 1, "span_ms": 60000, "suspicious_only": false,
                       "active_ms": 60000, "string_patterns": [], "flag_younger_than_ms": null,
@@ -704,7 +704,20 @@ async fn a_logged_raider_keeps_sticky_roles() {
         .await
         .unwrap();
     assert_eq!(flagged, 1, "the join raid flagged them");
-    assert_eq!(roles(&t, 0, u), Some(vec![ROLE]), "sticky roles came back");
+    assert_eq!(
+        roles(&t, 0, u),
+        Some(vec![]),
+        "not given back during the raid"
+    );
+    let kept: (Vec<i64>, bool) = sqlx::query_as(
+        "SELECT roles, pending FROM member_roles WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(g)
+    .bind(u as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, (vec![ROLE as i64], true), "still saved, pending");
     for sql in [
         "DELETE FROM member_roles WHERE guild_id = $1",
         "DELETE FROM raid_log WHERE guild_id = $1",
