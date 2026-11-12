@@ -27,6 +27,8 @@ pub struct GuildInfo {
     pub parents: HashMap<Id<ChannelMarker>, Id<ChannelMarker>>,
     /// Every channel but threads.
     pub channels: HashSet<Id<ChannelMarker>>,
+    /// Age-restricted channels (threads follow their parent).
+    pub nsfw: HashSet<Id<ChannelMarker>>,
     pub bot_top: i64,
     pub(crate) fetched: Instant,
 }
@@ -76,6 +78,11 @@ impl App {
             managed: all.iter().filter(|r| r.managed).map(|r| r.id).collect(),
             parents,
             channels: all_channels.iter().map(|c| c.id).collect(),
+            nsfw: all_channels
+                .iter()
+                .filter(|c| c.nsfw == Some(true))
+                .map(|c| c.id)
+                .collect(),
             roles,
             fetched: Instant::now(),
         });
@@ -97,6 +104,7 @@ impl App {
             managed: HashSet::new(),
             parents: HashMap::new(),
             channels: HashSet::new(),
+            nsfw: HashSet::new(),
             bot_top: 0,
             fetched: Instant::now(),
         };
