@@ -247,6 +247,86 @@ mod tests {
         assert!(ip("8.8.8.8") && ip("2606:4700::1111") && ip("::ffff:8.8.8.8"));
     }
 
+    /// One-request-per-connection HTTP server answering each GET with the next body; `chunked`
+    /// sends it without Content-Length.
+    fn serve(bodies: Vec<(Vec<u8>, bool)>) -> String {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/list.txt", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (body, chunked) in bodies {
+                let (mut c, _) = l.accept().unwrap();
+                let mut req = [0u8; 4096];
+                let _ = c.read(&mut req);
+                let head = if chunked {
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                };
+                let _ = c.write_all(head.as_bytes());
+                if chunked {
+                    for part in body.chunks(1 << 20) {
+                        let _ = c.write_all(format!("{:x}\r\n", part.len()).as_bytes());
+                        let _ = c.write_all(part);
+                        let _ = c.write_all(b"\r\n");
+                    }
+                    let _ = c.write_all(b"0\r\n\r\n");
+                } else {
+                    let _ = c.write_all(&body);
+                }
+            }
+        });
+        url
+    }
+
+    /// Through `refresh`: a list that comes back empty (or lost over half) or over 20 MB keeps the
+    /// old list, so the phishing filter stays on; a list of about the same size replaces it.
+    #[tokio::test]
+    async fn refresh_keeps_the_old_list_when_the_new_one_is_empty_or_huge() {
+        let full: String = (0..1000).map(|i| format!("evil{i}.com\n")).collect();
+        let same: String = (0..900).map(|i| format!("bad{i}.com\n")).collect();
+        let huge: Vec<u8> = (0..1_000_000)
+            .flat_map(|i| format!("x{i}.example.org\n").into_bytes())
+            .chain(std::iter::repeat_n(b'#', 21 << 20))
+            .collect();
+        let url = serve(vec![
+            (full.into_bytes(), false),
+            (Vec::new(), false),
+            (huge, true),
+            (same.into_bytes(), false),
+        ]);
+        // SAFETY of the env writes: no other test in this crate reads these variables.
+        std::env::set_var("PHISHING_LIST_URL", &url);
+        std::env::set_var("NSFW_LIST_URL", "");
+        let s = Sites {
+            phishing: Default::default(),
+            nsfw: Default::default(),
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+        };
+        let hit = |h: &str| s.phishing(&[h.to_string()]);
+        s.refresh().await;
+        assert!(hit("evil7.com"), "first list loaded");
+        s.refresh().await;
+        assert!(
+            hit("evil7.com"),
+            "an empty list must not replace a full one"
+        );
+        s.refresh().await;
+        assert!(
+            hit("evil7.com") && !hit("x7.example.org"),
+            "a list over 20 MB is refused"
+        );
+        s.refresh().await;
+        assert!(
+            hit("bad7.com") && !hit("evil7.com"),
+            "a normal refresh still replaces"
+        );
+    }
+
     #[test]
     fn a_list_that_lost_over_half_is_refused() {
         assert!(shrank(1000, 0) && shrank(1000, 499));

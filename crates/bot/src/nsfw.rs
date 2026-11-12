@@ -673,6 +673,41 @@ mod tests {
         assert_eq!((ids(&l.0), ids(&l.1)), (vec![1, 2, 4], vec![3]));
     }
 
+    /// Through `enqueue`, as the message handler calls it: a member posting many image messages in a
+    /// burst keeps 4 images in the live lane and the rest go to the backlog; other members stay live.
+    #[test]
+    fn a_burst_by_one_member_fills_only_four_live_slots() {
+        let msg = |n: u64, author: u64, images: usize| -> Message {
+            let files: Vec<_> = (0..images)
+                .map(|i| {
+                    serde_json::json!({"id": format!("{n}{i}"), "filename": "a.png", "size": 10,
+                    "url": format!("https://cdn.discordapp.com/a/{n}{i}.png"),
+                    "proxy_url": format!("https://media.discordapp.net/a/{n}{i}.png"),
+                    "content_type": "image/png"})
+                })
+                .collect();
+            serde_json::from_value(serde_json::json!({
+                "id": n.to_string(), "channel_id": "1", "guild_id": "9",
+                "author": {"id": author.to_string(), "username": "u", "discriminator": "0", "avatar": null},
+                "content": "", "timestamp": "2026-01-01T00:00:00+00:00", "edited_timestamp": null, "tts": false,
+                "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": files, "embeds": [],
+                "pinned": false, "type": 0
+            }))
+            .unwrap()
+        };
+        let s = Scanner::default();
+        for n in 1..=50 {
+            s.enqueue(&msg(n, 2, 1), false, false);
+        }
+        s.enqueue(&msg(100, 3, 4), false, false);
+        s.enqueue(&msg(101, 3, 1), false, false);
+        let l = s.lanes.lock().unwrap();
+        let ids = |q: &VecDeque<Job>| q.iter().map(|j| j.msg.id.get()).collect::<Vec<_>>();
+        assert_eq!(ids(&l.0), vec![1, 2, 3, 4, 100]);
+        assert_eq!(l.1.len(), 47);
+        assert_eq!(l.1.back().map(|j| j.msg.id.get()), Some(101));
+    }
+
     #[test]
     fn live_goes_first_and_old_live_jobs_move_to_the_backlog() {
         let s = Scanner::default();

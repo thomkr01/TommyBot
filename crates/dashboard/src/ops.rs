@@ -1054,4 +1054,40 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// D65 rescue. A claim is a config version holding the new Extra Owner, so a page that loaded
+    /// the version before cannot save (or roll back) a permits copy without them.
+    #[tokio::test]
+    async fn claim_is_a_config_version() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_101_000_000 + std::process::id() as i64;
+        sqlx::query("insert into guild_config (guild_id, version, config) values ($1, 1, $2)")
+            .bind(g)
+            .bind(json!({"misc": {"prefix": "x!"}, "permits": {"eo": [], "ta": [], "custom": []}}))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("insert into rescue_key (guild_id, key_hash) values ($1, $2) on conflict (guild_id) do update set key_hash = $2").bind(g).bind(hash("k")).execute(&db).await.unwrap();
+        claim_key(&db, g, 5, (Some("k"), None)).await.unwrap();
+        let (v, c) = crate::store::current(&db, g).await.unwrap();
+        assert_eq!(v, 2, "the claim made no version");
+        assert_eq!(c["permits"]["eo"], json!(["5"]));
+        assert_eq!(c["misc"]["prefix"], "x!");
+        let mut tx = db.begin().await.unwrap();
+        let stale = crate::store::commit(&mut tx, g, 1, &json!({}), 7).await;
+        assert!(matches!(stale, Err(ApiError::Conflict(2))), "{stale:?}");
+        tx.rollback().await.unwrap();
+        for t in ["guild_config", "extra_owners"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+    }
 }

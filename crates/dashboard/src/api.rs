@@ -1103,3 +1103,232 @@ mod logging_validate_tests {
         assert!(!bad(json!({"events": ["member_kick"], "channel": "5"})));
     }
 }
+
+/// Handler tests on a scratch Postgres (they return early without DATABASE_URL). Discord is never
+/// called: the guild and member lookups are pre-filled in the memo, user 7 owns the server.
+#[cfg(test)]
+mod g3_handler_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Instant;
+
+    async fn setup(base: i64) -> Option<(AppState, Sess, i64)> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = base + std::process::id() as i64;
+        let discord = crate::discord::Discord {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            bot_token: String::new(),
+            redirect_uri: String::new(),
+            api: "http://127.0.0.1:1".into(),
+            memo: Default::default(),
+        };
+        {
+            let mut m = discord.memo.lock().unwrap();
+            m.insert(
+                format!("/guilds/{g}"),
+                (
+                    Instant::now(),
+                    Some(json!({"owner_id": "7", "name": "T", "roles": []})),
+                ),
+            );
+            m.insert(
+                format!("/guilds/{g}/members/7"),
+                (Instant::now(), Some(json!({"roles": []}))),
+            );
+        }
+        let st = AppState {
+            db,
+            discord,
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        let s = Sess {
+            id: String::new(),
+            user_id: 7,
+            username: "owner".into(),
+            access_token: String::new(),
+            stepped_up: true,
+            csrf: String::new(),
+        };
+        Some((st, s, g))
+    }
+
+    async fn put_version(st: &AppState, g: i64, v: i32, c: Value) {
+        sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
+            .bind(g)
+            .bind(v)
+            .bind(c)
+            .execute(&st.db)
+            .await
+            .unwrap();
+    }
+
+    async fn cleanup(st: &AppState, g: i64) {
+        for t in ["guild_config", "trusted_admins", "extra_owners"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn tas(st: &AppState, g: i64) -> Vec<i64> {
+        sqlx::query_scalar("select user_id from trusted_admins where guild_id = $1")
+            .bind(g)
+            .fetch_all(&st.db)
+            .await
+            .unwrap()
+    }
+
+    fn body<T: serde::de::DeserializeOwned>(v: Value) -> Json<T> {
+        Json(serde_json::from_value(v).unwrap())
+    }
+
+    /// D65. TA 55 is removed in Discord, which (since the fix, see the bot's
+    /// `trusted_admin_removal_is_a_config_version`) appends v3 with the live permits. A Permits
+    /// page or History page still holding v2 cannot write 55 back.
+    #[tokio::test]
+    async fn stale_permits_save_and_rollback_do_not_bring_back_a_removed_ta() {
+        let Some((st, s, g)) = setup(9_880_000_000).await else {
+            return;
+        };
+        let with = |p: &str, ta: Value| json!({"misc": {"prefix": p}, "permits": {"eo": [], "ta": ta, "custom": []}});
+        put_version(&st, g, 1, with("a!", json!(["55"]))).await;
+        put_version(&st, g, 2, with("b!", json!(["55"]))).await;
+        // The Discord removal as the bot now does it: row gone, v3 with the live permits.
+        put_version(&st, g, 3, with("b!", json!([]))).await;
+        let stale = put_permits(
+            State(st.clone()),
+            s.clone(),
+            Path(g),
+            body(json!({"expected_version": 2, "value": {"eo": [], "ta": ["55"], "custom": []}})),
+        )
+        .await;
+        assert!(matches!(stale, Err(ApiError::Conflict(3))), "{stale:?}");
+        let back = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 1)),
+            body(json!({"expected_version": 2})),
+        )
+        .await;
+        assert!(matches!(back, Err(ApiError::Conflict(3))), "{back:?}");
+        assert!(tas(&st, g).await.is_empty(), "55 was written back");
+        cleanup(&st, g).await;
+    }
+
+    /// D65 History. "Diff vs current" compares with the live permit tables, so a table change
+    /// the newest version's copy does not hold (TA removed) shows up in what a rollback changes.
+    #[tokio::test]
+    async fn diff_vs_current_shows_the_live_permits() {
+        let Some((st, s, g)) = setup(9_881_000_000).await else {
+            return;
+        };
+        let with = |p: &str| json!({"misc": {"prefix": p}, "permits": {"eo": [], "ta": ["55"], "custom": []}});
+        put_version(&st, g, 1, with("a!")).await;
+        put_version(&st, g, 2, with("b!")).await;
+        // trusted_admins has no row: 55 was removed without a version (as before the fix).
+        let Json(d) = diff_versions(State(st.clone()), s.clone(), Path((g, 1, 2)))
+            .await
+            .unwrap();
+        let text = d.to_string();
+        assert!(
+            text.contains("permits"),
+            "rollback to v1 re-adds TA 55 unseen: {text}"
+        );
+        cleanup(&st, g).await;
+    }
+
+    /// D69 + D70. A rollback runs the save checks: an old version whose verification the bot cannot
+    /// parse, or whose panic window is 0, is refused; an in-range one still rolls back.
+    #[tokio::test]
+    async fn rollback_refuses_what_a_save_refuses() {
+        let Some((st, s, g)) = setup(9_882_000_000).await else {
+            return;
+        };
+        put_version(
+            &st,
+            g,
+            1,
+            json!({"verification": {"enabled": true, "channel": "not an id"}}),
+        )
+        .await;
+        put_version(&st, g, 2, json!({"panic": {"window_secs": 0}})).await;
+        put_version(
+            &st,
+            g,
+            3,
+            json!({"automod": {"strike": {"strike_timeout_ms": 0}}}),
+        )
+        .await;
+        put_version(&st, g, 4, json!({"panic": {"window_secs": 600}})).await;
+        put_version(&st, g, 5, json!({})).await;
+        for v in [1, 2, 3] {
+            let r = rollback(
+                State(st.clone()),
+                s.clone(),
+                Path((g, v)),
+                body(json!({"expected_version": 5})),
+            )
+            .await;
+            assert!(matches!(r, Err(ApiError::BadRequest(_))), "v{v}: {r:?}");
+        }
+        let ok = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 4)),
+            body(json!({"expected_version": 5})),
+        )
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        cleanup(&st, g).await;
+    }
+
+    /// D70. A section save refuses 0 for a window or count that would switch its feature off,
+    /// and `panic.executors` 0 (off on purpose) still saves.
+    #[tokio::test]
+    async fn section_save_refuses_zero_windows() {
+        let Some((st, s, g)) = setup(9_883_000_000).await else {
+            return;
+        };
+        let save = |sec: &'static str, value: Value| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                put_section(
+                    State(st),
+                    s,
+                    Path((g, sec.to_string())),
+                    body(json!({"expected_version": 0, "value": value})),
+                )
+                .await
+            }
+        };
+        for (sec, v) in [
+            ("panic", json!({"window_secs": 0})),
+            (
+                "automod",
+                json!({"auto_lockdown": {"mention_window_ms": 0}}),
+            ),
+            ("automod", json!({"strike": {"cap": 0}})),
+            ("joinraid", json!({"span_ms": 0})),
+        ] {
+            let r = save(sec, v.clone()).await;
+            assert!(
+                matches!(r, Err(ApiError::BadRequest(_))),
+                "{sec} {v}: {r:?}"
+            );
+        }
+        let off = save("panic", json!({"executors": 0})).await;
+        assert!(off.is_ok(), "{off:?}");
+        cleanup(&st, g).await;
+    }
+}

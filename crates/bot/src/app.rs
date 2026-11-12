@@ -446,6 +446,103 @@ mod tests {
         assert!(!GuildCfg::parse(&json!({})).automod.enabled);
     }
 
+    /// D70. The bot's own defaults (what an empty section means) sit inside every new range.
+    #[test]
+    fn defaults_fit_the_ranges() {
+        use tommybot_core::limits::for_path;
+        let c = GuildCfg::parse(&json!({}));
+        let r = RaidCfg::default();
+        let a = &c.automod;
+        let vals: Vec<(&str, &str, i64)> = vec![
+            ("automod", "strike.cap", a.strike.cap as i64),
+            (
+                "automod",
+                "strike.multiplier_pct",
+                a.strike.multiplier_pct as i64,
+            ),
+            (
+                "automod",
+                "strike.strike_timeout_ms",
+                a.strike.strike_timeout_ms,
+            ),
+            ("automod", "strike.cap_timeout_ms", a.strike.cap_timeout_ms),
+            (
+                "automod",
+                "auto_lockdown.mention_count",
+                a.auto_lockdown.mention_count as i64,
+            ),
+            (
+                "automod",
+                "auto_lockdown.mention_window_ms",
+                a.auto_lockdown.mention_window_ms,
+            ),
+            (
+                "automod",
+                "filters.mention_hour_cap",
+                a.filters.mention_hour_cap as i64,
+            ),
+            ("panic", "window_secs", c.panic.window_secs as i64),
+            ("panic", "heat_executors", c.panic.heat_executors as i64),
+            ("joinraid", "count", r.count as i64),
+            ("joinraid", "span_ms", r.span_ms),
+            ("joinraid", "id_flag_min", r.id_flag_min.unwrap() as i64),
+            ("misc", "ban_purge_days", c.misc.ban_purge_days as i64),
+        ];
+        for (s, p, v) in vals {
+            let (lo, hi) = for_path(s, p).unwrap_or_else(|| panic!("{s}.{p} has no range"));
+            assert!(
+                (lo..=hi).contains(&v),
+                "{s}.{p} default {v} outside {lo}..={hi}"
+            );
+        }
+        for t in &c.misc.warn_actions {
+            let (lo, hi) = for_path("misc", "warn_actions.0.points").unwrap();
+            assert!((lo..=hi).contains(&(t.points as i64)));
+        }
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Loads race saves (insert, then
+    /// forget as after a NOTIFY); once both settle, the config served must be the newest saved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_load_racing_a_save_never_caches_the_older_version() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = Arc::new(App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        ));
+        let g = 9_870_000_000 + std::process::id() as i64;
+        let mut stale = 0;
+        for v in 1..=300 {
+            let a = app.clone();
+            let load = tokio::spawn(async move { a.cfg(g as u64).await.unwrap() });
+            sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
+                .bind(g)
+                .bind(v)
+                .bind(json!({"misc": {"prefix": format!("p{v}")}}))
+                .execute(&app.pool)
+                .await
+                .unwrap();
+            app.forget_cfg(g as u64);
+            load.await.unwrap();
+            if app.cfg(g as u64).await.unwrap().misc.prefix != format!("p{v}") {
+                stale += 1;
+                app.forget_cfg(g as u64);
+            }
+        }
+        sqlx::query("delete from guild_config where guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        assert_eq!(stale, 0, "an older version stayed cached after a save");
+    }
+
     #[test]
     fn a_load_started_before_a_forget_is_not_cached() {
         let mut c = CfgCache::default();

@@ -1523,6 +1523,35 @@ mod tests {
         }
     }
 
+    /// D70. Every number the form fills in by default (what the wizard and an emptied field save)
+    /// passes the save check, so the new ranges never refuse the dashboard's own values.
+    #[test]
+    fn every_default_passes_the_range_check() {
+        let mut bad = vec![];
+        for sec in schema() {
+            for fd in sec["fields"].as_array().unwrap() {
+                let (Some(path), d) = (fd["path"].as_str(), &fd["default"]) else {
+                    continue;
+                };
+                if !d.is_number() {
+                    continue;
+                }
+                let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
+                let mut doc = json!({});
+                let parts: Vec<_> = path.split('.').collect();
+                let mut cur = &mut doc;
+                for p in &parts[..parts.len() - 1] {
+                    cur = &mut cur[*p];
+                }
+                cur[parts[parts.len() - 1]] = d.clone();
+                if let Err(e) = limits::check(name, &doc, &Value::Null) {
+                    bad.push(format!("{name}.{path}={d}: {e}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
     #[test]
     fn every_schema_path_deserializes() {
         let mut objs: std::collections::BTreeMap<String, Value> = Default::default();
