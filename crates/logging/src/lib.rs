@@ -106,6 +106,28 @@ impl Logger {
         }
     }
 
+    /// The voice channel the logger last saw the member in. Read it before `handle` records the
+    /// next voice event, which overwrites it.
+    pub fn voice_channel(
+        &self,
+        guild: Id<GuildMarker>,
+        user: Id<UserMarker>,
+    ) -> Option<Id<ChannelMarker>> {
+        self.voice.get(&(guild, user)).copied()
+    }
+
+    /// Replaces a guild's voice state with the members in voice now (from `GuildCreate`), so a
+    /// move after a restart is not read as a join.
+    pub fn seed_voice(
+        &mut self,
+        guild: Id<GuildMarker>,
+        members: impl IntoIterator<Item = (Id<UserMarker>, Id<ChannelMarker>)>,
+    ) {
+        self.voice.retain(|k, _| k.0 != guild);
+        self.voice
+            .extend(members.into_iter().map(|(u, c)| ((guild, u), c)));
+    }
+
     /// Returns the logs to send for one event. Call it for every event of a guild, even when
     /// logging is off, so the message cache can serve edits and deletes.
     pub fn handle(&mut self, cfg: &LogConfig, event: &Event, now: Instant) -> Vec<LogMessage> {
@@ -304,7 +326,6 @@ impl Logger {
             Event::GuildAuditLogEntryCreate(e) => self.audit(&e.0, now),
             Event::VoiceStateUpdate(v) => {
                 let (guild, user, new) = (v.0.guild_id?, v.0.user_id, v.0.channel_id);
-                // shortcut: members already in voice when the bot starts log their first move as a join.
                 let old = match new {
                     Some(c) => self.voice.insert((guild, user), c),
                     None => self.voice.remove(&(guild, user)),
@@ -493,6 +514,55 @@ mod tests {
         assert!(Logger::new(Id::new(1))
             .handle(&fallback_only, &ev(Some("10")), Instant::now())
             .is_empty());
+    }
+
+    #[test]
+    fn seeded_voice_state_reads_a_move_as_a_move() {
+        let cfg = LogConfig {
+            routes: std::collections::HashMap::from([(LogKind::Voice, Id::new(2))]),
+            ..Default::default()
+        };
+        let mut l = Logger::new(Id::new(1));
+        l.seed_voice(
+            Id::new(5),
+            [(Id::new(7), Id::new(10)), (Id::new(8), Id::new(10))],
+        );
+        assert_eq!(l.voice_channel(Id::new(5), Id::new(7)), Some(Id::new(10)));
+        let t = l.handle(&cfg, &voice_ev(7, Some("11")), Instant::now());
+        assert_eq!(t[0].embed.title.as_deref(), Some("Voice Move"));
+        // A new snapshot drops members who left meanwhile.
+        l.seed_voice(Id::new(5), [(Id::new(7), Id::new(11))]);
+        assert_eq!(l.voice_channel(Id::new(5), Id::new(8)), None);
+    }
+
+    #[test]
+    fn a_join_and_a_move_in_either_order_read_as_one_join() {
+        // As `events.rs` does: read the old channel, then let the logger record the event.
+        let joins = |order: &[Option<&str>]| {
+            let mut l = Logger::new(Id::new(1));
+            let cfg = LogConfig::default();
+            let mut n = 0;
+            for c in order {
+                let old = l.voice_channel(Id::new(5), Id::new(7));
+                n += usize::from(old.is_none() && c.is_some());
+                l.handle(&cfg, &voice_ev(7, *c), Instant::now());
+            }
+            n
+        };
+        assert_eq!(joins(&[Some("10"), Some("11")]), 1);
+        assert_eq!(joins(&[Some("11"), Some("10")]), 1);
+    }
+
+    fn voice_ev(user: u64, channel: Option<&str>) -> Event {
+        Event::VoiceStateUpdate(Box::new(
+            serde_json::from_value(serde_json::json!({
+                "guild_id": "5", "user_id": user.to_string(), "channel_id": channel,
+                "session_id": "s", "deaf": false, "mute": false, "self_deaf": false,
+                "self_mute": false, "self_video": false, "suppress": false,
+                "request_to_speak_timestamp": null
+            }))
+            .unwrap(),
+        ))
     }
 
     fn audit_event(action: u16, executor: u64) -> Event {

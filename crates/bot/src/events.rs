@@ -370,13 +370,18 @@ pub async fn shutdown(app: &App) {
 }
 
 async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
+    // A voice member's channel before this event, read under the same lock before the logger
+    // records the event and overwrites it.
+    let mut voice_old = None;
     if let Some(guild) = guild_of(ev) {
         let cfg = app.cfg(guild).await?;
-        let msgs = app
-            .logger
-            .lock()
-            .unwrap()
-            .handle(&cfg.logging, ev, Instant::now());
+        let msgs = {
+            let mut logger = app.logger.lock().unwrap();
+            if let Event::VoiceStateUpdate(v) = ev {
+                voice_old = logger.voice_channel(Id::new(guild), v.0.user_id);
+            }
+            logger.handle(&cfg.logging, ev, Instant::now())
+        };
         for m in msgs {
             if let Err(e) = send_entry(app, &m).await {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
@@ -519,7 +524,13 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             }
             nuke.and(ban).and(unban).and(allow)?
         }
-        Event::VoiceStateUpdate(v) => crate::voice_nuke::on_voice(app, &v.0).await,
+        // Voice raid first: the anti-nuke recheck can wait out its fetch gap.
+        Event::VoiceStateUpdate(v) => {
+            if let Err(e) = crate::voice_raid::on_voice(app, &v.0, voice_old).await {
+                tracing::warn!(?e, "voice raid check failed");
+            }
+            crate::voice_nuke::on_voice(app, &v.0, voice_old).await
+        }
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
         Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,

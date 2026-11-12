@@ -42,6 +42,7 @@ mod tickets;
 mod timeout_roles;
 mod verify;
 mod voice_nuke;
+mod voice_raid;
 mod webhooks;
 mod welcome;
 mod whitelist;
@@ -121,6 +122,9 @@ async fn main() -> Result<()> {
 
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
+    }
+    if let Err(e) = voice_raid::restore(&app).await {
+        tracing::warn!(?e, "restoring voice raids failed");
     }
     if let Err(e) = slowmode::restore(&app).await {
         tracing::warn!(?e, "loading the auto slowmode channels failed");

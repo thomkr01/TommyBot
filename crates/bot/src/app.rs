@@ -187,6 +187,8 @@ pub struct App {
     pub sticky_budget: Mutex<HashMap<u64, (i64, u32)>>,
     /// Guilds watched for merged voice disconnect and move entries; see `voice_nuke`.
     pub voice_audit: Mutex<crate::voice_nuke::State>,
+    /// Voice join raid state per guild; idle guilds are dropped on each voice join.
+    pub voice_raids: Mutex<HashMap<u64, tommybot_automod::voice::VoiceRaidDetector>>,
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -255,6 +257,7 @@ impl App {
             reactions: Default::default(),
             sticky_budget: Default::default(),
             voice_audit: Mutex::new(crate::voice_nuke::State::new(crate::automod::now_ms())),
+            voice_raids: Mutex::new(HashMap::new()),
         }
     }
 

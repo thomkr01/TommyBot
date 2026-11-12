@@ -8,7 +8,10 @@ use tokio::time::Instant;
 use tommybot_antinuke::Action;
 use twilight_model::{
     guild::audit_log::{AuditLogEntry, AuditLogEventType as A},
-    id::{marker::GuildMarker, Id},
+    id::{
+        marker::{ChannelMarker, GuildMarker},
+        Id,
+    },
     voice::VoiceState,
 };
 
@@ -192,9 +195,11 @@ pub async fn note(
     Ok(())
 }
 
-/// A voice update: rechecks the audit log while the guild is watched. Costs one lookup otherwise.
-pub async fn on_voice(app: &App, v: &VoiceState) {
-    if let Some(gid) = v.guild_id {
+/// A voice leave or move (`old`: the channel before): rechecks the audit log while the guild is
+/// watched. Costs one lookup otherwise. Joins and mute changes cannot be a disconnect or a move.
+pub async fn on_voice(app: &App, v: &VoiceState, old: Option<Id<ChannelMarker>>) {
+    let moved = v.channel_id.is_none() || old.is_some_and(|o| v.channel_id != Some(o));
+    if let Some(gid) = v.guild_id.filter(|_| moved) {
         recheck(app, gid).await;
     }
 }

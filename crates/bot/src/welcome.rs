@@ -112,6 +112,12 @@ pub async fn purge_left(app: std::sync::Arc<App>) {
 }
 
 pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
+    // Members already in voice, so their next move is not logged or counted as a join.
+    if let GuildCreate::Available(g) = ev {
+        let in_voice = g.voice_states.iter();
+        let in_voice = in_voice.filter_map(|v| Some((v.user_id, v.channel_id?)));
+        app.logger.lock().unwrap().seed_voice(g.id, in_voice);
+    }
     sqlx::query("DELETE FROM guild_left WHERE guild_id = $1")
         .bind(ev.id().get() as i64)
         .execute(&app.pool)

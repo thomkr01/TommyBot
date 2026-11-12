@@ -203,22 +203,39 @@ pub(crate) fn raid_trigger_log(
     code: &str,
     url: Option<String>,
 ) -> Log {
-    let mut log = Log::new("🕵 Join Raid Trigger!", ALERT)
+    let next = format!(
+        "Flagged accounts joining for the next `{}` will be **{}**.",
+        duration(raid.active_ms / 1000),
+        punished(raid.action)
+    );
+    trigger_log(("🕵 Join Raid Trigger!", "join"), &next, flagged, code, url)
+}
+
+/// "timed out", "banned", ...: what a raid action does to a member.
+pub(crate) fn punished(action: Action) -> &'static str {
+    match action {
+        Action::Log => "logged",
+        Action::Rename => "renamed",
+        Action::Warn => "warned",
+        Action::Timeout(_) => "timed out",
+        Action::Kick => "kicked",
+        Action::Ban => "banned",
+    }
+}
+
+/// A raid trigger alert (join or voice): `(title, pattern)`, what happens next, the first flags.
+pub(crate) fn trigger_log(
+    (title, pattern): (&str, &str),
+    next: &str,
+    flagged: &[(u64, &str)],
+    code: &str,
+    url: Option<String>,
+) -> Log {
+    let mut log = Log::new(title, ALERT)
         .text(&format!(
-            "{YES} TommyBot has identified a weird join pattern."
+            "{YES} TommyBot has identified a weird {pattern} pattern."
         ))
-        .text(&format!(
-            "{ARROW} Flagged accounts joining for the next `{}` will be **{}**.",
-            duration(raid.active_ms / 1000),
-            match raid.action {
-                Action::Log => "logged",
-                Action::Rename => "renamed",
-                Action::Warn => "warned",
-                Action::Timeout(_) => "timed out",
-                Action::Kick => "kicked",
-                Action::Ban => "banned",
-            }
-        ))
+        .text(&format!("{ARROW} {next}"))
         .text(&format!(
             "{ARROW} A full report will be posted once the duration ends."
         ))
@@ -242,8 +259,13 @@ pub(crate) fn raid_trigger_log(
 
 /// The report when a join raid ends; `code` names the raid when the full report has a link.
 pub(crate) fn raid_report_log(caught: i64, code: Option<&str>) -> Log {
-    let log = Log::new("🕵 Join Raid Report!", DONE).text(&format!(
-        "{YES} `{caught}` users have been caught by the join raid."
+    report_log(("🕵 Join Raid Report!", "join raid"), caught, code)
+}
+
+/// A raid report (join or voice): `(title, raid)`.
+pub(crate) fn report_log((title, raid): (&str, &str), caught: i64, code: Option<&str>) -> Log {
+    let log = Log::new(title, DONE).text(&format!(
+        "{YES} `{caught}` users have been caught by the {raid}."
     ));
     match code {
         Some(code) => log.text(&format!("{ARROW} `{code}`")),

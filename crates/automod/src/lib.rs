@@ -11,4 +11,5 @@ pub mod lockdown;
 pub mod sites;
 pub mod store;
 pub mod strike;
+pub mod voice;
 pub mod window;
