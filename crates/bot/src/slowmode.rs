@@ -131,13 +131,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>, cfg: 
             let log = Log::new("Auto Slowmode On", ORANGE)
                 .line("Channel", &channel(ch.get()))
                 .line("Slowmode", &format!("`{}s`", cfg.slowmode_secs))
-                .line(
-                    "Factor",
-                    &format!(
-                        "*{}% of max heat from {}+ members*",
-                        cfg.channel_pct, cfg.min_users
-                    ),
-                );
+                .line("Factor", &format!("*{}% of max heat*", cfg.channel_pct));
             if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
                 tracing::warn!(?e, %ch, "could not log the auto slowmode");
             }
@@ -595,10 +589,14 @@ mod tests {
             parts: vec![("message", 1e6)],
         };
         let (cfg, heat) = (AutoSlowmodeCfg::default(), HeatCfg::default());
-        for ch in [a, b] {
+        // Three members: each adds at most max heat.
+        for (ch, user) in [a, b]
+            .into_iter()
+            .flat_map(|ch| (1..=3).map(move |u| (ch, u)))
+        {
             app.slow.lock().unwrap().entry(ch).or_default().on_message(
                 now_ms(),
-                1,
+                user,
                 &hot,
                 &cfg,
                 &heat,

@@ -13,7 +13,7 @@ use tommybot_automod::discord_api::{Api, DiscordAutomodCfg};
 use tommybot_automod::{
     heat::{ChannelActivity, ChannelHeat, HeatState, UserHistory},
     join::{GateCfg, RaidCfg, RaidDetector},
-    lockdown::{LockdownPrefs, MentionWatch},
+    lockdown::{LockdownPrefs, MentionLock, MentionWatch},
 };
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
@@ -143,7 +143,7 @@ pub struct App {
     pub captchas: Mutex<HashMap<(u64, u64), (String, i64)>>,
     /// Invite uses per guild at the last join, to see which invite the next joiner used.
     pub invites: Mutex<HashMap<u64, HashMap<String, u64>>>,
-    pub mentions: Mutex<HashMap<u64, MentionWatch>>,
+    pub mentions: Mutex<HashMap<u64, MentionLock>>,
     /// Mentions per (guild, user) for the mentions filter's hour cap.
     pub pings: Mutex<HashMap<(u64, u64), MentionWatch>>,
     /// Last message per channel, for the inactive channel filter.

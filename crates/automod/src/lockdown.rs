@@ -421,7 +421,7 @@ pub fn unlock_ops(s: &Snapshot, current: &[(u64, u64)]) -> Vec<Op> {
         .collect()
 }
 
-/// Auto lockdown: N mentions from non-whitelisted members within T locks the server.
+/// Mentions one member sent within a time span (the hourly mention cap).
 #[derive(Debug, Default)]
 pub struct MentionWatch(Window);
 
@@ -437,6 +437,50 @@ impl MentionWatch {
     /// When the latest mention was counted, if any.
     pub fn last_at(&self) -> Option<i64> {
         self.0.last()
+    }
+}
+
+/// Auto lockdown: N mentions from non-whitelisted members within T locks the server.
+/// Each member counts for at most `share(N)`, so a lockdown takes at least three members:
+/// one mass-mention is for the mentions filter to punish, not a reason to lock everyone out.
+/// A member that filter does not punish (`capped` false) counts in full.
+#[derive(Debug, Default)]
+pub struct MentionLock(std::collections::VecDeque<(i64, u64, usize)>);
+
+impl MentionLock {
+    /// Most one member counts for: under half of `limit` (so two are never enough) and
+    /// about a third of it. A limit of 1 or 2 is the admin asking for one or two members.
+    pub fn share(limit: usize) -> usize {
+        limit.div_ceil(3).min(limit.saturating_sub(1) / 2).max(1)
+    }
+
+    pub fn on_mentions(
+        &mut self,
+        user: u64,
+        capped: bool,
+        mentions: usize,
+        now: i64,
+        limit: usize,
+        span_ms: i64,
+    ) -> bool {
+        self.0.push_back((now, user, mentions));
+        // shortcut: a long window on a busy server keeps the newest 10k pinging messages only.
+        if self.0.len() > 10_000 {
+            self.0.pop_front();
+        }
+        while self.0.front().is_some_and(|&(t, ..)| now - t > span_ms) {
+            self.0.pop_front();
+        }
+        let mut per: std::collections::HashMap<u64, usize> = Default::default();
+        for &(_, u, n) in &self.0 {
+            *per.entry(u).or_default() += n;
+        }
+        let cap = if capped {
+            Self::share(limit)
+        } else {
+            usize::MAX
+        };
+        per.values().map(|&n| n.min(cap)).sum::<usize>() >= limit
     }
 }
 
@@ -753,6 +797,27 @@ mod tests {
         let mut w = MentionWatch::default();
         w.on_mentions(30, 0, 50, 30_000);
         assert!(!w.on_mentions(30, 40_000, 50, 30_000)); // old ones aged out
+
+        // Server lockdown: one member, however many mentions, never locks alone.
+        let mut l = MentionLock::default();
+        assert!(!l.on_mentions(1, true, 500, 0, 50, 3_000));
+        assert!(
+            !l.on_mentions(2, true, 500, 1, 50, 3_000),
+            "two members: 34 of 50"
+        );
+        assert!(
+            l.on_mentions(3, true, 500, 2, 50, 3_000),
+            "a third member: 51 of 50"
+        );
+        let mut l = MentionLock::default();
+        assert!(!l.on_mentions(1, true, 17, 0, 50, 3_000));
+        assert!(!l.on_mentions(1, true, 17, 4_000, 50, 3_000), "aged out");
+        // Not punished by the mentions filter: counted in full, as before.
+        assert!(MentionLock::default().on_mentions(1, false, 50, 0, 50, 3_000));
+        assert_eq!(
+            [1, 2, 3, 4, 5, 50, 1000].map(MentionLock::share),
+            [1, 1, 1, 1, 2, 17, 334]
+        );
 
         let mut p = Panic::default();
         assert!(!p.on_raider_trigger(0, 3, 10_000, 600_000));

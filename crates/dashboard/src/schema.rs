@@ -450,7 +450,10 @@ pub fn schema() -> Vec<Value> {
         ),
         ti(fg("Auto lockdown", "auto_lockdown.enabled", "bool"), "Use the auto lockdown module"),
         ti(dv(fg("Mentions lockdown", "auto_lockdown.mentions", "bool"), true), "Use the mentions auto lockdown trigger"),
-        ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_count", "int"), 50), "Trigger count (mentions)"),
+        hp(
+            ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_count", "int"), 50), "Trigger count (mentions)"),
+            "While Anti Spam and its mentions filter are on, each member counts for about a third of this at most (17 of 50), so from 3 up it takes at least three members: the filter punishes one member's mass mention. Members the filter skips (whitelisted, or the filter off) count in full.",
+        ),
         ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_window_ms", "int"), 3_000), "Trigger count history"),
         hp(
             ti(fg("Strikes lockdown", "auto_lockdown.strikes", "int"), "Lock at this strike number"),
@@ -466,11 +469,7 @@ pub fn schema() -> Vec<Value> {
         ),
         hp(
             ti(dv(fg("Auto slowmode", "auto_slowmode.channel_pct", "int"), 300), "Trigger (% of max heat)"),
-            "All messages in the channel add their heat to one pool. 300 means three members' worth of max heat.",
-        ),
-        hp(
-            ti(dv(fg("Auto slowmode", "auto_slowmode.min_users", "int"), 4), "Minimum members"),
-            "Members who sent messages in the last 30 seconds. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator don't count, as Discord lets them skip slowmode. Members who have these only in this channel still count.",
+            "All messages in the channel add their heat to one pool. Each member adds at most max heat, so 300 needs at least three members, and the lowest value, 200, needs two. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator add nothing, as Discord lets them skip slowmode.",
         ),
         hp(
             ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode"),
