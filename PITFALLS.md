@@ -135,6 +135,10 @@ Sticky roles checked the member once, when the rejoin claimed the saved list, an
 A mass rejoin (after a raid, or a re-invite) giving every member's roles back would fill the per-guild member bucket that timeouts, kicks and bans need right then.
 *Avoid:* bulk role or nickname work on members gets a per-guild cap (`sticky::take`, 20 adds a minute) and queues the rest as a job instead of dropping it.
 
+**A switch checked in only one of two call sites.** (race review item 5, 11-12)
+`on_audit` calls the quarantine hold from two places. Kicks, bans and timeouts checked `quarantine_hold`, role changes did not, so staff were still quarantined with the switch off.
+*Avoid:* when a feature has a switch, grep every caller of its entry point and check the switch in each, or check it once inside the function.
+
 **A join quarantine counted as a nuke target.** (race review follow-up, 11-11)
 Verification's "quarantine on join" writes a quarantine row with no saved roles. The quarantine hold treated it like an anti-nuke quarantine, so an autorole bot giving a joiner its role was quarantined and lost its role permissions on every join.
 *Avoid:* a row with empty `saved_roles` is a join quarantine. The hold undoes the role change but punishes nobody. Code that reads `quarantines` must tell the two kinds apart.

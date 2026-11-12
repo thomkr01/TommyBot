@@ -121,7 +121,8 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             | A::ChannelOverwriteUpdate
             | A::GuildUpdate
     ) {
-        if e.action_type == A::MemberRoleUpdate {
+        // Switched off, Quarantine Hold watches nothing, role changes included (Thomas, 11-12).
+        if e.action_type == A::MemberRoleUpdate && cfg.antinuke.quarantine_hold {
             hold(app, e, actor).await?;
         }
         // A role rename still counts below.
