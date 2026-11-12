@@ -273,9 +273,9 @@ async fn verify_channel(
     for r in &given {
         overwrites.push(json!({"id": r, "type": 0, "deny": "1024"}));
     }
-    // Members in the join quarantine read it too; the bot's enforce_quarantine knows this overwrite.
+    // Members in the join quarantine read it too; the bot's enforce_quarantine knows this shape.
     if let Some(q) = own(&config["antinuke"]["quarantine_role"]) {
-        overwrites.push(json!({"id": q, "type": 0, "allow": "66560", "deny": "2048"}));
+        overwrites.push(verification_overwrite(&q));
     }
     let existing = own(&config["verification"]["channel"]);
     if existing.is_none() {
@@ -697,8 +697,14 @@ async fn log_setup(
     Ok(Json(json!({"version": version, "created": created})))
 }
 
-/// Sets the quarantine overwrite on every channel but the verification channel (members in the
-/// join quarantine must see it) and returns how many it could not set (the bot lacks Manage Roles
+/// The quarantine role's overwrite in the verification channel (`verification_shape`).
+fn verification_overwrite(role: &str) -> Value {
+    use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
+    json!({"id": role, "type": 0, "allow": VERIFY_ALLOW.to_string(), "deny": VERIFY_DENY.to_string()})
+}
+
+/// Sets the quarantine overwrite on every channel (the verification channel gets the shape the
+/// join quarantine can read) and returns how many it could not set (the bot lacks Manage Roles
 /// there); `None` when the channels could not be listed. Runs after the commit, so a failure here
 /// loses no setup.
 pub(crate) async fn quarantine_channels(
@@ -715,16 +721,15 @@ pub(crate) async fn quarantine_channels(
     let body = json!({"type": 0, "deny": tommybot_core::sections::QUARANTINE_DENY.to_string()});
     let mut failed = 0;
     let verification = own(&config["verification"]["channel"]);
-    for id in channels
-        .as_array()?
-        .iter()
-        .filter_map(|c| c["id"].as_str())
-        .filter(|id| verification.as_deref() != Some(id))
-    {
+    for id in channels.as_array()?.iter().filter_map(|c| c["id"].as_str()) {
         let path = format!("/channels/{id}/permissions/{role}");
+        let body = match verification.as_deref() == Some(id) {
+            true => verification_overwrite(role),
+            false => body.clone(),
+        };
         if st
             .discord
-            .call(Method::PUT, &path, Some(body.clone()))
+            .call(Method::PUT, &path, Some(body))
             .await
             .is_err()
         {

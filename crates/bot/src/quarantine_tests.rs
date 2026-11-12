@@ -354,38 +354,178 @@ async fn enforce_permits_skips_managed_roles() {
     t.cleanup().await;
 }
 
-/// D55: enforce_quarantine leaves the verification channel open to the join quarantine, also one
-/// the dashboard made and has not saved yet (its exact overwrite marks it); other channels still
-/// get the deny.
+/// D55: enforce_quarantine gives the verification channel the shape the join quarantine reads
+/// (and repairs an older overwrite), also a channel the dashboard made and has not saved yet while
+/// verification is on and the saved channel is gone; other channels still get the full deny.
 #[tokio::test]
-async fn enforce_quarantine_leaves_the_verification_channel_alone() {
+async fn enforce_quarantine_gives_the_verification_channel_its_shape() {
+    use tommybot_core::sections::{QUARANTINE_DENY, VERIFY_ALLOW, VERIFY_DENY};
     let Some(t) = T::new(78).await else { return };
     let q = json!({"quarantine_role": Q.to_string()});
     let misc = json!({"enforce_quarantine_perms": true});
-    let saved = json!({"antinuke": q, "misc": misc, "verification": web_verification()});
-    server(&t, 0, saved).await;
-    server(&t, 1, json!({"antinuke": q, "misc": misc})).await;
+    let mut unsaved = web_verification();
+    unsaved.as_object_mut().unwrap().remove("channel");
+    let mut dead = web_verification();
+    dead["channel"] = json!("799"); // deleted in Discord: GET answers 404
+    let mut off = web_verification();
+    off["enabled"] = json!(false);
+    off.as_object_mut().unwrap().remove("channel");
+    for (i, v) in [web_verification(), unsaved, dead, off]
+        .into_iter()
+        .enumerate()
+    {
+        server(
+            &t,
+            i as u64,
+            json!({"antinuke": q, "misc": misc, "verification": v}),
+        )
+        .await;
+    }
     let chan = |i: u64, id: u64, allow: u64, deny: u64| -> Channel {
         let ow = json!([{"id": Q.to_string(), "type": 0, "allow": allow.to_string(), "deny": deny.to_string()}]);
         serde_json::from_value(json!({"id": id.to_string(), "type": 0, "guild_id": t.g(i).to_string(),
                                       "permission_overwrites": if allow | deny == 0 { json!([]) } else { ow }}))
         .unwrap()
     };
-    // Read (View + History), not Send: the overwrite verification writes.
-    let (read, send) = (1024 | 65536, 2048);
-    let put = |c: u64| t.calls(&format!("PUT /channels/{c}/permissions/{Q}"));
+    let shape = |i, id| chan(i, id, VERIFY_ALLOW, VERIFY_DENY);
     for (i, c) in [
-        (0, chan(0, 700, read, send)), // the saved verification channel
-        (0, chan(0, 701, 0, 0)),       // another channel
-        (1, chan(1, 702, read, send)), // made by the dashboard, not saved yet
-        (1, chan(1, 703, read | send, 0)),
+        (0, chan(0, 700, VERIFY_ALLOW, 2048)), // the saved one, with D55's old overwrite
+        (0, chan(0, 701, 0, 0)),               // another channel
+        (1, shape(1, 702)),                    // made by the dashboard, not saved yet
+        (1, chan(1, 703, VERIFY_ALLOW | 2048, 0)),
+        (2, shape(2, 704)), // the saved channel was deleted
+        (3, shape(3, 705)), // verification is off
     ] {
         let r = crate::setup::enforce_quarantine(&t.app, &c).await;
         assert!(r.is_ok(), "{i}: {r:?}");
     }
-    assert_eq!(put(700), 0, "the verification channel keeps its overwrite");
-    assert_eq!(put(702), 0, "a new verification channel too");
-    assert_eq!((put(701), put(703)), (1, 1), "other channels get the deny");
+    let put = |c: u64, deny: Option<u64>| {
+        let m = t.mock.lock().unwrap();
+        let to = format!("PUT /channels/{c}/permissions/{Q} ");
+        let body = deny.map(|d| format!("\"deny\":\"{d}\""));
+        m.log
+            .iter()
+            .filter(|l| l.starts_with(&to) && body.as_ref().is_none_or(|b| l.contains(b)))
+            .count()
+    };
+    assert_eq!(
+        put(700, Some(VERIFY_DENY)),
+        1,
+        "the saved one is repaired to the shape"
+    );
+    assert_eq!(
+        (put(702, None), put(704, None)),
+        (0, 0),
+        "a new verification channel keeps it"
+    );
+    for c in [701, 703, 705] {
+        assert_eq!(put(c, Some(QUARANTINE_DENY)), 1, "{c} gets the deny");
+    }
+    t.cleanup().await;
+}
+
+/// Round 2, item 1: a failed member read counts as not contained, so the nuker gets the full run.
+#[tokio::test]
+async fn a_failed_member_read_does_not_count_as_contained() {
+    let Some(t) = T::new(81).await else { return };
+    let an = json!({"enabled": true, "quarantine_role": Q.to_string(),
+                    "limits": {"Ban": {"per_minute": 1, "per_hour": 1}}});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let u = t.base * 10 + 1;
+    row(&t, 0, u, &[ROLE as i64]).await;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![Q]);
+        m.fail_member = true;
+    });
+    let cfg = t.app.cfg(t.g(0).get()).await.unwrap();
+    let ban = tommybot_antinuke::Action::Ban;
+    let r = crate::antinuke::count(
+        &t.app,
+        &cfg,
+        t.g(0),
+        Id::new(u),
+        ban,
+        Some(9),
+        &[],
+        false,
+        5,
+    )
+    .await;
+    tracing::info!(?r, "count");
+    let cases: i64 = sqlx::query_scalar("SELECT count(*) FROM cases WHERE guild_id = $1")
+        .bind(t.g(0).get() as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(cases, 1, "the full run opened a case");
+    t.cleanup().await;
+}
+
+/// Round 2, item 2: a saved list stays when the member holds no other role than quarantine
+/// leaves (none at all, or a recreated Quarantine role they lack), and when the other roles come
+/// from a membership that began after the quarantine (a rejoin with autoroles).
+#[tokio::test]
+async fn a_second_quarantine_keeps_a_valid_saved_list() {
+    let Some(t) = T::new(82).await else { return };
+    server(
+        &t,
+        0,
+        json!({"antinuke": {"quarantine_role": Q.to_string()}}),
+    )
+    .await;
+    let (none, boost, rejoined) = (t.base * 10 + 1, t.base * 10 + 2, t.base * 10 + 3);
+    for u in [none, boost, rejoined] {
+        row(&t, 0, u, &[ROLE as i64]).await;
+    }
+    // The mock's members joined in 2020: this quarantine is older than the membership.
+    sqlx::query(
+        "UPDATE quarantines SET created_at = '2019-01-01' WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(t.g(0).get() as i64)
+    .bind(rejoined as i64)
+    .execute(&t.app.pool)
+    .await
+    .unwrap();
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), none), vec![]);
+        m.members.insert((t.g(0).get(), boost), vec![BOOST]);
+        m.members.insert((t.g(0).get(), rejoined), vec![AUTOROLE]);
+    });
+    for u in [none, boost, rejoined] {
+        let r = crate::antinuke::quarantine_actor(&t.app, t.g(0), Id::new(u), "test").await;
+        assert!(r.is_ok(), "{u}: {r:?}");
+        assert_eq!(saved(&t, 0, u).await, Some(vec![ROLE as i64]), "{u}");
+    }
+    t.cleanup().await;
+}
+
+/// Round 2, item 5: with verification off, a rejoin ends a join quarantine instead of holding the
+/// member where nobody can verify out.
+#[tokio::test]
+async fn a_join_quarantine_ends_on_rejoin_when_verification_is_off() {
+    let Some(t) = T::new(83).await else { return };
+    let mut v = web_verification();
+    v["enabled"] = json!(false);
+    server(
+        &t,
+        0,
+        json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v}),
+    )
+    .await;
+    let u = t.base * 10 + 1;
+    row(&t, 0, u, &[]).await;
+    sqlx::query("UPDATE quarantines SET on_join = true WHERE guild_id = $1")
+        .bind(t.g(0).get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![]);
+    });
+    let r = crate::antinuke::requarantine_rejoin(&t.app, t.g(0), Id::new(u)).await;
+    assert_eq!(r.unwrap(), crate::antinuke::Rejoin::Free);
+    assert_eq!(saved(&t, 0, u).await, None);
+    assert_eq!(roles(&t, 0, u), Some(vec![]));
     t.cleanup().await;
 }
 
@@ -414,7 +554,8 @@ async fn a_failed_report_log_still_alerts_the_owner() {
     t.cleanup().await;
 }
 
-/// Migration 3900: only rows with nothing saved (the old join quarantine) become join quarantines.
+/// Migration 3900: only rows with nothing saved (the old join quarantine) become join quarantines,
+/// unless a quarantine case or Raider List quarantine since the row shows a real one.
 #[tokio::test]
 async fn migration_3900_marks_only_empty_saved_rows_as_join() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -426,8 +567,16 @@ async fn migration_3900_marks_only_empty_saved_rows_as_join() {
     for sql in [
         "CREATE SCHEMA m3900",
         "SET LOCAL search_path = m3900",
-        "CREATE TABLE quarantines (guild_id BIGINT, user_id BIGINT, saved_roles BIGINT[] NOT NULL)",
-        "INSERT INTO quarantines VALUES (1, 1, '{}'), (1, 2, '{5}'), (1, 3, '{5,6}')",
+        "CREATE TABLE quarantines (guild_id BIGINT, user_id BIGINT, saved_roles BIGINT[] NOT NULL,
+                                   created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        "CREATE TABLE cases (guild_id BIGINT, user_id BIGINT, kind TEXT, created_at TIMESTAMPTZ)",
+        "CREATE TABLE joingate_actions (guild_id BIGINT, user_id BIGINT, action TEXT, ok BOOLEAN,
+                                        created_at TIMESTAMPTZ)",
+        "INSERT INTO quarantines VALUES (1, 1, '{}'), (1, 2, '{5}'), (1, 3, '{5,6}'), (1, 5, '{}'),
+                                        (1, 6, '{}'), (1, 7, '{}')",
+        // 5: a staff quarantine case; 6: a Raider List quarantine; 7: only an old, released case.
+        "INSERT INTO cases VALUES (1, 5, 'quarantine', now()), (1, 7, 'quarantine', now() - interval '1 day')",
+        "INSERT INTO joingate_actions VALUES (1, 6, 'Quarantine', true, now())",
     ] {
         sqlx::query(sql).execute(&mut *tx).await.unwrap();
     }
@@ -438,7 +587,17 @@ async fn migration_3900_marks_only_empty_saved_rows_as_join() {
             .fetch_all(&mut *tx)
             .await
             .unwrap();
-    assert_eq!(rows, vec![(1, true), (2, false), (3, false)]);
+    assert_eq!(
+        rows,
+        vec![
+            (1, true),
+            (2, false),
+            (3, false),
+            (5, false),
+            (6, false),
+            (7, true)
+        ]
+    );
     // New rows default to a real quarantine.
     sqlx::query("INSERT INTO quarantines VALUES (1, 4, '{}')")
         .execute(&mut *tx)

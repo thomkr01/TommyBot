@@ -11,6 +11,7 @@ use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
 };
 use tommybot_core::jobs;
+use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
 use tommybot_logging::emoji::ARROW;
 use tommybot_logging::{
     embed::{ALERT, DONE, GREEN, NO, RED, YES},
@@ -357,12 +358,13 @@ async fn ensure_channel(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         deny,
     };
     let none = Permissions::empty();
+    let bits = Permissions::from_bits_truncate;
     let read = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
     let mut overwrites = vec![role(gid.cast(), read, Permissions::SEND_MESSAGES)];
     overwrites.extend(
         cfg.antinuke
             .quarantine_role
-            .map(|q| role(q, read, Permissions::SEND_MESSAGES)),
+            .map(|q| role(q, bits(VERIFY_ALLOW), bits(VERIFY_DENY))),
     );
     overwrites.extend(
         cfg.verification

@@ -45,7 +45,8 @@ pub struct Setup {
     pub trusted: Vec<u64>,
     /// Every channel a log goes to.
     pub log_channels: Vec<u64>,
-    /// Members in verification's join quarantine must see it, so it keeps no quarantine deny.
+    /// Members in verification's join quarantine must read it: its quarantine overwrite has
+    /// [`crate::verification_shape`] instead of the full deny.
     pub verification_channel: Option<u64>,
 }
 
@@ -693,11 +694,15 @@ pub fn checks(
                     .and_then(|p| channels.iter().find(|x| x.id == p))
                     .is_none_or(|cat| !synced(c, cat))
             })
-            .filter(|c| Some(c.id) != setup.verification_channel)
             .filter(|c| {
-                !c.overwrites
-                    .iter()
-                    .any(|o| o.is_role && o.target == q.id && o.deny & VIEW != 0)
+                !c.overwrites.iter().any(|o| {
+                    o.is_role
+                        && o.target == q.id
+                        && match Some(c.id) == setup.verification_channel {
+                            true => crate::verification_shape(o.allow, o.deny),
+                            false => o.deny & VIEW != 0,
+                        }
+                })
             })
             .map(|c| c.name.as_str())
             .collect();
@@ -1213,14 +1218,29 @@ mod tests {
         assert_eq!(r.severity, Severity::Bad);
         assert!(r.detail.contains("2 channel(s): c12, c13"), "{}", r.detail);
         assert_eq!(r.fix.as_ref().unwrap().setting, Some(QUARANTINE_CHANNELS));
-        // The verification channel stays open to the join quarantine.
+        // The verification channel needs the shape the join quarantine reads, not the full deny.
         let verifying = Setup {
             verification_channel: Some(13),
             ..setup
         };
-        let rows = checks(&SAFE, &roles, &channels, 4, &verifying);
-        let r = sev(&rows, "quarantine_channels").unwrap();
-        assert!(r.detail.contains("1 channel(s): c12"), "{}", r.detail);
+        let shaped = OverwriteImg {
+            target: 5,
+            is_role: true,
+            allow: crate::VERIFY_ALLOW,
+            deny: crate::VERIFY_DENY,
+        };
+        let with = |o: &OverwriteImg| {
+            [
+                chan(12, 0, None, vec![]),
+                chan(13, 0, None, vec![o.clone()]),
+            ]
+        };
+        let open = |o| {
+            let rows = checks(&SAFE, &roles, &with(o), 4, &verifying);
+            sev(&rows, "quarantine_channels").unwrap().detail.clone()
+        };
+        assert!(open(&shaped).contains("1 channel(s): c12"));
+        assert!(open(&deny).contains("2 channel(s): c12, c13"));
         let setup = verifying;
         let all = [
             chan(10, CATEGORY, None, vec![deny.clone()]),

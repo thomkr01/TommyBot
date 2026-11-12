@@ -524,9 +524,26 @@ pub async fn enforce_permits(app: &App, m: &MemberUpdate) -> Result<()> {
         return Ok(());
     }
     let info = app.guild_info(gid).await?;
-    let mut bad = dangerous_below_bot(&m.roles, &info.role_perms, &info.roles, info.bot_top);
-    // Discord refuses to take a managed (bot or integration) role off.
-    bad.retain(|r| !info.managed.contains(r));
+    let (managed, bad): (Vec<_>, Vec<_>) =
+        dangerous_below_bot(&m.roles, &info.role_perms, &info.roles, info.bot_top)
+            .into_iter()
+            .partition(|r| info.managed.contains(r));
+    // Discord refuses to take a managed (bot or integration) role off: staff are told once.
+    for r in managed
+        .iter()
+        .filter(|r| first_in(("managed", gid.get(), r.get()), None))
+    {
+        let log = Log::new("Anti Nuke", ALERT)
+            .text(&format!("{NO} **A managed role holds dangerous permissions**"))
+            .line("Role", &format!("<@&{r}>"))
+            .line(
+                "Effect",
+                "Enforce permits cannot take a bot or integration role off. Remove the permissions from the role instead.",
+            );
+        if let Err(e) = send_log(app, gid.get(), LogKind::AntiNuke, log).await {
+            tracing::warn!(?e, "managed role log failed");
+        }
+    }
     if bad.is_empty() {
         return Ok(());
     }
@@ -590,15 +607,23 @@ pub(crate) async fn quarantine_as(
     let on_join = match kind {
         Kind::Real => false,
         Kind::Join => true,
-        Kind::Deadline => member.roles.iter().all(|r| Some(*r) == q),
+        Kind::Deadline => !other_roles(&member.roles, q, &managed),
         Kind::Again(j) => j,
     };
     // Saved before the roles go, so a crash between the two never loses them. A second
-    // quarantine keeps the first saved list, unless a new real one finds the member no longer
-    // held (released by hand): then the old list is stale.
+    // quarantine keeps the first saved list, unless a new real one finds the member holding
+    // other roles again in the same membership (released by hand): then the old list is stale.
     let (g, u) = (gid.get() as i64, user.get() as i64);
-    let stale = kind == Kind::Real && !held(&member.roles, q, &managed);
-    let old = save_row(&app.pool, (g, u), &saved, on_join, stale).await?;
+    let released = kind == Kind::Real && other_roles(&member.roles, q, &managed);
+    let joined = member
+        .joined_at
+        .and_then(|t| DateTime::from_timestamp_micros(t.as_micros()));
+    let row = (
+        saved.as_slice(),
+        on_join,
+        released.then_some(joined).flatten(),
+    );
+    let old = save_row(&app.pool, (g, u), row).await?;
     let update = app.http.update_guild_member(gid, user).roles(&roles);
     let update = match reason {
         Some(r) => update.reason(r),
@@ -612,56 +637,87 @@ pub(crate) async fn quarantine_as(
     record_quarantine(app, gid, user).await
 }
 
-/// A `quarantines` row as it was before [`save_row`] (saved roles, on_join, created_at), all None
-/// when there was none.
-type OldRow = (Option<Vec<i64>>, Option<bool>, Option<DateTime<Utc>>);
+/// A `quarantines` row: saved roles, on_join, created_at.
+type Row = (Vec<i64>, bool, DateTime<Utc>);
 
-/// Writes the quarantine row and returns the one it replaced. A real quarantine wins over a join
-/// one. `stale`: the member is no longer held (roles given back by hand), so their roles now are
-/// saved and the quarantine starts again.
+/// What [`save_row`] wrote, and the row it replaced (None after an insert).
+#[derive(Debug, PartialEq)]
+struct Saved {
+    inserted: bool,
+    wrote: Row,
+    old: Option<Row>,
+}
+
+/// Writes the quarantine row. A real quarantine wins over a join one. `released`: the member
+/// holds other roles again and joined at this time; when that was before the row's quarantine,
+/// the saved list is stale, so today's roles are saved and the quarantine starts again.
 async fn save_row(
     pool: &PgPool,
     (g, u): (i64, i64),
-    saved: &[i64],
-    on_join: bool,
-    stale: bool,
-) -> Result<OldRow> {
-    Ok(sqlx::query_as(
+    (saved, on_join, released): (&[i64], bool, Option<DateTime<Utc>>),
+) -> Result<Saved> {
+    type Out = (
+        bool,
+        Vec<i64>,
+        bool,
+        DateTime<Utc>,
+        Option<Vec<i64>>,
+        Option<bool>,
+        Option<DateTime<Utc>>,
+    );
+    let r: Out = sqlx::query_as(
         "WITH old AS (SELECT saved_roles, on_join, created_at FROM quarantines
                       WHERE guild_id = $1 AND user_id = $2)
-         INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, $3, $4)
+         INSERT INTO quarantines AS q (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, $3, $4)
          ON CONFLICT (guild_id, user_id) DO UPDATE SET
-             saved_roles = CASE WHEN $5 THEN EXCLUDED.saved_roles ELSE quarantines.saved_roles END,
-             created_at = CASE WHEN $5 THEN now() ELSE quarantines.created_at END,
-             on_join = quarantines.on_join AND EXCLUDED.on_join
-         RETURNING (SELECT saved_roles FROM old), (SELECT on_join FROM old), (SELECT created_at FROM old)",
+             saved_roles = CASE WHEN $5 < q.created_at THEN EXCLUDED.saved_roles ELSE q.saved_roles END,
+             created_at = CASE WHEN $5 < q.created_at THEN now() ELSE q.created_at END,
+             on_join = q.on_join AND EXCLUDED.on_join
+         RETURNING q.xmax = 0, q.saved_roles, q.on_join, q.created_at,
+                   (SELECT saved_roles FROM old), (SELECT on_join FROM old), (SELECT created_at FROM old)",
     )
     .bind(g)
     .bind(u)
     .bind(saved)
     .bind(on_join)
-    .bind(stale)
+    .bind(released)
     .fetch_one(pool)
-    .await?)
+    .await?;
+    let old = match (r.4, r.5, r.6) {
+        (Some(s), Some(j), Some(at)) if !r.0 => Some((s, j, at)),
+        _ => None,
+    };
+    Ok(Saved {
+        inserted: r.0,
+        wrote: (r.1, r.2, r.3),
+        old,
+    })
 }
 
-/// Puts back the row [`save_row`] replaced, or deletes the one it made.
-async fn restore_row(pool: &PgPool, (g, u): (i64, i64), old: OldRow) -> Result<()> {
-    let q = match old {
-        (Some(saved), Some(on_join), Some(at)) => sqlx::query(
-            "UPDATE quarantines SET saved_roles = $3, on_join = $4, created_at = $5
-             WHERE guild_id = $1 AND user_id = $2",
+/// Undoes [`save_row`] only while the row still holds what it wrote, so a quarantine written
+/// meanwhile is never deleted or downgraded.
+async fn restore_row(pool: &PgPool, (g, u): (i64, i64), s: Saved) -> Result<()> {
+    let (saved, on_join, at) = s.wrote;
+    let q = match (s.inserted, s.old) {
+        (true, _) => sqlx::query(
+            "DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2
+               AND saved_roles = $3 AND on_join = $4 AND created_at = $5",
         )
         .bind(g)
-        .bind(u)
-        .bind(saved)
-        .bind(on_join)
-        .bind(at),
-        _ => sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2")
-            .bind(g)
-            .bind(u),
+        .bind(u),
+        (false, Some(old)) => sqlx::query(
+            "UPDATE quarantines SET saved_roles = $1, on_join = $2, created_at = $3
+             WHERE guild_id = $4 AND user_id = $5
+               AND saved_roles = $6 AND on_join = $7 AND created_at = $8",
+        )
+        .bind(old.0)
+        .bind(old.1)
+        .bind(old.2)
+        .bind(g)
+        .bind(u),
+        (false, None) => return Ok(()),
     };
-    q.execute(pool).await?;
+    q.bind(saved).bind(on_join).bind(at).execute(pool).await?;
     Ok(())
 }
 
@@ -684,10 +740,28 @@ async fn quarantine_parts(
     Ok((q, managed))
 }
 
+/// True the first time `key` comes up, then again only once `every` has passed (never with None).
+fn first_in(key: (&'static str, u64, u64), every: Option<Duration>) -> bool {
+    type Seen = std::sync::Mutex<HashMap<(&'static str, u64, u64), Instant>>;
+    static SEEN: std::sync::LazyLock<Seen> = std::sync::LazyLock::new(Default::default);
+    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
+    let now = Instant::now();
+    match seen.get(&key) {
+        Some(at) if every.is_none_or(|e| now.duration_since(*at) < e) => false,
+        _ => {
+            seen.insert(key, now);
+            true
+        }
+    }
+}
+
 /// A deleted Quarantine role: members are still stripped (to their managed roles), and staff
-/// learn why they no longer get the role.
+/// learn why they no longer get the role (at most every 10 minutes, a raid quarantines many).
 async fn quarantine_role_missing(app: &App, gid: Id<GuildMarker>) {
     tracing::warn!(guild = gid.get(), "quarantine role missing");
+    if !first_in(("q_missing", gid.get(), 0), Some(Duration::from_secs(600))) {
+        return;
+    }
     let log = Log::new("Anti Nuke", ALERT)
         .text(&format!("{NO} **Quarantine role missing**"))
         .line(
@@ -718,10 +792,18 @@ fn held(
     quarantine: Option<Id<RoleMarker>>,
     managed: &[Id<RoleMarker>],
 ) -> bool {
-    quarantine.is_none_or(|q| member.contains(&q))
-        && member
-            .iter()
-            .all(|r| Some(*r) == quarantine || managed.contains(r))
+    quarantine.is_none_or(|q| member.contains(&q)) && !other_roles(member, quarantine, managed)
+}
+
+/// The member holds a role [`quarantine_roles`] would take.
+fn other_roles(
+    member: &[Id<RoleMarker>],
+    quarantine: Option<Id<RoleMarker>>,
+    managed: &[Id<RoleMarker>],
+) -> bool {
+    member
+        .iter()
+        .any(|r| Some(*r) != quarantine && !managed.contains(r))
 }
 
 /// Logs the bot's quarantine so the revert center can undo it. Written after the role change
@@ -801,6 +883,15 @@ pub(crate) async fn requarantine_rejoin(
     let Some(on_join) = quarantine_kind(app, gid, user).await? else {
         return Ok(Rejoin::Free);
     };
+    // With verification off nobody can verify out of a join quarantine: it ends (as in N1).
+    if on_join && !app.cfg(gid.get()).await?.verification.enabled {
+        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2 AND on_join")
+            .bind(gid.get() as i64)
+            .bind(user.get() as i64)
+            .execute(&app.pool)
+            .await?;
+        return Ok(Rejoin::Free);
+    }
     let done = contain(app, gid, user, None, Kind::Again(on_join)).await?;
     // Not verified yet is not an anti-nuke matter.
     if on_join {
@@ -1175,28 +1266,28 @@ pub(crate) fn nuke_running(app: &App, gid: u64, actor: u64) -> bool {
 
 /// Quarantined by row and still held in Discord. A row alone is not enough: roles given back by
 /// hand (a Quarantine Whitelist user, Quarantine Hold off) leave it behind, and a re-armed nuker
-/// must be contained again.
+/// must be contained again. A failed read counts as not contained: a second case and alert are
+/// better than a nuker left free.
 async fn still_contained(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> Result<bool> {
     if !quarantined(app, gid, actor).await? {
         return Ok(false);
     }
-    // Gone or unreadable: the row decides, as before.
-    let Ok(member) = app.http.guild_member(gid, actor).await else {
-        return Ok(true);
+    let live = async {
+        // Gone: the row decides, as before.
+        let Some(member) = crate::http_err::member(&app.http, gid, actor).await? else {
+            return Ok(true);
+        };
+        let cfg = app.cfg(gid.get()).await?;
+        let (q, managed) = quarantine_parts(app, gid, &cfg).await?;
+        // A bot's own role cannot be taken off, only cleared.
+        let cleared =
+            !member.user.bot || bot_role(app, gid, actor).await?.is_none_or(|(_, p)| p == 0);
+        anyhow::Ok(held(&member.roles, q, &managed) && cleared)
     };
-    let member = member.model().await?;
-    let cfg = app.cfg(gid.get()).await?;
-    let (q, managed) = quarantine_parts(app, gid, &cfg).await?;
-    if !held(&member.roles, q, &managed) {
-        return Ok(false);
-    }
-    // A bot's own role cannot be taken off, only cleared.
-    if member.user.bot {
-        if let Some((_, perms)) = bot_role(app, gid, actor).await? {
-            return Ok(perms == 0);
-        }
-    }
-    Ok(true)
+    Ok(live.await.unwrap_or_else(|e| {
+        tracing::warn!(?e, "checking a quarantined nuker failed, containing again");
+        false
+    }))
 }
 
 /// One claimed run: the full contain, revert, report and panic, or only the revert, then again
@@ -1705,47 +1796,70 @@ mod tests {
         };
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let key = (6_200_000_000 + std::process::id() as i64, 42);
-        let row = || async {
-            sqlx::query_as::<_, (Vec<i64>, bool)>(
-                "SELECT saved_roles, on_join FROM quarantines WHERE guild_id = $1 AND user_id = $2",
-            )
-            .bind(key.0)
-            .bind(key.1)
-            .fetch_optional(&pool)
-            .await
-            .unwrap()
-        };
-        // A join quarantine; a real one on top of it wins and keeps the saved list.
-        let none = (None, None, None);
-        assert_eq!(save_row(&pool, key, &[], true, false).await.unwrap(), none);
-        let joined = save_row(&pool, key, &[9], false, false).await.unwrap();
-        assert_eq!(row().await, Some((vec![], false)));
-        // A failed role change puts the join quarantine back.
-        restore_row(&pool, key, joined).await.unwrap();
-        assert_eq!(row().await, Some((vec![], true)));
-        // A join quarantine never turns a real one back into a join one.
-        save_row(&pool, key, &[], false, false).await.unwrap();
-        save_row(&pool, key, &[], true, false).await.unwrap();
-        assert_eq!(row().await, Some((vec![], false)));
-        // Released by hand, then quarantined again: today's roles are saved.
-        save_row(&pool, key, &[7, 8], false, true).await.unwrap();
-        assert_eq!(row().await, Some((vec![7, 8], false)));
-        // A failed first quarantine leaves no row.
-        restore_row(
-            &pool,
-            (key.0, 43),
-            save_row(&pool, (key.0, 43), &[1], false, false)
+        let row = |u: i64| {
+            let pool = &pool;
+            async move {
+                sqlx::query_as::<_, (Vec<i64>, bool)>(
+                    "SELECT saved_roles, on_join FROM quarantines WHERE guild_id = $1 AND user_id = $2",
+                )
+                .bind(key.0)
+                .bind(u)
+                .fetch_optional(pool)
                 .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+                .unwrap()
+            }
+        };
+        let (long_ago, later) = (
+            DateTime::from_timestamp(1, 0),
+            DateTime::from_timestamp(4e9 as i64, 0),
+        );
+        // A join quarantine; a real one on top of it wins and keeps the saved list.
+        let first = save_row(&pool, key, (&[], true, None)).await.unwrap();
+        assert!(first.inserted && first.old.is_none());
+        let real = save_row(&pool, key, (&[9], false, None)).await.unwrap();
+        assert_eq!(row(42).await, Some((vec![], false)));
+        // A failed role change puts the join quarantine back.
+        restore_row(&pool, key, real).await.unwrap();
+        assert_eq!(row(42).await, Some((vec![], true)));
+        // A join quarantine never turns a real one back into a join one.
+        save_row(&pool, key, (&[], false, None)).await.unwrap();
+        save_row(&pool, key, (&[], true, None)).await.unwrap();
+        assert_eq!(row(42).await, Some((vec![], false)));
+        // Holding other roles in a membership from after the quarantine (a rejoin with
+        // autoroles): the saved list stays.
+        save_row(&pool, key, (&[7], false, later)).await.unwrap();
+        assert_eq!(row(42).await, Some((vec![], false)));
+        // Released by hand in the same membership, then quarantined again: today's roles.
+        let again = save_row(&pool, key, (&[7, 8], false, long_ago))
+            .await
+            .unwrap();
+        assert_eq!(row(42).await, Some((vec![7, 8], false)));
+        // A quarantine written meanwhile is not undone by a failed one.
+        sqlx::query("UPDATE quarantines SET saved_roles = '{5}' WHERE guild_id = $1")
+            .bind(key.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        restore_row(&pool, key, again).await.unwrap();
+        assert_eq!(row(42).await, Some((vec![5], false)));
+        // A failed first quarantine leaves no row, unless another wrote it meanwhile.
+        let k2 = (key.0, 43);
+        let made = save_row(&pool, k2, (&[1], false, None)).await.unwrap();
+        restore_row(&pool, k2, made).await.unwrap();
+        assert_eq!(row(43).await, None);
+        let made = save_row(&pool, k2, (&[1], true, None)).await.unwrap();
+        save_row(&pool, k2, (&[1], false, None)).await.unwrap();
+        restore_row(&pool, k2, made).await.unwrap();
+        assert_eq!(
+            row(43).await,
+            Some((vec![1], false)),
+            "a real one is never deleted"
+        );
         sqlx::query("DELETE FROM quarantines WHERE guild_id = $1")
             .bind(key.0)
             .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(row().await, None);
     }
 
     /// Runs the bot steps with fake calls; `fail` names the call that errors.
