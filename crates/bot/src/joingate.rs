@@ -618,11 +618,12 @@ pub(crate) async fn punish(
                             .remove(&(gid.get(), user));
                     }
                     let reason = format!("rename skipped: {skip}");
-                    return finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await;
+                    finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await;
+                    return Ok(());
                 }
                 Err(e) => {
                     let reason = crate::http_err::why(&e);
-                    finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await?;
+                    finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await;
                     return Err(e);
                 }
             }
@@ -673,15 +674,16 @@ pub(crate) async fn punish(
             if let Err(e) = done {
                 // Logged like a success, so a refused kick still shows up in the Join Gate log.
                 let reason = crate::http_err::why(&e);
-                finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await?;
+                finish(app, cfg, gid, user, (action, why, detail), Some(&reason)).await;
                 return Err(e);
             }
             if action == Action::Ban {
-                crate::scheduler::forget_jobs(app, gid, user, "unban", None).await;
+                crate::scheduler::forget_jobs(app, gid, user, crate::scheduler::BANNED, None).await;
             }
         }
     }
-    finish(app, cfg, gid, user, (action, why, detail), None).await
+    finish(app, cfg, gid, user, (action, why, detail), None).await;
+    Ok(())
 }
 
 /// A raid punishment: one that failed without a refusal (5xx, timeout) is tried again from a
@@ -698,7 +700,9 @@ pub(crate) async fn punish_or_retry(
         return;
     };
     tracing::warn!(?e, user, why, "punishing a raider failed");
-    if crate::http_err::refused(&e) {
+    // A warn writes its case before anything can fail, so it is never retried.
+    let retries = matches!(action, Action::Timeout(_) | Action::Kick | Action::Ban);
+    if !retries || crate::http_err::refused(&e) {
         return;
     }
     let job = serde_json::json!({ "user": user, "action": action, "why": why });
@@ -708,8 +712,9 @@ pub(crate) async fn punish_or_retry(
     }
 }
 
-/// The `raid_punish` job. A refusal is final (the failed punishment is already logged); anything
-/// else fails the job, so the scheduler tries again.
+/// The `raid_punish` job. Someone made staff or let back in since is left alone (staff's unban,
+/// appeal or Allow also drop the job). A refusal is final (the failed punishment is already
+/// logged); anything else fails the job, so the scheduler tries again.
 pub(crate) async fn punish_job(
     app: &App,
     gid: Id<GuildMarker>,
@@ -719,6 +724,9 @@ pub(crate) async fn punish_job(
     let user = crate::bansync::need(p, "user")?;
     let action: Action = serde_json::from_value(p["action"].clone())?;
     let why = p["why"].as_str().context("job payload has no why")?;
+    if app.is_immune(gid, Id::new(user)).await? || crate::raiders::allowed(app, gid, user).await? {
+        return Ok(());
+    }
     let cfg = app.cfg(gid.get()).await?;
     match punish(app, &cfg, gid, user, action, why, Detail::default()).await {
         Err(e) if !crate::http_err::refused(&e) => Err(e),
@@ -726,7 +734,8 @@ pub(crate) async fn punish_job(
     }
 }
 
-/// Records and logs a punishment, done or `failed`.
+/// Records and logs a punishment, done or `failed`. A failed log is only logged: `punish` fails
+/// only when the action did, so a retry never punishes twice.
 async fn finish(
     app: &App,
     cfg: &GuildCfg,
@@ -734,20 +743,17 @@ async fn finish(
     user: u64,
     what: (Action, &str, Detail<'_>),
     failed: Option<&str>,
-) -> Result<()> {
+) {
     let (action, why, detail) = what;
     let name = format!("{action:?}");
     record(app, gid, user, (&name, why, detail), failed).await;
     if cfg.logging.target(LogKind::JoinGate, None).is_none() {
         no_log_channel(app, gid).await;
     }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::JoinGate,
-        gate_log(user, action, why, detail, failed),
-    )
-    .await
+    let log = gate_log(user, action, why, detail, failed);
+    if let Err(e) = send_log(app, gid.get(), LogKind::JoinGate, log).await {
+        tracing::warn!(?e, "join gate log failed");
+    }
 }
 
 #[cfg(test)]

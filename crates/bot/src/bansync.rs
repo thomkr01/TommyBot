@@ -1022,7 +1022,7 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
         _ => {}
     }
     // A temp copy's unban job must not lift a ban staff make later.
-    crate::scheduler::forget_jobs(app, to, user.get(), "unban", None).await;
+    crate::scheduler::forget_jobs(app, to, user.get(), &["unban"], None).await;
     let case_no = new_case(app, (to, user), "unban", &why, None).await?;
     mark(app, key, LIVE, "lifted", None).await?;
     commands::mod_log(

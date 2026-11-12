@@ -125,6 +125,8 @@ pub(crate) struct Mock {
     pub(crate) timeouts: HashMap<(u64, u64), String>,
     /// Log and DM messages fail with 403.
     pub(crate) fail_message: bool,
+    /// Log and DM messages fail with 502.
+    pub(crate) fail_message_5xx: bool,
     /// Channel deletes fail with 500.
     pub(crate) fail_delete_channel: bool,
     pub(crate) log: Vec<String>,
@@ -263,6 +265,7 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, j.to_string())
         }
         ("POST", ["channels", _, "messages"]) if m.fail_message => err(403, 50013),
+        ("POST", ["channels", _, "messages"]) if m.fail_message_5xx => err(502, 0),
         ("POST", ["users", "@me", "channels"]) => (200, json!({"id": "77", "type": 1}).to_string()),
         ("POST", ["channels", _, "messages"]) => (200, "{}".into()),
         _ => err(404, 10004),

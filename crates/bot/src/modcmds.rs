@@ -865,7 +865,7 @@ pub async fn run(
                 let (d, r) =
                     reply::dm_and_act(reply::dm_first("unban"), notice("unban", user), act).await;
                 (told, _) = (d, r?);
-                crate::scheduler::forget_jobs(app, gid, user, "unban", None).await;
+                crate::scheduler::forget_jobs(app, gid, user, &["unban"], None).await;
                 crate::raiders::lifted(app, gid, Id::new(user), actor_id).await;
                 ("unban", user, None, None, format!("Unbanned <@{user}>"))
             }
@@ -876,7 +876,7 @@ pub async fn run(
                     .delete_message_seconds(secs)
                     .reason(&audit)
                     .await?;
-                crate::scheduler::forget_jobs(app, gid, user, "unban", None).await;
+                crate::scheduler::forget_jobs(app, gid, user, crate::scheduler::BANNED, None).await;
                 let inv = json!({"op":"unban","user":user});
                 (
                     "ban",
@@ -899,7 +899,7 @@ pub async fn run(
                     reply::dm_and_act(reply::dm_first("untimeout"), notice("untimeout", user), act)
                         .await;
                 (told, _) = (d, r?);
-                crate::scheduler::forget_jobs(app, gid, user, "timeout_renew", None).await;
+                crate::scheduler::forget_jobs(app, gid, user, &["timeout_renew"], None).await;
                 let text = format!("Removed timeout of <@{user}>");
                 ("untimeout", user, None, None, text)
             }

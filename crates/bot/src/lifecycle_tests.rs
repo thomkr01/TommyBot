@@ -377,3 +377,96 @@ async fn a_raid_ban_discord_did_not_answer_is_retried() {
     assert!(pending(&t, 0, "raid_punish").await.is_empty());
     t.cleanup().await;
 }
+
+fn raid_job(t: &T, payload: Value) -> jobs::Job {
+    jobs::Job {
+        id: 0,
+        guild_id: t.g(0).get() as i64,
+        kind: "raid_punish".into(),
+        payload,
+        attempts: 0,
+    }
+}
+
+/// D64 review: a punishment that worked is not retried because its log failed.
+#[tokio::test]
+async fn a_failed_join_gate_log_does_not_retry_a_done_punishment() {
+    let Some(t) = T::new(79).await else { return };
+    let cfg = json!({"logging": {"fallback": "42"}});
+    t.server_config(0, t.owner(), cfg).await;
+    // Not a refusal: before the fix this failed `punish` and queued a second ban.
+    t.set(|m| m.fail_message_5xx = true);
+    let c = t.app.cfg(t.g(0).get()).await.unwrap();
+    let ban = tommybot_automod::join::Action::Ban;
+    crate::joingate::punish_or_retry(&t.app, &c, t.g(0), 790, ban, "join raid").await;
+    assert!(t.banned(0, 790).is_some());
+    assert!(pending(&t, 0, "raid_punish").await.is_empty());
+    t.cleanup().await;
+}
+
+/// D64 review: a retry leaves alone whoever was made staff or let back in since, and staff's
+/// Allow (also every unban and ban appeal, through `raiders::allow`) drops a pending retry.
+#[tokio::test]
+async fn a_raid_retry_skips_staff_and_allowed_users() {
+    let Some(t) = T::new(80).await else { return };
+    t.server_config(0, t.owner(), json!({})).await;
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 801)")
+        .await;
+    t.exec("INSERT INTO raider_allow (guild_id, user_id, by) VALUES ($1, 802, 1)")
+        .await;
+    for u in [801, 802, 803] {
+        let job = raid_job(&t, json!({"user": u, "action": "Ban", "why": "join raid"}));
+        super::dispatch(&t.app, &job).await.unwrap();
+    }
+    assert_eq!((t.banned(0, 801), t.banned(0, 802)), (None, None));
+    assert!(t.banned(0, 803).is_some());
+    let payload = json!({"user": 804, "action": "Ban", "why": "join raid"});
+    enqueue(&t, 0, "raid_punish", payload, 30).await;
+    let g = t.g(0).get() as i64;
+    tommybot_core::raiders::allow(&t.app.pool, g, 804, 1)
+        .await
+        .unwrap();
+    assert!(pending(&t, 0, "raid_punish").await.is_empty());
+    t.cleanup().await;
+}
+
+/// D8 review: panic's end lifts only a lock its own lock call saved. A lock that failed before
+/// saving (here: the bot's member cannot be read) is not panic's, so a later staff lock stays.
+#[tokio::test]
+async fn panic_owns_only_a_lock_it_saved() {
+    let Some(t) = T::new(81).await else { return };
+    let panic = json!({"lock_on_trigger": true, "duration_secs": 600});
+    for i in [0, 1] {
+        t.server_config(i, t.owner(), json!({ "panic": panic }))
+            .await;
+    }
+    // Server 1 can be locked: the bot's own member is there.
+    t.set(|m| {
+        m.members.insert((t.g(1).get(), bansync::tests::ME), vec![]);
+    });
+    for i in [0, 1] {
+        let cfg = t.app.cfg(t.g(i).get()).await.unwrap().panic.clone();
+        crate::panic::start(&t.app, t.g(i), &cfg).await.unwrap();
+    }
+    let locked = |p: Vec<(Value, i64)>| p[0].0["locked"].clone();
+    assert_eq!(
+        locked(pending(&t, 0, "panic_end").await),
+        false,
+        "a failed lock is not panic's"
+    );
+    assert!(crate::lockdown::active(&t.app, t.g(0))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(locked(pending(&t, 1, "panic_end").await), true);
+    assert_eq!(
+        crate::lockdown::active(&t.app, t.g(1)).await.unwrap(),
+        [LockKind::Role]
+    );
+    for i in [0, 1] {
+        t.app.panic_runs.lock().unwrap().remove(&t.g(i).get());
+    }
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}

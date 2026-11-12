@@ -101,6 +101,18 @@ pub async fn lock_for(
     kind: LockKind,
     secs: Option<i64>,
 ) -> Result<bool> {
+    lock_saving(app, gid, kind, secs, &mut false).await
+}
+
+/// [`lock_for`] that sets `saved` once this call saved its snapshot: an error after that leaves a
+/// (half applied) lock of this call's, an error before it leaves none.
+pub async fn lock_saving(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: LockKind,
+    secs: Option<i64>,
+    saved: &mut bool,
+) -> Result<bool> {
     if lock_thread(app, gid, &kind, true).await? {
         return Ok(true);
     }
@@ -117,6 +129,7 @@ pub async fn lock_for(
     let plan = plan_now(app, gid, &kind).await?;
     // Saved first so a failure halfway can still be unlocked exactly, or finished after a restart.
     store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+    *saved = true;
     if let Some(d) = secs {
         let job = serde_json::json!({ "lock": kind });
         tommybot_core::jobs::enqueue(&app.pool, gid.get() as i64, "unlock", job, now_secs() + d)

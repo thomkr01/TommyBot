@@ -212,6 +212,7 @@ pub async fn apply_dm(
                     .reason(&audit)
                     .await?;
                 app.http.delete_ban(gid, target).reason(&audit).await?;
+                crate::scheduler::forget_jobs(app, gid, t, &["unban"], None).await;
                 (None, 0)
             }
             ModKind::Ban => {
@@ -227,7 +228,7 @@ pub async fn apply_dm(
                     .delete_message_seconds(cfg.misc.purge_secs())
                     .reason(&audit)
                     .await?;
-                crate::scheduler::forget_jobs(app, gid, t, "unban", job).await;
+                crate::scheduler::forget_jobs(app, gid, t, crate::scheduler::BANNED, job).await;
                 (Some(json!({"op":"unban","user":t})), 0)
             }
             ModKind::Kick => {
@@ -238,8 +239,6 @@ pub async fn apply_dm(
                 (None, 0)
             }
             ModKind::Timeout => {
-                // Before, as the new timeout queues its own renewal.
-                crate::scheduler::forget_jobs(app, gid, t, "timeout_renew", None).await;
                 timeout_until(app, gid, target, now_secs() + timeout_s, &audit).await?;
                 (Some(json!({"op":"untimeout","user":t})), 0)
             }
@@ -664,7 +663,7 @@ pub(crate) async fn apply_warn_actions(
     // Same rule as a typed punishment: tell the member first.
     reply::dm_and_act(true, dm, act).await.1?;
     if kind == "ban" {
-        crate::scheduler::forget_jobs(app, g, u.get(), "unban", None).await;
+        crate::scheduler::forget_jobs(app, g, u.get(), crate::scheduler::BANNED, None).await;
     }
     let case_no = cases::create(
         &app.pool,
@@ -748,18 +747,15 @@ pub async fn timeout_until(
         .communication_disabled_until(Some(Timestamp::from_secs(now + chunk)?))
         .reason(reason)
         .await?;
+    let mut job = None;
     if more {
         // Renewed a day early so scheduler lag cannot open a gap.
-        let job = json!({"user":u.get(),"until_secs":until});
-        jobs::enqueue(
-            &app.pool,
-            g.get() as i64,
-            "timeout_renew",
-            job,
-            now + chunk - 86_400,
-        )
-        .await?;
+        let p = json!({"user":u.get(),"until_secs":until});
+        let at = now + chunk - 86_400;
+        job = Some(jobs::enqueue(&app.pool, g.get() as i64, "timeout_renew", p, at).await?);
     }
+    // After the PATCH: a failed one keeps the old timeout's renewal. One chain per member.
+    crate::scheduler::forget_jobs(app, g, u.get(), &["timeout_renew"], job).await;
     Ok(())
 }
 

@@ -700,8 +700,10 @@ pub(crate) struct RevertSummary {
     pub done: Vec<Inverse>,
     pub failed: usize,
     pub reinvite: Vec<u64>,
-    /// Deleted channels and roles recreated from the latest backup.
+    /// Changes made to recreate deleted channels and roles from the backups.
     pub recreated: usize,
+    /// Roles recreated from an older backup without their dangerous permissions.
+    pub stripped: usize,
 }
 
 /// Undoes the actor's unreverted logged actions since `since_secs` (unix seconds) and marks them reverted.
@@ -791,7 +793,7 @@ pub(crate) async fn revert_actor(
     .fetch_all(&app.pool)
     .await?;
     let targets: std::collections::HashSet<u64> = gone.iter().map(|g| g.1 as u64).collect();
-    let (recreated, back) = if targets.is_empty() {
+    let back = if targets.is_empty() {
         Default::default()
     } else {
         backup::recreate(app, gid, &targets, filters)
@@ -808,7 +810,7 @@ pub(crate) async fn revert_actor(
         .map(|r| r.0)
         .chain(
             gone.iter()
-                .filter(|g| back.contains(&(g.1 as u64)))
+                .filter(|g| back.back.contains(&(g.1 as u64)))
                 .map(|g| g.0),
         )
         .collect();
@@ -821,7 +823,8 @@ pub(crate) async fn revert_actor(
         done: plan.ops,
         failed: failed.len(),
         reinvite: plan.reinvite,
-        recreated,
+        recreated: back.changes,
+        stripped: back.stripped,
     })
 }
 
@@ -1246,13 +1249,24 @@ pub(crate) fn report_log(
     if let Some(cleared) = done.bot_role {
         log = log.line("Bot Role Cleansing", &mark(cleared));
     }
-    log.section("Revert Report:")
+    log = log
+        .section("Revert Report:")
         .line(
             "Reverted",
             &format!("`{}/{}`", sum.ops - sum.failed, sum.ops),
         )
         .line("Recreated", &format!("`{}`", sum.recreated))
-        .line("Kicked, re-invite", &reinvite)
+        .line("Kicked, re-invite", &reinvite);
+    if sum.stripped > 0 {
+        log = log.line(
+            "Older backup",
+            &format!(
+                "`{}` recreated roles came from an older backup and got no dangerous permissions. Give them back by hand if they should have them.",
+                sum.stripped
+            ),
+        );
+    }
+    log
 }
 
 /// A quiet gap this long starts a new nuke case instead of extending the last one.
@@ -1300,7 +1314,7 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
     match op {
         Inverse::Unban { user } => {
             app.http.delete_ban(gid, Id::new(*user)).await?;
-            crate::scheduler::forget_jobs(app, gid, *user, "unban", None).await;
+            crate::scheduler::forget_jobs(app, gid, *user, &["unban"], None).await;
         }
         Inverse::DeleteChannel { id } => {
             app.http.delete_channel(Id::new(*id)).await?;

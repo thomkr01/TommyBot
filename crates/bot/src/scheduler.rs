@@ -33,18 +33,21 @@ fn user(payload: &Value) -> Result<Id<UserMarker>> {
     ))
 }
 
-/// Drops the pending `kind` jobs ("unban", "timeout_renew") an earlier temp ban or long timeout of
-/// `user` queued, other than `keep`, so they cannot lift or stretch what was done since. Only
+/// What a ban ends: an older temp ban's unban, and a timeout's renewal (which would retry hourly).
+pub(crate) const BANNED: &[&str] = &["unban", "timeout_renew"];
+
+/// Drops the pending `kinds` jobs an earlier temp ban, long timeout or raid punishment of `user`
+/// queued, other than `keep`, so they cannot lift, stretch or redo what was done since. Only
 /// logged on failure: the action itself is already done.
 pub(crate) async fn forget_jobs(
     app: &App,
     gid: Id<GuildMarker>,
     user: u64,
-    kind: &str,
+    kinds: &[&str],
     keep: Option<i64>,
 ) {
-    if let Err(e) = jobs::cancel_user(&app.pool, gid.get() as i64, kind, user, keep).await {
-        tracing::warn!(?e, kind, user, "dropping an earlier pending job failed");
+    if let Err(e) = jobs::cancel_user(&app.pool, gid.get() as i64, kinds, user, keep).await {
+        tracing::warn!(?e, ?kinds, user, "dropping an earlier pending job failed");
     }
 }
 

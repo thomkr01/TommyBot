@@ -203,17 +203,18 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
             // A failed step is logged, so the report below is still sent.
-            // False: a lock from before panic covers it, and panic's end must leave it. An error
-            // can come after the lock was saved, so the end still lifts that one.
-            PanicStep::LockServer => match lockdown::lock(app, gid, LockKind::Role).await {
-                Ok(false) => {}
-                r => {
-                    if let Err(e) = r {
-                        tracing::warn!(?e, "panic: locking the server failed");
-                    }
+            // Panic's end lifts only a lock this call saved, also one an error left half applied;
+            // a lock from before panic, or one staff make after a failed lock, stays.
+            PanicStep::LockServer => {
+                let mut saved = false;
+                let r = lockdown::lock_saving(app, gid, LockKind::Role, None, &mut saved).await;
+                if let Err(e) = r {
+                    tracing::warn!(?e, "panic: locking the server failed");
+                }
+                if saved {
                     own_lock(app, gid, true).await;
                 }
-            },
+            }
             PanicStep::PingWarnedRoles => {
                 let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
                     .text(&format!(

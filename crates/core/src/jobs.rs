@@ -116,21 +116,21 @@ pub async fn of_user(
     .await?)
 }
 
-/// Deletes the pending `kind` jobs for `user` (payload `user`) other than `keep`: a later ban or a
-/// lift makes an older temp ban's unban, or an older timeout's renewal, wrong.
+/// Deletes the pending jobs of these `kinds` for `user` (payload `user`) other than `keep`: a later
+/// ban or a lift makes an older temp ban's unban, or an older timeout's renewal, wrong.
 pub async fn cancel_user<'e>(
     db: impl sqlx::PgExecutor<'e>,
     guild: i64,
-    kind: &str,
+    kinds: &[&str],
     user: u64,
     keep: Option<i64>,
 ) -> Result<u64> {
     Ok(sqlx::query(
-        "DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = $2 AND payload->>'user' = $3
+        "DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = ANY($2) AND payload->>'user' = $3
            AND id IS DISTINCT FROM $4",
     )
     .bind(guild)
-    .bind(kind)
+    .bind(kinds)
     .bind(user.to_string())
     .bind(keep)
     .execute(db)
@@ -327,7 +327,7 @@ mod tests {
             .unwrap();
         let new = enqueue(&pool, gid, "unban", user(42), at).await.unwrap();
         assert_eq!(
-            cancel_user(&pool, gid, "unban", 42, Some(new))
+            cancel_user(&pool, gid, &["unban"], 42, Some(new))
                 .await
                 .unwrap(),
             1
@@ -341,7 +341,10 @@ mod tests {
             .await
             .unwrap()
             .is_some());
-        assert_eq!(cancel_user(&pool, gid, "unban", 42, None).await.unwrap(), 1);
+        assert_eq!(
+            cancel_user(&pool, gid, &["unban"], 42, None).await.unwrap(),
+            1
+        );
         assert!(of_user(&pool, gid, "unban", 42).await.unwrap().is_none());
         clean(&pool, gid).await;
     }

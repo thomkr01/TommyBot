@@ -771,7 +771,8 @@ async fn filter_action(
                 return Err(e);
             }
             if kind == "ban" {
-                crate::scheduler::forget_jobs(app, gid, uid.get(), "unban", None).await;
+                crate::scheduler::forget_jobs(app, gid, uid.get(), crate::scheduler::BANNED, None)
+                    .await;
             }
             auto_case(app, gid, uid, kind, factor, timed).await?;
         }

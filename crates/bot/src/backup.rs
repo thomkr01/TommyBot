@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tommybot_antinuke::{
     describe, map_overwrites, plan, Action, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
-    Settings, WebhookImg, CATEGORY,
+    Settings, WebhookImg, CATEGORY, DANGEROUS_PERMS,
 };
 use twilight_http::Client;
 use twilight_model::{
@@ -311,22 +311,21 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> R
 
 /// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker), each
 /// from the newest image that has it, plus children re-parented to a recreated category. Nothing
-/// else is touched. Returns how many changes were made and which of `ids` exist again (recreated,
-/// or matched to a live object).
+/// else is touched.
 pub async fn recreate(
     app: &App,
     gid: Id<GuildMarker>,
     ids: &HashSet<u64>,
     filters: Option<&BackupsCfg>,
-) -> Result<(usize, HashSet<u64>)> {
+) -> Result<Recreated> {
     let images: Vec<(Json<Image>,)> = sqlx::query_as(
         "SELECT image FROM backups WHERE guild_id = $1 ORDER BY created_at DESC, id DESC",
     )
     .bind(gid.get() as i64)
     .fetch_all(&app.pool)
     .await?;
-    let Some(image) = newest_with(images.into_iter().map(|(Json(i),)| i), ids) else {
-        return Ok((0, HashSet::new()));
+    let Some((image, stripped)) = newest_with(images.into_iter().map(|(Json(i),)| i), ids) else {
+        return Ok(Recreated::default());
     };
     let live = snapshot(&app.restore_http, gid).await?;
     let keep: HashSet<u64> = live
@@ -348,21 +347,45 @@ pub async fn recreate(
         apply_filters(&mut p, f);
     }
     let (sum, id_map) = execute(app, gid, (&image, &live), p, true).await;
-    let back = ids
+    let back: HashSet<u64> = ids
         .iter()
         .copied()
         .filter(|i| id_map.contains_key(i))
         .collect();
-    Ok((sum.total(), back))
+    Ok(Recreated {
+        changes: sum.total(),
+        stripped: stripped.intersection(&back).count(),
+        back,
+    })
+}
+
+/// What [`recreate`] did.
+#[derive(Debug, Default)]
+pub struct Recreated {
+    pub changes: usize,
+    /// Which of the ids exist again (recreated, or matched to a live object).
+    pub back: HashSet<u64>,
+    /// Roles that came back from an older image, without their dangerous permissions.
+    pub stripped: usize,
 }
 
 /// The newest image (first), plus each of `ids` it lacks from the newest older image that has it:
-/// a backup taken after the delete (or mid-nuke) must not make the object unrecoverable.
-fn newest_with(mut images: impl Iterator<Item = Image>, ids: &HashSet<u64>) -> Option<Image> {
+/// a backup taken after the delete (or mid-nuke) must not make the object unrecoverable. A role
+/// from an older image loses its dangerous permissions (it may predate staff taking them away);
+/// their ids are the second value.
+fn newest_with(
+    mut images: impl Iterator<Item = Image>,
+    ids: &HashSet<u64>,
+) -> Option<(Image, HashSet<u64>)> {
     let mut image = images.next()?;
+    let mut stripped = HashSet::new();
     for old in images {
-        for r in old.roles {
+        for mut r in old.roles {
             if ids.contains(&r.id) && !image.roles.iter().any(|x| x.id == r.id) {
+                if r.permissions & DANGEROUS_PERMS != 0 {
+                    r.permissions &= !DANGEROUS_PERMS;
+                    stripped.insert(r.id);
+                }
                 image.roles.push(r);
             }
         }
@@ -372,7 +395,7 @@ fn newest_with(mut images: impl Iterator<Item = Image>, ids: &HashSet<u64>) -> O
             }
         }
     }
-    Some(image)
+    Some((image, stripped))
 }
 
 fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
@@ -740,11 +763,12 @@ mod tests {
 
     #[test]
     fn a_deleted_object_comes_from_the_newest_image_that_has_it() {
+        // Administrator (1 << 3) and Send Messages (1 << 11).
         let role = |id, name: &str| RoleImg {
             id,
             name: name.into(),
             color: 0,
-            permissions: 0,
+            permissions: (1 << 3) | if id == 2 { 1 << 11 } else { 0 },
             position: 1,
             hoist: false,
             mentionable: false,
@@ -760,9 +784,17 @@ mod tests {
             img(vec![role(1, "old"), role(2, "mid")]),
             img(vec![role(2, "oldest"), role(3, "not asked")]),
         ];
-        let got = newest_with(images.into_iter(), &HashSet::from([1, 2])).unwrap();
+        let (got, stripped) = newest_with(images.into_iter(), &HashSet::from([1, 2])).unwrap();
         let names: Vec<_> = got.roles.iter().map(|r| (r.id, r.name.as_str())).collect();
         assert_eq!(names, [(1, "new"), (2, "mid")]);
+        // Role 2 came from an older image: Administrator is gone, Send Messages stays.
+        assert_eq!(got.roles[1].permissions, 1 << 11);
+        assert_eq!(stripped, HashSet::from([2]));
+        assert_eq!(
+            got.roles[0].permissions,
+            1 << 3,
+            "the newest image keeps its perms"
+        );
         assert!(newest_with(std::iter::empty(), &HashSet::from([1])).is_none());
     }
 
