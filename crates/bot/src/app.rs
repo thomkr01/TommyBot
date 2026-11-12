@@ -518,10 +518,19 @@ mod tests {
         ));
         let g = 9_870_000_000 + std::process::id() as i64;
         let mut stale = 0;
-        for v in 1..=300 {
+        for v in 1..=100 {
             let a = app.clone();
-            let load = tokio::spawn(async move { a.cfg(g as u64).await.unwrap() });
-            sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
+            app.forget_cfg(g as u64); // nothing cached: the loads below read the database
+                                      // Several loads in flight, so one reads the old version while the save commits.
+            let loads: Vec<_> = (0..8)
+                .map(|_| {
+                    let a = a.clone();
+                    tokio::spawn(async move { a.cfg(g as u64).await.unwrap() })
+                })
+                .collect();
+            tokio::task::yield_now().await;
+            sqlx::query(// Padded on the server: a load reading a version is slow, writing one is quick.
+                "insert into guild_config (guild_id, version, config) values ($1, $2, $3 || jsonb_build_object('pad', repeat('x', 4000000)))")
                 .bind(g)
                 .bind(v)
                 .bind(json!({"misc": {"prefix": format!("p{v}")}}))
@@ -529,7 +538,9 @@ mod tests {
                 .await
                 .unwrap();
             app.forget_cfg(g as u64);
-            load.await.unwrap();
+            for l in loads {
+                l.await.unwrap();
+            }
             if app.cfg(g as u64).await.unwrap().misc.prefix != format!("p{v}") {
                 stale += 1;
                 app.forget_cfg(g as u64);
