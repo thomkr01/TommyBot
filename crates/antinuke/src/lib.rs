@@ -260,15 +260,15 @@ pub const DANGEROUS_PERMS: u64 = (1 << 1)  // kick
 pub const QUARANTINE_DENY: u64 = 377_958_173_761;
 
 /// The quarantine role in the verification channel, which the join quarantine must read: View
-/// Channel and Read Message History allowed, the rest of [`QUARANTINE_DENY`] denied.
+/// Channel and Read Message History allowed; the rest of [`QUARANTINE_DENY`], Use Application
+/// Commands and Use External Apps denied.
 pub const VERIFY_ALLOW: u64 = (1 << 10) | (1 << 16);
-pub const VERIFY_DENY: u64 = QUARANTINE_DENY & !VERIFY_ALLOW;
+pub const VERIFY_DENY: u64 = (QUARANTINE_DENY | (1 << 31) | (1 << 50)) & !VERIFY_ALLOW;
 
-/// The quarantine role's overwrite in a channel has the verification channel's shape.
+/// The quarantine role's overwrite in a channel has the verification channel's shape. It allows
+/// exactly [`VERIFY_ALLOW`], so no other right (Manage Messages, Webhooks) rides along.
 pub fn verification_shape(allow: u64, deny: u64) -> bool {
-    allow & VERIFY_ALLOW == VERIFY_ALLOW
-        && deny & VERIFY_DENY == VERIFY_DENY
-        && allow & VERIFY_DENY == 0
+    allow == VERIFY_ALLOW && deny & VERIFY_DENY == VERIFY_DENY
 }
 
 pub fn gained_dangerous(old: u64, new: u64) -> bool {
@@ -470,6 +470,11 @@ mod tests {
             "D55's old overwrite"
         );
         assert!(!verification_shape(VERIFY_ALLOW | (1 << 11), VERIFY_DENY));
+        assert!(
+            !verification_shape(VERIFY_ALLOW | (1 << 13), VERIFY_DENY),
+            "Manage Messages rides along"
+        );
+        const { assert!(VERIFY_DENY & (1 << 31) != 0 && VERIFY_DENY & (1 << 50) != 0) };
         assert!(!verification_shape(0, QUARANTINE_DENY), "the normal deny");
     }
 

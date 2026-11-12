@@ -66,14 +66,14 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
     }
     // Before the other checks, so a failed join gate step cannot let a quarantined member back in.
     // A failed check counts as quarantined, so sticky roles never gives roles to a held member.
-    // `held`: still in the server but held back (quarantine, raid flag); `gone`: kicked or banned.
+    // `held`: still in the server but quarantined; `gone`: kicked or banned.
     let rejoin = crate::antinuke::requarantine_rejoin(app, gid, user.id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "quarantining a rejoined member failed");
             Rejoin::Held
         });
-    let mut held = rejoin == Rejoin::Held;
+    let held = rejoin == Rejoin::Held;
     if crate::raiders::on_join(app, &cfg, gid, user.id).await {
         return Ok(());
     }
@@ -180,9 +180,12 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
             }
         }
     }
+    // A raid hit that keeps the member (Log, Warn, Timeout) does not hold their sticky roles: a
+    // timeout holds the main roles itself.
+    let mut raided = false;
     if let Some(raid) = cfg.joinraid.as_ref().filter(|r| r.enabled) {
         if join_raid(app, &cfg, gid, raid, &j, suspicious, now).await? {
-            held = true;
+            raided = true;
             gone |= removes(raid.action);
         }
     }
@@ -192,7 +195,7 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
     }
     let restored = crate::sticky::on_join(app, m, held, verifying).await;
     // After a gate rename the join-time name is stale: dehoisting it would undo the rename.
-    if !held && !renamed {
+    if !held && !raided && !renamed {
         crate::dehoist::on_join(app, gid, &m.member).await;
     }
     restored

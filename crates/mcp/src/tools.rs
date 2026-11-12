@@ -262,7 +262,7 @@ pub async fn call(st: &State, name: &str, a: &Value) -> Result<Value> {
             need(a, "guild_id")?, limit(a, 20, 100)).await?,
         "quarantines" => one(st,
             "SELECT jsonb_agg(r ORDER BY created_at DESC) FROM (
-                SELECT user_id::text, saved_roles, created_at FROM mcp_quarantines WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) r",
+                SELECT user_id::text, saved_roles, created_at, on_join FROM mcp_quarantines WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2) r",
             need(a, "guild_id")?, 500).await?,
         "strikes" => filtered(st,
             "SELECT jsonb_agg(r ORDER BY last_strike DESC) FROM (

@@ -640,11 +640,12 @@ pub(crate) async fn quarantine_as(
 /// A `quarantines` row: saved roles, on_join, created_at.
 type Row = (Vec<i64>, bool, DateTime<Utc>);
 
-/// What [`save_row`] wrote, and the row it replaced (None after an insert).
+/// Which row version [`save_row`] wrote (`xmin`, new on every write), and the row it replaced
+/// (None after an insert).
 #[derive(Debug, PartialEq)]
 struct Saved {
     inserted: bool,
-    wrote: Row,
+    version: i64,
     old: Option<Row>,
 }
 
@@ -658,9 +659,7 @@ async fn save_row(
 ) -> Result<Saved> {
     type Out = (
         bool,
-        Vec<i64>,
-        bool,
-        DateTime<Utc>,
+        i64,
         Option<Vec<i64>>,
         Option<bool>,
         Option<DateTime<Utc>>,
@@ -673,7 +672,7 @@ async fn save_row(
              saved_roles = CASE WHEN $5 < q.created_at THEN EXCLUDED.saved_roles ELSE q.saved_roles END,
              created_at = CASE WHEN $5 < q.created_at THEN now() ELSE q.created_at END,
              on_join = q.on_join AND EXCLUDED.on_join
-         RETURNING q.xmax = 0, q.saved_roles, q.on_join, q.created_at,
+         RETURNING q.xmax = 0, q.xmin::text::bigint,
                    (SELECT saved_roles FROM old), (SELECT on_join FROM old), (SELECT created_at FROM old)",
     )
     .bind(g)
@@ -683,32 +682,29 @@ async fn save_row(
     .bind(released)
     .fetch_one(pool)
     .await?;
-    let old = match (r.4, r.5, r.6) {
+    let old = match (r.2, r.3, r.4) {
         (Some(s), Some(j), Some(at)) if !r.0 => Some((s, j, at)),
         _ => None,
     };
     Ok(Saved {
         inserted: r.0,
-        wrote: (r.1, r.2, r.3),
+        version: r.1,
         old,
     })
 }
 
-/// Undoes [`save_row`] only while the row still holds what it wrote, so a quarantine written
-/// meanwhile is never deleted or downgraded.
+/// Undoes [`save_row`] only while the row is still the version it wrote, so a quarantine written
+/// meanwhile (even an identical one) is never deleted or downgraded.
 async fn restore_row(pool: &PgPool, (g, u): (i64, i64), s: Saved) -> Result<()> {
-    let (saved, on_join, at) = s.wrote;
     let q = match (s.inserted, s.old) {
         (true, _) => sqlx::query(
-            "DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2
-               AND saved_roles = $3 AND on_join = $4 AND created_at = $5",
+            "DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2 AND xmin::text::bigint = $3",
         )
         .bind(g)
         .bind(u),
         (false, Some(old)) => sqlx::query(
             "UPDATE quarantines SET saved_roles = $1, on_join = $2, created_at = $3
-             WHERE guild_id = $4 AND user_id = $5
-               AND saved_roles = $6 AND on_join = $7 AND created_at = $8",
+             WHERE guild_id = $4 AND user_id = $5 AND xmin::text::bigint = $6",
         )
         .bind(old.0)
         .bind(old.1)
@@ -717,7 +713,7 @@ async fn restore_row(pool: &PgPool, (g, u): (i64, i64), s: Saved) -> Result<()> 
         .bind(u),
         (false, None) => return Ok(()),
     };
-    q.bind(saved).bind(on_join).bind(at).execute(pool).await?;
+    q.bind(s.version).execute(pool).await?;
     Ok(())
 }
 
@@ -1855,6 +1851,11 @@ mod tests {
             Some((vec![1], false)),
             "a real one is never deleted"
         );
+        // An identical write meanwhile is a new version too: the failed one leaves it.
+        let first = save_row(&pool, k2, (&[1], false, None)).await.unwrap();
+        save_row(&pool, k2, (&[1], false, None)).await.unwrap();
+        restore_row(&pool, k2, first).await.unwrap();
+        assert_eq!(row(43).await, Some((vec![1], false)));
         sqlx::query("DELETE FROM quarantines WHERE guild_id = $1")
             .bind(key.0)
             .execute(&pool)

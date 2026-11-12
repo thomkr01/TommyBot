@@ -343,6 +343,16 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
 /// Held while the bot makes and saves a verification channel.
 pub(crate) static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The quarantine role's overwrite in a verification channel (`verification_shape`).
+pub(super) fn quarantine_shape(q: Id<RoleMarker>) -> PermissionOverwrite {
+    PermissionOverwrite {
+        id: q.cast(),
+        kind: PermissionOverwriteType::Role,
+        allow: Permissions::from_bits_truncate(VERIFY_ALLOW),
+        deny: Permissions::from_bits_truncate(VERIFY_DENY),
+    }
+}
+
 /// First join after setup with no verification channel (`s 12`): create one that unverified
 /// members can read but verified ones do not see, save it and post the button.
 async fn ensure_channel(app: &App, gid: Id<GuildMarker>) -> Result<()> {
@@ -358,14 +368,9 @@ async fn ensure_channel(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         deny,
     };
     let none = Permissions::empty();
-    let bits = Permissions::from_bits_truncate;
     let read = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
     let mut overwrites = vec![role(gid.cast(), read, Permissions::SEND_MESSAGES)];
-    overwrites.extend(
-        cfg.antinuke
-            .quarantine_role
-            .map(|q| role(q, bits(VERIFY_ALLOW), bits(VERIFY_DENY))),
-    );
+    overwrites.extend(cfg.antinuke.quarantine_role.map(quarantine_shape));
     overwrites.extend(
         cfg.verification
             .roles

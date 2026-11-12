@@ -304,6 +304,7 @@ async fn verify_channel(
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
+    reshape_verification(&st, &channel, &config).await?;
     st.discord
         .call(
             Method::POST,
@@ -697,6 +698,22 @@ async fn log_setup(
     Ok(Json(json!({"version": version, "created": created})))
 }
 
+/// Once the channel is saved: the bot's enforce_quarantine may have denied it before it knew the
+/// channel (with verification still off nothing marks a new one), so the shape goes back on.
+async fn reshape_verification(
+    st: &AppState,
+    channel: &str,
+    config: &Value,
+) -> Result<(), ApiError> {
+    if let Some(q) = own(&config["antinuke"]["quarantine_role"]) {
+        let path = format!("/channels/{channel}/permissions/{q}");
+        st.discord
+            .call(Method::PUT, &path, Some(verification_overwrite(&q)))
+            .await?;
+    }
+    Ok(())
+}
+
 /// The quarantine role's overwrite in the verification channel (`verification_shape`).
 fn verification_overwrite(role: &str) -> Value {
     use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
@@ -892,6 +909,50 @@ async fn log_channels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_saved_verification_channel_gets_the_shape_back() {
+        use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
+        let seen: crate::Shared<String, Value> = Default::default();
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/channels/700/permissions/500",
+            axum::routing::put(move |Json(b): Json<Value>| async move {
+                s2.lock().unwrap().insert("body".into(), b);
+                ""
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let st = AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://x@127.0.0.1:1/x").unwrap(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api,
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        reshape_verification(&st, "700", &json!({})).await.unwrap();
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no quarantine role, nothing to do"
+        );
+        let config = json!({"antinuke": {"quarantine_role": "500"}});
+        reshape_verification(&st, "700", &config).await.unwrap();
+        let body = seen.lock().unwrap()["body"].clone();
+        assert_eq!(body["allow"], json!(VERIFY_ALLOW.to_string()));
+        assert_eq!(body["deny"], json!(VERIFY_DENY.to_string()));
+    }
 
     #[test]
     fn log_channel_paths_are_real_log_routes() {

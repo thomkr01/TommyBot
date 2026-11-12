@@ -173,7 +173,7 @@ async fn claim(
 }
 
 /// Last step of `joingate::on_join` for a joiner still in the server. `held`: an earlier step
-/// (quarantine, join raid) holds them back, so the row moves to this membership and the old list
+/// (a quarantine) holds them back, so the row moves to this membership and the old list
 /// is dropped (a quarantine keeps its own saved roles). `verifying`: the roles are held until
 /// [`restore_pending`].
 pub async fn on_join(app: &App, m: &MemberAdd, held: bool, verifying: bool) -> Result<()> {

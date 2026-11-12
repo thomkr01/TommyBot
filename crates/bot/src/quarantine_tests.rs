@@ -666,3 +666,50 @@ async fn a_join_quarantine_rejoin_keeps_sticky_roles_for_verification() {
         .unwrap();
     t.cleanup().await;
 }
+
+/// Round 3, D61: a join raid that only logs the member keeps them, so their sticky roles come
+/// back; only a quarantine (or a kick or ban) holds them.
+#[tokio::test]
+async fn a_logged_raider_keeps_sticky_roles() {
+    let Some(t) = T::new(84).await else { return };
+    let raid = json!({"enabled": true, "count": 1, "span_ms": 60000, "suspicious_only": false,
+                      "active_ms": 60000, "string_patterns": [], "flag_younger_than_ms": null,
+                      "flag_no_avatar": true, "flag_spammer": false, "action": "Log"});
+    let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "joinraid": raid,
+                     "misc": {"sticky_roles": true}});
+    server(&t, 0, cfg).await;
+    let (g, u) = (t.g(0).get() as i64, t.base * 10 + 1);
+    sqlx::query(
+        "INSERT INTO member_roles (guild_id, user_id, roles, joined_at, left_at)
+         VALUES ($1, $2, '{501}', '2025-01-01T00:00:00Z', now())",
+    )
+    .bind(g)
+    .bind(u as i64)
+    .execute(&t.app.pool)
+    .await
+    .unwrap();
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![]);
+    });
+    let m: MemberAdd = serde_json::from_value(json!({
+        "guild_id": t.g(0).to_string(), "roles": [], "joined_at": "2026-01-01T00:00:00.000000+00:00",
+        "deaf": false, "mute": false, "flags": 0,
+        "user": {"id": u.to_string(), "username": "raider", "discriminator": "0", "avatar": null},
+    }))
+    .unwrap();
+    crate::joingate::on_join(&t.app, &m, false).await.unwrap();
+    let flagged: i64 = sqlx::query_scalar("SELECT count(*) FROM raid_log WHERE guild_id = $1")
+        .bind(g)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(flagged, 1, "the join raid flagged them");
+    assert_eq!(roles(&t, 0, u), Some(vec![ROLE]), "sticky roles came back");
+    for sql in [
+        "DELETE FROM member_roles WHERE guild_id = $1",
+        "DELETE FROM raid_log WHERE guild_id = $1",
+    ] {
+        sqlx::query(sql).bind(g).execute(&t.app.pool).await.unwrap();
+    }
+    t.cleanup().await;
+}
