@@ -442,7 +442,8 @@ impl MentionWatch {
 
 /// Auto lockdown: N mentions from non-whitelisted members within T locks the server.
 /// Each member counts for at most `share(N)`, so a lockdown takes at least three members:
-/// one mass-mention is for heat to punish, not a reason to lock everyone out.
+/// one mass-mention is for the mentions filter to punish, not a reason to lock everyone out.
+/// A member that filter does not punish (`capped` false) counts in full.
 #[derive(Debug, Default)]
 pub struct MentionLock(std::collections::VecDeque<(i64, u64, usize)>);
 
@@ -456,6 +457,7 @@ impl MentionLock {
     pub fn on_mentions(
         &mut self,
         user: u64,
+        capped: bool,
         mentions: usize,
         now: i64,
         limit: usize,
@@ -473,7 +475,11 @@ impl MentionLock {
         for &(_, u, n) in &self.0 {
             *per.entry(u).or_default() += n;
         }
-        let cap = Self::share(limit);
+        let cap = if capped {
+            Self::share(limit)
+        } else {
+            usize::MAX
+        };
         per.values().map(|&n| n.min(cap)).sum::<usize>() >= limit
     }
 }
@@ -794,18 +800,20 @@ mod tests {
 
         // Server lockdown: one member, however many mentions, never locks alone.
         let mut l = MentionLock::default();
-        assert!(!l.on_mentions(1, 500, 0, 50, 3_000));
+        assert!(!l.on_mentions(1, true, 500, 0, 50, 3_000));
         assert!(
-            !l.on_mentions(2, 500, 1, 50, 3_000),
+            !l.on_mentions(2, true, 500, 1, 50, 3_000),
             "two members: 34 of 50"
         );
         assert!(
-            l.on_mentions(3, 500, 2, 50, 3_000),
+            l.on_mentions(3, true, 500, 2, 50, 3_000),
             "a third member: 51 of 50"
         );
         let mut l = MentionLock::default();
-        assert!(!l.on_mentions(1, 17, 0, 50, 3_000));
-        assert!(!l.on_mentions(1, 17, 4_000, 50, 3_000), "aged out");
+        assert!(!l.on_mentions(1, true, 17, 0, 50, 3_000));
+        assert!(!l.on_mentions(1, true, 17, 4_000, 50, 3_000), "aged out");
+        // Not punished by the mentions filter: counted in full, as before.
+        assert!(MentionLock::default().on_mentions(1, false, 50, 0, 50, 3_000));
         assert_eq!(
             [1, 2, 3, 4, 5, 50, 1000].map(MentionLock::share),
             [1, 1, 1, 1, 2, 17, 334]

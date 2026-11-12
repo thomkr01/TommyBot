@@ -223,6 +223,8 @@ async fn check_message(
     } else {
         facts.user_mentions + facts.everyone_mentions + facts.role_mentions
     };
+    // Capped per member only where the mentions filter punishes one member's mass mention.
+    let punished = am.anti_spam && f.mentions.enabled && !listed(&wl.mentions);
     let lock = &am.auto_lockdown;
     let mention_lock = lock.enabled
         && lock.mentions
@@ -235,26 +237,26 @@ async fn check_message(
             .or_default()
             .on_mentions(
                 m.author.id.get(),
+                punished,
                 pings,
                 now,
                 lock.mention_count,
                 lock.mention_window_ms,
             );
-    let over_hour_cap =
-        am.anti_spam && f.mentions.enabled && !listed(&wl.mentions) && pings > 0 && {
-            let mut map = app.pings.lock().unwrap();
-            // Past 100k members, drop those with no ping in the hour window (they count 0 anyway);
-            // everyone only if that frees nothing.
+    let over_hour_cap = punished && pings > 0 && {
+        let mut map = app.pings.lock().unwrap();
+        // Past 100k members, drop those with no ping in the hour window (they count 0 anyway);
+        // everyone only if that frees nothing.
+        if map.len() > 100_000 {
+            map.retain(|_, w| w.last_at().is_some_and(|t| t > now - 3_600_000));
             if map.len() > 100_000 {
-                map.retain(|_, w| w.last_at().is_some_and(|t| t > now - 3_600_000));
-                if map.len() > 100_000 {
-                    map.clear();
-                }
+                map.clear();
             }
-            map.entry((gid.get(), m.author.id.get()))
-                .or_default()
-                .on_mentions(pings, now, f.mention_hour_cap + 1, 3_600_000)
-        };
+        }
+        map.entry((gid.get(), m.author.id.get()))
+            .or_default()
+            .on_mentions(pings, now, f.mention_hour_cap + 1, 3_600_000)
+    };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
     let (triggered, fresh, breakdown, crowd) = {

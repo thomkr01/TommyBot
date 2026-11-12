@@ -452,7 +452,7 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Mentions lockdown", "auto_lockdown.mentions", "bool"), true), "Use the mentions auto lockdown trigger"),
         hp(
             ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_count", "int"), 50), "Trigger count (mentions)"),
-            "Each member counts for about a third of this at most (17 of 50), so it takes at least three members. One member's mass mention is punished by heat instead.",
+            "While Anti Spam and its mentions filter are on, each member counts for about a third of this at most (17 of 50), so from 3 up it takes at least three members: the filter punishes one member's mass mention. Members the filter skips (whitelisted, or the filter off) count in full.",
         ),
         ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_window_ms", "int"), 3_000), "Trigger count history"),
         hp(
