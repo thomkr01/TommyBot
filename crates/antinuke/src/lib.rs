@@ -329,13 +329,34 @@ pub enum Inverse {
     DeleteScheduledEvent {
         id: u64,
     },
+    /// `from`: the name the entry set. The revert applies only while the server still has it, so a
+    /// late rerun never puts back a name from a rename in between. Missing (old rows): always.
     GuildName {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
-    /// `None`: the server had no icon.
+    /// `None`: the server had no icon. `from` as for the name (`Some(None)`: the entry removed it).
     GuildIcon {
         hash: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present"
+        )]
+        from: Option<Option<String>>,
     },
+}
+
+/// A field that is present is `Some`, even when it is null (serde reads both as `None` otherwise).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// Compare-and-set for a server name or icon revert: true while the live value is still the one
+/// the entry set (`from`), or when the row predates `from`.
+pub fn still_set<T: PartialEq>(from: &Option<T>, live: &T) -> bool {
+    from.as_ref().is_none_or(|f| f == live)
 }
 
 /// The CDN address of a server icon, or None for anything that is not a Discord icon hash
@@ -571,19 +592,41 @@ mod tests {
                 Inverse::DeleteScheduledEvent { id: 4 },
                 r#"{"op":"delete_scheduled_event","id":4}"#,
             ),
+            // Rows without `from` (written before it existed) still read, as unconditional.
             (
-                Inverse::GuildName { name: "Old".into() },
+                Inverse::GuildName {
+                    name: "Old".into(),
+                    from: None,
+                },
                 r#"{"op":"guild_name","name":"Old"}"#,
             ),
             (
-                Inverse::GuildIcon { hash: None },
+                Inverse::GuildName {
+                    name: "Old".into(),
+                    from: Some("New".into()),
+                },
+                r#"{"op":"guild_name","name":"Old","from":"New"}"#,
+            ),
+            (
+                Inverse::GuildIcon {
+                    hash: None,
+                    from: None,
+                },
                 r#"{"op":"guild_icon","hash":null}"#,
             ),
             (
                 Inverse::GuildIcon {
                     hash: Some("ab".into()),
+                    from: Some(None),
                 },
-                r#"{"op":"guild_icon","hash":"ab"}"#,
+                r#"{"op":"guild_icon","hash":"ab","from":null}"#,
+            ),
+            (
+                Inverse::GuildIcon {
+                    hash: None,
+                    from: Some(Some("cd".into())),
+                },
+                r#"{"op":"guild_icon","hash":null,"from":"cd"}"#,
             ),
         ] {
             assert_eq!(serde_json::to_string(&i).unwrap(), json);
@@ -596,7 +639,10 @@ mod tests {
         let e = |at, name: &str| LogEntry {
             actor: 9,
             at,
-            inverse: Inverse::GuildName { name: name.into() },
+            inverse: Inverse::GuildName {
+                name: name.into(),
+                from: None,
+            },
             reverted: false,
         };
         // Same second: the caller passes rows newest first, and the order holds for ties.
@@ -605,16 +651,57 @@ mod tests {
         assert_eq!(
             last,
             &Inverse::GuildName {
-                name: "original".into()
+                name: "original".into(),
+                from: None,
             }
         );
         let p = plan_revert(&[e(100, "original"), e(200, "second")], 9, 0);
         assert_eq!(
             p.ops.last().unwrap(),
             &Inverse::GuildName {
-                name: "original".into()
+                name: "original".into(),
+                from: None,
             }
         );
+    }
+
+    #[test]
+    fn a_late_rerun_never_puts_back_a_name_from_a_rename_in_between() {
+        // O -> X -> Y -> Z. Each row stores the name it undoes to and the name it set.
+        let e = |at, name: &str, from: &str| LogEntry {
+            actor: 9,
+            at,
+            inverse: Inverse::GuildName {
+                name: name.into(),
+                from: Some(from.into()),
+            },
+            reverted: false,
+        };
+        let apply = |live: &mut String, rows: &[LogEntry]| {
+            for op in plan_revert(rows, 9, 0).ops {
+                if let Inverse::GuildName { name, from } = op {
+                    if still_set(&from, live) {
+                        *live = name;
+                    }
+                }
+            }
+        };
+        // The first run read two renames and put O back; the row of Y -> Z reaches a late rerun,
+        // which must not set Y again.
+        let mut live = "Y".to_string();
+        apply(&mut live, &[e(100, "O", "X"), e(101, "X", "Y")]);
+        assert_eq!(live, "O");
+        apply(&mut live, &[e(102, "Y", "Z")]);
+        assert_eq!(live, "O");
+        // All rows in one run still walk back to O.
+        let mut live = "Z".to_string();
+        apply(
+            &mut live,
+            &[e(100, "O", "X"), e(101, "X", "Y"), e(102, "Y", "Z")],
+        );
+        assert_eq!(live, "O");
+        // A row without `from` applies whatever the live name is.
+        assert!(still_set(&None, &"anything".to_string()));
     }
 
     #[test]

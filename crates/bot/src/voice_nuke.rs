@@ -3,7 +3,12 @@
 //! (PITFALLS §1). So the first gateway entry watches the guild, and while it is watched every
 //! voice update asks for a debounced audit-log fetch that counts how much each entry grew.
 use anyhow::Result;
-use std::{collections::HashMap, future::Future, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::time::Instant;
 use tommybot_antinuke::Action;
 use twilight_model::{
@@ -24,9 +29,14 @@ const GAP: Duration = Duration::from_secs(3);
 const MAX_AGE_MS: i64 = 15 * 60 * 1000;
 const MAX_COUNT: u32 = 500;
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
+/// An entry made this long before its watch began still counts in full (the gateway entry that
+/// starts the watch arrives a moment after it was made).
+const SLACK_MS: i64 = 5_000;
 
 struct Watch {
     until: Instant,
+    /// When this watch began (unix ms). A fetch seeds older entries it has not seen.
+    since_ms: i64,
     running: bool,
     /// A voice update came in during the running fetch or its gap: fetch once more.
     pending: bool,
@@ -49,16 +59,29 @@ impl State {
         }
     }
 
-    fn watch(&mut self, gid: u64, now: Instant) {
-        self.guilds
-            .entry(gid)
-            .or_insert(Watch {
-                until: now,
-                running: false,
-                pending: false,
-                last: None,
-            })
-            .until = now + WATCH;
+    fn watch(&mut self, gid: u64, now: Instant, now_ms: i64) {
+        let w = self.guilds.entry(gid).or_insert(Watch {
+            until: now,
+            since_ms: now_ms,
+            running: false,
+            pending: false,
+            last: None,
+        });
+        if w.until <= now {
+            w.since_ms = now_ms;
+        }
+        w.until = now + WATCH;
+    }
+
+    /// Entries made before this are seeded on first sight: before the bot started, or for a fetch,
+    /// before the guild's current watch (growth while unwatched would land as one lump).
+    fn seed_before(&self, gid: Option<u64>, now_ms: i64) -> i64 {
+        let watch = gid.map(|g| {
+            self.guilds
+                .get(&g)
+                .map_or(now_ms, |w| w.since_ms - SLACK_MS)
+        });
+        watch.map_or(self.started_ms, |w| w.max(self.started_ms))
     }
 
     /// True when the caller holds the claim and must run the fetch loop.
@@ -88,13 +111,13 @@ fn created_ms(id: u64) -> i64 {
     (id >> 22) as i64 + DISCORD_EPOCH_MS
 }
 
-/// How much each voice entry grew since it was last seen. Entries older than the bot are seeded
-/// (counted from now on), so a restart does not count an old merged entry again.
+/// How much each voice entry grew since it was last seen. Entries made before `seed_before` are
+/// seeded (counted from now on), so a restart does not count an old merged entry again.
 pub fn deltas(
     seen: &mut HashMap<u64, u32>,
     entries: &[AuditLogEntry],
     me: u64,
-    started_ms: i64,
+    seed_before: i64,
     now_ms: i64,
 ) -> Vec<Delta> {
     seen.retain(|id, _| now_ms - created_ms(*id) < MAX_AGE_MS);
@@ -119,7 +142,7 @@ pub fn deltas(
         let base = seen
             .get(&id)
             .copied()
-            .unwrap_or(if at < started_ms { count } else { 0 });
+            .unwrap_or(if at < seed_before { count } else { 0 });
         seen.insert(id, count.max(base));
         if count > base {
             out.push(Delta {
@@ -133,28 +156,50 @@ pub fn deltas(
     out
 }
 
+/// The guild's fetch claim; dropping it frees the claim, also when the fetch panics.
+struct Claim<'a>(&'a Mutex<State>, u64);
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut s = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(w) = s.guilds.get_mut(&self.1) {
+            w.running = false;
+        }
+    }
+}
+
 /// The fetch loop of the claim holder: one fetch at a time, at most one per `GAP`, and once more
-/// after a voice update that came in meanwhile, so the end of a burst is always counted.
-async fn run<F, Fut>(state: &Mutex<State>, gid: u64, mut fetch: F)
+/// after a voice update that came in meanwhile, so the end of a burst is always counted. The
+/// claim covers only the fetch: `apply` (counting, maybe a nuke run of tens of seconds) runs
+/// after it is freed, so other voice updates of the guild are fetched meanwhile.
+async fn run<F, Fut, T, G, Gut>(state: &Mutex<State>, gid: u64, mut fetch: F, mut apply: G)
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = T>,
+    G: FnMut(T) -> Gut,
+    Gut: Future<Output = ()>,
 {
     loop {
-        let last = state.lock().unwrap().guilds.get(&gid).and_then(|w| w.last);
-        if let Some(l) = last {
-            tokio::time::sleep_until(l + GAP).await;
-        }
-        if let Some(w) = state.lock().unwrap().guilds.get_mut(&gid) {
-            w.pending = false;
-            w.last = Some(Instant::now());
-        }
-        fetch().await;
+        let found = {
+            let _claim = Claim(state, gid);
+            let last = state.lock().unwrap().guilds.get(&gid).and_then(|w| w.last);
+            if let Some(l) = last {
+                tokio::time::sleep_until(l + GAP).await;
+            }
+            if let Some(w) = state.lock().unwrap().guilds.get_mut(&gid) {
+                w.pending = false;
+                w.last = Some(Instant::now());
+            }
+            fetch().await
+        };
+        apply(found).await;
         let mut s = state.lock().unwrap();
         let now = Instant::now();
+        // Claim again for the trailing fetch, unless another update already took the claim.
         let more = s.guilds.get_mut(&gid).is_some_and(|w| {
-            w.running = w.pending;
-            w.pending
+            let go = w.pending && !w.running;
+            w.running |= go;
+            go
         });
         if !more {
             s.guilds.retain(|_, w| w.running || w.until > now);
@@ -180,17 +225,14 @@ pub async fn note(
     }
     let found = {
         let mut s = app.voice_audit.lock().unwrap();
-        s.watch(gid.get(), Instant::now());
-        let started = s.started_ms;
-        deltas(
-            &mut s.seen,
-            std::slice::from_ref(e),
-            app.me.get(),
-            started,
-            crate::automod::now_ms(),
-        )
+        let now_ms = crate::automod::now_ms();
+        s.watch(gid.get(), Instant::now(), now_ms);
+        // A gateway entry is new: only entries older than the bot are seeded.
+        let seed = s.seed_before(None, now_ms);
+        let State { seen, .. } = &mut *s;
+        deltas(seen, std::slice::from_ref(e), app.me.get(), seed, now_ms)
     };
-    apply(app, cfg, gid, found).await?;
+    apply(app, cfg, gid, found).await;
     recheck(app, gid).await;
     Ok(())
 }
@@ -213,18 +255,24 @@ async fn recheck(app: &App, gid: Id<GuildMarker>) {
     {
         return;
     }
-    run(&app.voice_audit, gid.get(), || async move {
-        if let Err(e) = fetch(app, gid).await {
+    let fetched = || async move {
+        fetch(app, gid).await.unwrap_or_else(|e| {
             tracing::warn!(?e, guild = gid.get(), "voice audit-log recheck failed");
+            None
+        })
+    };
+    let counted = |found: Option<(Arc<GuildCfg>, Vec<Delta>)>| async move {
+        if let Some((cfg, found)) = found {
+            apply(app, &cfg, gid, found).await;
         }
-    })
-    .await;
+    };
+    run(&app.voice_audit, gid.get(), fetched, counted).await;
 }
 
-async fn fetch(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+async fn fetch(app: &App, gid: Id<GuildMarker>) -> Result<Option<(Arc<GuildCfg>, Vec<Delta>)>> {
     let cfg = app.cfg(gid.get()).await?;
     if !cfg.antinuke.enabled {
-        return Ok(());
+        return Ok(None);
     }
     let mut entries = vec![];
     for t in [A::MemberDisconnect, A::MemberMove] {
@@ -233,25 +281,32 @@ async fn fetch(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     }
     let found = {
         let mut s = app.voice_audit.lock().unwrap();
-        let started = s.started_ms;
-        deltas(
-            &mut s.seen,
-            &entries,
-            app.me.get(),
-            started,
-            crate::automod::now_ms(),
-        )
+        let now_ms = crate::automod::now_ms();
+        let seed = s.seed_before(Some(gid.get()), now_ms);
+        let State { seen, .. } = &mut *s;
+        deltas(seen, &entries, app.me.get(), seed, now_ms)
     };
-    apply(app, &cfg, gid, found).await
+    Ok(Some((cfg, found)))
 }
 
-async fn apply(app: &App, cfg: &GuildCfg, gid: Id<GuildMarker>, found: Vec<Delta>) -> Result<()> {
+/// `seen` already holds every delta, so an error is logged and the other actors still count.
+async fn apply(app: &App, cfg: &GuildCfg, gid: Id<GuildMarker>, found: Vec<Delta>) {
     for d in found {
         let actor = Id::new(d.actor);
-        let exempt = app.whitelisted(gid, actor, "antinuke").await?;
-        crate::antinuke::count(app, cfg, gid, actor, d.action, d.channel, &[], exempt, d.n).await?;
+        let r = async {
+            let exempt = app.whitelisted(gid, actor, "antinuke").await?;
+            crate::antinuke::count(app, cfg, gid, actor, d.action, d.channel, &[], exempt, d.n)
+                .await
+        };
+        if let Err(e) = r.await {
+            tracing::warn!(
+                ?e,
+                guild = gid.get(),
+                actor = d.actor,
+                "counting a voice nuke failed"
+            );
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -340,7 +395,7 @@ mod tests {
         let state = Arc::new(Mutex::new(State::new(NOW - 60_000)));
         let discord = Arc::new(AtomicU32::new(0)); // the merged entry's count in Discord
         let (counted, fetches) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
-        state.lock().unwrap().watch(9, Instant::now());
+        state.lock().unwrap().watch(9, Instant::now(), NOW);
         let mut tasks = vec![];
         // 15 disconnects in 2 s, each with its voice update, and nothing after them.
         for _ in 0..15 {
@@ -351,21 +406,26 @@ mod tests {
                 let (counted, fetches) = (counted.clone(), fetches.clone());
                 tasks.push(tokio::spawn(async move {
                     let st = state.clone();
-                    run(&state, 9, move || {
-                        let (state, discord) = (st.clone(), discord.clone());
-                        let (counted, fetches) = (counted.clone(), fetches.clone());
-                        async move {
-                            // Discord answers after 200 ms.
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                            let c = discord.load(SeqCst).to_string();
-                            let e = entry(NOW - 1000, 1, 27, 7, &c);
-                            let mut s = state.lock().unwrap();
-                            let started = s.started_ms;
-                            let d = deltas(&mut s.seen, &[e], 1, started, NOW);
-                            counted.fetch_add(sum(&d), SeqCst);
-                            fetches.fetch_add(1, SeqCst);
-                        }
-                    })
+                    run(
+                        &state,
+                        9,
+                        move || {
+                            let (state, discord) = (st.clone(), discord.clone());
+                            let (counted, fetches) = (counted.clone(), fetches.clone());
+                            async move {
+                                // Discord answers after 200 ms.
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                let c = discord.load(SeqCst).to_string();
+                                let e = entry(NOW - 1000, 1, 27, 7, &c);
+                                let mut s = state.lock().unwrap();
+                                let started = s.started_ms;
+                                let d = deltas(&mut s.seen, &[e], 1, started, NOW);
+                                counted.fetch_add(sum(&d), SeqCst);
+                                fetches.fetch_add(1, SeqCst);
+                            }
+                        },
+                        |_| async {},
+                    )
                     .await
                 }));
             }
@@ -380,12 +440,65 @@ mod tests {
         assert!(!s.guilds[&9].running && !s.guilds[&9].pending);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn the_claim_is_free_while_counting_and_after_a_panic() {
+        let state = Arc::new(Mutex::new(State::new(0)));
+        state.lock().unwrap().watch(9, Instant::now(), NOW);
+        assert!(state.lock().unwrap().request(9, Instant::now()));
+        // A nuke run of a minute after the fetch: another voice update can claim meanwhile.
+        let st = state.clone();
+        let slow = tokio::spawn(async move {
+            run(
+                &st,
+                9,
+                || async {},
+                |_| tokio::time::sleep(Duration::from_secs(60)),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(state.lock().unwrap().request(9, Instant::now()));
+        state.lock().unwrap().guilds.get_mut(&9).unwrap().running = false;
+        slow.await.unwrap();
+        // A fetch that panics frees the claim.
+        assert!(state.lock().unwrap().request(9, Instant::now()));
+        let st = state.clone();
+        let r = tokio::spawn(async move {
+            run(&st, 9, || async { panic!("fetch") }, |_: ()| async {}).await
+        });
+        assert!(r.await.is_err());
+        assert!(state.lock().unwrap().request(9, Instant::now()));
+    }
+
+    #[test]
+    fn a_fetch_seeds_entries_made_before_the_watch() {
+        let mut s = State::new(NOW - 3_600_000);
+        let watched = NOW - 60_000;
+        s.watch(9, Instant::now(), watched);
+        let seed = s.seed_before(Some(9), NOW);
+        assert_eq!(seed, watched - SLACK_MS);
+        // A moderator's 12 moves made over the minutes before the watch: seeded, not one lump.
+        let old = entry(watched - 600_000, 1, 26, 7, "12");
+        assert!(deltas(&mut s.seen, &[old], 1, seed, NOW).is_empty());
+        let old = entry(watched - 600_000, 1, 26, 7, "13");
+        assert_eq!(sum(&deltas(&mut s.seen, &[old], 1, seed, NOW)), 1);
+        // Made since the watch began (within the slack too): counted in full.
+        let new = entry(watched - 1_000, 2, 27, 8, "4");
+        assert_eq!(sum(&deltas(&mut s.seen, &[new], 1, seed, NOW)), 4);
+        // A gateway entry is counted from its count, unless it predates the bot.
+        assert_eq!(s.seed_before(None, NOW), NOW - 3_600_000);
+        // An expired watch that comes back starts a new one.
+        let later = Instant::now() + WATCH + Duration::from_secs(1);
+        s.watch(9, later, NOW);
+        assert_eq!(s.seed_before(Some(9), NOW), NOW - SLACK_MS);
+    }
+
     #[test]
     fn only_watched_guilds_fetch_and_one_claim_at_a_time() {
         let mut s = State::new(0);
         let now = Instant::now();
         assert!(!s.request(9, now));
-        s.watch(9, now);
+        s.watch(9, now, 0);
         assert!(s.request(9, now));
         assert!(!s.request(9, now));
         assert!(s.guilds[&9].pending);

@@ -103,10 +103,15 @@ fn inverse(action: Action, e: &AuditLogEntry) -> Vec<Inverse> {
             .iter()
             .filter_map(|c| match c {
                 AuditLogChange::Name {
-                    old: Some(name), ..
-                } => Some(Inverse::GuildName { name: name.clone() }),
-                AuditLogChange::IconHash { old, .. } => Some(Inverse::GuildIcon {
+                    old: Some(name),
+                    new,
+                } => Some(Inverse::GuildName {
+                    name: name.clone(),
+                    from: new.clone(),
+                }),
+                AuditLogChange::IconHash { old, new } => Some(Inverse::GuildIcon {
                     hash: old.map(|h| h.to_string()),
+                    from: Some(new.map(|h| h.to_string())),
                 }),
                 _ => None,
             })
@@ -942,7 +947,8 @@ async fn quarantine_and_revert(
         // logged, and the running revert picks it up before it ends.
         return Ok(());
     }
-    let r = async {
+    let _claim = RunClaim(app, key);
+    async {
         let since = now_secs() - 3600;
         let payload = json!({"actor": actor.get(), "why": why, "since": since});
         let guard = jobs::enqueue(
@@ -960,9 +966,18 @@ async fn quarantine_and_revert(
         jobs::finish(&app.pool, guard).await?;
         r
     }
-    .await;
-    app.nuke_runs.lock().unwrap().remove(&key);
-    r
+    .await
+}
+
+/// Frees a nuke-run claim when the run ends, also when it panics (or the actor stays claimed and
+/// its guard job is skipped for good).
+struct RunClaim<'a>(&'a App, (u64, u64));
+
+impl Drop for RunClaim<'_> {
+    fn drop(&mut self) {
+        let mut runs = self.0.nuke_runs.lock().unwrap_or_else(|p| p.into_inner());
+        runs.remove(&self.1);
+    }
 }
 
 /// The `nuke_revert` guard job after a restart: the cut-off run again, under the same claim, so a
@@ -978,9 +993,8 @@ pub(crate) async fn resume_nuke(
     if !claim_nuke_run(app, key) {
         return Ok(());
     }
-    let r = nuke_run(app, gid, actor, why, since, true).await;
-    app.nuke_runs.lock().unwrap().remove(&key);
-    r
+    let _claim = RunClaim(app, key);
+    nuke_run(app, gid, actor, why, since, true).await
 }
 
 /// True while a quarantine and revert for this actor runs in this process.
@@ -1295,14 +1309,23 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
                 .delete_guild_scheduled_event(gid, Id::new(*id))
                 .await?; // twilight takes no audit reason here
         }
-        Inverse::GuildName { name } => {
+        // Compare-and-set: a rename in between (a late rerun) is not undone to an older name.
+        Inverse::GuildName { name, from } => {
+            let live = app.http.guild(gid).await?.model().await?.name;
+            if !tommybot_antinuke::still_set(from, &live) {
+                return Ok(());
+            }
             app.http
                 .update_guild(gid)
                 .name(name)
                 .reason(REVERT_REASON)
                 .await?;
         }
-        Inverse::GuildIcon { hash } => {
+        Inverse::GuildIcon { hash, from } => {
+            let live = app.http.guild(gid).await?.model().await?.icon;
+            if !tommybot_antinuke::still_set(from, &live.map(|h| h.to_string())) {
+                return Ok(());
+            }
             let icon = match hash {
                 Some(h) => Some(
                     tommybot_automod::discord_api::icon_data_uri(app.api.client(), gid.get(), h)
@@ -1556,10 +1579,12 @@ mod tests {
             inverse(Action::GuildUpdate, &both),
             vec![
                 Inverse::GuildName {
-                    name: "Home".into()
+                    name: "Home".into(),
+                    from: Some("Nuked".into()),
                 },
                 Inverse::GuildIcon {
-                    hash: Some(hash.into())
+                    hash: Some(hash.into()),
+                    from: Some(Some(format!("a_{hash}"))),
                 }
             ]
         );
@@ -1567,7 +1592,10 @@ mod tests {
         let added = entry(1, json!([{"key": "icon_hash", "new_value": hash}]));
         assert_eq!(
             inverse(Action::GuildUpdate, &added),
-            vec![Inverse::GuildIcon { hash: None }]
+            vec![Inverse::GuildIcon {
+                hash: None,
+                from: Some(Some(hash.into())),
+            }]
         );
         // Other server settings (here the vanity URL) are not this card.
         let vanity = entry(

@@ -130,14 +130,15 @@ pub async fn reschedule(pool: &PgPool, id: i64, run_at_secs: i64, payload: Value
     Ok(())
 }
 
-/// Pending jobs of one kind as (guild, payload), for rebuilding in-memory state at boot.
+/// Pending jobs of one kind as (guild, payload), for rebuilding in-memory state at boot. Oldest
+/// `run_at` first, so a caller keeping one per guild keeps the latest.
 pub async fn pending(pool: &PgPool, kind: &str) -> Result<Vec<(i64, Value)>> {
-    Ok(
-        sqlx::query_as("SELECT guild_id, payload FROM scheduled_jobs WHERE kind = $1")
-            .bind(kind)
-            .fetch_all(pool)
-            .await?,
+    Ok(sqlx::query_as(
+        "SELECT guild_id, payload FROM scheduled_jobs WHERE kind = $1 ORDER BY run_at, id",
     )
+    .bind(kind)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Jobs that are due now and not leased, for the metrics endpoint.

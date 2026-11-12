@@ -61,6 +61,7 @@ Types 130-132 arrive as `AuditLogEventType::Unknown(n)`. Matching `Unknown(132)`
 **Voice disconnects and moves are merged into one audit entry.** (anti-nuke voice, 11-12)
 Discord merges `MEMBER_DISCONNECT` (27) and `MEMBER_MOVE` (26) by the same actor in quick succession into the first entry and raises its `options.count`, and those updates fire no gateway event. Counting gateway entries sees 1 for a mass disconnect of 20.
 *Avoid:* count the growth of `count`, not entries. `voice_nuke` watches a guild for 10 minutes after the first entry and rereads the audit log on voice updates (one fetch at a time, at most one per 3 s, plus a trailing fetch so the end of a burst counts). The last seen count per entry is read and stored under one lock, entries older than the bot are seeded at their count (a restart does not recount them), `count` is a string parsed to u32 and capped at 500, and 26/27 are counted only there, never also through `watched()`. Message deletes merge the same way (see "Discord's own rendering quirks").
+The review (11-12) found an entry first seen through a fetch counted in full: growth from while the guild was unwatched (a moderator moving 12 members over minutes) landed as one lump and quarantined them. Root cause: "first sight" was treated as "new", but a fetch can be the first sight of an old entry. A fetch now seeds an unseen entry made before the current watch began (minus 5 s slack, `State::seed_before`); a gateway entry (`note`) is new by definition and counts from its count.
 
 **A server icon is downloaded from a stored hash.** (anti-nuke triggers, 11-12)
 The icon revert fetches the old icon by the hash in `action_log.inverse`, which anyone with database or revert access could shape into another path.
@@ -128,6 +129,15 @@ Past the limit every audit entry returned `Quarantine` again, and each one is it
 `revert_actor` read the actor's rows without an `ORDER BY`, and `plan_revert` sorts by whole seconds. Two server renames in one second could be put back in the wrong order, leaving the attacker's first name instead of the original. Root cause: a sort key coarser than the order of events, with the tie left to whatever order Postgres returned. Earlier inverses (deletes, unbans) did not depend on order, so it only showed with name and icon reverts.
 *Avoid:* read rows `ORDER BY id DESC` and keep the sort stable, so ties stay newest first. Checked: the dashboard revert already orders by `created_at desc, id desc`.
 
+**A late rerun put back a name from a rename in between.** (anti-nuke review, 11-12)
+O → X → Y → Z: the first run read two renames and restored O, then the row of Y → Z reached the rerun and set Y, the attacker's name. Root cause: a "set to value" inverse is not idempotent across runs that read different rows; it only undoes its own change while the server still shows that change. *Avoid:* compare-and-set: `GuildName`/`GuildIcon` store the value the entry set (`from`) and are applied only while the live value still equals it (`still_set`; bot `run_inverse` and dashboard `ops::run_inverse` GET the guild first; the dashboard lists a skipped row under Skipped and leaves it unreverted). Rows without `from` (written before) apply as before. Not covered: a first run that reads while the last rename's row is not logged yet skips all, and the rerun still sets the middle name.
+
+**A claim freed only on the normal return stayed taken after a panic.** (anti-nuke review, 11-12)
+`voice_nuke` set `running = true` and cleared it only when the fetch loop returned, so a panic in a fetch left the guild claimed and its voice updates were never counted again. `nuke_runs` had the same hole: a panicking nuke run kept the actor claimed, so later events only logged rows and the guard job skipped the "running" run. *Avoid:* free an in-memory claim in a `Drop` guard (`voice_nuke::Claim`, `antinuke::RunClaim`), taken right after the claim succeeds.
+
+**Replacing a job dropped a report that was due but not yet claimed.** (voice raid review, 11-12)
+A raid trigger called `jobs::replace`, which deletes every pending job of that kind in the guild. A raid starting right after the last one ended deleted the last one's report job before the scheduler took it. Join Raid's `raid_end` had the same pattern. Also an extended voice raid's end was only in memory, so `restore()` after a restart ended it early. *Avoid:* `replace` only where one job per guild is the meaning (`panic_end`, which cannot start again until its end job ran). A job per event uses `enqueue`; a job that re-queues itself enqueues too (it is finished after it returns). Write a moved deadline into its job (`voice_raid::extend`), and read `jobs::pending` in `run_at` order so a restore keeps the latest per guild.
+
 **A run marked rows it never read.** (race review, 11-11)
 `revert_actor` read the actor's rows, worked for seconds, then marked every row since `since` as reverted. What the nuker did meanwhile was marked too and never undone, not even by `/revert`.
 *Avoid:* mark only the ids you read (`WHERE id = ANY($1)`). Never close work with a range condition when rows can arrive while it runs.
@@ -159,6 +169,7 @@ Verification's "quarantine on join" writes a quarantine row with no saved roles.
 **Long work under a global lock.** (#100)
 Similarity compared whole 4000-character messages (quadratic) while holding the global heat lock.
 *Avoid:* bound the input (first 500 characters) and keep work under shared locks short.
+The same holds for a claim: `voice_nuke` held the guild's fetch claim while counting, and counting can start a nuke run of tens of seconds, so no other voice update of the guild was fetched meanwhile (review, 11-12). The claim now covers only the fetch (`run` takes `fetch` and `apply`); the one-run-per-actor claim of the nuke run is separate and unchanged.
 
 **Listeners must survive a reconnect.** (#100)
 The config listener died after one DB hiccup, so dashboard changes never applied until a bot restart.
@@ -168,6 +179,7 @@ The config listener died after one DB hiccup, so dashboard changes never applied
 The timeout DM went out before the timeout worked, and a failed anti-nuke report stopped panic mode.
 *Avoid:* fixed order Contain → Revert → Report → Panic. Logs and DMs are side effects; their failure never skips the next protective step.
 The race review (11-11) found the same in Join Raid (a failed raid log or report job skipped the lockdown and every punishment, and one raider who had already left stopped the punish loop), in automod (the mention-lock log and lock came before the strike, the timeout log before the strike-cap lock) and in `warn_actions`. A loop that punishes several members logs a failure and goes on with the next.
+`voice_nuke::apply` broke that with `?`: the audit deltas were already stored as seen, so one actor's failed whitelist read or count dropped every later actor's delta for good (review, 11-12). Root cause: `?` inside a loop whose input was already marked done. It now logs per actor and goes on.
 
 The sticky roles review (11-11) found it in Join Gate too: a refused gate punishment (403 on kick) ended `on_join`, so the join raid check never ran for that joiner. Gate punishments now log and go on.
 
@@ -181,7 +193,7 @@ An `auto_slowmode` row is claimed with `ON CONFLICT DO NOTHING`. When its `slowm
 
 **State built from gateway events starts empty after a restart.** (voice raid, 11-12)
 The logger tells voice joins from moves by the channel it last saw each member in, and that map started empty, so after every restart or new gateway session the first move of each member already in voice was a "join". It was only a wrong log line (marked `shortcut:`) until the voice raid counted joins from it: a restart during a busy event could have started a false raid. Root cause: the old value came only from earlier events, and Discord does not replay those.
-*Avoid:* seed such state from `GuildCreate`, which carries the whole snapshot (`welcome::on_guild_create` seeds `Logger::seed_voice` from `voice_states`, replacing what the guild had), and read the old value under the same lock right before the event overwrites it (`events.rs`). Searched: `thread_parents` is filled from `ThreadListSync` and thread events, the ticket-category lookup (`parent_of`) only pairs an event with its own audit entry, and Join Raid and heat start empty on purpose (a restart counts from zero, it never counts twice).
+*Avoid:* seed such state from `GuildCreate`, which carries the whole snapshot (`welcome::on_guild_create` seeds `Logger::seed_voice` from `voice_states`, replacing what the guild had), and read the old value under the same lock right before the event overwrites it (`events.rs`). Both must happen before the task's first await (review, 11-12): the seed ran after `app.cfg().await` and a DB write, wiping voice updates handled meanwhile, and the old channel was read after `app.cfg().await`, so the second update of a member could take the lock first and both read the same old channel. `events::run` now seeds a `GuildCreate` and records a voice update (`Logger::voice_update`) first, and logs the update afterwards with `handle_voice`. Searched: `thread_parents` is filled from `ThreadListSync` and thread events, the ticket-category lookup (`parent_of`) only pairs an event with its own audit entry, and Join Raid and heat start empty on purpose (a restart counts from zero, it never counts twice).
 
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.

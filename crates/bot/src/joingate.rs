@@ -325,8 +325,9 @@ async fn join_raid(
         }
     }
     if out.triggered {
-        // The report job must not hold back the lock and the punishments below.
-        if let Err(e) = jobs::replace(
+        // The report job must not hold back the lock and the punishments below. Its own job, not a
+        // replace: the last raid's report may be due and not yet claimed.
+        if let Err(e) = jobs::enqueue(
             &app.pool,
             gid.get() as i64,
             "raid_end",

@@ -370,17 +370,34 @@ pub async fn shutdown(app: &App) {
 }
 
 async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
-    // A voice member's channel before this event, read under the same lock before the logger
-    // records the event and overwrites it.
-    let mut voice_old = None;
+    // Before any await: each event runs in its own task, so an await here would let a later voice
+    // update of the same member (or one after a GuildCreate) take the logger lock first.
+    if let Event::GuildCreate(g) = ev {
+        crate::welcome::seed_voice(app, g);
+    }
+    // A voice member's channel before this event, read as the update is recorded.
+    let voice = match ev {
+        Event::VoiceStateUpdate(v) => v.0.guild_id.map(|g| {
+            let old = app
+                .logger
+                .lock()
+                .unwrap()
+                .voice_update(g, v.0.user_id, v.0.channel_id);
+            (v.0.user_id, (old, v.0.channel_id))
+        }),
+        _ => None,
+    };
+    let voice_old = voice.and_then(|v| v.1 .0);
     if let Some(guild) = guild_of(ev) {
         let cfg = app.cfg(guild).await?;
         let msgs = {
             let mut logger = app.logger.lock().unwrap();
-            if let Event::VoiceStateUpdate(v) = ev {
-                voice_old = logger.voice_channel(Id::new(guild), v.0.user_id);
+            match voice {
+                Some((user, moved)) => {
+                    logger.handle_voice(&cfg.logging, user, moved, Instant::now())
+                }
+                None => logger.handle(&cfg.logging, ev, Instant::now()),
             }
-            logger.handle(&cfg.logging, ev, Instant::now())
         };
         for m in msgs {
             if let Err(e) = send_entry(app, &m).await {

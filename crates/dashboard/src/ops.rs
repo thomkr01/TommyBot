@@ -534,10 +534,32 @@ struct RevertBody {
     owners: bool,
 }
 
-async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<()> {
+/// Ok(false): a server name or icon revert skipped, since the server no longer has the value the
+/// entry set (renamed again since).
+async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<bool> {
+    let live = match inv {
+        Inverse::GuildName { from: Some(_), .. } | Inverse::GuildIcon { from: Some(_), .. } => {
+            st.discord
+                .call(Method::GET, &format!("/guilds/{guild}"), None)
+                .await?
+        }
+        _ => Value::Null,
+    };
+    let still = match inv {
+        Inverse::GuildName { from, .. } => {
+            tommybot_antinuke::still_set(from, &live["name"].as_str().unwrap_or_default().into())
+        }
+        Inverse::GuildIcon { from, .. } => {
+            tommybot_antinuke::still_set(from, &live["icon"].as_str().map(String::from))
+        }
+        _ => true,
+    };
+    if !still {
+        return Ok(false);
+    }
     let (m, path, body) = match inv {
         // The old icon is downloaded first, so it cannot be a plain request.
-        Inverse::GuildIcon { hash } => {
+        Inverse::GuildIcon { hash, .. } => {
             let icon = match hash {
                 Some(h) => Some(
                     tommybot_automod::discord_api::icon_data_uri(&st.discord.http, guild as u64, h)
@@ -553,7 +575,7 @@ async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result
         }
         _ => inverse_request(guild, inv),
     };
-    st.discord.call(m, &path, body).await.map(drop)
+    st.discord.call(m, &path, body).await.map(|_| true)
 }
 
 /// The Discord call that undoes `inv`.
@@ -599,7 +621,7 @@ fn inverse_request(guild: i64, inv: &Inverse) -> (Method, String, Option<Value>)
             format!("/guilds/{guild}/scheduled-events/{id}"),
             None,
         ),
-        Inverse::GuildName { name } => (
+        Inverse::GuildName { name, .. } => (
             Method::PATCH,
             format!("/guilds/{guild}"),
             Some(json!({ "name": name })),
@@ -650,12 +672,18 @@ async fn revert(
                 continue;
             }
             Inverse::Reinvite { user } => reinvite.push(user.to_string()),
-            _ => {
-                if let Err(e) = run_inverse(&st, guild, &inv).await {
+            _ => match run_inverse(&st, guild, &inv).await {
+                Ok(true) => {}
+                // Renamed again since: left for staff, not marked reverted.
+                Ok(false) => {
+                    skipped.push(id);
+                    continue;
+                }
+                Err(e) => {
                     failed.push(json!({"id": id, "error": e.to_string()}));
                     continue;
                 }
-            }
+            },
         }
         // The revert unbans as the bot, so the bot cannot tell staff lifted a Raider List ban.
         if let Inverse::Unban { user } = inv {
@@ -855,7 +883,8 @@ mod tests {
             axum::routing::patch(move |Json(b): Json<Value>| async move {
                 s2.lock().unwrap().insert("body".into(), b);
                 "{}"
-            }),
+            })
+            .get(|| async { r#"{"name":"Now","icon":null}"# }),
         );
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = format!("http://{}", l.local_addr().unwrap());
@@ -875,14 +904,30 @@ mod tests {
             totp: Default::default(),
             rate: Default::default(),
         };
-        run_inverse(&st, 5, &Inverse::GuildIcon { hash: None })
-            .await
-            .unwrap();
+        let clear = Inverse::GuildIcon {
+            hash: None,
+            from: None,
+        };
+        assert!(run_inverse(&st, 5, &clear).await.unwrap());
         assert_eq!(seen.lock().unwrap()["body"], json!({"icon": null}));
         let bad = Inverse::GuildIcon {
             hash: Some("../../users/@me".into()),
+            from: None,
         };
         assert!(run_inverse(&st, 5, &bad).await.is_err());
+        // Compare-and-set: renamed again since the entry, so the old name is not put back.
+        let name = |from: &str| Inverse::GuildName {
+            name: "Home".into(),
+            from: Some(from.into()),
+        };
+        assert!(!run_inverse(&st, 5, &name("Nuked")).await.unwrap());
+        assert!(run_inverse(&st, 5, &name("Now")).await.unwrap());
+        assert_eq!(seen.lock().unwrap()["body"], json!({"name": "Home"}));
+        let icon = Inverse::GuildIcon {
+            hash: None,
+            from: Some(Some("0123456789abcdef0123456789abcdef".into())),
+        };
+        assert!(!run_inverse(&st, 5, &icon).await.unwrap());
     }
 
     #[test]
@@ -915,6 +960,7 @@ mod tests {
             (
                 Inverse::GuildName {
                     name: "Home".into(),
+                    from: None,
                 },
                 Method::PATCH,
                 "/guilds/5",
