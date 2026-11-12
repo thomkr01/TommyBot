@@ -468,12 +468,29 @@ async fn close_log(st: &AppState, id: i64, decision: &str) {
         return;
     };
     let mut embeds = m["embeds"].take();
-    if let Some(fields) = embeds[0]["fields"].as_array_mut() {
-        fields.push(json!({"name": "Decision", "value": decision, "inline": false}));
-    }
-    let body = json!({"embeds": embeds, "components": []});
+    add_decision(&mut embeds, decision);
+    let body = if embeds.is_array() {
+        json!({"embeds": embeds, "components": []})
+    } else {
+        json!({"components": []})
+    };
     if let Err(e) = st.discord.call(Method::PATCH, &path, Some(body)).await {
         tracing::warn!(?e, "closing the appeal log failed");
+    }
+}
+
+/// Adds the Decision field to the log's first embed. A log without an embed is left as it is
+/// (`embeds[0]` would panic and kill `decide` before the verdict DM).
+fn add_decision(embeds: &mut Value, decision: &str) {
+    let Some(e) = embeds.get_mut(0).and_then(Value::as_object_mut) else {
+        return;
+    };
+    // Discord refuses the whole PATCH (buttons stay) for a value over 1024 or a 26th field.
+    let value: String = decision.chars().take(1024).collect();
+    if let Some(fields) = e.entry("fields").or_insert(json!([])).as_array_mut() {
+        if fields.len() < 25 {
+            fields.push(json!({"name": "Decision", "value": value, "inline": false}));
+        }
     }
 }
 
@@ -644,6 +661,36 @@ mod tests {
         let mut f = field(&[], false, true);
         f.min = Some(20);
         assert!(check(&f, "0123456789").is_ok());
+    }
+
+    #[test]
+    fn decision_on_logs_of_any_shape() {
+        let d = json!({"name": "Decision", "value": "Denied", "inline": false});
+        for (mut embeds, want) in [
+            (json!([]), json!([])),
+            (Value::Null, Value::Null),
+            (json!("x"), json!("x")),
+            (json!([5]), json!([5])),
+            (json!([{}]), json!([{"fields": [d]}])),
+            (json!([{"fields": 1}]), json!([{"fields": 1}])),
+            (json!([{"fields": [d]}]), json!([{"fields": [d, d]}])),
+        ] {
+            add_decision(&mut embeds, "Denied");
+            assert_eq!(embeds, want);
+        }
+        let mut long = json!([{}]);
+        add_decision(&mut long, &"x".repeat(1100));
+        assert_eq!(
+            long[0]["fields"][0]["value"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            1024
+        );
+        let mut full = json!([{"fields": vec![d.clone(); 25]}]);
+        add_decision(&mut full, "Denied");
+        assert_eq!(full[0]["fields"].as_array().unwrap().len(), 25);
     }
 
     #[test]

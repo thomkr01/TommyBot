@@ -124,8 +124,13 @@ async fn token_create(State(st): State<AppState>, s: Sess, Json(b): Json<NewToke
             "name: 1 to 40 letters, digits, spaces, dots, dashes or underscores",
         ));
     }
+    // Count and insert under one lock, or parallel requests all see room and pass the cap.
+    let mut tx = st.db.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended('mcp_tokens:', 0))")
+        .execute(&mut *tx)
+        .await?;
     let live: i64 = sqlx::query_scalar("select count(*) from mcp_tokens where revoked_at is null")
-        .fetch_one(&st.db)
+        .fetch_one(&mut *tx)
         .await?;
     if live >= MAX_TOKENS {
         return Err(bad(format!(
@@ -139,8 +144,9 @@ async fn token_create(State(st): State<AppState>, s: Sess, Json(b): Json<NewToke
     .bind(name)
     .bind(token_hash(&token))
     .bind(s.user_id)
-    .fetch_one(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     tracing::info!(id, name, "mcp token created");
     Ok(Json(json!({"id": id, "name": name, "token": token})))
 }
@@ -371,14 +377,6 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
         .filter(|t| takes_target && !t.is_empty());
     route(&p.action, guild, target)?;
     let body = if p.body.is_null() { json!({}) } else { p.body };
-    let open: i64 = sqlx::query_scalar("select count(*) from mcp_writes where status = 'pending'")
-        .fetch_one(&st.db)
-        .await?;
-    if open >= MAX_OPEN {
-        return Err(bad(format!(
-            "{open} changes already wait for a code; confirm or let them expire first"
-        )));
-    }
     let changes = preview(&st, guild, &p.action, target, &body).await?;
     let shown = lines(&changes);
     let n = shown.chars().count();
@@ -389,6 +387,19 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
     }
     let owner: i64 = st.discord.bot_owner().await?.parse()?;
     let code = format!("{:06}", rand::random_range(0..1_000_000));
+    // Count and insert under one lock, or parallel proposals all see room and pass the cap.
+    let mut tx = st.db.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended('mcp_writes:', 0))")
+        .execute(&mut *tx)
+        .await?;
+    let open: i64 = sqlx::query_scalar("select count(*) from mcp_writes where status = 'pending'")
+        .fetch_one(&mut *tx)
+        .await?;
+    if open >= MAX_OPEN {
+        return Err(bad(format!(
+            "{open} changes already wait for a code; confirm or let them expire first"
+        )));
+    }
     let (id, expires_at): (i64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
         "insert into mcp_writes (token_id, client, guild_id, action, target, body, code_hash, preview_hash, expires_at)
          values ($1, $2, $3, $4, $5, $6, '', $8, now() + make_interval(mins => $7)) returning id, expires_at",
@@ -401,13 +412,14 @@ async fn propose(State(st): State<AppState>, h: HeaderMap, Json(p): Json<Propose
     .bind(&body)
     .bind(TTL_MINUTES)
     .bind(preview_hash(&changes))
-    .fetch_one(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
     sqlx::query("update mcp_writes set code_hash = $2 where id = $1")
         .bind(id)
         .bind(code_hash(id, &code))
-        .execute(&st.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     let text = dm_text(&client.name, id, guild, &p.action, target, &shown, &code);
     if let Err(e) = st.discord.dm(owner, &text).await {
         tracing::warn!(id, ?e, "mcp write: code DM failed");
@@ -655,6 +667,9 @@ mod tests {
         );
     }
 
+    /// The token cap is global, so tests that make tokens run one at a time.
+    static TOKENS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Runs only when DATABASE_URL points at a scratch Postgres. Discord is a local mock.
     #[tokio::test]
     async fn change_needs_a_live_token_the_dm_code_once_and_totp_where_the_page_does() {
@@ -662,6 +677,7 @@ mod tests {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        let _one = TOKENS.lock().await;
         let db = tommybot_core::db::connect(&url).await.unwrap();
         let owner = 7_700_000_000 + std::process::id() as i64;
         let g = 9_450_000_000 + std::process::id() as i64;
@@ -1007,5 +1023,108 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+    }
+
+    /// Parallel creates at 9 live tokens make exactly one more. Runs only with DATABASE_URL.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_token_creates_stop_at_the_cap() {
+        use std::sync::Arc;
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _one = TOKENS.lock().await;
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let owner = 7_800_000_000 + std::process::id() as i64;
+        let mock = Router::new().route(
+            "/applications/@me",
+            get(move || async move { Json(json!({"owner": {"id": owner.to_string()}})) }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, mock).await });
+        let st = AppState {
+            db: db.clone(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api,
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+        };
+        let live = || async {
+            sqlx::query_scalar::<_, i64>("select count(*) from mcp_tokens where revoked_at is null")
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        };
+        // Fill up to one below the cap with rows of this test's owner.
+        let fill = (MAX_TOKENS - 1 - live().await).max(0);
+        sqlx::query(
+            "insert into mcp_tokens (name, token_hash, created_by)
+             select 'fill', sha256(($1 || ':' || i)::bytea), $1 from generate_series(1, $2) i",
+        )
+        .bind(owner)
+        .bind(fill)
+        .execute(&db)
+        .await
+        .unwrap();
+        let before = live().await;
+        // Warm the owner lookup and the pool's connections, so the requests reach the count together.
+        st.discord.bot_owner().await.unwrap();
+        let mut warm = tokio::task::JoinSet::new();
+        for _ in 0..10 {
+            let db = db.clone();
+            warm.spawn(async move { sqlx::query("select pg_sleep(0.05)").execute(&db).await });
+        }
+        warm.join_all().await;
+        let app = crate::router(st.clone(), "/nonexistent");
+        // A few rounds, as one round of 20 does not always hit the gap.
+        let mut rounds = vec![];
+        for _ in 0..5 {
+            let go = Arc::new(tokio::sync::Barrier::new(20));
+            let mut runs = tokio::task::JoinSet::new();
+            for _ in 0..20 {
+                let (app, go) = (app.clone(), go.clone());
+                let mut req = Request::post("/api/mcp-tokens")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "race"}).to_string()))
+                    .unwrap();
+                req.extensions_mut().insert(Sess {
+                    id: String::new(),
+                    user_id: owner,
+                    username: "t".into(),
+                    access_token: String::new(),
+                    stepped_up: true,
+                    csrf: String::new(),
+                });
+                runs.spawn(async move {
+                    go.wait().await;
+                    app.oneshot(req).await.unwrap().status().as_u16()
+                });
+            }
+            let codes = runs.join_all().await;
+            rounds.push((
+                codes.iter().filter(|c| **c == 200).count() as i64,
+                live().await,
+            ));
+            sqlx::query("delete from mcp_tokens where created_by = $1 and name = 'race'")
+                .bind(owner)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("delete from mcp_tokens where created_by = $1")
+            .bind(owner)
+            .execute(&db)
+            .await
+            .unwrap();
+        let room = (MAX_TOKENS - before).max(0);
+        assert_eq!(rounds, vec![(room, before.max(MAX_TOKENS)); 5]);
     }
 }

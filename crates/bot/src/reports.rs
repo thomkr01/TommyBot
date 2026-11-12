@@ -158,20 +158,27 @@ async fn report(
             "You can no longer report messages in this server".into(),
         ));
     }
+    if app.whitelisted(gid, msg.author.id, "reports").await? {
+        return Ok(Some("This member cannot be reported".into()));
+    }
+    // Count and insert under one lock, or parallel reports all see room and pass the hourly cap.
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('reports:' || $1 || ':' || $2, 0))")
+        .bind(g)
+        .bind(reporter.get() as i64)
+        .execute(&mut *tx)
+        .await?;
     let recent: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM reports WHERE guild_id=$1 AND reporter_id=$2 AND created_at > now() - interval '1 hour'",
     )
     .bind(g)
     .bind(reporter.get() as i64)
-    .fetch_one(&app.pool)
+    .fetch_one(&mut *tx)
     .await?;
     if recent >= REPORTS_PER_HOUR {
         return Ok(Some(
             "You reported a lot of messages this hour, try again later".into(),
         ));
-    }
-    if app.whitelisted(gid, msg.author.id, "reports").await? {
-        return Ok(Some("This member cannot be reported".into()));
     }
     let content: String = msg.content.chars().take(SNIPPET).collect();
     let id: Option<i64> = sqlx::query_scalar(
@@ -185,8 +192,9 @@ async fn report(
     .bind(msg.id.get() as i64)
     .bind(&content)
     .bind(reason)
-    .fetch_optional(&app.pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     let Some(id) = id else {
         return Ok(Some("You already reported this message".into()));
     };
