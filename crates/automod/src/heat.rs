@@ -343,7 +343,8 @@ impl Default for AutoSlowmodeCfg {
     }
 }
 
-pub const SLOW_PCT: (i64, i64) = (100, 5_000);
+/// At least two members' worth: one member adds at most max heat.
+pub const SLOW_PCT: (i64, i64) = (200, 5_000);
 /// Discord's maximum slowmode is 6 hours.
 pub const SLOW_SECS: (i64, i64) = (1, 21_600);
 pub const SLOW_ON: (i64, i64) = (10, 3_600);
@@ -371,6 +372,8 @@ impl AutoSlowmodeCfg {
 #[derive(Debug, Default)]
 pub struct ChannelHeat {
     heat: HeatState,
+    /// Each member's part of the pool, at most max heat, so 300% always takes three members.
+    shares: HashMap<u64, HeatState>,
     /// When the pool last fell (or will fall) under half the trigger.
     calm_since: i64,
     /// A slowmode was claimed and not released yet.
@@ -382,15 +385,35 @@ pub struct ChannelHeat {
 }
 
 impl ChannelHeat {
+    /// Shares kept before cold ones are dropped.
+    const KEEP: usize = 1_000;
+
     /// Adds a message's heat; true once per flip, when the slowmode should start.
     pub fn on_message(
         &mut self,
         now: i64,
+        user: u64,
         b: &Breakdown,
         cfg: &AutoSlowmodeCfg,
         h: &HeatCfg,
     ) -> bool {
-        self.heat.apply(b, now, h);
+        if self.shares.len() >= Self::KEEP {
+            self.shares.retain(|_, s| s.decayed(now, h) >= 1.0);
+        }
+        // Shares decay like the pool, so the pool stays their sum.
+        let share = self.shares.entry(user).or_default();
+        let old = share.decayed(now, h);
+        let add = b.total().min(h.max - old).max(0.0);
+        *share = HeatState {
+            value: old + add,
+            at_ms: now,
+            ..*share
+        };
+        self.heat = HeatState {
+            value: self.heat.decayed(now, h) + add,
+            at_ms: now,
+            ..self.heat
+        };
         let (trigger, value) = (cfg.trigger(h), self.heat.value);
         if value >= trigger / 2.0 {
             self.calm_since = now.saturating_add(fall_ms(value, trigger / 2.0, h.decay_per_sec));
@@ -848,55 +871,70 @@ mod tests {
     }
 
     /// Index of the message that started a slowmode, if one did.
-    fn flood(c: &mut ChannelHeat, every_ms: i64, from: i64, n: i64) -> Option<i64> {
+    fn flood(c: &mut ChannelHeat, users: u64, every_ms: i64, from: i64, n: i64) -> Option<i64> {
         let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
         let b = heat(
             &msg("hello there, how is everyone doing"),
             &UserHistory::default(),
             &h,
         );
-        (0..n).find(|&i| c.on_message(from + i * every_ms, &b, &cfg, &h))
+        (0..n).find(|&i| c.on_message(from + i * every_ms, i as u64 % users, &b, &cfg, &h))
     }
 
     #[test]
-    fn only_the_pool_decides() {
-        // No member count: heat already stops one member long before they fill the pool alone.
-        let mut c = ChannelHeat::default();
+    fn one_member_never_fills_the_pool_alone() {
         let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
-        let hits: Vec<bool> = (0..4)
-            .map(|i| c.on_message(i * 50, &hot(100.0), &cfg, &h))
-            .collect();
-        assert_eq!(hits, [false, false, false, true]);
+        let mut c = ChannelHeat::default();
+        // Fast messages, and one message far over max heat: still one member's worth.
+        assert!((0..200).all(|i| !c.on_message(i * 50, 7, &hot(100.0), &cfg, &h)));
+        assert!(!c.on_message(10_000, 7, &hot(10_000.0), &cfg, &h));
+        // Two members: 200%, under the 300% trigger.
+        assert!(!c.on_message(10_000, 8, &hot(10_000.0), &cfg, &h));
+        // A third heavy member at the same moment reaches 300%.
+        assert!(c.on_message(10_000, 9, &hot(10_000.0), &cfg, &h));
     }
 
     #[test]
-    fn a_flood_starts_it_once() {
+    fn a_share_refills_as_it_decays() {
+        let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
         let mut c = ChannelHeat::default();
-        // A message every 250 ms.
-        flood(&mut c, 250, 1, 40).expect("a flood starts it");
-        assert_eq!(flood(&mut c, 250, 20_000, 200), None, "once per flip");
+        c.on_message(0, 1, &hot(100.0), &cfg, &h);
+        // 10 s later the share decayed to about 43, so the next message may add about 57.
+        c.on_message(10_000, 1, &hot(100.0), &cfg, &h);
+        assert!(
+            (c.heat.value - 100.0).abs() < 1e-6,
+            "pool is the sum of the shares"
+        );
+    }
+
+    #[test]
+    fn four_members_flooding_start_it_once() {
+        let mut c = ChannelHeat::default();
+        // Four members, a message every 250 ms between them.
+        flood(&mut c, 4, 250, 1, 40).expect("a flood starts it");
+        assert_eq!(flood(&mut c, 4, 250, 20_000, 200), None, "once per flip");
     }
 
     #[test]
     fn normal_chat_stays_under_the_trigger() {
         let mut c = ChannelHeat::default();
-        // One message every two seconds, for ten minutes.
-        assert_eq!(flood(&mut c, 2_000, 1, 300), None);
+        // Six members, one message every two seconds, for ten minutes.
+        assert_eq!(flood(&mut c, 6, 2_000, 1, 300), None);
     }
 
     #[test]
     fn calm_after_the_pool_stays_low_and_flap_guard() {
         let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
         let mut c = ChannelHeat::default();
-        let t = flood(&mut c, 250, 1, 40).unwrap() * 250 + 1;
+        let t = flood(&mut c, 4, 250, 1, 40).unwrap() * 250 + 1;
         assert!(!c.is_calm(t, &cfg, &h), "still hot");
         // From ~600 the pool needs about 18 s to fall under 150, then 120 s of calm.
         assert!(!c.is_calm(t + 100_000, &cfg, &h));
         assert!(c.is_calm(t + 140_000, &cfg, &h));
         c.release(t + 140_000);
         let back = t + 150_000;
-        assert_eq!(flood(&mut c, 250, back, 400), None, "flap guard");
-        assert!(flood(&mut c, 250, t + 140_000 + 180_000, 40).is_some());
+        assert_eq!(flood(&mut c, 4, 250, back, 400), None, "flap guard");
+        assert!(flood(&mut c, 4, 250, t + 140_000 + 180_000, 40).is_some());
         // A fresh channel (also after a restart) is calm.
         assert!(ChannelHeat::default().is_calm(1_700_000_000_000, &cfg, &h));
     }
@@ -904,19 +942,19 @@ mod tests {
     #[test]
     fn flap_guard_counts_from_the_real_off() {
         let mut c = ChannelHeat::default();
-        let t = flood(&mut c, 250, 1, 40).unwrap() * 250 + 1;
+        let t = flood(&mut c, 4, 250, 1, 40).unwrap() * 250 + 1;
         // A second start that found the slowmode already on leaves the claim alone: no new trip.
-        assert_eq!(flood(&mut c, 250, t, 2_000), None, "still claimed");
+        assert_eq!(flood(&mut c, 4, 250, t, 2_000), None, "still claimed");
         // The real off, much later, starts the guard (min on 60 s + calm 120 s).
         let off = t + 1_000_000;
         c.release(off);
-        assert_eq!(flood(&mut c, 250, off + 1_000, 400), None, "flap guard");
-        assert!(flood(&mut c, 250, off + 180_000, 40).is_some());
+        assert_eq!(flood(&mut c, 4, 250, off + 1_000, 400), None, "flap guard");
+        assert!(flood(&mut c, 4, 250, off + 180_000, 40).is_some());
         // A second release (the off job after a failed start released it) moves the guard too.
         let mut c = ChannelHeat::default();
         c.release(1_000);
         c.release(500_000);
-        assert_eq!(flood(&mut c, 250, 501_000, 400), None);
+        assert_eq!(flood(&mut c, 4, 250, 501_000, 400), None);
     }
 
     #[test]
@@ -965,7 +1003,7 @@ mod tests {
                 c.min_on_secs,
                 c.calm_secs
             ),
-            (true, 100, 21_600, 10, 3_600)
+            (true, 200, 21_600, 10, 3_600)
         );
         let d = AutoSlowmodeCfg::default();
         assert_eq!(d.clone().clamped().channel_pct, d.channel_pct);

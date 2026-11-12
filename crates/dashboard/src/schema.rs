@@ -464,7 +464,7 @@ pub fn schema() -> Vec<Value> {
         ),
         hp(
             ti(dv(fg("Auto slowmode", "auto_slowmode.channel_pct", "int"), 300), "Trigger (% of max heat)"),
-            "All messages in the channel add their heat to one pool. 300 means three members' worth of max heat. One member alone is stopped by their own heat long before that. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator add nothing, as Discord lets them skip slowmode.",
+            "All messages in the channel add their heat to one pool. Each member adds at most max heat, so 300 needs at least three members, and the lowest value, 200, needs two. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator add nothing, as Discord lets them skip slowmode.",
         ),
         hp(
             ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode"),

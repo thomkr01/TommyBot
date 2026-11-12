@@ -72,7 +72,7 @@ pub async fn feed(
     }
     map.entry(m.channel_id.get())
         .or_default()
-        .on_message(now, b, slow, heat)
+        .on_message(now, m.author.id.get(), b, slow, heat)
         .then(|| slow.clone())
 }
 
@@ -589,13 +589,18 @@ mod tests {
             parts: vec![("message", 1e6)],
         };
         let (cfg, heat) = (AutoSlowmodeCfg::default(), HeatCfg::default());
-        for ch in [a, b] {
-            app.slow
-                .lock()
-                .unwrap()
-                .entry(ch)
-                .or_default()
-                .on_message(now_ms(), &hot, &cfg, &heat);
+        // Three members: each adds at most max heat.
+        for (ch, user) in [a, b]
+            .into_iter()
+            .flat_map(|ch| (1..=3).map(move |u| (ch, u)))
+        {
+            app.slow.lock().unwrap().entry(ch).or_default().on_message(
+                now_ms(),
+                user,
+                &hot,
+                &cfg,
+                &heat,
+            );
         }
         let job = |ch: u64| json!({"channel": ch, "set_secs": 5});
         off(&app, Id::new(g), &job(a)).await.unwrap();

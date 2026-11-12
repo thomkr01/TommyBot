@@ -979,7 +979,7 @@ mod tests {
         assert!(c.enabled);
         assert_eq!(
             (c.channel_pct, c.slowmode_secs, c.min_on_secs, c.calm_secs),
-            (100, 1, 3_600, 10)
+            (200, 1, 3_600, 10)
         );
         let c = am(json!({"enabled": true, "slowmode_secs": 99_999})).auto_slowmode;
         assert_eq!((c.slowmode_secs, c.channel_pct), (21_600, 300));

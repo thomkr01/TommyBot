@@ -129,7 +129,8 @@ mod tests {
         let slow = |k: &str, v: i64| json!({"auto_slowmode": {k: v}});
         assert!(check("automod", &slow("slowmode_secs", 21_600), &Value::Null).is_ok());
         assert!(check("automod", &slow("slowmode_secs", 21_601), &Value::Null).is_err());
-        assert!(check("automod", &slow("channel_pct", 99), &Value::Null).is_err());
+        assert!(check("automod", &slow("channel_pct", 199), &Value::Null).is_err());
+        assert!(check("automod", &slow("channel_pct", 200), &Value::Null).is_ok());
         assert!(check("automod", &json!({}), &Value::Null).is_ok());
         assert_eq!(for_path("automod", "auto_slowmode.min_users"), None);
         assert!(check("joingate", &json!({}), &Value::Null).is_ok());
