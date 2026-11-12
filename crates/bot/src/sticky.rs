@@ -173,10 +173,10 @@ async fn claim(
 }
 
 /// Last step of `joingate::on_join` for a joiner still in the server. `held`: a quarantine holds
-/// them back, so the row moves to this membership and the old list is dropped (the quarantine
-/// keeps its own saved roles). `raided`: a join raid hit that kept them; nothing is given back
-/// now, but the list stays saved and pending, for a later rejoin or [`restore_pending`].
-/// `verifying`: the roles are held until [`restore_pending`].
+/// them back, `raided`: a join raid hit kept them (Log, Warn, Timeout, Rename). Either way the
+/// row moves to this membership and the old list is dropped (a quarantine keeps its own saved
+/// roles), so a raider cannot get it back by verifying or rejoining. `verifying`: the roles are
+/// held until [`restore_pending`].
 pub async fn on_join(
     app: &App,
     m: &MemberAdd,
@@ -193,7 +193,7 @@ pub async fn on_join(
     }
     let (g, u) = (gid.get() as i64, user.get() as i64);
     if held || raided {
-        return claim(&app.pool, g, u, joined, !held).await.map(drop);
+        return claim(&app.pool, g, u, joined, false).await.map(drop);
     }
     // Read before the claim: a failure after it would lose the claimed roles.
     let info = app.guild_info(gid).await?;
@@ -229,6 +229,12 @@ pub async fn restore_pending(app: &App, gid: Id<GuildMarker>, user: Id<UserMarke
     }
     let info = app.guild_info(gid).await?;
     let permit = permits::permit_roles(&app.pool, gid.get() as i64).await?;
+    // Web verification and staff /verify work during a timeout, which holds the main roles: read
+    // it before the claim.
+    let Some(member) = http_err::member(&app.http, gid, user).await? else {
+        return Ok(());
+    };
+    let timeout = member.communication_disabled_until.map(|t| t.as_secs());
     let held: Option<(Vec<i64>, DateTime<Utc>)> = sqlx::query_as(
         "UPDATE member_roles SET pending = false, updated_at = now()
          WHERE guild_id = $1 AND user_id = $2 AND pending RETURNING roles, joined_at",
@@ -244,8 +250,7 @@ pub async fn restore_pending(app: &App, gid: Id<GuildMarker>, user: Id<UserMarke
                 joined: joined.timestamp_micros(),
                 tries: 0,
             };
-            // A member cannot press Verify while timed out.
-            restore_or_queue(app, gid, &t, &roles, None, (&info, &permit)).await
+            restore_or_queue(app, gid, &t, &roles, timeout, (&info, &permit)).await
         }
         _ => Ok(()),
     }

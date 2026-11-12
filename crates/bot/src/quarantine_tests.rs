@@ -667,10 +667,10 @@ async fn a_join_quarantine_rejoin_keeps_sticky_roles_for_verification() {
     t.cleanup().await;
 }
 
-/// D61: a join raid that only logs the member holds their sticky roles back during the raid, but
-/// keeps them saved (pending) instead of dropping them.
+/// D61: a join raid hit that keeps the member drops their saved sticky roles, as on main, so a
+/// raider cannot get them back by verifying or rejoining; nothing is given back.
 #[tokio::test]
-async fn a_logged_raider_keeps_sticky_roles_saved() {
+async fn a_logged_raider_loses_saved_sticky_roles() {
     let Some(t) = T::new(84).await else { return };
     let raid = json!({"enabled": true, "count": 1, "span_ms": 60000, "suspicious_only": false,
                       "active_ms": 60000, "string_patterns": [], "flag_younger_than_ms": null,
@@ -704,11 +704,7 @@ async fn a_logged_raider_keeps_sticky_roles_saved() {
         .await
         .unwrap();
     assert_eq!(flagged, 1, "the join raid flagged them");
-    assert_eq!(
-        roles(&t, 0, u),
-        Some(vec![]),
-        "not given back during the raid"
-    );
+    assert_eq!(roles(&t, 0, u), Some(vec![]), "nothing given back");
     let kept: (Vec<i64>, bool) = sqlx::query_as(
         "SELECT roles, pending FROM member_roles WHERE guild_id = $1 AND user_id = $2",
     )
@@ -717,12 +713,61 @@ async fn a_logged_raider_keeps_sticky_roles_saved() {
     .fetch_one(&t.app.pool)
     .await
     .unwrap();
-    assert_eq!(kept, (vec![ROLE as i64], true), "still saved, pending");
+    assert_eq!(kept, (vec![], false), "the saved list is dropped");
     for sql in [
         "DELETE FROM member_roles WHERE guild_id = $1",
         "DELETE FROM raid_log WHERE guild_id = $1",
     ] {
         sqlx::query(sql).bind(g).execute(&t.app.pool).await.unwrap();
     }
+    t.cleanup().await;
+}
+
+/// Web verification and staff /verify work during a timeout: the pending sticky roles come back,
+/// but the main roles wait for the timeout's end when the timeout takes them.
+#[tokio::test]
+async fn verifying_during_a_timeout_does_not_give_back_main_roles() {
+    let Some(t) = T::new(85).await else { return };
+    let cfg = json!({"misc": {"sticky_roles": true, "remove_main_roles_on_timeout": true},
+                     "lockdown": {"main_roles": [ROLE.to_string()]}});
+    server(&t, 0, cfg).await;
+    let (g, u) = (t.g(0).get() as i64, t.base * 10 + 1);
+    sqlx::query(
+        "INSERT INTO member_roles (guild_id, user_id, roles, joined_at, pending)
+         VALUES ($1, $2, '{501,504}', '2025-01-01T00:00:00Z', true)",
+    )
+    .bind(g)
+    .bind(u as i64)
+    .execute(&t.app.pool)
+    .await
+    .unwrap();
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![VERIFIED]);
+        m.timeouts
+            .insert((t.g(0).get(), u), "2099-01-01T00:00:00.000000+00:00".into());
+    });
+    crate::sticky::restore_pending(&t.app, t.g(0), Id::new(u))
+        .await
+        .unwrap();
+    let mut got = roles(&t, 0, u).unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![VERIFIED, AUTOROLE],
+        "the main role waits for the timeout"
+    );
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM scheduled_jobs WHERE guild_id = $1 AND kind = $2")
+            .bind(g)
+            .bind(crate::timeout_roles::KIND)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(queued, 1, "queued for the timeout's end");
+    sqlx::query("DELETE FROM member_roles WHERE guild_id = $1")
+        .bind(g)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
     t.cleanup().await;
 }

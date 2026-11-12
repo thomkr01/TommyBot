@@ -120,6 +120,8 @@ pub(crate) struct Mock {
     pub(crate) fail_channels: Vec<u64>,
     /// Role permission edits fail (the role is above the bot).
     pub(crate) fail_role_edit: bool,
+    /// Members by (guild, user) timed out until this ISO time.
+    pub(crate) timeouts: HashMap<(u64, u64), String>,
     /// Managed role -> the bot it belongs to (its tags.bot_id).
     pub(crate) bot_roles: HashMap<u64, u64>,
     pub(crate) log: Vec<String>,
@@ -219,7 +221,13 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 j["joined_at"] = json!("2099-01-01T00:00:00.000000+00:00");
                 (200, j.to_string())
             }
-            Some(r) => (200, member(u, r).to_string()),
+            Some(r) => {
+                let mut j = member(u, r);
+                if let Some(until) = m.timeouts.get(&(n(g), n(u))) {
+                    j["communication_disabled_until"] = json!(until);
+                }
+                (200, j.to_string())
+            }
             None => err(404, 10007),
         },
         ("GET", ["guilds", g, "members"]) => {
