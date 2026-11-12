@@ -727,6 +727,10 @@ pub struct VerifyCfg {
     pub captcha: CaptchaCfg,
     /// Kick, ban and quarantine at the time limit write a reason into the audit log (`v 14`).
     pub audit_reason: bool,
+    /// Web mode refuses Tor, VPN and proxy addresses (`v 15`). The dashboard does the check.
+    pub block_vpn: bool,
+    /// With `block_vpn`, hosting/datacenter networks are refused too (`v 16`).
+    pub block_hosting: bool,
 }
 
 /// Web verification only works with action Nothing and at least one verified/main role (roles fall back to
@@ -829,6 +833,8 @@ impl Default for VerifyCfg {
             regen_ms: None,
             captcha: CaptchaCfg::default(),
             audit_reason: true,
+            block_vpn: false,
+            block_hosting: true,
         }
     }
 }

@@ -1939,6 +1939,8 @@ mod db_tests {
             secure: false,
             totp: Default::default(),
             rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
         };
         let send = |m: &str, path: &str, user: i64, stepped_up: bool, body: Option<Value>| {
             let mut req = Request::builder()

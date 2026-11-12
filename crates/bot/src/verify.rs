@@ -432,6 +432,25 @@ pub async fn web_grant(
     self_grant(app, gid, user, v).await
 }
 
+/// The web page refused a member on a VPN, proxy or hosting network (logged at most every 10 minutes per
+/// member). The IP is never in the log.
+pub async fn web_blocked(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    list: &str,
+) -> Result<()> {
+    let why = match list {
+        "Tor" => "Tor",
+        "hosting network" => "Hosting network",
+        _ => "VPN or proxy",
+    };
+    let log = Log::new("Verification Blocked", ALERT)
+        .user("Member", user.get())
+        .line("Reason", why);
+    send_log(app, gid.get(), LogKind::Verification, log).await
+}
+
 /// [`grant`] for a member verifying themselves. Someone quarantined after they had roles (anti-nuke,
 /// a rate limit, staff) must not get out by passing verification; only a join quarantine saves none.
 async fn self_grant(

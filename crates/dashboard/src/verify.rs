@@ -9,6 +9,8 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::net::IpAddr;
+use tommybot_automod::iplist::IpLists;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/verify/{guild}", get(page).post(submit))
@@ -123,6 +125,22 @@ async fn submit(
     let ip = headers
         .get("cf-connecting-ip")
         .and_then(|v| v.to_str().ok());
+    if let Some(list) = vpn_hit(&st.ips, &cfg, ip).map_err(|m| ApiError::BadRequest(m.into()))? {
+        if first_in_10_min(&st, guild, s.user_id) {
+            tommybot_core::jobs::enqueue(
+                &st.db,
+                guild,
+                "verify_blocked",
+                json!({ "user": s.user_id, "list": list }),
+                0,
+            )
+            .await?;
+        }
+        return Err(ApiError::BadRequest(
+            "Verification is blocked from VPNs, proxies and hosting networks. Turn yours off and try again."
+                .into(),
+        ));
+    }
     let same_ip = match ip {
         Some(ip) => same_ip(&st, guild, s.user_id, ip).await?,
         None => vec![],
@@ -136,6 +154,48 @@ async fn submit(
     )
     .await?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// The list that refuses this visitor when the VPN block is on. Err when it is on and the address is missing
+/// (the request did not come through Cloudflare). Lists not loaded yet let everyone through, so a failed
+/// download never stops every server's verification.
+fn vpn_hit(
+    lists: &IpLists,
+    cfg: &Value,
+    ip: Option<&str>,
+) -> Result<Option<&'static str>, &'static str> {
+    let v = &cfg["verification"];
+    if v["block_vpn"] != true {
+        return Ok(None);
+    }
+    let Some(ip) = ip.and_then(|s| s.trim().parse::<IpAddr>().ok()) else {
+        return Err("Your connection could not be checked. Try again later.");
+    };
+    if !lists.loaded() {
+        tracing::warn!("VPN block is on but no IP list is loaded yet; letting the member through");
+        return Ok(None);
+    }
+    Ok(lists.verdict(ip, v["block_hosting"] != false))
+}
+
+/// One refusal log per member per 10 minutes, so pressing Verify in a loop does not flood the log.
+fn first_in_10_min(st: &AppState, guild: i64, user: i64) -> bool {
+    const GAP: i64 = 600_000;
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut m = st.vpn_logged.lock().unwrap();
+    if m.len() > 10_000 {
+        m.retain(|_, t| *t > now - GAP);
+        if m.len() > 10_000 {
+            m.clear();
+        }
+    }
+    match m.get(&(guild, user)) {
+        Some(t) if *t > now - GAP => false,
+        _ => {
+            m.insert((guild, user), now);
+            true
+        }
+    }
 }
 
 /// Salted per server, so the hash says nothing outside it and no raw IP is stored.
@@ -181,6 +241,47 @@ mod tests {
         assert!(gate(&cfg("Captcha", json!(["1"])), true).is_err());
         assert!(gate(&cfg("Web", json!([])), true).is_err());
         assert!(gate(&json!({}), true).is_err());
+    }
+
+    #[test]
+    fn vpn_block_refuses_listed_and_unknown_addresses() {
+        let lists = IpLists::from_texts("1.1.1.1\n", "2.2.2.0/24\n", "3.3.0.0/16\n").unwrap();
+        let on =
+            |hosting: Value| json!({"verification": {"block_vpn": true, "block_hosting": hosting}});
+        assert_eq!(
+            vpn_hit(&lists, &json!({}), Some("1.1.1.1")),
+            Ok(None),
+            "off by default"
+        );
+        assert_eq!(vpn_hit(&lists, &json!({}), None), Ok(None));
+        assert_eq!(
+            vpn_hit(&lists, &on(Value::Null), Some("1.1.1.1")),
+            Ok(Some("Tor"))
+        );
+        assert_eq!(
+            vpn_hit(&lists, &on(Value::Null), Some(" 2.2.2.2 ")),
+            Ok(Some("VPN"))
+        );
+        assert_eq!(
+            vpn_hit(&lists, &on(Value::Null), Some("3.3.3.3")),
+            Ok(Some("hosting network")),
+            "hosting on by default"
+        );
+        assert_eq!(
+            vpn_hit(&lists, &on(json!(false)), Some("3.3.3.3")),
+            Ok(None)
+        );
+        assert_eq!(vpn_hit(&lists, &on(Value::Null), Some("8.8.8.8")), Ok(None));
+        assert!(
+            vpn_hit(&lists, &on(Value::Null), None).is_err(),
+            "no address: refused"
+        );
+        assert!(vpn_hit(&lists, &on(Value::Null), Some("garbage")).is_err());
+        assert_eq!(
+            vpn_hit(&IpLists::default(), &on(Value::Null), Some("1.1.1.1")),
+            Ok(None),
+            "not loaded: let through"
+        );
     }
 
     #[test]

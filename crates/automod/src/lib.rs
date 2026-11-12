@@ -6,6 +6,7 @@
 pub mod discord_api;
 pub mod filters;
 pub mod heat;
+pub mod iplist;
 pub mod join;
 pub mod lockdown;
 pub mod sites;

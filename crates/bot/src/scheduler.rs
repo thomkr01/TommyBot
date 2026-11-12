@@ -107,6 +107,10 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "confirm_expire" => crate::confirm::run_expire(app, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
+        "verify_blocked" => {
+            let list = job.payload["list"].as_str().unwrap_or("VPN");
+            verify::web_blocked(app, gid, user(&job.payload)?, list).await?
+        }
         "verify_grant" => {
             let same_ip: Vec<u64> = job.payload["same_ip"]
                 .as_array()

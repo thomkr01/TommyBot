@@ -722,6 +722,8 @@ mod tests {
             secure: false,
             totp: Default::default(),
             rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
         };
         // A call as the MCP server (auth = token) or as a dashboard session (sess).
         let send = |path: String, auth: Option<String>, sess: Option<Sess>, body: Value| {
@@ -1056,6 +1058,8 @@ mod tests {
             secure: false,
             totp: Default::default(),
             rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
         };
         let live = || async {
             sqlx::query_scalar::<_, i64>("select count(*) from mcp_tokens where revoked_at is null")
