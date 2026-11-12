@@ -52,6 +52,30 @@ fn app_posts_are_read_with_their_embeds_and_link_buttons() {
     // A member's own post: Discord made its embeds.
     let member = msg(json!({"embeds": embeds}));
     assert_eq!(app_text(&member), "");
+    // A member forwarding an app's post: its rich embeds and buttons are read, previews are not.
+    let forward = msg(json!({"message_snapshots": [{"message": {
+        "embeds": embeds, "components": components, "content": "see https://news.example/x",
+        "attachments": [], "mentions": [], "mention_roles": [], "type": 0,
+        "timestamp": "2026-01-01T00:00:00.000000+00:00", "edited_timestamp": null,
+    }}]}));
+    let text = app_text(&forward);
+    for part in ["steamcommunity.ru", "own embed", "https://phish.example"] {
+        assert!(text.contains(part), "{part} missing in {text:?}");
+    }
+    assert!(!text.contains("preview text"));
+}
+
+#[test]
+fn only_webhooks_and_apps_add_files_in_an_edit() {
+    let edited = json!("2026-01-01T00:01:00.000000+00:00");
+    assert!(files_can_be_new(&msg(json!({}))));
+    assert!(!files_can_be_new(&msg(json!({"edited_timestamp": edited}))));
+    assert!(files_can_be_new(&msg(
+        json!({"edited_timestamp": edited, "application_id": "3"})
+    )));
+    assert!(files_can_be_new(&msg(
+        json!({"edited_timestamp": edited, "webhook_id": "9"})
+    )));
 }
 
 #[test]
@@ -154,6 +178,41 @@ async fn main_roles_come_back_only_to_the_same_verified_membership() {
     assert_eq!(t.calls("PUT"), 0, "no role added");
     t.exec("DELETE FROM member_roles WHERE guild_id BETWEEN $1 AND $1 + 9")
         .await;
+    t.cleanup().await;
+}
+
+/// A member quarantined when the timeout ends gets the main roles into the quarantine's saved list,
+/// not on their account, so the release gives them back.
+#[tokio::test]
+async fn main_roles_of_a_quarantined_member_go_to_the_quarantine() {
+    let Some(t) = T::new(95).await else { return };
+    let gid = t.g(0);
+    t.server_config(0, t.owner(), json!({})).await;
+    let user = t.base + 5;
+    t.set(|m| {
+        m.members.insert((gid.get(), user), vec![]);
+    });
+    sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, $2, '{12}')")
+        .bind(gid.get() as i64)
+        .bind(user as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    let job = json!({"user": user, "roles": [11, 12]});
+    crate::timeout_roles::restore(&t.app, gid, &job)
+        .await
+        .unwrap();
+    let mut saved: Vec<i64> = sqlx::query_scalar(
+        "SELECT saved_roles FROM quarantines WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(gid.get() as i64)
+    .bind(user as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    saved.sort();
+    assert_eq!(saved, [11, 12]);
+    assert_eq!(t.calls("PUT"), 0, "no role added during the quarantine");
     t.cleanup().await;
 }
 

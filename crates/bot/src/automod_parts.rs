@@ -1,5 +1,5 @@
 //! What a message carries besides its content: forwarded attachments, and the embed and component
-//! text of webhook and app posts.
+//! text of webhook and app posts and of forwards.
 use twilight_model::channel::{
     message::{component::Component, Embed},
     Attachment, Message,
@@ -14,17 +14,37 @@ pub(crate) fn attachments(m: &Message) -> impl Iterator<Item = &Attachment> {
     )
 }
 
-/// Embed and component text of a webhook or app post. Discord's previews of links in the content
-/// are left out: the content already holds those links, and the page's text is not the poster's.
-/// A poster's own embeds are always `rich`, so one cannot pass as a preview by repeating its URL.
+/// Embed and component text of a webhook or app post, and of what a message forwards. Discord's
+/// previews of links in the content are left out: the content already holds those links, and the
+/// page's text is not the poster's. A poster's own embeds are always `rich`, so one cannot pass as a
+/// preview by repeating its URL.
 pub(super) fn app_text(m: &Message) -> String {
-    if m.webhook_id.is_none() && m.application_id.is_none() {
-        return String::new();
-    }
-    let preview =
-        |e: &&Embed| e.kind != "rich" && e.url.as_deref().is_some_and(|u| m.content.contains(u));
     let mut out = vec![];
-    for e in m.embeds.iter().filter(|e| !preview(e)) {
+    if m.webhook_id.is_some() || m.application_id.is_some() {
+        let preview = |e: &&Embed| {
+            e.kind != "rich" && e.url.as_deref().is_some_and(|u| m.content.contains(u))
+        };
+        embed_text(m.embeds.iter().filter(|e| !preview(e)), &mut out);
+        component_text(&m.components, &mut out);
+    }
+    // A forward does not say who wrote the original; only its `rich` embeds are a poster's own.
+    for s in &m.message_snapshots {
+        embed_text(
+            s.message.embeds.iter().filter(|e| e.kind == "rich"),
+            &mut out,
+        );
+        component_text(&s.message.components, &mut out);
+    }
+    out.join("\n")
+}
+
+/// Webhooks and apps (a deferred app reply too) can add files in an edit; a member cannot.
+pub(crate) fn files_can_be_new(m: &Message) -> bool {
+    m.edited_timestamp.is_none() || m.webhook_id.is_some() || m.application_id.is_some()
+}
+
+fn embed_text<'a>(embeds: impl Iterator<Item = &'a Embed>, out: &mut Vec<&'a str>) {
+    for e in embeds {
         out.extend(
             [&e.title, &e.description, &e.url]
                 .into_iter()
@@ -39,8 +59,6 @@ pub(super) fn app_text(m: &Message) -> String {
             out.extend(std::iter::once(a.name.as_str()).chain(a.url.as_deref()));
         }
     }
-    component_text(&m.components, &mut out);
-    out.join("\n")
 }
 
 /// Link-button URLs and text blocks, also inside rows, sections and containers.

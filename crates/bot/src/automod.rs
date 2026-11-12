@@ -34,7 +34,7 @@ use crate::{
 #[path = "automod_parts.rs"]
 mod parts;
 use parts::app_text;
-pub(crate) use parts::attachments;
+pub(crate) use parts::{attachments, files_can_be_new};
 
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -128,7 +128,7 @@ async fn check_message(
         return Ok(());
     }
     // A user-installed app's reply runs as an edit (instant filters only), but its files are new.
-    let new_files = !nsfw_image && m.edited_timestamp.is_none();
+    let new_files = !nsfw_image && files_can_be_new(m);
     if !nsfw_image && am.filters.nsfw_images.enabled {
         app.nsfw.enqueue(m, !new_files, false);
     }

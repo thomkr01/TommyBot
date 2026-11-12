@@ -235,13 +235,17 @@ pub async fn run(app: Arc<App>) {
     }
 }
 
-async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
+async fn scan(app: &App, job: Job) -> Result<()> {
     let m = job.msg;
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let f = &cfg.automod.filters;
     // Read again now: the filter may have been switched off while the job waited.
     if !cfg.automod.enabled || !f.nsfw_images.enabled {
+        return Ok(());
+    }
+    // Automod does not watch webhooks with Monitor Webhooks off: no scan, row or hit log either.
+    if m.webhook_id.is_some() && !cfg.automod.monitor_webhooks {
         return Ok(());
     }
     let (parent, _) = app.channel_scope(gid, m.channel_id).await?;
@@ -531,6 +535,31 @@ async fn sweep_guild(app: &App, gid: Id<GuildMarker>) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// With Monitor Webhooks off a webhook's image is not scanned, saved or logged.
+    #[tokio::test]
+    async fn unmonitored_webhooks_are_not_scanned() {
+        let Some(t) = crate::bansync::tests::T::new(94).await else {
+            return;
+        };
+        let gid = t.g(0);
+        let job = |hook: bool| Job {
+            msg: Box::new(crate::automod::more_tests::msg(json!({
+                "guild_id": gid.to_string(), "webhook_id": if hook { json!("9") } else { json!(null) },
+            }))),
+            urls: vec!["https://media.discordapp.net/a.png".into()],
+            at_ms: 0,
+        };
+        let on = json!({"enabled": true, "monitor_webhooks": false, "filters": {"nsfw_images": {"enabled": true}}});
+        t.server_config(0, t.owner(), json!({ "automod": on }))
+            .await;
+        scan(&t.app, job(true)).await.unwrap();
+        assert!(t.mock.lock().unwrap().log.is_empty(), "nothing fetched");
+        // A member's post in the same server is looked at (the mock refuses the channel lookup).
+        let _ = scan(&t.app, job(false)).await;
+        assert!(!t.mock.lock().unwrap().log.is_empty());
+        t.cleanup().await;
+    }
 
     /// A user-installed app's reply is queued as the member's post, a server-installed app's not at
     /// all; a forward's images are scanned.
