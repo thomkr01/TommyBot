@@ -1421,6 +1421,7 @@ mod tests {
                 mod_roles: vec![],
                 trusted: vec![],
                 log_channels: vec![13],
+                verification_channel: None,
             },
             bot_pos: 10,
         }

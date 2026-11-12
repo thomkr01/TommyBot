@@ -793,6 +793,18 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         },
         _ => vec![],
     };
+    // The dashboard's rule too: a main role is never @everyone, managed or above the bot.
+    if row.path == "lockdown.main_roles" && !matches!(op, Op::Remove(..)) {
+        let info = app.guild_info(gid).await?;
+        let bad = ids
+            .iter()
+            .find_map(|&id| Some((id, info.unfit(gid, Id::new_checked(id)?)?)));
+        if let Some((id, why)) = bad {
+            let text = format!("<@&{id}> cannot be a main role: {why}");
+            send(app, msg, &text, None, vec![]).await?;
+            return Ok(true);
+        }
+    }
     let sections = [section];
     let saved = save(app, gid, msg.author.id.get(), &sections, |doc| {
         let e = edit_for(row, &op, &ids, get_path(doc, row.path))?;

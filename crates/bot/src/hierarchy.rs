@@ -54,6 +54,15 @@ pub fn top_position(roles: &HashMap<Id<RoleMarker>, i64>, member_roles: &[Id<Rol
         .unwrap_or(0)
 }
 
+impl GuildInfo {
+    /// [`tommybot_core::roles::unfit`] for a role of this guild.
+    pub fn unfit(&self, gid: Id<GuildMarker>, role: Id<RoleMarker>) -> Option<&'static str> {
+        let rank = self.roles.get(&role).copied().unwrap_or(0);
+        let managed = self.managed.contains(&role);
+        tommybot_core::roles::unfit(gid.get(), role.get(), managed, rank, self.bot_top)
+    }
+}
+
 impl App {
     /// Cached for 5 minutes; gateway role/channel/guild/bot-member events call [`App::invalidate_guild`].
     pub async fn guild_info(&self, gid: Id<GuildMarker>) -> Result<Arc<GuildInfo>> {

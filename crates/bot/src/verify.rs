@@ -262,7 +262,9 @@ pub async fn on_join(
         }
     }
     if v.verify.quarantine_on_join {
-        if let Err(e) = crate::antinuke::quarantine(app, gid, user).await {
+        if let Err(e) =
+            crate::antinuke::quarantine_as(app, gid, user, None, crate::antinuke::Kind::Join).await
+        {
             tracing::warn!(?e, "quarantining an unverified joiner failed");
         }
     }
@@ -337,7 +339,8 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     Ok(())
 }
 
-pub(super) static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Held while the bot makes and saves a verification channel.
+pub(crate) static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// First join after setup with no verification channel (`s 12`): create one that unverified
 /// members can read but verified ones do not see, save it and post the button.
@@ -451,23 +454,17 @@ pub async fn web_blocked(
     send_log(app, gid.get(), LogKind::Verification, log).await
 }
 
-/// [`grant`] for a member verifying themselves. Someone quarantined after they had roles (anti-nuke,
-/// a rate limit, staff) must not get out by passing verification; only a join quarantine saves none.
+/// [`grant`] for a member verifying themselves. Someone in a real quarantine (anti-nuke, a rate
+/// limit, staff, the Raider List) must not get out by passing verification; only a join one lifts.
 async fn self_grant(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
     v: &VerificationCfg,
 ) -> Result<()> {
-    let saved: Option<Vec<i64>> = sqlx::query_scalar(
-        "SELECT saved_roles FROM quarantines WHERE guild_id = $1 AND user_id = $2",
-    )
-    .bind(gid.get() as i64)
-    .bind(user.get() as i64)
-    .fetch_optional(&app.pool)
-    .await?;
+    let on_join = crate::antinuke::quarantine_kind(app, gid, user).await?;
     anyhow::ensure!(
-        saved.is_none_or(|r| r.is_empty()),
+        on_join != Some(false),
         "quarantined member tried to verify out of quarantine"
     );
     grant(app, gid, user, v).await
@@ -526,7 +523,8 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
             };
         }
         FailAction::Quarantine => {
-            crate::antinuke::quarantine_because(app, gid, user, reason).await?
+            let kind = crate::antinuke::Kind::Deadline;
+            crate::antinuke::quarantine_as(app, gid, user, reason, kind).await?
         }
     }
     send_log(
@@ -633,7 +631,20 @@ pub(crate) async fn grant(
             safe
         })
         .collect();
-    if v.verify.replace_roles || v.verify.quarantine_on_join {
+    // A join quarantine ends whatever "quarantine on join" says now: it may have been switched
+    // off since they joined.
+    let join = crate::antinuke::quarantine_kind(app, gid, user).await? == Some(true);
+    if v.verify.replace_roles || v.verify.quarantine_on_join || join {
+        // Discord refuses a role list that drops a managed (booster, integration) role.
+        let member = app.http.guild_member(gid, user).await?.model().await?;
+        let mut roles = roles;
+        let managed: Vec<_> = member
+            .roles
+            .iter()
+            .copied()
+            .filter(|r| info.managed.contains(r) && !roles.contains(r))
+            .collect();
+        roles.extend(managed);
         app.http
             .update_guild_member(gid, user)
             .roles(&roles)
@@ -643,8 +654,8 @@ pub(crate) async fn grant(
             app.http.add_guild_member_role(gid, user, *r).await?;
         }
     }
-    if v.verify.quarantine_on_join {
-        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2")
+    if join {
+        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2 AND on_join")
             .bind(gid.get() as i64)
             .bind(user.get() as i64)
             .execute(&app.pool)

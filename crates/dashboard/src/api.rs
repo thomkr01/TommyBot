@@ -293,6 +293,48 @@ async fn check_ids(
     }
 }
 
+/// The quarantine role and main roles the section adds (`roles::unfit`, the bot's rule too).
+/// Ids already stored are left alone, as in [`check_ids`].
+async fn check_held_roles(
+    st: &AppState,
+    guild: i64,
+    section: &str,
+    new: &Value,
+    old: &Value,
+) -> Result<(), ApiError> {
+    let added = held_roles(section, new)
+        .into_iter()
+        .filter(|id| !held_roles(section, old).contains(id))
+        .collect::<Vec<_>>();
+    if added.is_empty() {
+        return Ok(());
+    }
+    let (roles, bot_pos) = crate::ops::roles_and_bot_pos(st, guild).await?;
+    match roles
+        .iter()
+        .filter(|r| added.contains(&r.id))
+        .find_map(|r| Some((&r.id, r.unfit(guild, bot_pos)?)))
+    {
+        Some((id, why)) => Err(ApiError::BadRequest(format!(
+            "<@&{id}> cannot be used here: {why}"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `antinuke.quarantine_role` and `lockdown.main_roles`.
+fn held_roles(section: &str, v: &Value) -> Vec<String> {
+    let ids = match section {
+        "antinuke" => std::slice::from_ref(&v["quarantine_role"]),
+        "lockdown" => v["main_roles"].as_array().map_or(&[][..], Vec::as_slice),
+        _ => &[],
+    };
+    ids.iter()
+        .filter_map(|i| i.as_str())
+        .map(String::from)
+        .collect()
+}
+
 pub async fn put_section(
     State(st): State<AppState>,
     s: Sess,
@@ -313,6 +355,7 @@ pub async fn put_section(
     validate(&section, &b.value)?;
     let (cur, mut config) = store::current(&st.db, guild).await?;
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
+    check_held_roles(&st, guild, &section, &b.value, &config[&section]).await?;
     limits::check(&section, &b.value, &config[&section]).map_err(ApiError::BadRequest)?;
     // Turning Tickets on is the whole setup: its category and log channel are made here.
     let tickets_on = section == "tickets"
@@ -1006,6 +1049,15 @@ mod logging_validate_tests {
                 "{file}"
             );
         }
+    }
+
+    #[test]
+    fn held_roles_are_the_quarantine_and_main_roles() {
+        let v = json!({"quarantine_role": "5", "main_roles": ["6", "7"]});
+        assert_eq!(held_roles("antinuke", &v), vec!["5"]);
+        assert_eq!(held_roles("lockdown", &v), vec!["6", "7"]);
+        assert!(held_roles("logging", &v).is_empty());
+        assert!(held_roles("antinuke", &json!({})).is_empty());
     }
 
     #[test]

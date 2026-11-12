@@ -45,6 +45,8 @@ pub struct Setup {
     pub trusted: Vec<u64>,
     /// Every channel a log goes to.
     pub log_channels: Vec<u64>,
+    /// Members in verification's join quarantine must see it, so it keeps no quarantine deny.
+    pub verification_channel: Option<u64>,
 }
 
 /// Ordered from fine to worst.
@@ -691,6 +693,7 @@ pub fn checks(
                     .and_then(|p| channels.iter().find(|x| x.id == p))
                     .is_none_or(|cat| !synced(c, cat))
             })
+            .filter(|c| Some(c.id) != setup.verification_channel)
             .filter(|c| {
                 !c.overwrites
                     .iter()
@@ -832,6 +835,7 @@ mod tests {
             modules: vec![],
             trusted: vec![],
             log_channels: vec![],
+            verification_channel: None,
         }
     }
 
@@ -1209,6 +1213,15 @@ mod tests {
         assert_eq!(r.severity, Severity::Bad);
         assert!(r.detail.contains("2 channel(s): c12, c13"), "{}", r.detail);
         assert_eq!(r.fix.as_ref().unwrap().setting, Some(QUARANTINE_CHANNELS));
+        // The verification channel stays open to the join quarantine.
+        let verifying = Setup {
+            verification_channel: Some(13),
+            ..setup
+        };
+        let rows = checks(&SAFE, &roles, &channels, 4, &verifying);
+        let r = sev(&rows, "quarantine_channels").unwrap();
+        assert!(r.detail.contains("1 channel(s): c12"), "{}", r.detail);
+        let setup = verifying;
         let all = [
             chan(10, CATEGORY, None, vec![deny.clone()]),
             chan(11, 0, Some(10), vec![deny]),

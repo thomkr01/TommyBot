@@ -20,6 +20,7 @@ use twilight_model::{
 
 use super::{action_name, cat_name, BUTTON, PREFIX, UNVERIFIED_ALERT_ONLY};
 use crate::{
+    antinuke::Applied,
     app::{App, GuildCfg},
     bansync::{self, live_owner, md},
     commands, http_err, joingate,
@@ -163,16 +164,23 @@ async fn enforce(
             ("ban", Some(json!({"op": "unban", "user": u})))
         }
         RaiderAction::Quarantine => {
-            let done = crate::antinuke::quarantine_because(app, gid, user, Some(&why)).await;
+            // Through contain(), so a listed bot also loses its managed role's permissions.
+            let real = crate::antinuke::Kind::Real;
+            let done = crate::antinuke::contain(app, gid, user, Some(&why), real).await;
             let failed = done.as_ref().err().map(http_err::why);
-            let what = ("Quarantine", why.as_str(), gate);
-            joingate::record(app, gid, u, what, failed.as_deref()).await;
-            let log = action_log(u, &entry.category, "Quarantine", failed.as_deref());
+            let kicked = done.as_ref().is_ok_and(|d| d.applied == Applied::Kicked);
+            let label = if kicked { "Kick" } else { "Quarantine" };
+            joingate::record(app, gid, u, (label, why.as_str(), gate), failed.as_deref()).await;
+            let log = action_log(u, &entry.category, label, failed.as_deref());
             if let Err(e) = crate::events::send_log(app, gid.get(), LogKind::JoinGate, log).await {
                 tracing::warn!(?e, "raider list action log failed");
             }
             done?;
-            ("quarantine", Some(json!({"op": "unquarantine", "user": u})))
+            if kicked {
+                ("kick", None)
+            } else {
+                ("quarantine", Some(json!({"op": "unquarantine", "user": u})))
+            }
         }
     };
     let n = bot_case(app, (gid, user), kind, &why, inverse).await?;

@@ -25,6 +25,7 @@ use twilight_model::{
 };
 
 use crate::{
+    antinuke::Rejoin,
     app::{now_secs, App, GuildCfg},
     commands::timeout,
     events::{send_log, send_log_pinging},
@@ -66,12 +67,13 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
     // Before the other checks, so a failed join gate step cannot let a quarantined member back in.
     // A failed check counts as quarantined, so sticky roles never gives roles to a held member.
     // `held`: still in the server but held back (quarantine, raid flag); `gone`: kicked or banned.
-    let mut held = crate::antinuke::requarantine_rejoin(app, gid, user.id)
+    let rejoin = crate::antinuke::requarantine_rejoin(app, gid, user.id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(?e, "quarantining a rejoined member failed");
-            true
+            Rejoin::Held
         });
+    let mut held = rejoin == Rejoin::Held;
     if crate::raiders::on_join(app, &cfg, gid, user.id).await {
         return Ok(());
     }
@@ -129,7 +131,9 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
     };
     let suspicious = is_suspicious(&j, &cfg.joingate, cfg.joingate.min_age_ms(), now);
     let timeout = m.member.communication_disabled_until.map(|t| t.as_secs());
-    let verifying = verify::on_join(app, gid, user.id, suspicious, user.bot, timeout).await;
+    // Back in a join quarantine: their sticky roles wait for verification, as a new joiner's do.
+    let verifying = verify::on_join(app, gid, user.id, suspicious, user.bot, timeout).await
+        || rejoin == Rejoin::Verifying;
     let hits = gate(&j, &cfg.joingate, now);
     let (mut gone, mut renamed) = (false, false);
     if let Some(action) = harshest(&hits) {

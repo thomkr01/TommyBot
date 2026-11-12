@@ -231,7 +231,7 @@ async fn auto_setup(
     }
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
-    let quarantine_failed = quarantine_channels(&st, guild, &role).await;
+    let quarantine_failed = quarantine_channels(&st, guild, &role, &config).await;
     api::log_change(
         &st,
         guild,
@@ -272,6 +272,10 @@ async fn verify_channel(
         .unwrap_or_default();
     for r in &given {
         overwrites.push(json!({"id": r, "type": 0, "deny": "1024"}));
+    }
+    // Members in the join quarantine read it too; the bot's enforce_quarantine knows this overwrite.
+    if let Some(q) = own(&config["antinuke"]["quarantine_role"]) {
+        overwrites.push(json!({"id": q, "type": 0, "allow": "66560", "deny": "2048"}));
     }
     let existing = own(&config["verification"]["channel"]);
     if existing.is_none() {
@@ -564,8 +568,21 @@ fn stale<'a>(channels: &'a Value, config: &Value, name: &str) -> Vec<&'a str> {
 
 /// The quarantine role. A picked role is kept and stripped of every permission. With none picked,
 /// leftover roles named Quarantine are deleted first so the server never ends up with several.
+/// A picked role that cannot be one (@everyone, managed, not below the bot) is replaced.
 async fn quarantine_role(st: &AppState, guild: i64, config: &Value) -> Result<String, ApiError> {
-    if let Some(id) = own(&config["antinuke"]["quarantine_role"]) {
+    let picked = own(&config["antinuke"]["quarantine_role"]);
+    let fit = match &picked {
+        Some(id) => {
+            let (roles, bot_pos) = crate::ops::roles_and_bot_pos(st, guild).await?;
+            // A role missing from the list is handled below as deleted in Discord.
+            roles
+                .iter()
+                .find(|r| r.id == *id)
+                .is_none_or(|r| r.unfit(guild, bot_pos).is_none())
+        }
+        None => false,
+    };
+    if let Some(id) = picked.filter(|_| fit) {
         let r = st
             .discord
             .call(
@@ -680,10 +697,16 @@ async fn log_setup(
     Ok(Json(json!({"version": version, "created": created})))
 }
 
-/// Sets the quarantine overwrite on every channel and returns how many it could not set (the
-/// bot lacks Manage Roles there); `None` when the channels could not be listed. Runs after the
-/// commit, so a failure here loses no setup.
-pub(crate) async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<usize> {
+/// Sets the quarantine overwrite on every channel but the verification channel (members in the
+/// join quarantine must see it) and returns how many it could not set (the bot lacks Manage Roles
+/// there); `None` when the channels could not be listed. Runs after the commit, so a failure here
+/// loses no setup.
+pub(crate) async fn quarantine_channels(
+    st: &AppState,
+    guild: i64,
+    role: &str,
+    config: &Value,
+) -> Option<usize> {
     let channels = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
@@ -691,7 +714,13 @@ pub(crate) async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -
         .ok()?;
     let body = json!({"type": 0, "deny": tommybot_core::sections::QUARANTINE_DENY.to_string()});
     let mut failed = 0;
-    for id in channels.as_array()?.iter().filter_map(|c| c["id"].as_str()) {
+    let verification = own(&config["verification"]["channel"]);
+    for id in channels
+        .as_array()?
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .filter(|id| verification.as_deref() != Some(id))
+    {
         let path = format!("/channels/{id}/permissions/{role}");
         if st
             .discord

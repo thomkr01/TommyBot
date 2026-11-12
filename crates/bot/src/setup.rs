@@ -17,7 +17,10 @@ use twilight_model::{
     gateway::payload::incoming::MessageCreate,
     guild::{Permissions, RolePosition},
     http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
-    id::{marker::GuildMarker, Id},
+    id::{
+        marker::{GuildMarker, RoleMarker},
+        Id,
+    },
 };
 
 use twilight_http::request::AuditLogReason;
@@ -30,6 +33,7 @@ use crate::{
 use tommybot_core::sections::QUARANTINE_DENY;
 
 /// `misc.enforce_quarantine_perms`: puts the quarantine overwrite back on a channel that lacks it.
+/// The verification channel is left alone: members in the join quarantine must see it.
 pub async fn enforce_quarantine(app: &App, c: &Channel) -> Result<()> {
     let Some(gid) = c.guild_id else {
         return Ok(());
@@ -47,19 +51,41 @@ pub async fn enforce_quarantine(app: &App, c: &Channel) -> Result<()> {
         c.permission_overwrites.iter().flatten().any(|o| {
             o.id.get() == role.get() && o.deny.contains(want) && !o.allow.intersects(want)
         });
-    if !ok {
-        let o = PermissionOverwrite {
-            id: role.cast(),
-            kind: PermissionOverwriteType::Role,
-            allow: None,
-            deny: Some(want),
-        };
-        app.http
-            .update_channel_permission(c.id, &o)
-            .reason("Sanitizing the channel: quarantine permissions were missing")
-            .await?;
+    if ok {
+        return Ok(());
     }
+    let verification = {
+        // The bot makes and saves a verification channel under this lock, and its ChannelCreate
+        // can come in before the save: wait for it, then read the saved channel.
+        let _made = crate::verify::CHANNEL_LOCK.lock().await;
+        let saved = app.cfg(gid.get()).await?.verification.channel;
+        // The dashboard's Setup Channel saves after it made the channel, without the lock: until
+        // then its exact overwrite (read, not send) marks it.
+        let ows = c.permission_overwrites.as_deref().unwrap_or_default();
+        saved == Some(c.id) || (saved.is_none() && verification_overwrite(ows, role))
+    };
+    if verification {
+        return Ok(());
+    }
+    let o = PermissionOverwrite {
+        id: role.cast(),
+        kind: PermissionOverwriteType::Role,
+        allow: None,
+        deny: Some(want),
+    };
+    app.http
+        .update_channel_permission(c.id, &o)
+        .reason("Sanitizing the channel: quarantine permissions were missing")
+        .await?;
     Ok(())
+}
+
+/// The quarantine role's overwrite in a new verification channel: read, but not send.
+fn verification_overwrite(overwrites: &[ModelOverwrite], role: Id<RoleMarker>) -> bool {
+    let read = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+    overwrites
+        .iter()
+        .any(|o| o.id == role.cast() && o.allow == read && o.deny == Permissions::SEND_MESSAGES)
 }
 
 const STEPS: [&str; 9] = [
@@ -151,10 +177,11 @@ where
     let cfg = app.cfg(gid.get()).await?;
     let roles = http.roles(gid).await?.models().await?;
     tick(4).await;
+    // A saved role that is gone, or one that cannot be a quarantine role, is replaced.
     let role = match cfg
         .antinuke
         .quarantine_role
-        .filter(|r| roles.iter().any(|x| x.id == *r))
+        .filter(|r| roles.iter().any(|x| x.id == *r) && info.unfit(gid, *r).is_none())
     {
         Some(r) => r,
         None => {
@@ -169,7 +196,12 @@ where
     };
     tick(5).await;
     let deny = Permissions::from_bits_truncate(QUARANTINE_DENY);
-    for c in http.guild_channels(gid).await?.models().await? {
+    // Not the verification channel: members in the join quarantine must see it.
+    let channels = http.guild_channels(gid).await?.models().await?;
+    for c in channels
+        .iter()
+        .filter(|c| cfg.verification.channel != Some(c.id))
+    {
         let o = PermissionOverwrite {
             id: role.cast(),
             kind: PermissionOverwriteType::Role,
@@ -257,6 +289,30 @@ async fn log_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_verification_overwrite_marks_a_new_verification_channel() {
+        let q = Id::new(5);
+        let ow = |id: u64, allow: Permissions, deny: Permissions| ModelOverwrite {
+            id: Id::new(id),
+            kind: ModelOverwriteType::Role,
+            allow,
+            deny,
+        };
+        let read = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+        let send = Permissions::SEND_MESSAGES;
+        assert!(verification_overwrite(&[ow(5, read, send)], q));
+        assert!(!verification_overwrite(&[ow(6, read, send)], q)); // another role
+        assert!(!verification_overwrite(
+            &[ow(5, read | send, Permissions::empty())],
+            q
+        ));
+        assert!(!verification_overwrite(
+            &[ow(5, Permissions::VIEW_CHANNEL, send)],
+            q
+        ));
+        assert!(!verification_overwrite(&[], q));
+    }
 
     #[test]
     fn progress_marks_done_running_and_failed() {
