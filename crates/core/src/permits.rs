@@ -402,6 +402,44 @@ pub fn command_allowed(
     }
 }
 
+/// The live EO/TA lists and custom permits as one document: the `permits` copy in each config version.
+pub async fn snapshot(c: &mut sqlx::PgConnection, guild: i64) -> sqlx::Result<serde_json::Value> {
+    let users = |table: &str| {
+        format!("select user_id::text from {table} where guild_id = $1 order by user_id")
+    };
+    let eo: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(users("extra_owners")))
+        .bind(guild)
+        .fetch_all(&mut *c)
+        .await?;
+    let ta: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(users("trusted_admins")))
+        .bind(guild)
+        .fetch_all(&mut *c)
+        .await?;
+    type Row = (
+        i64,
+        String,
+        i32,
+        Vec<String>,
+        serde_json::Value,
+        Vec<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as("select id, name, rank, perms, limits, whitelist from permits where guild_id = $1 order by rank desc, name")
+        .bind(guild)
+        .fetch_all(&mut *c)
+        .await?;
+    let mut custom = vec![];
+    for (id, name, rank, perms, limits, whitelist) in rows {
+        let roles: Vec<String> = sqlx::query_scalar(
+            "select role_id::text from permit_roles where permit_id = $1 order by role_id",
+        )
+        .bind(id)
+        .fetch_all(&mut *c)
+        .await?;
+        custom.push(serde_json::json!({"name": name, "rank": rank, "perms": perms, "limits": limits, "whitelist": whitelist, "roles": roles}));
+    }
+    Ok(serde_json::json!({"eo": eo, "ta": ta, "custom": custom}))
+}
+
 /// Every role tied to one of the guild's permits; never handed out by verification or sticky roles.
 pub async fn permit_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Vec<i64>> {
     sqlx::query_scalar(

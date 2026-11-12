@@ -10,7 +10,31 @@ pub async fn current(db: &PgPool, guild: i64) -> Result<(i32, Value), ApiError> 
         .bind(guild).fetch_optional(db).await?.unwrap_or((0, json!({}))))
 }
 
+/// The newest version under the config lock, so a `commit` in the same transaction cannot conflict.
+pub async fn locked(
+    tx: &mut Transaction<'_, Postgres>,
+    guild: i64,
+) -> Result<(i32, Value), ApiError> {
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(guild)
+        .execute(&mut **tx)
+        .await?;
+    Ok(sqlx::query_as("select version, config from guild_config where guild_id = $1 order by version desc limit 1")
+        .bind(guild).fetch_optional(&mut **tx).await?.unwrap_or((0, json!({}))))
+}
+
+/// Records a change made to the permit tables alone as a new version, so rollbacks and stale saves see it.
+pub async fn bump(
+    tx: &mut Transaction<'_, Postgres>,
+    guild: i64,
+    user: i64,
+) -> Result<i32, ApiError> {
+    let (cur, config) = locked(tx, guild).await?;
+    commit(tx, guild, cur, &config, user).await
+}
+
 /// Appends a new config version if `expected` is still the newest, then tells the bot.
+/// The version's `permits` copy is always read from the live tables, never taken from `config`.
 pub async fn commit(
     tx: &mut Transaction<'_, Postgres>,
     guild: i64,
@@ -18,25 +42,18 @@ pub async fn commit(
     config: &Value,
     user: i64,
 ) -> Result<i32, ApiError> {
-    sqlx::query("select pg_advisory_xact_lock($1)")
-        .bind(guild)
-        .execute(&mut **tx)
-        .await?;
-    let cur: i32 = sqlx::query_scalar(
-        "select coalesce(max(version), 0) from guild_config where guild_id = $1",
-    )
-    .bind(guild)
-    .fetch_one(&mut **tx)
-    .await?;
+    let (cur, _) = locked(tx, guild).await?;
     if cur != expected {
         return Err(ApiError::Conflict(cur));
     }
+    let mut config = config.clone();
+    config["permits"] = read_permits(tx, guild).await?;
     sqlx::query(
         "insert into guild_config (guild_id, version, config, changed_by) values ($1,$2,$3,$4)",
     )
     .bind(guild)
     .bind(cur + 1)
-    .bind(config)
+    .bind(&config)
     .bind(user)
     .execute(&mut **tx)
     .await?;
@@ -46,8 +63,6 @@ pub async fn commit(
         .await?;
     Ok(cur + 1)
 }
-
-type PermitRow = (i64, String, i32, Vec<String>, Value, Vec<String>);
 
 fn ids(v: &Value) -> Vec<i64> {
     v.as_array()
@@ -66,32 +81,7 @@ fn strs(v: &Value) -> Vec<String> {
 }
 
 pub async fn read_permits(c: &mut PgConnection, guild: i64) -> Result<Value, ApiError> {
-    let eo: Vec<i64> =
-        sqlx::query_scalar("select user_id from extra_owners where guild_id = $1 order by user_id")
-            .bind(guild)
-            .fetch_all(&mut *c)
-            .await?;
-    let ta: Vec<i64> = sqlx::query_scalar(
-        "select user_id from trusted_admins where guild_id = $1 order by user_id",
-    )
-    .bind(guild)
-    .fetch_all(&mut *c)
-    .await?;
-    let rows: Vec<PermitRow> =
-        sqlx::query_as("select id, name, rank, perms, limits, whitelist from permits where guild_id = $1 order by rank desc, name").bind(guild).fetch_all(&mut *c).await?;
-    let mut custom = vec![];
-    for (id, name, rank, perms, limits, whitelist) in rows {
-        let roles: Vec<i64> = sqlx::query_scalar(
-            "select role_id from permit_roles where permit_id = $1 order by role_id",
-        )
-        .bind(id)
-        .fetch_all(&mut *c)
-        .await?;
-        custom.push(json!({"name": name, "rank": rank, "perms": perms, "limits": limits, "whitelist": whitelist,
-            "roles": roles.iter().map(i64::to_string).collect::<Vec<_>>()}));
-    }
-    let s = |v: Vec<i64>| v.iter().map(i64::to_string).collect::<Vec<_>>();
-    Ok(json!({"eo": s(eo), "ta": s(ta), "custom": custom}))
+    Ok(permits::snapshot(c, guild).await?)
 }
 
 /// Replaces the guild's EO/TA lists and custom permits with `p`. Permits are upserted by name.
@@ -193,6 +183,41 @@ mod tests {
         )
         .await
         .is_err());
+        tx.rollback().await.unwrap();
+    }
+
+    /// A version's `permits` copy is the live tables, also for a save that carried a stale copy, and
+    /// a change to the tables alone (rescue claim) gets a version of its own.
+    #[tokio::test]
+    async fn every_version_holds_the_live_permits() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_840_000_000 + (std::process::id() as i64);
+        let mut tx = db.begin().await.unwrap();
+        sqlx::query("insert into trusted_admins (guild_id, user_id) values ($1, 6)")
+            .bind(g)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let stale = json!({"a": 1, "permits": {"eo": [], "ta": ["6", "9"], "custom": []}});
+        assert_eq!(commit(&mut tx, g, 0, &stale, 7).await.unwrap(), 1);
+        sqlx::query("insert into extra_owners (guild_id, user_id) values ($1, 5)")
+            .bind(g)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(bump(&mut tx, g, 5).await.unwrap(), 2);
+        let rows: Vec<(i32, Value)> = sqlx::query_as(
+            "select version, config from guild_config where guild_id = $1 order by version",
+        )
+        .bind(g)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        let live = |eo: &[&str]| json!({"a": 1, "permits": {"eo": eo, "ta": ["6"], "custom": []}});
+        assert_eq!(rows, vec![(1, live(&[])), (2, live(&["5"]))]);
         tx.rollback().await.unwrap();
     }
 

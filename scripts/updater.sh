@@ -26,13 +26,16 @@ where id = :id;
 SQL
 }
 
-# Puts the images from before the update back under their tags and restarts on them.
+# Puts the images from before the update back under their tags and restarts on them. The old version
+# is checked like the new one: it can crash too, for example on a migration it does not know.
 rollback() {
   while read -r svc ref; do docker tag "${ref%:*}:rollback" "$ref"; done < "$OLD"
-  if $DC up -d --no-deps --no-build bot dashboard > /dev/null 2>&1; then
+  if ! $DC up -d --no-deps --no-build bot dashboard > /dev/null 2>&1; then
+    finish failed "$1 Rolling back failed too: run 'docker compose up -d' on the server."
+  elif settled; then
     finish rolled_back "$1 The previous version is running again."
   else
-    finish failed "$1 Rolling back failed too: run 'docker compose up -d' on the server."
+    finish failed "$1 The previous version does not start either: check 'docker compose logs bot dashboard' on the server."
   fi
 }
 
@@ -43,6 +46,18 @@ healthy() {
     [ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$c" 2> /dev/null)" = "true 0" ] || return 1
   done
   wget -q -T 5 -O /dev/null http://dashboard:8080/
+}
+
+# Up and answering within a minute, then still up 15 seconds later (catches crash loops).
+settled() {
+  i=0
+  until healthy; do
+    i=$((i + 1))
+    [ "$i" -lt 30 ] || return 1
+    sleep 2
+  done
+  sleep 15
+  healthy
 }
 
 run() {
@@ -74,15 +89,7 @@ SQL
   out=$($DC up -d --no-deps --no-build dashboard 2>&1) || { rollback "Restarting the dashboard failed: $(echo "$out" | tail -c 300)"; return; }
 
   step 4
-  # Up and answering within a minute, then still up 15 seconds later (catches crash loops).
-  i=0
-  until healthy; do
-    i=$((i + 1))
-    [ "$i" -lt 30 ] || { rollback "The new version did not start properly."; return; }
-    sleep 2
-  done
-  sleep 15
-  healthy || { rollback "The new version stopped right after starting."; return; }
+  settled || { rollback "The new version did not start properly."; return; }
   finish done ""
 }
 

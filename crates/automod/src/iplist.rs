@@ -1,5 +1,5 @@
 //! Tor exit, VPN and hosting-network IP ranges for web verification (downloaded, refreshed on a timer).
-use crate::sites::{client, is_public};
+use crate::sites::{client, is_public, read_capped, shrank, LIST_MAX_BYTES};
 use std::{
     net::{IpAddr, Ipv6Addr},
     sync::RwLock,
@@ -8,7 +8,6 @@ use std::{
 const TOR_URL: &str = "https://check.torproject.org/torbulkexitlist";
 const VPN_URLS: &str = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv6.txt";
 const DC_URLS: &str = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv6.txt";
-const MAX_BYTES: usize = 20 << 20;
 /// A real list has no range this wide; one that does is broken or poisoned and would block whole countries.
 const MIN_V4_PREFIX: u8 = 8;
 const MIN_V6_PREFIX: u8 = 16;
@@ -172,12 +171,14 @@ impl IpLists {
     /// Re-downloads every list. `TOR_LIST_URL` / `VPN_LIST_URL` / `HOSTING_LIST_URL` (space-separated URLs)
     /// override the sources, empty disables one. A failed, broken or much smaller download keeps the old list.
     pub async fn refresh(&self) {
-        for (var, default, slot) in [
+        let slots = [
             ("TOR_LIST_URL", TOR_URL, &self.tor),
             ("VPN_LIST_URL", VPN_URLS, &self.vpn),
             ("HOSTING_LIST_URL", DC_URLS, &self.hosting),
-        ] {
-            let urls = std::env::var(var).unwrap_or_else(|_| default.into());
+        ];
+        let urls = |var, default: &str| std::env::var(var).unwrap_or_else(|_| default.into());
+        for (var, default, slot) in slots {
+            let urls = urls(var, default);
             if urls.trim().is_empty() {
                 *slot.write().unwrap() = IpList::default();
                 continue;
@@ -204,7 +205,7 @@ impl IpLists {
             match IpList::parse(&text) {
                 Ok(new) => {
                     let old = slot.read().unwrap().len();
-                    if new.len() * 2 < old {
+                    if shrank(old, new.len()) {
                         tracing::warn!(
                             var,
                             old,
@@ -218,19 +219,17 @@ impl IpLists {
                 Err(e) => tracing::warn!(e, var, "IP list refused, keeping the old one"),
             }
         }
+        // `loaded()` is true once any list is, so say which one is still missing.
+        for (var, default, slot) in slots {
+            if !urls(var, default).trim().is_empty() && slot.read().unwrap().is_empty() {
+                tracing::warn!(var, "IP list is empty, addresses on it are let through");
+            }
+        }
     }
 
     async fn download(&self, url: &str) -> anyhow::Result<String> {
-        let mut r = self.http.get(url).send().await?.error_for_status()?;
-        anyhow::ensure!(
-            r.content_length().is_none_or(|l| l <= MAX_BYTES as u64),
-            "list too big"
-        );
-        let mut buf = Vec::new();
-        while let Some(c) = r.chunk().await? {
-            buf.extend_from_slice(&c);
-            anyhow::ensure!(buf.len() <= MAX_BYTES, "list too big");
-        }
+        let r = self.http.get(url).send().await?.error_for_status()?;
+        let buf = read_capped(r, LIST_MAX_BYTES).await?;
         Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 

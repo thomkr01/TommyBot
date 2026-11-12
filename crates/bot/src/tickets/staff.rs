@@ -34,7 +34,8 @@ pub(super) async fn relay(
     };
     let staff = &m.author;
     let (to_member, copy) = from_staff(&s, staff, &member.user, &text, anon);
-    let files = download(app, &m.attachments).await;
+    let (files, linked) = download(app, &m.attachments).await;
+    let to_member = attachment_fields(to_member, linked.iter().copied());
     let dm = app
         .http
         .create_private_channel(user)
@@ -56,16 +57,22 @@ pub(super) async fn relay(
             return say(app, ch, error(text)).await;
         }
     };
-    let copy = attachment_fields(copy, &posted.attachments);
+    let copy = attachment_fields(
+        copy,
+        posted.attachments.iter().chain(linked.iter().copied()),
+    );
     app.http
         .create_message(ch)
         .embeds(&[copy.build()])
         .attachments(&files)
         .await?;
-    best_effort(
-        app.http.delete_message(ch, m.id).await,
-        "relayed ticket message",
-    );
+    // A linked file lives on the staff message, so that one stays.
+    if linked.is_empty() {
+        best_effort(
+            app.http.delete_message(ch, m.id).await,
+            "relayed ticket message",
+        );
+    }
     remember(app, user, gid).await
 }
 

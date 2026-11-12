@@ -213,10 +213,28 @@ pub struct Put {
 }
 
 pub(crate) async fn log_change(st: &AppState, guild: i64, config: &Value, text: String) {
-    if let Some(ch) = config["logging"]["config_changes"]
+    // Also the channel of the version before, so a save that clears or moves the log is still seen there.
+    let before: Vec<Option<String>> = sqlx::query_scalar(
+        "select config->'logging'->>'config_changes' from guild_config where guild_id = $1 order by version desc limit 2",
+    )
+    .bind(guild)
+    .fetch_all(&st.db)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("config-changes log channels not read: {e:#}");
+        vec![]
+    });
+    let mut channels: Vec<String> = config["logging"]["config_changes"]
         .as_str()
         .map(String::from)
-    {
+        .into_iter()
+        .chain(before.into_iter().flatten())
+        .filter(|c| !c.is_empty())
+        .collect();
+    channels.sort();
+    channels.dedup();
+    for ch in channels {
+        let text = text.clone();
         let d = st.discord.clone();
         tokio::spawn(async move {
             match d.private_channel_of(guild, &ch).await {
@@ -389,8 +407,7 @@ pub async fn put_permits(
     }
     store::write_permits(&mut tx, guild, &b.value).await?;
     keep_exemptions(&mut tx, guild, level, &old).await?;
-    let (_, mut config) = store::current(&st.db, guild).await?;
-    config["permits"] = store::read_permits(&mut tx, guild).await?;
+    let (_, config) = store::current(&st.db, guild).await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
     log_change(
@@ -483,9 +500,14 @@ pub async fn diff_versions(
     Path((guild, from, to)): Path<(i64, i32, i32)>,
 ) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
+    let mut new = version(&st, guild, to).await?;
+    // "Diff vs current" shows what a rollback changes, and a rollback compares with the live permits.
+    if to == store::current(&st.db, guild).await?.0 {
+        new["permits"] = store::read_permits(&mut *st.db.acquire().await?, guild).await?;
+    }
     Ok(Json(json!(diff::diff(
         &version(&st, guild, from).await?,
-        &version(&st, guild, to).await?
+        &new
     ))))
 }
 
@@ -511,6 +533,14 @@ pub async fn rollback(
         ));
     }
     discord_owner_for(&st, &s, guild, owner_only_changed(&old, &now)).await?;
+    // The same checks as a save: an old version may hold a value the bot would now read as off.
+    for k in access::SECTIONS {
+        if let Some(v) = old.get(*k).filter(|v| Some(*v) != now.get(*k)) {
+            validate(k, v)?;
+            limits::check(k, v, &now[*k]).map_err(ApiError::BadRequest)?;
+        }
+    }
+    web_mode_ok(&old, &now)?;
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
     if let Some(p) = old.get("permits") {
@@ -688,12 +718,7 @@ pub async fn import(
     let (min, step_up) = import_bar(&new, &now);
     let level = require(&st, &s, guild, min, step_up).await?;
     discord_owner_for(&st, &s, guild, owner_only_changed(&new, &now)).await?;
-    let web = ["verification", "lockdown"]
-        .iter()
-        .any(|k| new.get(*k) != now.get(*k));
-    if let Some(e) = tommybot_automod::join::web_mode_error(&new).filter(|_| web) {
-        return Err(ApiError::BadRequest(e.into()));
-    }
+    web_mode_ok(&new, &now)?;
     if !b.apply {
         return Ok(Json(
             json!({"diff": diff::diff(&now, &new), "cleared": cleared}),
@@ -788,7 +813,9 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "antinuke" => serde_json::from_value::<AntinukeCfg>(v).map(drop),
         "automod" => serde_json::from_value::<AutomodCfg>(v).map(drop),
         "joingate" => serde_json::from_value::<tommybot_automod::join::GateCfg>(v).map(drop),
-        "verification" => serde_json::from_value::<tommybot_automod::join::VerifyCfg>(v).map(drop),
+        "verification" => {
+            serde_json::from_value::<tommybot_core::sections::VerificationCfg>(v).map(drop)
+        }
         "joinraid" => serde_json::from_value::<tommybot_automod::join::RaidCfg>(v).map(drop),
         "backups" => serde_json::from_value::<BackupsCfg>(v).map(drop),
         "panic" => serde_json::from_value::<PanicCfg>(v).map(drop),
@@ -810,6 +837,17 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
 }
 
+/// Web verification's rules, checked only when a whole-config write changes verification or lockdown.
+fn web_mode_ok(new: &Value, now: &Value) -> Result<(), ApiError> {
+    let web = ["verification", "lockdown"]
+        .iter()
+        .any(|k| new.get(*k) != now.get(*k));
+    match tommybot_automod::join::web_mode_error(new).filter(|_| web) {
+        Some(e) => Err(ApiError::BadRequest(e.into())),
+        None => Ok(()),
+    }
+}
+
 /// No negative heat weights. Max and decay have their ranges in `limits`.
 fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
     let weights = serde_json::to_value(h).unwrap_or_default();
@@ -828,6 +866,18 @@ fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
 mod logging_validate_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn verification_is_checked_with_the_bots_type() {
+        // `channel` and `roles` are only in the bot's VerificationCfg; a bad one made the bot read it all as off.
+        assert!(validate("verification", &json!({"channel": "not an id"})).is_err());
+        assert!(validate("verification", &json!({"roles": "6"})).is_err());
+        assert!(validate(
+            "verification",
+            &json!({"enabled": true, "channel": "5", "roles": ["6"]})
+        )
+        .is_ok());
+    }
 
     #[test]
     fn imports_refuse_new_numbers_outside_their_range() {

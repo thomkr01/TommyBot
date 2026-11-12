@@ -247,7 +247,7 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         },
     };
     let text = body(&m.content, app.me);
-    let files = download(app, &m.attachments).await;
+    let (files, linked) = download(app, &m.attachments).await;
     let (sent, got) = from_member(&s, &m.author, &text);
     let dm_msg = app
         .http
@@ -257,7 +257,8 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         .await?
         .model()
         .await?;
-    let got = attachment_fields(got, &dm_msg.attachments);
+    // The member's own message stays in the DM, so its links keep working.
+    let got = attachment_fields(got, dm_msg.attachments.iter().chain(linked));
     if let Err(e) = app
         .http
         .create_message(ch)

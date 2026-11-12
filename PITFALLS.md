@@ -107,6 +107,12 @@ Saving a bot role's old permissions loses bits newer than twilight. This is a kn
 User flags too: `UserFlags` is read with `from_bits_truncate`, so `public_flags` never holds Discord's undocumented spammer bit (`1 << 20`).
 *Avoid:* read such a bit from the raw gateway JSON before twilight parses it, like `spam_flag` in `crates/bot/src/main.rs` (the loop reads raw messages instead of `next_event`).
 
+**A download without a size cap could fill the bot's memory.** (overlap deep dive D51/D52, 11-12)
+Ticket and modmail relays copied every attachment with `.bytes()` and then `to_vec()`, so a few large files held twice their size in memory, and an out-of-memory restart wipes the in-memory protection state. `Sites::fetch` read the whole body when Content-Length was missing, and the phishing/NSFW list refresh read any size and took an empty or garbled 200 as the new list, which switched those filters off for 12 hours. Root cause: three hand-written readers, only the IP list one capped while reading and refused a list that shrank.
+*Avoid:* read a body from outside through `sites::read_capped` (Content-Length and the running total), and refuse a refreshed list that lost over half its entries (`sites::shrank`, shared with the IP lists). A ticket file over Discord's 25 MB is linked instead of copied, and the staff message holding it is kept. Searched: the icon revert already capped while reading; the NSFW scan fetch goes through `Sites::fetch`.
+
+**A REST call on the join path had no time limit.** (D57, 11-12) `invites::used_invite` runs before raid detection on every join and waited out Discord's rate limit, so during a raid each joiner's detection queued behind the invites bucket. *Avoid:* a lookup on a protection path gets `tokio::time::timeout` (1.5 s here) and a timeout just means "unknown". Moving raid detection before it is an open question (D57).
+
 ## 2. Concurrency and restarts
 
 **Unlock deleted its snapshot first.** (#97, #111)
@@ -238,6 +244,15 @@ The lift took a missing ban to mean an earlier try had unbanned, and wrote an un
 `token_create` counted live MCP tokens and inserted in a separate statement, so parallel requests at 9 live tokens all saw room (the test made up to 20 against a cap of 10). `propose` (open MCP changes, each one a DM to the owner) and message reports (10 per reporter an hour; each interaction is its own task) had the same gap. A single `INSERT … SELECT … WHERE (SELECT count(*)) < n` does not help under READ COMMITTED: parallel statements do not see each other's uncommitted rows.
 *Avoid:* count and insert in one transaction under `pg_advisory_xact_lock(hashtextextended('<kind>:' || key, 0))` (`mcp_tokens:` and `mcp_writes:` are global, `reports:` is per guild and reporter), taken right before the insert and never held across a Discord call. A unique index is enough when it already lets only one win (`appeals_one_open`). Searched every `count(*)`, `exists(` and `.len() >=` that gates an insert: the appeals daily limit is covered by its unique open index; the Raider List report cap, ticket numbers and config saves were already locked; the Ban Sync hourly cap is counted inside sequential jobs (an owner's import can overlap a share job by a few, left as is); the in-memory caps (rescue claims, verification remakes, 2FA fails) check and push under one Mutex.
 
+**A write to the permit tables without a config version came back with a rollback.** (D65, 11-12)
+`statics 10 ?remove` deleted a Trusted Admin straight from the table, and the rescue claim added an Extra Owner the same way. Every config version keeps a `permits` copy, so a rollback rewrote the removed TA, a Permits page opened before the removal saved it back (the version check passed, nothing had bumped it), and History's "Diff vs current" compared two stale copies. Root cause: one piece of state stored in two places (tables and the version copy), with writers that updated only one.
+*Avoid:* every write to `extra_owners`, `trusted_admins`, `permits` or `permit_roles` runs in a config-version transaction: the dashboard's `store::commit` and the bot's `settings::save` always take the copy from the live tables (`permits::snapshot`), and a table-only change appends a version (`store::bump`, the bot's `locked` + `append`). Read permits you write back after any Discord call (Auto Setup). Searched: put_permits, rollback, import and Auto Setup already wrote inside a version; the MCP rollback preview already read live permits.
+
+**A cache filled after an await kept an older value than the NOTIFY that cleared it.** (D66, 11-12)
+`App::cfg` read the newest config, awaited, then inserted it. A save whose NOTIFY removed the cache entry between the read and the insert left the older config cached until the next save. *Avoid:* the config cache has a generation that every forget moves, and a load caches only under the generation it started with (`CfgCache`). Any lazy cache with an external invalidation needs the same.
+
+**A save after a Discord call lost the race to an unrelated save.** (D73, 11-12) `set_bot_actions` read the config, and after the AutoMod rule was already made in Discord, committed with that version; any save in between answered 409 and the rule had no bot actions. *Avoid:* a config write that follows a side effect reads the version under the config lock in its own transaction (`store::locked`), so it cannot conflict. Keep Discord calls outside that lock.
+
 ## 3. Automod
 
 **Three throwaway servers are three owners.** (Raider List review, 11-11)
@@ -297,6 +312,11 @@ The MCP OAuth registration took any `https://` redirect and checked localhost wi
 **A refresh token that issues a fresh one with a full lifetime never expires.** (MCP security review, 2026-11-10)
 Each MCP refresh gave a new 30-day refresh token, so a stolen one could be renewed forever and only rotating `MCP_OAUTH_SECRET` stopped it.
 *Avoid:* carry the login time (`auth`) through every refresh and cap the new token at login time plus the limit.
+
+**A zero quietly switched a protection off.** (D70, 11-12)
+Strike cap, multiplier, strike durations, mention lock count and window, the mention hour cap, panic window and heat trigger, Join Raid count, span and ID matches, ban purge days and warn points had ranges only in the prefix panels, so the dashboard, import and MCP could save `panic.window_secs = 0` or `mention_window_ms = 0` and the feature never fired. *Avoid:* the ranges live in `core::limits` (`FIXED`, `for_path`), the prefix panels use the same constants, and rollback runs the same `validate`, `limits::check` and `web_mode_error` as a save (it skipped them). `panic.executors` stays out: 0 means off. Values saved before stay as they are (no clamp on read yet).
+
+**The dashboard validated a section with a smaller type than the bot reads.** (D69, 11-12) `verification` was checked as `VerifyCfg`, but the bot parses `VerificationCfg` (also `channel`, `roles`), so a bad role id was saved and the bot read the whole section as default (off). *Avoid:* a section type both sides parse lives in `tommybot_core::sections` and the dashboard validates with that exact type.
 
 ## 5. Database and migrations
 
@@ -364,6 +384,12 @@ See [crates/dashboard/ui/PITFALLS.md](crates/dashboard/ui/PITFALLS.md) for the t
 
 - **Writing into Discord JSON by position panicked after the decision was saved.** (Jev full check, 11-11) Appeals `close_log` added the Decision field with `embeds[0]["fields"].as_array_mut()`. Writing through `v[0]` panics when `v` is not an array or is empty, and writing through `v["k"]` panics when `v` is a string, number, bool or array. A log message with no embed panicked after `decide` had committed, so the member never got the verdict DM. *Avoid:* to change JSON from outside (Discord replies, stored documents, user input), use `get_mut(i)` / `as_object_mut()` / `entry(..)` and do nothing on a wrong shape; reading with `v["x"]` never panics. Side work like `close_log` must not be able to stop what comes after it. Searched every write by index or key in `crates/*/src` and the UI: config writes are safe because `put_section` and import only store objects that parse into their typed sections. The UI embed editor's `set_at` also panicked on a stored `"image": "url"` (the server check only reads `/image/url`) and now replaces a non-object parent with `{}`. The Decision field itself could pass Discord's 1024 limit ("Denied and blacklisted by <@id>" plus a 1000-character reply), which made Discord refuse the edit and left the buttons on the log; both the dashboard and the bot's button path now cut it to 1024 and skip a 26th field.
 
+- **The config-change log read the new config.** (D71, 11-12) A save that cleared or moved `logging.config_changes` was announced only in the new channel, so clearing it hid itself. *Avoid:* `log_change` also posts to the channel of the version before.
+- **The lockdown check looked only at main-role overwrites.** (D76, 11-12) An allow on @everyone, another role or a member beats the lock too. *Avoid:* `tshoot` reports every overwrite that allows writing, except bots' managed roles, the bot itself and ticket channels; only main-role and @everyone ones get the automatic fix, since a staff channel's allow is often on purpose.
+- **A dashboard action skipped panic mode's mod command lock.** (D24, 11-12) Accepting an appeal unbanned during panic mode while the bot refused `t!unban`. *Avoid:* a dashboard path that does what a mod command does checks the lock (`appeals::mod_lock`, from the pending `panic_end` job) and lets only owners, Extra Owners and Trusted Admins through, like `commands::gated`.
+- **"Loaded" meant any IP list.** (D54, 11-12) `IpLists::loaded()` was true with only the Tor list, so VPN and hosting addresses passed silently. *Avoid:* the refresh warns for each enabled list that is still empty.
+- **The NSFW live lane had no per-member cap.** (D49, 11-12) One member's flood filled the shared live lane. *Avoid:* at most 4 images per member wait live (`PER_MEMBER_LIVE`); the rest go to the backlog.
+
 ## 7. Build and deploy
 
 **Trunk's prebuilt wasm-bindgen needs a newer glibc.** (#123)
@@ -384,6 +410,8 @@ The bot prints nothing useful at the default level. `live.sh` and compose set it
 Fix with `cargo update -p <crate>`. A new dependency can also pull a crate back to an older, vulnerable version: tract 0.21 pinned `time` below 0.3.42 (#188). After adding a dependency, diff `Cargo.lock` for downgrades. Ignore an advisory in `.cargo/audit.toml` only with a reason, as for RUSTSEC-2023-0071 (rsa only via the unused sqlx-mysql).
 
 **DEPLOY.md named a menu that does not exist.** (DEPLOY 6.4) It said **MCP** in the top bar; the link is **MCP tokens** in the account menu, so the owner could not find it. *Avoid:* when a guide names a button or menu, check its label and place in `crates/dashboard/ui/src/main.rs` (header) or the page itself. The rename missed "new MCP page" in CHANGELOG.md (found in the docs round after #166): grep every .md, CHANGELOG and README included, for the old label.
+
+**A rollback reported success without checking the old version.** (D48, 11-12) After a failed update the updater restarted the old images and wrote "running again" without a health check, so an old binary crash-looping on a newer migration was reported as fine. *Avoid:* the rollback waits on the same `settled` check as the update and reports `failed` when the old version does not start. `tests/e2e/updater.sh` covers it with a marker file standing in for the migration.
 
 ## 8. Tests
 

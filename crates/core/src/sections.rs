@@ -717,6 +717,19 @@ pub struct LockdownCfg {
     pub main_roles: Vec<Id<RoleMarker>>,
 }
 
+/// The whole `verification` section as the bot reads it; the dashboard validates saves with it too.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct VerificationCfg {
+    pub enabled: bool,
+    /// Where `verifysetup` posts the button.
+    pub channel: Option<Id<ChannelMarker>>,
+    /// Roles handed out on a pass.
+    pub roles: Vec<Id<RoleMarker>>,
+    #[serde(flatten)]
+    pub verify: tommybot_automod::join::VerifyCfg,
+}
+
 /// Panic mode: trips when `executors` distinct accounts are quarantined within `window_secs`.
 #[derive(Clone, Deserialize)]
 #[serde(default)]

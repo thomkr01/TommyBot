@@ -288,37 +288,45 @@ async fn server(app: &App, gid: Id<GuildMarker>) -> Result<Option<Server>> {
     }
 }
 
-/// Copies of a message's files, to post them again elsewhere. A file that fails to download is skipped.
-async fn download(app: &App, list: &[Uploaded]) -> Vec<Attachment> {
-    let mut out = vec![];
+/// Discord's upload limit for a bot without boosts; a larger file is linked instead of copied.
+const COPY_MAX: u64 = 25 << 20;
+
+/// Copies of a message's files, to post them again elsewhere, and the ones left as a link (over
+/// [`COPY_MAX`], or the download failed).
+async fn download<'a>(app: &App, list: &'a [Uploaded]) -> (Vec<Attachment>, Vec<&'a Uploaded>) {
+    let (mut out, mut linked) = (vec![], vec![]);
     for (i, a) in list.iter().enumerate() {
+        if a.size > COPY_MAX {
+            linked.push(a);
+            continue;
+        }
         let got = async {
-            anyhow::Ok(
-                // The shared client has a timeout; a bare `reqwest::get` could hang the reply.
-                app.api
-                    .client()
-                    .get(&a.url)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?,
-            )
+            // The shared client has a timeout; a bare `reqwest::get` could hang the reply.
+            let r = app
+                .api
+                .client()
+                .get(&a.url)
+                .send()
+                .await?
+                .error_for_status()?;
+            tommybot_automod::sites::read_capped(r, COPY_MAX as usize).await
         };
         match got.await {
-            Ok(b) => out.push(Attachment::from_bytes(
-                a.filename.clone(),
-                b.to_vec(),
-                i as u64,
-            )),
-            Err(e) => tracing::warn!(?e, file = %a.filename, "ticket attachment download failed"),
+            Ok(b) => out.push(Attachment::from_bytes(a.filename.clone(), b, i as u64)),
+            Err(e) => {
+                tracing::warn!(?e, file = %a.filename, "ticket attachment download failed");
+                linked.push(a);
+            }
         }
     }
-    out
+    (out, linked)
 }
 
-fn attachment_fields(mut b: EmbedBuilder, posted: &[Uploaded]) -> EmbedBuilder {
-    for (n, a) in posted.iter().enumerate() {
+fn attachment_fields<'a>(
+    mut b: EmbedBuilder,
+    posted: impl IntoIterator<Item = &'a Uploaded>,
+) -> EmbedBuilder {
+    for (n, a) in posted.into_iter().enumerate() {
         b = b.field(EmbedFieldBuilder::new(
             format!("Attachment {}", n + 1),
             a.url.clone(),

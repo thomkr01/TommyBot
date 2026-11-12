@@ -844,6 +844,7 @@ async fn claim_key(
     .bind(user)
     .execute(&mut *tx)
     .await?;
+    crate::store::bump(&mut tx, guild, user).await?;
     tx.commit().await?;
     Ok(())
 }

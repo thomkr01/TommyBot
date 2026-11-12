@@ -15,6 +15,8 @@ const PHISHING_URL: &str =
 const NSFW_URL: &str =
     "https://raw.githubusercontent.com/blocklistproject/Lists/master/alt-version/porn-nl.txt";
 pub const REFRESH: Duration = Duration::from_secs(12 * 3600);
+/// Largest list download (site and IP lists).
+pub(crate) const LIST_MAX_BYTES: usize = 20 << 20;
 
 /// Bare domains. A host hits when it or any parent domain is listed.
 #[derive(Default)]
@@ -107,6 +109,25 @@ fn follow(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
     }
 }
 
+/// A refreshed list with under half the entries of the one it replaces is refused.
+pub(crate) fn shrank(old: usize, new: usize) -> bool {
+    new * 2 < old
+}
+
+/// The body, refused as soon as it passes `max` bytes (a missing or wrong Content-Length included).
+pub async fn read_capped(mut r: reqwest::Response, max: usize) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        r.content_length().is_none_or(|l| l <= max as u64),
+        "body over {max} bytes"
+    );
+    let mut buf = Vec::new();
+    while let Some(c) = r.chunk().await? {
+        anyhow::ensure!(buf.len() + c.len() <= max, "body over {max} bytes");
+        buf.extend_from_slice(&c);
+    }
+    Ok(buf)
+}
+
 pub struct Sites {
     phishing: RwLock<SiteList>,
     nsfw: RwLock<SiteList>,
@@ -154,6 +175,12 @@ impl Sites {
                 continue;
             }
             match self.download(&url).await {
+                // An empty or garbled page would switch the filter off until the next refresh.
+                Ok(list) if shrank(slot.read().unwrap().0.len(), list.0.len()) => tracing::warn!(
+                    var,
+                    new = list.0.len(),
+                    "site list shrank by over half, keeping the old one"
+                ),
                 Ok(list) => *slot.write().unwrap() = list,
                 Err(e) => tracing::warn!(?e, var, "refreshing a site list failed"),
             }
@@ -171,23 +198,13 @@ impl Sites {
             .ok()?
             .error_for_status()
             .ok()?;
-        if r.content_length().is_some_and(|l| l > max as u64) {
-            return None;
-        }
-        let b = r.bytes().await.ok()?;
-        (b.len() <= max).then(|| b.to_vec())
+        read_capped(r, max).await.ok()
     }
 
-    async fn download(&self, url: &str) -> reqwest::Result<SiteList> {
-        let text = self
-            .http
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-        Ok(SiteList::parse(&text))
+    async fn download(&self, url: &str) -> anyhow::Result<SiteList> {
+        let r = self.http.get(url).send().await?.error_for_status()?;
+        let body = read_capped(r, LIST_MAX_BYTES).await?;
+        Ok(SiteList::parse(&String::from_utf8_lossy(&body)))
     }
 
     /// Host a shortener link ends up on: HEAD, redirects followed (public addresses only), no body read.
@@ -228,6 +245,12 @@ mod tests {
             assert!(!ip(bad), "{bad}");
         }
         assert!(ip("8.8.8.8") && ip("2606:4700::1111") && ip("::ffff:8.8.8.8"));
+    }
+
+    #[test]
+    fn a_list_that_lost_over_half_is_refused() {
+        assert!(shrank(1000, 0) && shrank(1000, 499));
+        assert!(!shrank(1000, 500) && !shrank(0, 0) && !shrank(10, 50));
     }
 
     #[test]

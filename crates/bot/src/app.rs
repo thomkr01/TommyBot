@@ -127,7 +127,7 @@ pub struct App {
     pub me: Id<UserMarker>,
     /// The bot application's owner (the team owner for a team app); Ban Sync never acts on them.
     pub bot_owner: Option<Id<UserMarker>>,
-    cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
+    cfgs: RwLock<CfgCache>,
     pub logger: Mutex<Logger>,
     /// Whether @everyone can read a log channel, and when that was checked.
     pub log_public:
@@ -191,6 +191,31 @@ pub struct App {
     pub voice_raids: Mutex<HashMap<u64, tommybot_automod::voice::VoiceRaidDetector>>,
     /// NSFW image scan queue, model and score cache.
     pub nsfw: crate::nsfw::Scanner,
+}
+
+/// Parsed configs per guild. A load that read the database before a newer save was announced must not
+/// cache what it read, so every forget moves `generation` and a load only caches under the one it started with.
+#[derive(Default)]
+struct CfgCache {
+    map: HashMap<u64, Arc<GuildCfg>>,
+    generation: u64,
+}
+
+impl CfgCache {
+    fn insert(&mut self, guild: u64, generation: u64, cfg: Arc<GuildCfg>) {
+        if generation == self.generation {
+            self.map.insert(guild, cfg);
+        }
+    }
+
+    /// One guild, or all with None.
+    fn forget(&mut self, guild: Option<u64>) {
+        self.generation += 1;
+        match guild {
+            Some(g) => drop(self.map.remove(&g)),
+            None => self.map.clear(),
+        }
+    }
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -322,9 +347,13 @@ impl App {
     }
 
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {
-        if let Some(c) = self.cfgs.read().unwrap().get(&guild) {
-            return Ok(c.clone());
-        }
+        let generation = {
+            let c = self.cfgs.read().unwrap();
+            if let Some(cfg) = c.map.get(&guild) {
+                return Ok(cfg.clone());
+            }
+            c.generation
+        };
         let row: Option<(Value,)> = sqlx::query_as(
             "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
         )
@@ -332,13 +361,16 @@ impl App {
         .fetch_optional(&self.pool)
         .await?;
         let cfg = Arc::new(row.map_or_else(GuildCfg::default, |(v,)| GuildCfg::parse(&v)));
-        self.cfgs.write().unwrap().insert(guild, cfg.clone());
+        self.cfgs
+            .write()
+            .unwrap()
+            .insert(guild, generation, cfg.clone());
         Ok(cfg)
     }
 
     /// Drops a guild's cached config after a write from Discord, before the NOTIFY round trip.
     pub fn forget_cfg(&self, guild: u64) {
-        self.cfgs.write().unwrap().remove(&guild);
+        self.cfgs.write().unwrap().forget(Some(guild));
     }
 
     /// Reloads configs when the dashboard saves. Reconnects by itself; a gap only delays a reload.
@@ -346,7 +378,7 @@ impl App {
         let mut l = PgListener::connect_with(&self.pool).await?;
         l.listen("config_changed").await?;
         // A restarted listener missed what was saved while it was down.
-        self.cfgs.write().unwrap().clear();
+        self.cfgs.write().unwrap().forget(None);
         loop {
             match l.try_recv().await? {
                 Some(n) => {
@@ -356,7 +388,7 @@ impl App {
                         None => (n.payload(), None),
                     };
                     if let Ok(g) = g.parse::<u64>() {
-                        self.cfgs.write().unwrap().remove(&g);
+                        self.cfgs.write().unwrap().forget(Some(g));
                         tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
                         if let Some(gid) = Id::new_checked(g) {
                             tokio::spawn(on_saved(self.clone(), gid, version));
@@ -365,7 +397,7 @@ impl App {
                 }
                 // The connection dropped and reconnects on the next call: changes saved meanwhile
                 // were never announced, so every cached config is read again.
-                None => self.cfgs.write().unwrap().clear(),
+                None => self.cfgs.write().unwrap().forget(None),
             }
         }
     }
@@ -412,6 +444,17 @@ mod tests {
         assert_eq!(c.logging.fallback, Some(Id::new(42)));
         assert_eq!(c.lockdown.main_roles, vec![Id::new(9)]);
         assert!(!GuildCfg::parse(&json!({})).automod.enabled);
+    }
+
+    #[test]
+    fn a_load_started_before_a_forget_is_not_cached() {
+        let mut c = CfgCache::default();
+        let started = c.generation;
+        c.forget(Some(2)); // a NOTIFY for another save lands while the load awaits the database
+        c.insert(1, started, Default::default());
+        assert!(c.map.is_empty());
+        c.insert(1, c.generation, Default::default());
+        assert!(c.map.contains_key(&1));
     }
 }
 

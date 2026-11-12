@@ -39,6 +39,42 @@ pub const RAIDER_MIN_MEMBERS: u64 = 100;
 /// Raider List: days a scam listing lasts after its last evidence.
 pub const RAIDER_SCAM_DAYS: i64 = 14;
 
+/// Discord's longest timeout, in ms.
+const TIMEOUT_MAX_MS: i64 = 28 * 86_400_000;
+pub const STRIKE_CAP: (i64, i64) = (1, 100);
+pub const STRIKE_MULTIPLIER: (i64, i64) = (100, 1_000);
+pub const PANIC_HEAT_EXECUTORS: (i64, i64) = (1, 50);
+pub const MENTION_COUNT: (i64, i64) = (1, 1_000);
+pub const RAID_COUNT: (i64, i64) = (2, 500);
+pub const BAN_PURGE_DAYS: (i64, i64) = (0, 7);
+pub const WARN_POINTS: (i64, i64) = (1, 1_000);
+
+/// Numbers at a fixed path whose 0 or out-of-range value would quietly switch their feature off:
+/// (section, path, range). `panic.executors` is left out on purpose: 0 turns panic mode off.
+const FIXED: [(&str, &str, (i64, i64)); 13] = [
+    ("automod", "strike.cap", STRIKE_CAP),
+    ("automod", "strike.multiplier_pct", STRIKE_MULTIPLIER),
+    (
+        "automod",
+        "strike.strike_timeout_ms",
+        (1_000, TIMEOUT_MAX_MS),
+    ),
+    ("automod", "strike.cap_timeout_ms", (1_000, TIMEOUT_MAX_MS)),
+    ("automod", "auto_lockdown.mention_count", MENTION_COUNT),
+    (
+        "automod",
+        "auto_lockdown.mention_window_ms",
+        (1_000, 3_600_000),
+    ),
+    ("automod", "filters.mention_hour_cap", (1, 1_000)),
+    ("panic", "window_secs", (1, 86_400)),
+    ("panic", "heat_executors", PANIC_HEAT_EXECUTORS),
+    ("joinraid", "count", RAID_COUNT),
+    ("joinraid", "span_ms", (1_000, 86_400_000)),
+    ("joinraid", "id_flag_min", RAID_COUNT),
+    ("misc", "ban_purge_days", BAN_PURGE_DAYS),
+];
+
 /// The range of the number at `path` (below the section, e.g. `limits.Ban.per_hour`), if it has one.
 pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
     match (section, path.split('.').collect::<Vec<_>>().as_slice()) {
@@ -49,7 +85,11 @@ pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
         ("automod", ["filters", "nsfw_threshold"]) => Some(NSFW_THRESHOLD),
         ("automod", ["auto_slowmode", k]) => SLOWMODE.iter().find(|s| s.0 == *k).map(|s| s.1),
         ("joinraid", ["voice", k]) => VOICE.iter().find(|s| s.0 == *k).map(|s| s.1),
-        _ => None,
+        ("misc", ["warn_actions", _, "points"]) => Some(WARN_POINTS),
+        _ => FIXED
+            .iter()
+            .find(|f| f.0 == section && f.1 == path)
+            .map(|f| f.2),
     }
 }
 
@@ -90,7 +130,24 @@ pub fn check(section: &str, doc: &Value, old: &Value) -> Result<(), String> {
                 found.push((format!("voice.{k}"), &doc["voice"][k]));
             }
         }
+        "misc" => {
+            for (i, t) in doc["warn_actions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                found.push((format!("warn_actions.{i}.points"), &t["points"]));
+            }
+        }
         _ => {}
+    }
+    for (_, path, _) in FIXED.iter().filter(|f| f.0 == section) {
+        found.push((
+            path.to_string(),
+            doc.pointer(&format!("/{}", path.replace('.', "/")))
+                .unwrap_or(&Value::Null),
+        ));
     }
     for (path, v) in found {
         let kept = old.pointer(&format!("/{}", path.replace('.', "/"))) == Some(v);
@@ -168,8 +225,33 @@ mod tests {
         assert!(check("joinraid", &voice("span_ms", 300_000), &Value::Null).is_ok());
         assert!(check("joinraid", &voice("active_ms", 59_999), &Value::Null).is_err());
         assert!(check("joinraid", &voice("active_ms", 3_600_001), &Value::Null).is_err());
-        assert!(check("joinraid", &json!({"count": 1000}), &Value::Null).is_ok());
-        assert_eq!(for_path("joinraid", "count"), None);
+        assert!(check("joinraid", &json!({"count": 1000}), &Value::Null).is_err());
+        assert_eq!(for_path("joinraid", "count"), Some(RAID_COUNT));
+        let at = |s: &str, p: &str, v: i64| {
+            let mut doc = json!({});
+            let keys: Vec<&str> = p.split('.').collect();
+            let mut cur = &mut doc;
+            for k in &keys[..keys.len() - 1] {
+                cur = cur.as_object_mut().unwrap().entry(*k).or_insert(json!({}));
+            }
+            cur[keys[keys.len() - 1]] = json!(v);
+            check(s, &doc, &Value::Null)
+        };
+        for (s, p, (lo, hi)) in FIXED {
+            assert!(at(s, p, lo).is_ok() && at(s, p, hi).is_ok(), "{s}.{p}");
+            assert!(
+                at(s, p, lo - 1).is_err() && at(s, p, hi + 1).is_err(),
+                "{s}.{p}"
+            );
+        }
+        assert!(at("automod", "strike.strike_timeout_ms", 0).is_err());
+        assert!(
+            at("panic", "executors", 0).is_ok(),
+            "0 turns panic mode off"
+        );
+        let warn = |p: i64| json!({"warn_actions": [{"points": 3}, {"points": p}]});
+        assert!(check("misc", &warn(1000), &Value::Null).is_ok());
+        assert!(check("misc", &warn(0), &Value::Null).is_err());
         // A value saved before the limits may stay; changing it must fit.
         let old = nuke("heat", json!(0));
         assert!(check("antinuke", &nuke("heat", json!(0)), &old).is_ok());

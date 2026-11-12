@@ -33,6 +33,8 @@ const SIDE: usize = 224;
 const CLASSES: [&str; 5] = ["drawings", "hentai", "neutral", "porn", "sexy"];
 const MAX_BYTES: usize = 8 << 20;
 const PER_MESSAGE: usize = 4;
+/// Images one member may have waiting in the live lane; the rest wait in the backlog (plan 2.8).
+const PER_MEMBER_LIVE: usize = 4;
 const LIVE_CAP: usize = 256;
 const BACKLOG_CAP: usize = 2_000;
 /// A live job older than this goes to the backlog, so a burst never leaves new posts waiting.
@@ -126,9 +128,20 @@ impl Scanner {
             urls,
             at_ms: crate::automod::now_ms(),
         };
+        self.push(job, backlog);
+        self.wake.notify_one();
+    }
+
+    fn push(&self, job: Job, backlog: bool) {
         let mut l = self.lanes.lock().unwrap();
         let (live, old) = &mut *l;
-        if backlog {
+        let author = (job.msg.guild_id, job.msg.author.id);
+        let waiting: usize = live
+            .iter()
+            .filter(|j| (j.msg.guild_id, j.msg.author.id) == author)
+            .map(|j| j.urls.len())
+            .sum();
+        if backlog || waiting + job.urls.len() > PER_MEMBER_LIVE {
             push_capped(old, job, BACKLOG_CAP);
         } else {
             if live.len() >= LIVE_CAP {
@@ -138,8 +151,6 @@ impl Scanner {
             }
             live.push_back(job);
         }
-        drop(l);
-        self.wake.notify_one();
     }
 
     fn take(&self, now: i64) -> Option<Job> {
@@ -631,8 +642,13 @@ mod tests {
     }
 
     fn job(at_ms: i64, n: u64) -> Job {
+        by(at_ms, n, 2, 0)
+    }
+
+    /// Job `n` by member `author` with `images` image urls.
+    fn by(at_ms: i64, n: u64, author: u64, images: usize) -> Job {
         let m: Message = serde_json::from_value(serde_json::json!({
-            "id": n.to_string(), "channel_id": "1", "author": {"id": "2", "username": "u", "discriminator": "0", "avatar": null},
+            "id": n.to_string(), "channel_id": "1", "author": {"id": author.to_string(), "username": "u", "discriminator": "0", "avatar": null},
             "content": "", "timestamp": "2026-01-01T00:00:00+00:00", "edited_timestamp": null, "tts": false,
             "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": [], "embeds": [],
             "pinned": false, "type": 0
@@ -640,9 +656,21 @@ mod tests {
         .unwrap();
         Job {
             msg: Box::new(m),
-            urls: vec![],
+            urls: vec![String::new(); images],
             at_ms,
         }
+    }
+
+    #[test]
+    fn one_member_has_at_most_four_images_in_the_live_lane() {
+        let s = Scanner::default();
+        s.push(by(0, 1, 2, 3), false);
+        s.push(by(0, 2, 2, 1), false);
+        s.push(by(0, 3, 2, 1), false); // a fifth image: backlog
+        s.push(by(0, 4, 5, 4), false); // another member still goes live
+        let l = s.lanes.lock().unwrap();
+        let ids = |q: &VecDeque<Job>| q.iter().map(|j| j.msg.id.get()).collect::<Vec<_>>();
+        assert_eq!((ids(&l.0), ids(&l.1)), (vec![1, 2, 4], vec![3]));
     }
 
     #[test]
