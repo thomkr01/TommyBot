@@ -72,7 +72,7 @@ pub async fn feed(
     }
     map.entry(m.channel_id.get())
         .or_default()
-        .on_message(now, m.author.id.get(), b, slow, heat)
+        .on_message(now, b, slow, heat)
         .then(|| slow.clone())
 }
 
@@ -131,13 +131,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>, cfg: 
             let log = Log::new("Auto Slowmode On", ORANGE)
                 .line("Channel", &channel(ch.get()))
                 .line("Slowmode", &format!("`{}s`", cfg.slowmode_secs))
-                .line(
-                    "Factor",
-                    &format!(
-                        "*{}% of max heat from {}+ members*",
-                        cfg.channel_pct, cfg.min_users
-                    ),
-                );
+                .line("Factor", &format!("*{}% of max heat*", cfg.channel_pct));
             if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
                 tracing::warn!(?e, %ch, "could not log the auto slowmode");
             }
@@ -596,13 +590,12 @@ mod tests {
         };
         let (cfg, heat) = (AutoSlowmodeCfg::default(), HeatCfg::default());
         for ch in [a, b] {
-            app.slow.lock().unwrap().entry(ch).or_default().on_message(
-                now_ms(),
-                1,
-                &hot,
-                &cfg,
-                &heat,
-            );
+            app.slow
+                .lock()
+                .unwrap()
+                .entry(ch)
+                .or_default()
+                .on_message(now_ms(), &hot, &cfg, &heat);
         }
         let job = |ch: u64| json!({"channel": ch, "set_secs": 5});
         off(&app, Id::new(g), &job(a)).await.unwrap();

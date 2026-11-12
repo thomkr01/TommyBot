@@ -972,30 +972,21 @@ mod tests {
             serde_json::from_value(json!({"enabled": true, "auto_slowmode": v})).unwrap()
         };
         let c = am(
-            json!({"enabled": true, "channel_pct": 0, "min_users": 999, "slowmode_secs": 0,
+            json!({"enabled": true, "channel_pct": 0, "slowmode_secs": 0,
             "min_on_secs": u32::MAX, "calm_secs": 0}),
         )
         .auto_slowmode;
         assert!(c.enabled);
         assert_eq!(
-            (
-                c.channel_pct,
-                c.min_users,
-                c.slowmode_secs,
-                c.min_on_secs,
-                c.calm_secs
-            ),
-            (100, 50, 1, 3_600, 10)
+            (c.channel_pct, c.slowmode_secs, c.min_on_secs, c.calm_secs),
+            (100, 1, 3_600, 10)
         );
         let c = am(json!({"enabled": true, "slowmode_secs": 99_999})).auto_slowmode;
-        assert_eq!(
-            (c.slowmode_secs, c.channel_pct, c.min_users),
-            (21_600, 300, 4)
-        );
+        assert_eq!((c.slowmode_secs, c.channel_pct), (21_600, 300));
         // -1 does not fit a u32: the card falls back to its defaults, automod stays on.
-        let bad = am(json!({"enabled": true, "min_users": -1}));
+        let bad = am(json!({"enabled": true, "calm_secs": -1}));
         assert!(bad.enabled && !bad.auto_slowmode.enabled);
-        assert_eq!(bad.auto_slowmode.min_users, 4);
+        assert_eq!(bad.auto_slowmode.calm_secs, 120);
         let none: AutomodCfg = serde_json::from_value(json!({})).unwrap();
         assert!(!none.auto_slowmode.enabled);
         assert_eq!(none.auto_slowmode.slowmode_secs, 5);
