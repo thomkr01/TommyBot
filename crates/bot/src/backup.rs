@@ -309,16 +309,24 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> R
     Ok(text)
 }
 
-/// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker) from
-/// the latest image, plus children re-parented to a recreated category. Nothing else is touched.
+/// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker), each
+/// from the newest image that has it, plus children re-parented to a recreated category. Nothing
+/// else is touched. Returns how many changes were made and which of `ids` exist again (recreated,
+/// or matched to a live object).
 pub async fn recreate(
     app: &App,
     gid: Id<GuildMarker>,
     ids: &HashSet<u64>,
     filters: Option<&BackupsCfg>,
-) -> Result<usize> {
-    let Some(image) = latest(app, gid).await? else {
-        return Ok(0);
+) -> Result<(usize, HashSet<u64>)> {
+    let images: Vec<(Json<Image>,)> = sqlx::query_as(
+        "SELECT image FROM backups WHERE guild_id = $1 ORDER BY created_at DESC, id DESC",
+    )
+    .bind(gid.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    let Some(image) = newest_with(images.into_iter().map(|(Json(i),)| i), ids) else {
+        return Ok((0, HashSet::new()));
     };
     let live = snapshot(&app.restore_http, gid).await?;
     let keep: HashSet<u64> = live
@@ -339,7 +347,32 @@ pub async fn recreate(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    Ok(execute(app, gid, (&image, &live), p, true).await.total())
+    let (sum, id_map) = execute(app, gid, (&image, &live), p, true).await;
+    let back = ids
+        .iter()
+        .copied()
+        .filter(|i| id_map.contains_key(i))
+        .collect();
+    Ok((sum.total(), back))
+}
+
+/// The newest image (first), plus each of `ids` it lacks from the newest older image that has it:
+/// a backup taken after the delete (or mid-nuke) must not make the object unrecoverable.
+fn newest_with(mut images: impl Iterator<Item = Image>, ids: &HashSet<u64>) -> Option<Image> {
+    let mut image = images.next()?;
+    for old in images {
+        for r in old.roles {
+            if ids.contains(&r.id) && !image.roles.iter().any(|x| x.id == r.id) {
+                image.roles.push(r);
+            }
+        }
+        for c in old.channels {
+            if ids.contains(&c.id) && !image.channels.iter().any(|x| x.id == c.id) {
+                image.channels.push(c);
+            }
+        }
+    }
+    Some(image)
 }
 
 fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
@@ -402,7 +435,7 @@ pub async fn restore(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    let mut sum = execute(app, gid, (image, &live), p, respect_lock).await;
+    let (mut sum, _) = execute(app, gid, (image, &live), p, respect_lock).await;
     // Webhooks that did not exist in the image were made since (old images have no list).
     if let (Some(f), Some(old)) = (filters, &image.webhooks) {
         if f.restore && f.delete_webhooks {
@@ -428,7 +461,7 @@ async fn execute(
     (image, live): (&Image, &Image),
     mut p: Plan,
     respect_lock: bool,
-) -> Summary {
+) -> (Summary, HashMap<u64, u64>) {
     let http = &app.restore_http;
     let mut done = Summary::default();
     let live_cats: HashSet<u64> = live
@@ -571,7 +604,7 @@ async fn execute(
             tracing::warn!(?e, "restoring role positions failed");
         }
     }
-    done
+    (done, id_map)
 }
 
 fn count(r: Result<()>, what: &str) -> bool {
@@ -630,7 +663,7 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
                     let Ok(cfg) = app.cfg(g.id.get()).await else {
                         continue;
                     };
-                    if !cfg.backups.auto || !cfg.backups.enabled {
+                    if !cfg.backups.auto || !cfg.backups.enabled || under_attack(&app, g.id.get()) {
                         continue;
                     }
                     match due(&app, g.id, cfg.backups.interval_hours).await {
@@ -649,6 +682,12 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
             Err(e) => tracing::warn!(?e, "listing guilds for backup failed"),
         }
     }
+}
+
+/// A nuke run or panic mode is on: a backup now would save the damage as the newest image.
+fn under_attack(app: &App, gid: u64) -> bool {
+    app.panic_runs.lock().unwrap().contains_key(&gid)
+        || app.nuke_runs.lock().unwrap().keys().any(|k| k.0 == gid)
 }
 
 /// True when the newest backup is older than `hours` (or there is none).
@@ -697,6 +736,34 @@ mod tests {
         assert_eq!(p.roles.len(), 2);
         assert!(matches!(p.roles[0], Change::Update { .. }));
         assert!(p.channels.is_empty());
+    }
+
+    #[test]
+    fn a_deleted_object_comes_from_the_newest_image_that_has_it() {
+        let role = |id, name: &str| RoleImg {
+            id,
+            name: name.into(),
+            color: 0,
+            permissions: 0,
+            position: 1,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+        };
+        let img = |roles| Image {
+            roles,
+            ..Default::default()
+        };
+        // Newest first: role 1 is in the newest image, role 2 only in the older ones.
+        let images = vec![
+            img(vec![role(1, "new")]),
+            img(vec![role(1, "old"), role(2, "mid")]),
+            img(vec![role(2, "oldest"), role(3, "not asked")]),
+        ];
+        let got = newest_with(images.into_iter(), &HashSet::from([1, 2])).unwrap();
+        let names: Vec<_> = got.roles.iter().map(|r| (r.id, r.name.as_str())).collect();
+        assert_eq!(names, [(1, "new"), (2, "mid")]);
+        assert!(newest_with(std::iter::empty(), &HashSet::from([1])).is_none());
     }
 
     #[test]

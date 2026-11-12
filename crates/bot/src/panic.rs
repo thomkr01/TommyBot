@@ -85,8 +85,18 @@ pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: b
         .lock()
         .unwrap()
         .insert(gid.get(), (raiders, until));
-    send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
+    // Heat panic is on already: a failed log must not fail the caller's punishment.
+    if let Err(e) = send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await {
+        tracing::warn!(?e, "heat panic log failed");
+    }
     Ok(())
+}
+
+/// [`note`] for a heat trip. Its failure is only logged: the caller's punishment still runs.
+pub(crate) async fn note_heat(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) {
+    if let Err(e) = note(app, gid, user, true).await {
+        tracing::warn!(?e, "counting towards heat panic failed");
+    }
 }
 
 async fn put_everyone(
@@ -176,7 +186,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     let ends = crate::app::now_secs() + cfg.duration_secs as i64;
     let payload = json!({
         "lock_mod_commands": cfg.lock_mod_commands, "unlock": cfg.unlock_when_ending,
-        "exempt": &exempted
+        "exempt": &exempted, "locked": false
     });
     if let Err(e) = jobs::replace(&app.pool, gid.get() as i64, "panic_end", payload, ends).await {
         // Without its end job panic mode would never end: mod commands stay locked and the
@@ -193,11 +203,17 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
             // A failed step is logged, so the report below is still sent.
-            PanicStep::LockServer => {
-                if let Err(e) = lockdown::lock(app, gid, LockKind::Role).await {
-                    tracing::warn!(?e, "panic: locking the server failed");
+            // False: a lock from before panic covers it, and panic's end must leave it. An error
+            // can come after the lock was saved, so the end still lifts that one.
+            PanicStep::LockServer => match lockdown::lock(app, gid, LockKind::Role).await {
+                Ok(false) => {}
+                r => {
+                    if let Err(e) = r {
+                        tracing::warn!(?e, "panic: locking the server failed");
+                    }
+                    own_lock(app, gid, true).await;
                 }
-            }
+            },
             PanicStep::PingWarnedRoles => {
                 let log = Log::new("Panic Mode Triggered! [Anti Nuke]", ALERT)
                     .text(&format!(
@@ -233,25 +249,26 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
                 .fetch_optional(&app.pool)
                 .await
                 .unwrap_or_default();
-                send_log(
+                let sent = send_log(
                     app,
                     gid.get(),
                     LogKind::Panic,
                     report(case.as_ref(), &backup),
-                )
-                .await?;
+                );
+                if let Err(e) = sent.await {
+                    tracing::warn!(?e, "panic report log failed");
+                }
             }
             PanicStep::UnlockServer => {}
         }
     }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::Panic,
-        Log::new("Panic Mode Lockdown", ALERT)
-            .text(&format!("{YES} **The server has been locked down.**")),
-    )
-    .await
+    let log = Log::new("Panic Mode Lockdown", ALERT)
+        .text(&format!("{YES} **The server has been locked down.**"));
+    // Panic mode runs: a failed log must not end the nuke run that started it.
+    if let Err(e) = send_log(app, gid.get(), LogKind::Panic, log).await {
+        tracing::warn!(?e, "panic lockdown log failed");
+    }
+    Ok(())
 }
 
 /// What panic mode's backup step did.
@@ -332,6 +349,22 @@ pub(crate) fn report(case: Option<&(String, Value)>, b: &Backup) -> Log {
     )
 }
 
+/// Records in the `panic_end` job whether the server lock is panic's own, so its end lifts only
+/// that one. Only logged on failure.
+pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, locked: bool) {
+    let r = sqlx::query(
+        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object('locked', $2::bool)
+         WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .bind(locked)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(?e, "panic: saving whose lock it is failed");
+    }
+}
+
 /// Ends panic mode for a guild; runs from the `panic_end` job, whose payload says what to put back.
 pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()> {
     app.panic_runs.lock().unwrap().remove(&gid.get());
@@ -340,7 +373,9 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
             tracing::warn!(?e, "panic: restoring category overwrite failed");
         }
     }
-    for step in panic_end_plan(payload["unlock"].as_bool().unwrap_or(false)) {
+    // Jobs from before `locked` existed unlock as they did.
+    let ours = payload["locked"].as_bool().unwrap_or(true);
+    for step in panic_end_plan(ours && payload["unlock"].as_bool().unwrap_or(false)) {
         if step == PanicStep::UnlockServer {
             lockdown::unlock(app, gid, Some(&LockKind::Role)).await?;
         }

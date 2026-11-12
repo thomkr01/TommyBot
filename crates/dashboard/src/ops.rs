@@ -711,6 +711,7 @@ async fn revert(
         // The revert unbans as the bot, so the bot cannot tell staff lifted a Raider List ban.
         if let Inverse::Unban { user } = inv {
             tommybot_core::raiders::allow(&st.db, guild, user as i64, s.user_id).await?;
+            tommybot_core::jobs::cancel_user(&st.db, guild, "unban", user, None).await?;
         }
         sqlx::query("update action_log set reverted = true where id = $1")
             .bind(id)

@@ -102,6 +102,12 @@ async fn decide(
                 "Could not lift the punishment, it may already be lifted".into(),
             ));
         }
+        let job = if kind == "ban" {
+            "unban"
+        } else {
+            "timeout_renew"
+        };
+        crate::scheduler::forget_jobs(app, gid, user as u64, job, None).await;
         if kind == "ban" {
             crate::raiders::lifted(app, gid, user_id, actor_id).await;
         }

@@ -17,7 +17,7 @@ use twilight_model::id::{
 };
 
 use crate::{
-    app::App,
+    app::{now_secs, App},
     backup, commands,
     events::{send_log, send_log_link},
     http_err,
@@ -31,6 +31,21 @@ fn user(payload: &Value) -> Result<Id<UserMarker>> {
             .as_u64()
             .context("job payload has no user")?,
     ))
+}
+
+/// Drops the pending `kind` jobs ("unban", "timeout_renew") an earlier temp ban or long timeout of
+/// `user` queued, other than `keep`, so they cannot lift or stretch what was done since. Only
+/// logged on failure: the action itself is already done.
+pub(crate) async fn forget_jobs(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: u64,
+    kind: &str,
+    keep: Option<i64>,
+) {
+    if let Err(e) = jobs::cancel_user(&app.pool, gid.get() as i64, kind, user, keep).await {
+        tracing::warn!(?e, kind, user, "dropping an earlier pending job failed");
+    }
 }
 
 async fn dispatch(app: &App, job: &Job) -> Result<()> {
@@ -61,8 +76,23 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let until = job.payload["until_secs"]
                 .as_i64()
                 .context("job payload has no until_secs")?;
-            commands::timeout_until(app, gid, user(&job.payload)?, until, "Timeout renewal")
-                .await?;
+            let r =
+                commands::timeout_until(app, gid, user(&job.payload)?, until, "Timeout renewal");
+            match r.await {
+                // Not in the server: Discord keeps a timeout for a rejoin, so try hourly until it ends.
+                Err(e) if http_err::code(&e) == Some(10007) && until > now_secs() => {
+                    let p = job.payload.clone();
+                    jobs::enqueue(
+                        &app.pool,
+                        job.guild_id,
+                        "timeout_renew",
+                        p,
+                        now_secs() + 3600,
+                    )
+                    .await?;
+                }
+                r => r?,
+            }
         }
         "panic_end" => panic::end(app, gid, &job.payload).await?,
         "panic_start" => {
@@ -106,6 +136,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "confirm_expire" => crate::confirm::run_expire(app, &job.payload).await?,
+        "raid_punish" => crate::joingate::punish_job(app, gid, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_blocked" => {
             let list = job.payload["list"].as_str().unwrap_or("VPN");
@@ -172,8 +203,9 @@ pub(crate) async fn raid_report(
     }
 }
 
-const ONE_TARGET: [&str; 8] = [
+const ONE_TARGET: [&str; 9] = [
     "unban",
+    "raid_punish",
     "timeout_renew",
     "delete_message",
     "slowmode_off",

@@ -27,6 +27,7 @@ The `quarantines` row survived a leave, but no join code read it, so a quarantin
 **The post-join username filter punished immune staff.** (Join Gate check, 11-11)
 Join Gate's username filter checks names again after join (the "POST join" switch) and called `punish` without a level check, so an Extra Owner or Trusted Admin who picked a nickname on the word list could be kicked or banned. At join time nobody is staff yet, so the gap only showed after join. The other automatic paths on existing members (automod, Discord AutoMod hits, reactions, threads) already go through `whitelisted()`.
 *Avoid:* every automatic action against a member who is already in the server checks `is_immune` or `whitelisted` first. The one deliberate exception is auto-dehoist (and Join Gate's Rename through `dehoist::rename`): Thomas's D6 skips only the owner and Extra Owners, so Trusted Admins and mods are renamed too.
+Join Raid had the same gap (deep dive D60, 11-12): when a raid triggers, it punishes every joiner it flagged in the window, and an earlier joiner may have been made staff since. The loop now skips immune ids other than the joiner (a failed lookup punishes as before).
 
 **Member edits share one rate-limit bucket.** (auto-dehoist, 11-11)
 Nick changes, role adds, timeouts and kicks of members all use Discord's member bucket, so a burst of automatic renames or role restores slows the punishments of a raid.
@@ -35,6 +36,10 @@ Nick changes, role adds, timeouts and kicks of members all use Discord's member 
 **Not every member lookup error means "not a member".** (#97)
 All `guild_member` errors (5xx, timeouts) were read as "left the server". Staff then lost their permit level for that event, so automod or anti-nuke could act on them.
 *Avoid:* use `http_err::member()`. Only a 404 means not a member. Other errors propagate.
+
+**An automatic timeout shortened a longer one.** (overlap deep dive D28, 11-12)
+Automod, warn thresholds, Join Gate and heat panic set `communication_disabled_until` to now plus their own length, so a 5-minute strike timeout replaced a 7-day staff timeout, and a long timeout's renewal lost to the next spam message. Root cause: "time out for X" was written as "the timeout ends in X", whatever ran before.
+*Avoid:* every automatic timeout goes through `commands::timeout`, which reads the member first and leaves a timeout that ends later (`outlasts`); a failed read times out as before. A mod's own `/timeout` still sets exactly what they typed, shorter too.
 
 **Swallowed errors hide missing permissions.** (#97)
 `.await.ok()` dropped real failures, so a punishment Discord refused left no trace.
@@ -93,6 +98,7 @@ The first Ban Sync copy set its row to `banned` before the ban, so a job that cr
 **A Discord outage is not a refusal.** (Ban Sync review, 11-11)
 `commands::apply_dm` turned every failed Discord call into a refusal reply, a 502 too. A job that bans through it (a Ban Sync copy) then marked the row skipped and never retried, although the same request would have worked a minute later. Root cause: the error arm did not tell "Discord said no" (4xx) from "Discord did not answer" (5xx, timeout), and the doc comment ("Err only for infrastructure failures") already promised the second as `Err`.
 *Avoid:* only a 4xx is a refusal (`http_err::refused`); anything else goes back as `Err`, so jobs retry and commands show "Something went wrong". Searched the other places that turn an error into reply text with `http_err::why`: `confirm`, `reports`, `appeals`, `slash` and `tickets::dm` answer a person, who can press again; `verify::deleted` sends the failure to the owner as its alert; and `joingate::punish` returns the error after its log, so the job retries.
+Join and voice raid punishments ran in a loop that only logged the error, so a 5xx or timeout during a raid left the raider in (deep dive D64, 11-12). They go through `joingate::punish_or_retry`, which queues a `raid_punish` job for anything that is not a refusal.
 
 **The dashboard acts as the bot.** (Raider List review, 11-11)
 An unban from the dashboard (an accepted appeal, a revert) is made with the bot's token, so the audit entry names the bot. The Raider List read a bot-made unban as one of its own lifts and did not record that staff let the user back in, so the next removal or join acted on them again. Root cause: the same as "the audit actor is the bot" above, on the unban side.
@@ -141,10 +147,19 @@ A raid trigger called `jobs::replace`, which deletes every pending job of that k
 **A run marked rows it never read.** (race review, 11-11)
 `revert_actor` read the actor's rows, worked for seconds, then marked every row since `since` as reverted. What the nuker did meanwhile was marked too and never undone, not even by `/revert`.
 *Avoid:* mark only the ids you read (`WHERE id = ANY($1)`). Never close work with a range condition when rows can arrive while it runs.
+Marking every id read was still too much (deep dive D9, 11-12): a failed inverse, an op the restore filters dropped and a deleted channel the backup did not recreate were all marked reverted, so neither the next run nor `/revert` tried them again. Mark a row only when its op ran (or its target was already gone): `antinuke::undone` for logged inverses, and `backup::recreate` returns the ids that exist again. The dashboard revert already marked per success.
 
 **Two locks at once saved a locked server as the snapshot.** (race review, 11-11)
 `lock_for` checked for an active lock, then planned with several HTTP calls, then saved with `ON CONFLICT DO UPDATE`. Mention-spam lock calls it for every message past the limit, so a second call could plan after the first began applying, save locked permissions and overwrite the first snapshot. Unlock then restored the locked state.
 *Avoid:* lock and unlock of a guild run one at a time (`lockdown::exclusive`). An in-process lock is enough here only because the dashboard queues jobs and never writes `lock_snapshots`; a second writer process needs an advisory lock (see the Channel Setup entry below).
+
+**An undo outlived what it undoes.** (overlap deep dive D8, D23, D26, 11-12)
+Jobs queued to end something (a temp ban's `unban`, a long timeout's `timeout_renew`, a timed lock's `unlock`, panic's `panic_end` unlock) were never removed when it ended another way, so they hit whatever came later: a permanent ban after a temp ban was lifted by the old job, an untimeout or accepted appeal was timed out again by the renewal, a manual unlock and a new lock was lifted by the first lock's timer, and panic's end lifted a role lock it did not make (its `lock()` had returned false). Root cause: "queue the undo first" (above) without the other half, "drop the undo when the thing is gone or replaced".
+*Avoid:* every ban, unban, lift and new timeout drops the user's older pending job (`jobs::cancel_user`, `commands::forget_jobs` in the bot; the dashboard's appeal accept and revert call `cancel_user` in their own transaction), keeping only the job it just queued (`keep`). A lifted lock drops its own timer and clears panic's claim on the role lock (`lockdown::forget_timers`); `panic_end` carries `locked` (set by `panic::own_lock` only when panic's lock went through) and unlocks only then. Ban Sync no longer skips a member who only has a local temp ban that ends before the copy would. A renewal that finds the member gone (10007) tries again hourly until the timeout's end, since Discord keeps the timeout for a rejoin. Searched: nuke reverts re-ban (`Inverse::Ban`) on purpose without dropping anything, as that restores the earlier state.
+
+**A deleted object came back only from the newest backup.** (overlap deep dive D10, 11-12)
+`backup::recreate` read only `latest()`, so a backup that missed the object (taken mid-nuke, or after a delete that was not logged in time) made it unrecoverable, and the auto backup could run during a nuke or panic and save the damage as the newest image.
+*Avoid:* recreate each id from the newest image that has it (`backup::newest_with`), and skip the auto backup while a nuke run or panic mode is on (`backup::under_attack`).
 
 **A gateway event and its audit entry run in their own tasks.** (race review, 11-11)
 The ticket-category exemption read the category that the `ChannelCreate` task stores. When the audit task ran first, the lookup missed and a ticket bot's channels counted towards its limit.
@@ -186,6 +201,7 @@ The race review (11-11) found the same in Join Raid (a failed raid log or report
 `voice_nuke::apply` broke that with `?`: the audit deltas were already stored as seen, so one actor's failed whitelist read or count dropped every later actor's delta for good (review, 11-12). Root cause: `?` inside a loop whose input was already marked done. It now logs per actor and goes on.
 
 The sticky roles review (11-11) found it in Join Gate too: a refused gate punishment (403 on kick) ended `on_join`, so the join raid check never ran for that joiner. Gate punishments now log and go on.
+`panic::note` broke it too (deep dive D13, 11-12): a failed heat panic log returned `Err` after heat panic was on, and automod (`automod.rs` twice), `activity::heat_up` and anti-nuke's heat path passed it on with `?`, so the strike, timeout or `on_actions` count that tripped it never ran. The panic report and lockdown logs in `panic::start` did the same and ended the nuke run that called it. Those logs only warn now, and every heat caller goes through `panic::note_heat`, which logs a failure and returns. Same search found `catch::on_message` (a failed log handed a caught message on to automod as uncaught) and `verify::deadline` (a failed log failed the job, which would punish again); both warn now. `native_action`'s Report log was left: its caller already logs per action and goes on.
 
 **A gateway event's value can be older than the bot's own write.** (auto slowmode review, 11-11)
 Events run in parallel tasks and Discord sends a channel update for every edit (a rename too), so a ChannelUpdate handled after the bot's own PATCH can still carry the old slowmode. Auto slowmode read that value as "staff changed it" and put it back, which undid its own slowmode.
@@ -225,6 +241,10 @@ The Raider List lift held `SELECT … FOR UPDATE` on its action row while it unb
 **A button read its state, acted, then marked it done.** (Raider List, full-codebase check 11-11)
 The Raider List alert's Ban/Kick/Quarantine read `action = 'alert'`, ran the punishment and only then set the row. Two staff pressing at once both passed the read: two cases, two DMs, two mod logs, or a ban and a kick.
 *Avoid:* claim first with `UPDATE ... WHERE action = 'alert'` and act only on `rows_affected() == 1`; put the row back when nothing was done. Searched: Ban Sync's Ban here already claims first; appeals decide claims after the unban, but an unban is safe to repeat and the case and log come after the claim, so it was left as is.
+
+**A staff button skipped the panic lock and the rate limit.** (overlap deep dive D29, 11-12)
+The Raider List alert's Allow button wrote the allow straight away, while Ban, Kick and Quarantine go through `commands::apply`/`modcmds::run`, which call `gated`. During panic mode's mod lock, or past the command rate limit, a hacked staff account could still let listed raiders in.
+*Avoid:* every button or command that acts for staff calls `commands::gated` with the permit it acts under before it changes anything, also when it only lifts or allows.
 
 **Advisory locks on raw ids share one key space.** (Raider List review, 11-11)
 `report` locked the reporting owner's user id and then `add` locked the reported user's id, both as plain `pg_advisory_xact_lock(id)`. Owner A reporting B while owner B reports A took the same two keys in opposite order and Postgres killed one as a deadlock.

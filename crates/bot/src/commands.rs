@@ -217,16 +217,17 @@ pub async fn apply_dm(
             ModKind::Ban => {
                 // Queued first: a restart right after the ban must not make it permanent. If the ban
                 // fails, the unban later finds no ban and is dropped.
+                let mut job = None;
                 if let Some(d) = duration_s {
-                    let job = json!({"user":t});
-                    jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d)
-                        .await?;
+                    let (g, at) = (gid.get() as i64, now_secs() + d);
+                    job = Some(jobs::enqueue(&app.pool, g, "unban", json!({"user":t}), at).await?);
                 }
                 app.http
                     .create_ban(gid, target)
                     .delete_message_seconds(cfg.misc.purge_secs())
                     .reason(&audit)
                     .await?;
+                crate::scheduler::forget_jobs(app, gid, t, "unban", job).await;
                 (Some(json!({"op":"unban","user":t})), 0)
             }
             ModKind::Kick => {
@@ -237,6 +238,8 @@ pub async fn apply_dm(
                 (None, 0)
             }
             ModKind::Timeout => {
+                // Before, as the new timeout queues its own renewal.
+                crate::scheduler::forget_jobs(app, gid, t, "timeout_renew", None).await;
                 timeout_until(app, gid, target, now_secs() + timeout_s, &audit).await?;
                 (Some(json!({"op":"untimeout","user":t})), 0)
             }
@@ -660,6 +663,9 @@ pub(crate) async fn apply_warn_actions(
     };
     // Same rule as a typed punishment: tell the member first.
     reply::dm_and_act(true, dm, act).await.1?;
+    if kind == "ban" {
+        crate::scheduler::forget_jobs(app, g, u.get(), "unban", None).await;
+    }
     let case_no = cases::create(
         &app.pool,
         cases::NewCase {
@@ -700,7 +706,8 @@ fn timeout_chunk(remaining: i64) -> (i64, bool) {
     (remaining.min(MAX_TIMEOUT_S), remaining > MAX_TIMEOUT_S)
 }
 
-/// Single capped timeout for callers that cannot renew (warn thresholds, automod).
+/// Single capped timeout for callers that cannot renew (warn thresholds, automod). Keeps a longer
+/// running timeout; a failed read times out anyway.
 pub async fn timeout(
     http: &Client,
     g: Id<GuildMarker>,
@@ -708,9 +715,16 @@ pub async fn timeout(
     secs: i64,
     reason: &str,
 ) -> Result<()> {
-    let until = Timestamp::from_secs(now_secs() + timeout_chunk(secs).0)?;
+    let until = now_secs() + timeout_chunk(secs).0;
+    let running = crate::http_err::member(http, g, u).await.ok().flatten();
+    if running
+        .and_then(|m| m.communication_disabled_until)
+        .is_some_and(|t| t.as_secs() >= until)
+    {
+        return Ok(());
+    }
     http.update_guild_member(g, u)
-        .communication_disabled_until(Some(until))
+        .communication_disabled_until(Some(Timestamp::from_secs(until)?))
         .reason(reason)
         .await?;
     Ok(())

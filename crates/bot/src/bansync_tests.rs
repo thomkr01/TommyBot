@@ -43,6 +43,14 @@ fn every_exemption_is_named() {
 }
 
 #[test]
+fn a_copy_replaces_only_a_local_temp_ban_it_outlasts() {
+    assert!(outlasts(None, Some(100)) && outlasts(Some(200), Some(100)));
+    assert!(!outlasts(Some(100), Some(100)) && !outlasts(Some(50), Some(100)));
+    // A permanent ban here (no unban job) is never replaced.
+    assert!(!outlasts(None, None) && !outlasts(Some(200), None));
+}
+
+#[test]
 fn automatic_bans_follow_their_switches() {
     let c = BanSyncCfg::default();
     for (o, on) in [

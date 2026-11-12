@@ -19,7 +19,7 @@ use crate::{
     app::{App, GuildCfg},
     automod::now_ms,
     events::send_log_pinging,
-    joingate::{self, Detail},
+    joingate,
 };
 
 const JOB: &str = "voice_raid_end";
@@ -107,19 +107,7 @@ pub async fn on_voice(app: &App, v: &VoiceState, old: Option<Id<ChannelMarker>>)
         if let Err(e) = left {
             tracing::warn!(?e, user = id, "voice raid: disconnecting failed");
         }
-        let r = joingate::punish(
-            app,
-            &cfg,
-            gid,
-            id,
-            raid.action(),
-            "voice raid",
-            Detail::default(),
-        )
-        .await;
-        if let Err(e) = r {
-            tracing::warn!(?e, user = id, "voice raid: punishing failed");
-        }
+        joingate::punish_or_retry(app, &cfg, gid, id, raid.action(), "voice raid").await;
     }
     Ok(())
 }

@@ -91,6 +91,15 @@ pub(super) async fn click(
         return Ok("This alert was already handled.".into());
     }
     if action == "allow" {
+        // Like the other buttons: refused during panic's mod lock, and counted for the rate limit
+        // under the permit that lets the clicker press it.
+        let permit = ["ban", "kick", "quarantine"]
+            .into_iter()
+            .find(|p| level.has(p))
+            .unwrap_or("ban");
+        if let Some(why) = commands::gated(app, gid, clicker, &level, permit).await? {
+            return Ok(why);
+        }
         let (g, u, c) = (gid.get() as i64, user.get() as i64, clicker.get() as i64);
         raiders::allow(&app.pool, g, u, c).await?;
         return Ok(format!(

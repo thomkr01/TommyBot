@@ -305,6 +305,24 @@ async fn announce(app: &App, gid: Id<GuildMarker>, log: Log) {
     }
 }
 
+/// A lifted lock takes its end with it: its timed unlock job, and panic mode's unlock when panic
+/// made it. Otherwise either would lift a later lock of the same part. Only logged on failure.
+async fn forget_timers(app: &App, gid: Id<GuildMarker>, kind: &LockKind) {
+    let timer = sqlx::query(
+        "DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'unlock' AND payload->'lock' = $2",
+    )
+    .bind(gid.get() as i64)
+    .bind(sqlx::types::Json(kind))
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = timer {
+        tracing::warn!(?e, "dropping the timed unlock failed");
+    }
+    if kind.overlaps(&LockKind::Role) {
+        crate::panic::own_lock(app, gid, false).await;
+    }
+}
+
 /// Lifts the active locks that overlap `which`, or all of them; returns how many were lifted.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
     if let Some(k) = which {
@@ -380,6 +398,9 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             );
         }
         store::drop_lock(&app.pool, gid.get(), &snap).await?;
+        if let Some(k) = &snap.kind {
+            forget_timers(app, gid, k).await;
+        }
         lifted += 1;
     }
     if failed > 0 {
@@ -774,6 +795,58 @@ pub async fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Lifting a lock drops its timer
+    /// (not another lock's) and tells panic mode the role lock is no longer its own.
+    #[tokio::test]
+    async fn a_lifted_lock_takes_its_timers_with_it() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(6_470_000_000 + std::process::id() as u64);
+        let g = gid.get() as i64;
+        let later = now_secs() + 600;
+        for kind in [LockKind::Role, LockKind::Channel(5)] {
+            let job = serde_json::json!({ "lock": kind });
+            tommybot_core::jobs::enqueue(&app.pool, g, "unlock", job, later)
+                .await
+                .unwrap();
+        }
+        let end = serde_json::json!({ "unlock": true, "locked": false });
+        tommybot_core::jobs::enqueue(&app.pool, g, "panic_end", end, later)
+            .await
+            .unwrap();
+        let jobs = || async {
+            let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+                "SELECT kind, payload FROM scheduled_jobs WHERE guild_id = $1 ORDER BY id",
+            )
+            .bind(g)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+            rows
+        };
+        crate::panic::own_lock(&app, gid, true).await;
+        assert_eq!(jobs().await[2].1["locked"], true);
+        forget_timers(&app, gid, &LockKind::Role).await;
+        let left = jobs().await;
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].1["lock"], serde_json::json!(LockKind::Channel(5)));
+        assert_eq!(left[1].1["locked"], false);
+        sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn lock_replies_read_like_the_panels() {
