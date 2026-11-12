@@ -73,20 +73,65 @@ fn watched(e: &AuditLogEntry) -> Option<Action> {
         A::AutoModerationRuleDelete => Action::AutoModRuleDelete,
         A::AutoModerationRuleUpdate => Action::AutoModRuleUpdate,
         A::MemberBanRemove => Action::Unban,
+        A::IntegrationCreate => Action::IntegrationCreate,
+        A::IntegrationDelete => Action::IntegrationDelete,
+        A::EmojiCreate => Action::EmojiCreate,
+        A::StickerCreate => Action::StickerCreate,
+        A::GuildScheduledEventCreate => Action::ScheduledEventCreate,
+        A::GuildUpdate
+            if changed(|c| {
+                matches!(
+                    c,
+                    AuditLogChange::Name { .. } | AuditLogChange::IconHash { .. }
+                )
+            }) =>
+        {
+            Action::GuildUpdate
+        }
+        // SOUNDBOARD_SOUND_DELETE: twilight 0.18 has no variant. Matched by number, so a later
+        // twilight that names it keeps matching.
+        t if u16::from(t) == 132 => Action::SoundboardDelete,
         _ => return None,
     })
 }
 
-fn inverse(action: Action, target: Option<u64>) -> Option<Inverse> {
-    let id = target?;
-    Some(match action {
+/// What undoes the entry. A server update that changed both name and icon gives two.
+fn inverse(action: Action, e: &AuditLogEntry) -> Vec<Inverse> {
+    if action == Action::GuildUpdate {
+        return e
+            .changes
+            .iter()
+            .filter_map(|c| match c {
+                AuditLogChange::Name {
+                    old: Some(name),
+                    new,
+                } => Some(Inverse::GuildName {
+                    name: name.clone(),
+                    from: new.clone(),
+                }),
+                AuditLogChange::IconHash { old, new } => Some(Inverse::GuildIcon {
+                    hash: old.map(|h| h.to_string()),
+                    from: Some(new.map(|h| h.to_string())),
+                }),
+                _ => None,
+            })
+            .collect();
+    }
+    let Some(id) = e.target_id.map(|t| t.get()) else {
+        return vec![];
+    };
+    vec![match action {
         Action::ChannelCreate => Inverse::DeleteChannel { id },
         Action::RoleCreate => Inverse::DeleteRole { id },
         Action::WebhookCreate => Inverse::DeleteWebhook { id },
         Action::Ban => Inverse::Unban { user: id },
         Action::Kick => Inverse::Reinvite { user: id },
-        _ => return None,
-    })
+        Action::IntegrationCreate => Inverse::DeleteIntegration { id },
+        Action::EmojiCreate => Inverse::DeleteEmoji { id },
+        Action::StickerCreate => Inverse::DeleteSticker { id },
+        Action::ScheduledEventCreate => Inverse::DeleteScheduledEvent { id },
+        _ => return vec![],
+    }]
 }
 
 /// The permit whitelist flag that exempts an action; the rest fall back to the blanket one.
@@ -135,12 +180,15 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         A::RoleCreate => guard_perms(app, &cfg, e, actor).await?,
         _ => {}
     }
+    if matches!(e.action_type, A::MemberDisconnect | A::MemberMove) {
+        return crate::voice_nuke::note(app, &cfg, gid, e).await;
+    }
     let Some(action) = watched(e) else {
         return Ok(());
     };
-    let Some((_, heat)) = cfg.antinuke.limit(action) else {
+    if cfg.antinuke.limit(action).is_none() {
         return Ok(());
-    };
+    }
     // Ticket bots open and close channels all day; the gateway event names the category first.
     let exempt_categories: Vec<u64> = cfg
         .antinuke
@@ -169,24 +217,69 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
                     .iter()
                     .any(|w| w.get() == t.get())
             }));
-    let inv = inverse(action, e.target_id.map(|t| t.get()));
+    let inv = inverse(action, e);
     if let (true, Some(t), Action::ChannelCreate | Action::RoleCreate) =
         (exempt, e.target_id, action)
     {
         backup::track_created(app, gid, action, t.get()).await?;
     }
+    count(
+        app,
+        &cfg,
+        gid,
+        actor,
+        action,
+        e.target_id.map(|t| t.get()),
+        &inv,
+        exempt,
+        1,
+    )
+    .await
+}
+
+/// Logs, heats and counts `n` actions of one audit entry, and contains the actor at the limit.
+/// The voice path counts how much a merged entry grew (`voice_nuke`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn count(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    action: Action,
+    target: Option<u64>,
+    inv: &[Inverse],
+    exempt: bool,
+    n: u32,
+) -> Result<()> {
+    let Some((_, heat)) = cfg.antinuke.limit(action) else {
+        return Ok(());
+    };
     if !exempt {
-        sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
-            .bind(gid.get() as i64)
-            .bind(actor.get() as i64)
-            .bind(format!("{action:?}"))
-            .bind(e.target_id.map(|t| t.get() as i64))
-            .bind(inv.as_ref().map(|i| json!(i)))
-            .execute(&app.pool)
-            .await?;
+        // One row per inverse (a name and icon change are two), still counted once below.
+        let rows: Vec<Option<&Inverse>> = if inv.is_empty() {
+            vec![None]
+        } else {
+            inv.iter().map(Some).collect()
+        };
+        for i in rows {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+                .bind(gid.get() as i64)
+                .bind(actor.get() as i64)
+                .bind(format!("{action:?}"))
+                .bind(target.map(|t| t as i64))
+                .bind(i.map(|i| json!(i)))
+                .execute(&app.pool)
+                .await?;
+        }
         if heat > 0
             && cfg.panic.heat_algorithm
-            && add_heat(app, gid, actor, heat, cfg.panic.heat_decay)
+            && add_heat(
+                app,
+                gid,
+                actor,
+                heat.saturating_mul(n),
+                cfg.panic.heat_decay,
+            )
         {
             crate::panic::note(app, gid, actor, true).await?;
         }
@@ -194,12 +287,18 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     let verdict = {
         let mut an = app.antinuke.lock().unwrap();
         an.limits = cfg.antinuke.watched();
-        an.on_action(gid.get(), actor.get(), action, exempt, Instant::now())
+        an.on_actions(gid.get(), actor.get(), action, exempt, Instant::now(), n)
     };
     if let Verdict::Quarantine(c) = verdict {
         let why = format!(
-            "{action:?} limit reached ({}/min, {}/hour)",
-            c.minute, c.hour
+            "{action:?} limit reached ({}/min, {}/hour){}",
+            c.minute,
+            c.hour,
+            if action.cannot_undo() {
+                "; cannot be undone in Discord"
+            } else {
+                ""
+            }
         );
         quarantine_and_revert(app, gid, actor, &why).await?;
     }
@@ -617,7 +716,8 @@ pub(crate) async fn revert_actor(
     // Only the rows read here are marked reverted at the end: the actor's newer actions are not undone yet.
     let rows: Vec<(i64, serde_json::Value, i64)> = sqlx::query_as(
         "SELECT id, inverse, EXTRACT(EPOCH FROM created_at)::BIGINT FROM action_log
-         WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)",
+         WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)
+         ORDER BY id DESC",
     )
     .bind(gid.get() as i64)
     .bind(actor.get() as i64)
@@ -625,6 +725,8 @@ pub(crate) async fn revert_actor(
     .fetch_all(&app.pool)
     .await?;
     let mut ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    // Newest first by id: `at` is whole seconds, and two renames in one second must put the
+    // older name back last.
     let log: Vec<LogEntry> = rows
         .into_iter()
         .filter_map(|(_, inv, at)| {
@@ -637,6 +739,24 @@ pub(crate) async fn revert_actor(
         })
         .collect();
     let mut plan = plan_revert(&log, actor.get(), since);
+    // The actor's oldest name and icon rows in the window, reverted or not: a late rerun that read
+    // only newer renames still ends on the name before the first one.
+    let firsts: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT DISTINCT ON (inverse->>'op') inverse FROM action_log
+         WHERE guild_id=$1 AND actor_id=$2 AND inverse->>'op' IN ('guild_name','guild_icon')
+           AND created_at >= to_timestamp($3)
+         ORDER BY inverse->>'op', id",
+    )
+    .bind(gid.get() as i64)
+    .bind(actor.get() as i64)
+    .bind(since)
+    .fetch_all(&app.pool)
+    .await?;
+    let firsts: Vec<Inverse> = firsts
+        .into_iter()
+        .filter_map(|(v,)| serde_json::from_value(v).ok())
+        .collect();
+    tommybot_antinuke::settle_guild(&mut plan.ops, &firsts);
     if let Some(f) = filters {
         plan.ops.retain(|op| match op {
             Inverse::DeleteRole { .. } => f.restore && f.delete_roles,
@@ -841,12 +961,13 @@ async fn quarantine_and_revert(
     why: &str,
 ) -> Result<()> {
     let key = (gid.get(), actor.get());
-    if !claim_nuke_run(app, key) {
+    let Some(token) = claim_nuke_run(app, key) else {
         // Every event past the limit lands here while the first run is busy; its action is
         // logged, and the running revert picks it up before it ends.
         return Ok(());
-    }
-    let r = async {
+    };
+    let _claim = RunClaim(app, key, token);
+    async {
         let since = now_secs() - 3600;
         let payload = json!({"actor": actor.get(), "why": why, "since": since});
         let guard = jobs::enqueue(
@@ -864,9 +985,19 @@ async fn quarantine_and_revert(
         jobs::finish(&app.pool, guard).await?;
         r
     }
-    .await;
-    app.nuke_runs.lock().unwrap().remove(&key);
-    r
+    .await
+}
+
+/// Frees a nuke-run claim when the run ends, also when it panics (or the actor stays claimed and
+/// its guard job is skipped for good). Only its own claim: `rerun` may have freed it already and
+/// a newer run claimed the actor meanwhile.
+struct RunClaim<'a>(&'a App, (u64, u64), u64);
+
+impl Drop for RunClaim<'_> {
+    fn drop(&mut self) {
+        let mut runs = self.0.nuke_runs.lock().unwrap_or_else(|p| p.into_inner());
+        release(&mut runs, self.1, self.2);
+    }
 }
 
 /// The `nuke_revert` guard job after a restart: the cut-off run again, under the same claim, so a
@@ -879,12 +1010,11 @@ pub(crate) async fn resume_nuke(
     since: i64,
 ) -> Result<()> {
     let key = (gid.get(), actor.get());
-    if !claim_nuke_run(app, key) {
+    let Some(token) = claim_nuke_run(app, key) else {
         return Ok(());
-    }
-    let r = nuke_run(app, gid, actor, why, since, true).await;
-    app.nuke_runs.lock().unwrap().remove(&key);
-    r
+    };
+    let _claim = RunClaim(app, key, token);
+    nuke_run(app, gid, actor, why, since, true).await
 }
 
 /// True while a quarantine and revert for this actor runs in this process.
@@ -938,7 +1068,7 @@ async fn nuke_run(
 
 /// True when no quarantine and revert runs for this (guild, actor) yet; otherwise asks the running
 /// one to revert once more.
-fn claim_nuke_run(app: &App, key: (u64, u64)) -> bool {
+fn claim_nuke_run(app: &App, key: (u64, u64)) -> Option<u64> {
     claim_run(&mut app.nuke_runs.lock().unwrap(), key)
 }
 
@@ -948,28 +1078,44 @@ fn nuke_rerun(app: &App, key: (u64, u64)) -> bool {
     rerun(&mut app.nuke_runs.lock().unwrap(), key)
 }
 
-fn claim_run(runs: &mut HashMap<(u64, u64), bool>, key: (u64, u64)) -> bool {
+/// The claim's token (one per run), or None while another run holds the actor.
+fn claim_run(runs: &mut NukeRuns, key: (u64, u64)) -> Option<u64> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     match runs.get_mut(&key) {
-        Some(again) => {
+        Some((_, again)) => {
             *again = true;
-            false
+            None
         }
         None => {
-            runs.insert(key, false);
-            true
+            let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            runs.insert(key, (token, false));
+            Some(token)
         }
     }
 }
 
-fn rerun(runs: &mut HashMap<(u64, u64), bool>, key: (u64, u64)) -> bool {
-    if runs.get(&key) == Some(&true) {
-        runs.insert(key, false);
-        true
-    } else {
-        runs.remove(&key);
-        false
+fn rerun(runs: &mut NukeRuns, key: (u64, u64)) -> bool {
+    match runs.get_mut(&key) {
+        Some((_, again)) if *again => {
+            *again = false;
+            true
+        }
+        _ => {
+            runs.remove(&key);
+            false
+        }
     }
 }
+
+/// Frees the claim only while it is still the one `token` took.
+fn release(runs: &mut NukeRuns, key: (u64, u64), token: u64) {
+    if runs.get(&key).is_some_and(|r| r.0 == token) {
+        runs.remove(&key);
+    }
+}
+
+/// (guild, actor) -> (the running run's token, actions came in meanwhile).
+pub(crate) type NukeRuns = HashMap<(u64, u64), (u64, bool)>;
 
 pub(crate) async fn revert_and_report(
     app: &App,
@@ -1119,6 +1265,8 @@ async fn record_nuke(
     Ok(case.id)
 }
 
+const REVERT_REASON: &str = "Anti-nuke revert";
+
 pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -> Result<()> {
     match op {
         Inverse::Unban { user } => {
@@ -1172,6 +1320,67 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
             app.http
                 .update_role(gid, Id::new(*id))
                 .permissions(Permissions::from_bits_truncate(*perms))
+                .await?;
+        }
+        Inverse::DeleteIntegration { id } => {
+            app.http
+                .delete_guild_integration(gid, Id::new(*id))
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::DeleteEmoji { id } => {
+            app.http
+                .delete_emoji(gid, Id::new(*id))
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::DeleteSticker { id } => {
+            app.http
+                .delete_guild_sticker(gid, Id::new(*id))
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::DeleteScheduledEvent { id } => {
+            app.http
+                .delete_guild_scheduled_event(gid, Id::new(*id))
+                .await?; // twilight takes no audit reason here
+        }
+        // Only when the live name differs. `from` (a row as stored, not settled by
+        // `revert_actor`): only while the server still has the name the entry set.
+        Inverse::GuildName { name, from } => {
+            let live = app.http.guild(gid).await?.model().await?.name;
+            if live == *name || !tommybot_antinuke::still_set(from, &live) {
+                return Ok(());
+            }
+            app.http
+                .update_guild(gid)
+                .name(name)
+                .reason(REVERT_REASON)
+                .await?;
+        }
+        Inverse::GuildIcon { hash, from } => {
+            let live = app
+                .http
+                .guild(gid)
+                .await?
+                .model()
+                .await?
+                .icon
+                .map(|h| h.to_string());
+            if live == *hash || !tommybot_antinuke::still_set(from, &live) {
+                return Ok(());
+            }
+            let icon = match hash {
+                Some(h) => Some(
+                    tommybot_automod::discord_api::icon_data_uri(app.api.client(), gid.get(), h)
+                        .await?,
+                ),
+                None => None,
+            };
+            app.http
+                .update_guild(gid)
+                .icon(icon.as_deref())
+                .reason(REVERT_REASON)
                 .await?;
         }
         // Discord cannot undo a kick, so this is reported for re-invite, not executed.
@@ -1270,12 +1479,17 @@ mod tests {
     fn one_nuke_run_per_actor_and_late_actions_rerun_it() {
         let mut runs = HashMap::new();
         let k = (1, 2);
-        assert!(claim_run(&mut runs, k));
-        assert!(!claim_run(&mut runs, k)); // a second event while it runs
-        assert!(claim_run(&mut runs, (1, 3))); // another actor runs on its own
+        let first = claim_run(&mut runs, k).unwrap();
+        assert!(claim_run(&mut runs, k).is_none()); // a second event while it runs
+        assert!(claim_run(&mut runs, (1, 3)).is_some()); // another actor runs on its own
         assert!(rerun(&mut runs, k)); // that event is reverted once more
         assert!(!rerun(&mut runs, k)); // nothing new: the claim is freed
-        assert!(claim_run(&mut runs, k)); // so a later action starts a new run
+        let second = claim_run(&mut runs, k).unwrap(); // so a later action starts a new run
+                                                       // The first run frees its claim after `jobs::finish`: the second run's claim stays.
+        release(&mut runs, k, first);
+        assert!(claim_run(&mut runs, k).is_none());
+        release(&mut runs, k, second);
+        assert!(claim_run(&mut runs, k).is_some());
     }
 
     #[test]
@@ -1364,6 +1578,84 @@ mod tests {
         assert_eq!(watched(&entry(31, rename)), Some(Action::RoleUpdate));
         assert_eq!(watched(&entry(31, json!([]))), None);
         assert_eq!(watched(&entry(23, json!([]))), Some(Action::Unban));
+    }
+
+    #[test]
+    fn new_triggers_are_watched_and_undone() {
+        let entry = |t: u16, changes: serde_json::Value| -> AuditLogEntry {
+            serde_json::from_value(json!({
+                "action_type": t, "changes": changes, "id": "1", "user_id": "2", "target_id": "3"
+            }))
+            .unwrap()
+        };
+        for (t, a, inv) in [
+            (
+                80,
+                Action::IntegrationCreate,
+                vec![Inverse::DeleteIntegration { id: 3 }],
+            ),
+            (82, Action::IntegrationDelete, vec![]),
+            (
+                60,
+                Action::EmojiCreate,
+                vec![Inverse::DeleteEmoji { id: 3 }],
+            ),
+            (
+                90,
+                Action::StickerCreate,
+                vec![Inverse::DeleteSticker { id: 3 }],
+            ),
+            (
+                100,
+                Action::ScheduledEventCreate,
+                vec![Inverse::DeleteScheduledEvent { id: 3 }],
+            ),
+            (132, Action::SoundboardDelete, vec![]),
+        ] {
+            let e = entry(t, json!([]));
+            assert_eq!(watched(&e), Some(a), "{t}");
+            assert_eq!(inverse(a, &e), inv, "{t}");
+        }
+        // Soundboard create and update are not watched. Voice moves and disconnects are counted
+        // only by `voice_nuke`, so a merged entry is never counted by two paths.
+        for t in [130, 26, 27] {
+            assert_eq!(watched(&entry(t, json!([]))), None, "{t}");
+        }
+        let hash = "0123456789abcdef0123456789abcdef";
+        let both = entry(
+            1,
+            json!([{"key": "name", "old_value": "Home", "new_value": "Nuked"},
+                   {"key": "icon_hash", "old_value": hash, "new_value": format!("a_{hash}")}]),
+        );
+        assert_eq!(watched(&both), Some(Action::GuildUpdate));
+        assert_eq!(
+            inverse(Action::GuildUpdate, &both),
+            vec![
+                Inverse::GuildName {
+                    name: "Home".into(),
+                    from: Some("Nuked".into()),
+                },
+                Inverse::GuildIcon {
+                    hash: Some(hash.into()),
+                    from: Some(Some(format!("a_{hash}"))),
+                }
+            ]
+        );
+        // An icon added where there was none is removed again.
+        let added = entry(1, json!([{"key": "icon_hash", "new_value": hash}]));
+        assert_eq!(
+            inverse(Action::GuildUpdate, &added),
+            vec![Inverse::GuildIcon {
+                hash: None,
+                from: Some(Some(hash.into())),
+            }]
+        );
+        // Other server settings (here the vanity URL) are not this card.
+        let vanity = entry(
+            1,
+            json!([{"key": "vanity_url_code", "old_value": "a", "new_value": "b"}]),
+        );
+        assert_eq!(watched(&vanity), None);
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres. A row the revert did not read

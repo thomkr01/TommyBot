@@ -19,6 +19,60 @@ const MAX_RETRIES: u32 = 4;
 /// Longest single wait on a 429, so a global ban on the token can't stall a caller for minutes.
 const MAX_WAIT: Duration = Duration::from_secs(30);
 
+/// Largest server icon a revert downloads.
+pub const ICON_MAX: usize = 10 * 1024 * 1024;
+
+/// A server icon from Discord's CDN as the `data:` URI that sets it again. Sends no token; the
+/// caller's client must have a timeout. Used by the bot and the dashboard revert.
+pub async fn icon_data_uri(http: &reqwest::Client, guild: u64, hash: &str) -> Result<String> {
+    let Some(url) = tommybot_antinuke::icon_url(guild, hash) else {
+        bail!("not a Discord icon hash: {hash:?}");
+    };
+    let res = http.get(&url).send().await?;
+    // A redirect must not take the download off the CDN.
+    if res.url().host_str() != Some("cdn.discordapp.com") {
+        bail!("the icon download left the Discord CDN");
+    }
+    image_data_uri(res).await
+}
+
+/// The body as a `data:` URI: an `image/*` type only, at most [`ICON_MAX`] bytes.
+async fn image_data_uri(res: reqwest::Response) -> Result<String> {
+    use base64::Engine as _;
+    let mut res = res.error_for_status()?;
+    let kind = res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    // Only token characters, so the type cannot reshape the data URI.
+    let sub = kind.strip_prefix("image/").unwrap_or("");
+    if sub.is_empty()
+        || !sub
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b))
+    {
+        bail!("the icon download is not an image ({kind:?})");
+    }
+    if res.content_length().is_some_and(|n| n > ICON_MAX as u64) {
+        bail!("the icon is larger than 10 MB");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = res.chunk().await? {
+        if body.len() + chunk.len() > ICON_MAX {
+            bail!("the icon is larger than 10 MB");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(format!(
+        "data:{kind};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(body)
+    ))
+}
+
 /// `retry_after` seconds from a 429 body, one second if missing, capped at `MAX_WAIT`.
 fn retry_after(body: &str) -> Duration {
     let secs = serde_json::from_str::<Value>(body)
@@ -58,6 +112,11 @@ impl Api {
                 .unwrap_or_default(),
             token: token.into(),
         }
+    }
+
+    /// The client with the timeout and User-Agent, for downloads that need no token.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.http
     }
 
     async fn send(&self, req: reqwest::RequestBuilder, body: Option<Value>) -> Result<Value> {
@@ -413,6 +472,54 @@ fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves one raw HTTP answer on a local port and fetches it.
+    async fn fetch(head: &str, body: Vec<u8>) -> Result<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        let head = head.to_string();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut buf = [0; 1024];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(head.as_bytes()).await;
+            let _ = s.write_all(&body).await;
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        image_data_uri(http.get(url).send().await?).await
+    }
+
+    #[tokio::test]
+    async fn icon_download_takes_only_small_images() {
+        let ok = "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: 3\r\n\r\n";
+        assert_eq!(
+            fetch(ok, b"abc".to_vec()).await.unwrap(),
+            "data:image/png;base64,YWJj"
+        );
+        let html = "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 3\r\n\r\n";
+        assert!(fetch(html, b"abc".to_vec()).await.is_err());
+        let odd = "HTTP/1.1 200 OK\r\ncontent-type: image/png,x\r\ncontent-length: 3\r\n\r\n";
+        assert!(fetch(odd, b"abc".to_vec()).await.is_err());
+        let gone = "HTTP/1.1 404 Not Found\r\ncontent-type: image/png\r\ncontent-length: 3\r\n\r\n";
+        assert!(fetch(gone, b"abc".to_vec()).await.is_err());
+        let big = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n\r\n",
+            ICON_MAX + 1
+        );
+        assert!(fetch(&big, vec![]).await.is_err());
+        // No length given: the cap holds while reading.
+        let open = "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\nconnection: close\r\n\r\n";
+        assert!(fetch(open, vec![0; ICON_MAX + 1]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn icon_download_refuses_a_bad_hash_before_any_request() {
+        let e = icon_data_uri(&reqwest::Client::new(), 1, "../x")
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("not a Discord icon hash"));
+    }
 
     #[test]
     fn old_configs_without_locks_still_load() {

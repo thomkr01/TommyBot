@@ -13,6 +13,8 @@ tracing.workspace = true
 tokio.workspace = true
 decancer = "4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tommybot-antinuke.workspace = true
+base64 = "0.23"
 
 [dev-dependencies]
 tommybot-core.workspace = true

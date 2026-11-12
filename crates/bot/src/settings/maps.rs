@@ -2,7 +2,7 @@
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
-use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, NSFW_THRESHOLD, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS};
+use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, NSFW_THRESHOLD, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, VOICE_COUNT};
 use tommybot_core::warn::Action as WarnAction;
 use twilight_model::id::{marker::RoleMarker, Id};
 
@@ -346,6 +346,12 @@ pub(super) static JOINRAID: Module = Module {
         r!("8c", "Margin", "joinraid.id_margin_ms", Kind::Ms, |c| ms(raid(c).id_margin_ms)),
         r!("8d", "Minimum Matches", "joinraid.id_flag_min", Kind::Int(2, 500), |c| raid(c).id_flag_min.map_or(NO.into(), |n| n.to_string())),
         r!("9", "Spammer Flag", "joinraid.flag_spammer", Kind::Bool, |c| on(raid(c).flag_spammer)),
+        group!("10", "Voice Raid"),
+        r!("10a", "Status", "joinraid.voice.enabled", Kind::Bool, |c| on(raid(c).voice.enabled)),
+        r!("10b", "Minimum Trigger", "joinraid.voice.count", Kind::Int(VOICE_COUNT.0, VOICE_COUNT.1), |c| format!("{} members.", raid(c).voice.count)),
+        r!("10c", "Join History", "joinraid.voice.span_ms", Kind::Ms, |c| format!("Past {}", ms(raid(c).voice.span_ms))),
+        r!("10d", "Trigger Duration", "joinraid.voice.active_ms", Kind::Ms, |c| ms(raid(c).voice.active_ms)),
+        r!("10e", "Action", "joinraid.voice.action", Kind::Choice(ACTIONS), |c| act(raid(c).voice.action)),
     ],
 };
 

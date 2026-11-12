@@ -235,6 +235,15 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("RoleUpdate", "Role renames"),
     ("EmojiDelete", "Emoji deletions"),
     ("StickerDelete", "Sticker deletions"),
+    ("EmojiCreate", "Emoji creations"),
+    ("StickerCreate", "Sticker creations"),
+    ("SoundboardDelete", "Soundboard deletions"),
+    ("ScheduledEventCreate", "Event creations"),
+    ("IntegrationCreate", "App additions"),
+    ("IntegrationDelete", "App removals"),
+    ("GuildUpdate", "Server name & icon changes"),
+    ("VoiceDisconnect", "Voice disconnects"),
+    ("VoiceMove", "Voice moves"),
     ("AutoModRuleDelete", "AutoMod rule deletions"),
     ("AutoModRuleUpdate", "AutoMod rule updates"),
     ("Unban", "Unbans"),
@@ -263,6 +272,8 @@ const TIPS: &[(&str, &str, &str)] = &[
     ("antinuke", "per_minute", "How many times one account may do this action (for example ban or delete a channel) before TommyBot stops it."),
     ("antinuke", "per_hour", "How many times one account may do this action (for example ban or delete a channel) before TommyBot stops it."),
     ("antinuke", "heat", "How much of the limit one action uses. 100 % means one action counts as reaching the limit."),
+    ("joinraid", "voice.count", "How many different members must join a voice channel within the join history time before TommyBot treats it as a voice raid. One member joining again and again counts once."),
+    ("joinraid", "voice.span_ms", "The time window TommyBot counts voice joins in. Moving between voice channels is not a join."),
     ("joinraid", "count", "How many members must join within the join history time before TommyBot treats it as a raid."),
     ("joinraid", "span_ms", "The time window TommyBot counts joins in. If the minimum trigger is reached within it, it is a raid."),
     ("joinraid", "id_flag_min", "Raid accounts are often made at the same moment. TommyBot looks for many joins whose accounts were created close together."),
@@ -854,6 +865,17 @@ pub fn schema() -> Vec<Value> {
         ),
         choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
         fg("Response", "warned_roles", "roles"),
+        hp(
+            ti(fg("Voice Raid", "voice.enabled", "bool"), "Use the voice raid trigger"),
+            "Once it triggers, everyone who joins voice is disconnected and gets the action below until the trigger duration ends. Staff with any permit, bots and members on the Auto Mod spam whitelist are never flagged.",
+        ),
+        ti(dv(fg("Voice Raid", "voice.count", "int"), 8), "Minimum trigger (members)"),
+        ti(dv(fg("Voice Raid", "voice.span_ms", "int"), 10_000), "Join history"),
+        ti(dv(fg("Voice Raid", "voice.active_ms", "int"), 300_000), "Trigger duration"),
+        hp(
+            ti(dv(choice("Voice Raid", "voice.action", GATE_ACTIONS), "Timeout"), "Action"),
+            "A timeout here lasts 10 minutes.",
+        ),
     ];
     // "heat" is the Auto Mod page, "nuke" the Anti Nuke page; the fields without a page are shared.
     let panic = vec![

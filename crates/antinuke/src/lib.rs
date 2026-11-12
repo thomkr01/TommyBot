@@ -36,10 +36,20 @@ pub enum Action {
     AutoModRuleDelete,
     AutoModRuleUpdate,
     Unban,
+    IntegrationCreate,
+    IntegrationDelete,
+    EmojiCreate,
+    StickerCreate,
+    SoundboardDelete,
+    ScheduledEventCreate,
+    /// Name or icon changes only.
+    GuildUpdate,
+    VoiceDisconnect,
+    VoiceMove,
 }
 
 impl Action {
-    pub const ALL: [Action; 18] = [
+    pub const ALL: [Action; 27] = [
         Action::ChannelCreate,
         Action::ChannelDelete,
         Action::RoleCreate,
@@ -58,6 +68,15 @@ impl Action {
         Action::AutoModRuleDelete,
         Action::AutoModRuleUpdate,
         Action::Unban,
+        Action::IntegrationCreate,
+        Action::IntegrationDelete,
+        Action::EmojiCreate,
+        Action::StickerCreate,
+        Action::SoundboardDelete,
+        Action::ScheduledEventCreate,
+        Action::GuildUpdate,
+        Action::VoiceDisconnect,
+        Action::VoiceMove,
     ];
 
     /// Defaults (per minute, per hour, heat %); None: watched only when configured.
@@ -77,6 +96,14 @@ impl Action {
             Action::EmojiDelete | Action::StickerDelete => (5, 15, 10),
             Action::AutoModRuleDelete => (2, 5, 25),
             Action::AutoModRuleUpdate => (3, 10, 15),
+            Action::IntegrationCreate | Action::IntegrationDelete | Action::GuildUpdate => {
+                (2, 5, 25)
+            }
+            Action::EmojiCreate => (5, 15, 10),
+            Action::StickerCreate => (3, 10, 10),
+            Action::SoundboardDelete => (3, 10, 15),
+            Action::ScheduledEventCreate => (3, 10, 10),
+            Action::VoiceDisconnect | Action::VoiceMove => (10, 30, 5),
         })
     }
 
@@ -92,6 +119,25 @@ impl Action {
                 | Action::AutoModRuleDelete
                 | Action::AutoModRuleUpdate
                 | Action::Unban
+                | Action::IntegrationDelete
+                | Action::EmojiCreate
+                | Action::StickerCreate
+                | Action::SoundboardDelete
+                | Action::ScheduledEventCreate
+                | Action::GuildUpdate
+                | Action::VoiceDisconnect
+                | Action::VoiceMove
+        )
+    }
+
+    /// Discord keeps nothing to put back, so the anti-nuke report says so instead of a revert.
+    pub fn cannot_undo(self) -> bool {
+        matches!(
+            self,
+            Action::IntegrationDelete
+                | Action::SoundboardDelete
+                | Action::VoiceDisconnect
+                | Action::VoiceMove
         )
     }
 
@@ -155,6 +201,20 @@ impl AntiNuke {
         exempt: bool,
         now: Instant,
     ) -> Verdict {
+        self.on_actions(guild, executor, action, exempt, now, 1)
+    }
+
+    /// `n` actions at once (a merged voice audit entry grew by `n`). `n` is capped at the hour
+    /// limit, which already trips, so a huge count cannot make a huge loop or window.
+    pub fn on_actions(
+        &mut self,
+        guild: u64,
+        executor: u64,
+        action: Action,
+        exempt: bool,
+        now: Instant,
+        n: u32,
+    ) -> Verdict {
         let action = action.card();
         let Some(limit) = self.limits.get(&action).copied() else {
             return Verdict::Ignore;
@@ -166,7 +226,7 @@ impl AntiNuke {
         while q.front().is_some_and(|t| now.duration_since(*t) >= HOUR) {
             q.pop_front();
         }
-        q.push_back(now);
+        q.extend(std::iter::repeat_n(now, n.min(limit.per_hour) as usize));
         let minute = q
             .iter()
             .filter(|t| now.duration_since(**t) < MINUTE)
@@ -256,6 +316,89 @@ pub enum Inverse {
         id: u64,
         perms: u64,
     },
+    /// Removes an added app (Discord also kicks its bot and deletes its webhooks).
+    DeleteIntegration {
+        id: u64,
+    },
+    DeleteEmoji {
+        id: u64,
+    },
+    DeleteSticker {
+        id: u64,
+    },
+    DeleteScheduledEvent {
+        id: u64,
+    },
+    /// `from`: the name the entry set. The revert applies only while the server still has it, so a
+    /// late rerun never puts back a name from a rename in between. Missing (old rows): always.
+    GuildName {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+    },
+    /// `None`: the server had no icon. `from` as for the name (`Some(None)`: the entry removed it).
+    GuildIcon {
+        hash: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present"
+        )]
+        from: Option<Option<String>>,
+    },
+}
+
+/// A field that is present is `Some`, even when it is null (serde reads both as `None` otherwise).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(Some)
+}
+
+/// A revert of server name or icon changes ends on the value before the actor's first change in
+/// the window, whatever subset of rows this run read (a late rerun reads only the newest). The
+/// name and icon ops are replaced by one op each, last (oldest), from `firsts`: the actor's
+/// oldest name and icon row since the window start, reverted or not, as the stored inverse.
+/// The caller applies it only when the live value differs.
+pub fn settle_guild(ops: &mut Vec<Inverse>, firsts: &[Inverse]) {
+    let kind = |i: &Inverse| match i {
+        Inverse::GuildName { .. } => Some(0),
+        Inverse::GuildIcon { .. } => Some(1),
+        _ => None,
+    };
+    let mut last = [None, None];
+    ops.retain(|op| match kind(op) {
+        Some(k) => {
+            last[k] = Some(op.clone());
+            false
+        }
+        None => true,
+    });
+    for (k, read) in last.into_iter().enumerate() {
+        let Some(read) = read else { continue };
+        let first = firsts.iter().find(|f| kind(f) == Some(k)).unwrap_or(&read);
+        ops.push(match first.clone() {
+            Inverse::GuildName { name, .. } => Inverse::GuildName { name, from: None },
+            Inverse::GuildIcon { hash, .. } => Inverse::GuildIcon { hash, from: None },
+            op => op,
+        });
+    }
+}
+
+/// Compare-and-set for a server name or icon revert: true while the live value is still the one
+/// the entry set (`from`), or when the row predates `from`.
+pub fn still_set<T: PartialEq>(from: &Option<T>, live: &T) -> bool {
+    from.as_ref().is_none_or(|f| f == live)
+}
+
+/// The CDN address of a server icon, or None for anything that is not a Discord icon hash
+/// (`a_` for animated, then 32 lowercase hex). The only place an icon URL is built, so a stored
+/// value can never point a download at another host or path.
+pub fn icon_url(guild: u64, hash: &str) -> Option<String> {
+    let (hex, ext) = match hash.strip_prefix("a_") {
+        Some(h) => (h, "gif"),
+        None => (hash, "png"),
+    };
+    (hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| format!("https://cdn.discordapp.com/icons/{guild}/{hash}.{ext}?size=1024"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -381,6 +524,34 @@ mod tests {
     }
 
     #[test]
+    fn on_actions_counts_n_capped_at_the_hour_limit() {
+        let (mut a, t0) = (engine(10, 30), Instant::now());
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, false, t0, 4),
+            Verdict::Allow(Counts { minute: 4, hour: 4 })
+        );
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, false, t0, 6),
+            Verdict::Quarantine(Counts {
+                minute: 10,
+                hour: 10
+            })
+        );
+        let (mut a, t0) = (engine(10, 30), Instant::now());
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, false, t0, u32::MAX),
+            Verdict::Quarantine(Counts {
+                minute: 30,
+                hour: 30
+            })
+        );
+        assert_eq!(
+            a.on_actions(1, 2, Action::Ban, true, t0, 50),
+            Verdict::Ignore
+        );
+    }
+
+    #[test]
     fn tripwires() {
         assert!(gained_dangerous(0, 1 << 3));
         assert!(!gained_dangerous(1 << 3, 1 << 3)); // already had it
@@ -434,5 +605,208 @@ mod tests {
         let s = serde_json::to_string(&i).unwrap();
         assert_eq!(s, r#"{"op":"role_perms","id":4,"perms":8}"#);
         assert_eq!(serde_json::from_str::<Inverse>(&s).unwrap(), i);
+        for (i, json) in [
+            (
+                Inverse::DeleteIntegration { id: 1 },
+                r#"{"op":"delete_integration","id":1}"#,
+            ),
+            (
+                Inverse::DeleteEmoji { id: 2 },
+                r#"{"op":"delete_emoji","id":2}"#,
+            ),
+            (
+                Inverse::DeleteSticker { id: 3 },
+                r#"{"op":"delete_sticker","id":3}"#,
+            ),
+            (
+                Inverse::DeleteScheduledEvent { id: 4 },
+                r#"{"op":"delete_scheduled_event","id":4}"#,
+            ),
+            // Rows without `from` (written before it existed) still read, as unconditional.
+            (
+                Inverse::GuildName {
+                    name: "Old".into(),
+                    from: None,
+                },
+                r#"{"op":"guild_name","name":"Old"}"#,
+            ),
+            (
+                Inverse::GuildName {
+                    name: "Old".into(),
+                    from: Some("New".into()),
+                },
+                r#"{"op":"guild_name","name":"Old","from":"New"}"#,
+            ),
+            (
+                Inverse::GuildIcon {
+                    hash: None,
+                    from: None,
+                },
+                r#"{"op":"guild_icon","hash":null}"#,
+            ),
+            (
+                Inverse::GuildIcon {
+                    hash: Some("ab".into()),
+                    from: Some(None),
+                },
+                r#"{"op":"guild_icon","hash":"ab","from":null}"#,
+            ),
+            (
+                Inverse::GuildIcon {
+                    hash: None,
+                    from: Some(Some("cd".into())),
+                },
+                r#"{"op":"guild_icon","hash":null,"from":"cd"}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&i).unwrap(), json);
+            assert_eq!(serde_json::from_str::<Inverse>(json).unwrap(), i);
+        }
+    }
+
+    #[test]
+    fn two_renames_revert_to_the_first_name() {
+        let e = |at, name: &str| LogEntry {
+            actor: 9,
+            at,
+            inverse: Inverse::GuildName {
+                name: name.into(),
+                from: None,
+            },
+            reverted: false,
+        };
+        // Same second: the caller passes rows newest first, and the order holds for ties.
+        let p = plan_revert(&[e(100, "second"), e(100, "original")], 9, 0);
+        let last = p.ops.last().unwrap();
+        assert_eq!(
+            last,
+            &Inverse::GuildName {
+                name: "original".into(),
+                from: None,
+            }
+        );
+        let p = plan_revert(&[e(100, "original"), e(200, "second")], 9, 0);
+        assert_eq!(
+            p.ops.last().unwrap(),
+            &Inverse::GuildName {
+                name: "original".into(),
+                from: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_late_rerun_never_puts_back_a_name_from_a_rename_in_between() {
+        // O -> X -> Y -> Z. Each row stores the name it undoes to and the name it set.
+        let row = |at, name: &str, from: &str| LogEntry {
+            actor: 9,
+            at,
+            inverse: Inverse::GuildName {
+                name: name.into(),
+                from: Some(from.into()),
+            },
+            reverted: false,
+        };
+        let log = [row(100, "O", "X"), row(101, "X", "Y"), row(102, "Y", "Z")];
+        // As `revert_actor` does: plan the rows read, settle on the oldest logged, then apply
+        // only when the live name differs.
+        let run = |live: &mut String, read: &[LogEntry], logged: &[LogEntry]| {
+            let mut ops = plan_revert(read, 9, 0).ops;
+            settle_guild(&mut ops, &[logged[0].inverse.clone()]);
+            let names: Vec<_> = ops
+                .iter()
+                .filter(|o| matches!(o, Inverse::GuildName { .. }))
+                .collect();
+            assert_eq!(names.len(), 1, "one name op per run");
+            if let Inverse::GuildName { name, .. } = names[0] {
+                if name != live {
+                    *live = name.clone();
+                }
+            }
+        };
+        // The first run reads before the last rename is logged (live already Z), then a late
+        // rerun reads that row alone.
+        let mut live = "Z".to_string();
+        run(&mut live, &log[..2], &log[..2]);
+        assert_eq!(live, "O");
+        run(&mut live, &log[2..], &log);
+        assert_eq!(live, "O");
+        // The first run read two renames while live was Y, the late rerun the third.
+        let mut live = "Y".to_string();
+        run(&mut live, &log[..2], &log[..2]);
+        run(&mut live, &log[2..], &log);
+        assert_eq!(live, "O");
+        // Other ops stay, and an icon settles on its own oldest value.
+        let mut ops = vec![
+            Inverse::GuildIcon {
+                hash: Some("new".into()),
+                from: None,
+            },
+            Inverse::DeleteEmoji { id: 1 },
+        ];
+        let first = Inverse::GuildIcon {
+            hash: None,
+            from: Some(Some("a".into())),
+        };
+        settle_guild(&mut ops, &[first]);
+        assert_eq!(
+            ops,
+            [
+                Inverse::DeleteEmoji { id: 1 },
+                Inverse::GuildIcon {
+                    hash: None,
+                    from: None
+                }
+            ]
+        );
+        // A row without `from` applies whatever the live name is.
+        assert!(still_set(&None, &"anything".to_string()));
+    }
+
+    #[test]
+    fn icon_url_takes_only_discord_hashes() {
+        let h = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            icon_url(5, h).unwrap(),
+            format!("https://cdn.discordapp.com/icons/5/{h}.png?size=1024")
+        );
+        assert!(icon_url(5, &format!("a_{h}"))
+            .unwrap()
+            .ends_with(".gif?size=1024"));
+        for bad in [
+            "",
+            "../../evil",
+            &h.to_uppercase(),
+            &h[1..],
+            &format!("{h}0"),
+            &format!("{}?x=1", &h[..28]),
+            &format!("{}/../", &h[..27]),
+            &format!("b_{h}"),
+        ] {
+            assert_eq!(icon_url(5, bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn new_cards_are_opt_in_except_app_additions() {
+        assert!(!Action::IntegrationCreate.opt_in());
+        for a in [
+            Action::IntegrationDelete,
+            Action::EmojiCreate,
+            Action::StickerCreate,
+            Action::SoundboardDelete,
+            Action::ScheduledEventCreate,
+            Action::GuildUpdate,
+            Action::VoiceDisconnect,
+            Action::VoiceMove,
+        ] {
+            assert!(a.opt_in(), "{a:?}");
+        }
+        // Every card's minute limit is inside the dashboard range (2-50), Prune aside.
+        for a in Action::ALL {
+            if let Some((m, h, _)) = a.default_limit().filter(|_| a != Action::Prune) {
+                assert!((2..=50).contains(&m) && h >= m, "{a:?}");
+            }
+        }
     }
 }

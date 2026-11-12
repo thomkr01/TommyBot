@@ -11,7 +11,10 @@ use tommybot_logging::{
     embed::{DONE, RED, YES},
     Log, LogKind,
 };
-use twilight_model::id::{marker::UserMarker, Id};
+use twilight_model::id::{
+    marker::{GuildMarker, UserMarker},
+    Id,
+};
 
 use crate::{
     app::App,
@@ -128,14 +131,9 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             let code = job.payload["code"].as_str().unwrap_or_default();
             let url = crate::invites::raid_url(code).filter(|_| caught > 0);
             let log = crate::joingate::raid_report_log(caught, url.is_some().then_some(code));
-            match url {
-                Some(url) => {
-                    send_log_link(app, gid.get(), LogKind::JoinRaid, log, (RAID_REPORT, url))
-                        .await?
-                }
-                None => send_log(app, gid.get(), LogKind::JoinRaid, log).await?,
-            }
+            raid_report(app, gid, log, url).await?
         }
+        "voice_raid_end" => crate::voice_raid::end(app, gid, &job.payload).await?,
         "nuke_revert" => {
             let p = &job.payload;
             let actor = Id::new(p["actor"].as_u64().context("job payload has no actor")?);
@@ -157,6 +155,21 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         other => tracing::warn!(kind = other, "unknown job kind"),
     }
     Ok(())
+}
+
+/// Posts a raid report, with the Full Raid Report button when there is a page to open.
+pub(crate) async fn raid_report(
+    app: &App,
+    gid: Id<GuildMarker>,
+    log: Log,
+    url: Option<String>,
+) -> Result<()> {
+    match url {
+        Some(url) => {
+            send_log_link(app, gid.get(), LogKind::JoinRaid, log, (RAID_REPORT, url)).await
+        }
+        None => send_log(app, gid.get(), LogKind::JoinRaid, log).await,
+    }
 }
 
 const ONE_TARGET: [&str; 8] = [

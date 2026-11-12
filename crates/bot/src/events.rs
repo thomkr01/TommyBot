@@ -370,13 +370,35 @@ pub async fn shutdown(app: &App) {
 }
 
 async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
+    // Before any await: each event runs in its own task, so an await here would let a later voice
+    // update of the same member (or one after a GuildCreate) take the logger lock first.
+    if let Event::GuildCreate(g) = ev {
+        crate::welcome::seed_voice(app, g);
+    }
+    // A voice member's channel before this event, read as the update is recorded.
+    let voice = match ev {
+        Event::VoiceStateUpdate(v) => v.0.guild_id.map(|g| {
+            let old = app
+                .logger
+                .lock()
+                .unwrap()
+                .voice_update(g, v.0.user_id, v.0.channel_id);
+            (v.0.user_id, (old, v.0.channel_id))
+        }),
+        _ => None,
+    };
+    let voice_old = voice.and_then(|v| v.1 .0);
     if let Some(guild) = guild_of(ev) {
         let cfg = app.cfg(guild).await?;
-        let msgs = app
-            .logger
-            .lock()
-            .unwrap()
-            .handle(&cfg.logging, ev, Instant::now());
+        let msgs = {
+            let mut logger = app.logger.lock().unwrap();
+            match voice {
+                Some((user, moved)) => {
+                    logger.handle_voice(&cfg.logging, user, moved, Instant::now())
+                }
+                None => logger.handle(&cfg.logging, ev, Instant::now()),
+            }
+        };
         for m in msgs {
             if let Err(e) = send_entry(app, &m).await {
                 tracing::warn!(?e, channel = %m.channel_id, "log send failed");
@@ -532,6 +554,13 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                 tracing::warn!(?err, "recording a mod action failed");
             }
             nuke.and(ban).and(unban).and(allow)?
+        }
+        // Voice raid first: the anti-nuke recheck can wait out its fetch gap.
+        Event::VoiceStateUpdate(v) => {
+            if let Err(e) = crate::voice_raid::on_voice(app, &v.0, voice_old).await {
+                tracing::warn!(?e, "voice raid check failed");
+            }
+            crate::voice_nuke::on_voice(app, &v.0, voice_old).await
         }
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,

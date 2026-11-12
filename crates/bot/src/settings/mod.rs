@@ -214,11 +214,20 @@ pub fn edit_for(row: &Row, op: &Op, ids: &[u64], current: Option<&Value>) -> Res
                             bad()
                         )
                     })?;
-                    json!(if matches!(kind, Kind::Ms) {
+                    let n = if matches!(kind, Kind::Ms) {
                         secs.checked_mul(1000).ok_or_else(bad)?
                     } else {
                         secs
-                    })
+                    };
+                    let (section, path) = row.path.split_once('.').unwrap_or_default();
+                    if let Some((lo, hi)) = tommybot_core::limits::for_path(section, path) {
+                        if !(lo..=hi).contains(&n) {
+                            let unit = if matches!(kind, Kind::Ms) { 1000 } else { 1 };
+                            let (lo, hi) = (embed::duration(lo / unit), embed::duration(hi / unit));
+                            return Err(format!("{label} must be between {lo} and {hi}"));
+                        }
+                    }
+                    json!(n)
                 }
                 Kind::Age => {
                     let (lo, hi) = tommybot_core::limits::MIN_AGE_MS;
@@ -979,7 +988,8 @@ mod tests {
                     Kind::Bool | Kind::Switch(..) => Op::Toggle(r.code.into(), true),
                     Kind::Int(min, _) => Op::Set(r.code.into(), min.to_string()),
                     Kind::Num(_) => Op::Set(r.code.into(), "50".into()),
-                    Kind::Secs | Kind::Ms | Kind::Age => Op::Set(r.code.into(), "10m".into()),
+                    // 1m fits every ranged duration row (Voice Raid: span up to 5m, active from 1m).
+                    Kind::Secs | Kind::Ms | Kind::Age => Op::Set(r.code.into(), "1m".into()),
                     Kind::Text => Op::Set(r.code.into(), "t!".into()),
                     Kind::Choice(o) => Op::Set(r.code.into(), o[o.len() - 1].0.into()),
                     Kind::Role | Kind::Channel | Kind::Roles | Kind::Channels => {
@@ -996,6 +1006,17 @@ mod tests {
                 (r.get)(&GuildCfg::parse(&doc));
             }
         }
+    }
+
+    #[test]
+    fn ranged_durations_are_refused_outside_their_limits() {
+        let span = row(&JOINRAID, "10c");
+        let set = |v: &str| edit_for(span, &Op::Set("10c".into(), v.into()), &[5], None);
+        assert!(set("5m").is_ok());
+        assert_eq!(
+            set("10m").err().as_deref(),
+            Some("[10C] Join History must be between 1s and 5m")
+        );
     }
 
     #[test]

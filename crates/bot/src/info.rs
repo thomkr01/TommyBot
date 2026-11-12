@@ -335,6 +335,11 @@ pub async fn security_page(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
             .routes
             .contains_key(&tommybot_logging::LogKind::ModCommand),
         main_roles: cfg.lockdown.main_roles.iter().map(|r| r.get()).collect(),
+        mod_roles: tommybot_core::permits::mod_roles(&app.pool, gid.get() as i64)
+            .await?
+            .into_iter()
+            .map(|r| r as u64)
+            .collect(),
         modules: vec![
             ("Anti-nuke", cfg.antinuke.enabled),
             ("Join gate", cfg.joingate.enabled),

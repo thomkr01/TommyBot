@@ -101,6 +101,20 @@ pub async fn staff_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Vec
     .await
 }
 
+/// Role ids on the Moderators permit and not on Admins: the security score holds them to member rules.
+pub async fn mod_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Vec<i64>> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT r.role_id FROM permits p JOIN permit_roles r ON r.permit_id = p.id
+         WHERE p.guild_id = $1 AND p.name = 'Moderators' AND NOT EXISTS (
+           SELECT 1 FROM permits a JOIN permit_roles ar ON ar.permit_id = a.id
+           WHERE a.guild_id = $1 AND a.name = 'Admins' AND ar.role_id = r.role_id)
+         ORDER BY 1",
+    )
+    .bind(guild_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// One toggle in the dashboard's permit editor. `flag` entries live in a permit's whitelist, the
 /// rest in its perms. `locked` ones are shown but never stored.
 pub struct PermDef {

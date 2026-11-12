@@ -16,7 +16,7 @@ pub fn account_created_ms(user_id: u64) -> i64 {
 }
 
 /// Ordered by severity; the gate applies the harshest action any filter asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(from = "ActionRepr")]
 pub enum Action {
     Log,
@@ -48,6 +48,28 @@ enum ActionName {
     Timeout,
     Kick,
     Ban,
+}
+
+/// The default timeout is written as a bare `"Timeout"`, the value the dashboard select shows;
+/// `{"Timeout": 0}` matched no option there.
+impl Serialize for Action {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let name = match *self {
+            Self::Timeout(ms) if ms != 0 => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("Timeout", &ms)?;
+                return m.end();
+            }
+            Self::Log => "Log",
+            Self::Rename => "Rename",
+            Self::Warn => "Warn",
+            Self::Timeout(_) => "Timeout",
+            Self::Kick => "Kick",
+            Self::Ban => "Ban",
+        };
+        s.serialize_str(name)
+    }
 }
 
 impl From<ActionRepr> for Action {
@@ -164,7 +186,7 @@ impl GateFilter {
 }
 
 /// Renaming only fixes a name, so only the username filter may take Rename.
-fn no_rename<'de, D, T>(d: D) -> Result<T, D::Error>
+pub(crate) fn no_rename<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de> + Into<Option<Action>> + Copy,
@@ -436,6 +458,9 @@ pub struct RaidCfg {
     pub lock: Option<crate::lockdown::LockKind>,
     #[serde(default)]
     pub warned_roles: Vec<String>,
+    /// The Voice Raid card: many members joining voice at once.
+    #[serde(default)]
+    pub voice: crate::voice::VoiceRaidCfg,
 }
 
 /// Bucket size for the ID flag. Adaptive starts at a day and narrows to an hour when one day
@@ -475,6 +500,7 @@ impl Default for RaidCfg {
             action: Action::Ban,
             lock: None,
             warned_roles: vec![],
+            voice: Default::default(),
         }
     }
 }
@@ -936,6 +962,11 @@ mod tests {
                 Action::Timeout(5),
                 Action::Ban
             ]
+        );
+        // Written back the way it was read.
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            r#"["Warn","Timeout",{"Timeout":5},"Ban"]"#
         );
         let cfg = GateCfg {
             enabled: true,

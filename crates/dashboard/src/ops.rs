@@ -20,9 +20,9 @@ use std::{
 };
 use tommybot_antinuke::{
     security::{
-        checks, move_under_bot, overwrite_targets, private_overwrites, setting_fix, strip_targets,
-        stripped, stripped_overwrite, synced_children, GuildSafety, Setup, PRIVATE,
-        QUARANTINE_CHANNELS,
+        checks, expression_targets, move_under_bot, overwrite_targets, private_overwrites,
+        setting_fix, strip_targets, stripped, stripped_overwrite, synced_children, GuildSafety,
+        Setup, EXPRESSIONS, EXPRESSION_PERMS, PRIVATE, QUARANTINE_CHANNELS,
     },
     Inverse, RoleImg,
 };
@@ -189,6 +189,11 @@ pub(crate) async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Li
                 .flatten()
                 .filter_map(id)
                 .collect(),
+            mod_roles: tommybot_core::permits::mod_roles(&st.db, guild)
+                .await?
+                .into_iter()
+                .map(|r| r as u64)
+                .collect(),
             trusted: extra
                 .into_iter()
                 .map(|u| u as u64)
@@ -269,7 +274,9 @@ async fn fix(
     if b.setting.as_deref() == Some(PRIVATE) {
         return make_private(&st, &s, guild, &c, b.channel_id.as_deref()).await;
     }
-    if let Some(setting) = b.setting {
+    // Strips roles like a role fix, so it takes the backup below.
+    let expressions = b.setting.as_deref() == Some(EXPRESSIONS);
+    if let Some(setting) = b.setting.filter(|_| !expressions) {
         let (key, value) =
             setting_fix(&setting).ok_or_else(|| ApiError::BadRequest("unknown setting".into()))?;
         st.discord
@@ -291,9 +298,11 @@ async fn fix(
         .await;
         return Ok(Json(json!({"ok": true})));
     }
-    let target = b
-        .role_id
-        .ok_or_else(|| ApiError::BadRequest("nothing to fix".into()))?;
+    let target = match b.role_id {
+        Some(t) if !expressions => t,
+        None if expressions => String::new(),
+        _ => return Err(ApiError::BadRequest("nothing to fix".into())),
+    };
     let l = live(&st, guild, &c).await?;
     let (g, roles, channels) = (guild as u64, &l.image.roles, &l.image.channels);
     let backup = || async {
@@ -351,11 +360,15 @@ async fn fix(
     let overwrites: Vec<_> = flagged
         .iter()
         .filter(|(ch, o)| {
-            all || (b.channel_id.as_deref() == Some(&ch.id.to_string())
-                && o.target.to_string() == target)
+            !expressions
+                && (all
+                    || (b.channel_id.as_deref() == Some(&ch.id.to_string())
+                        && o.target.to_string() == target))
         })
         .collect();
-    let role_targets: Vec<&RoleImg> = if all {
+    let role_targets: Vec<&RoleImg> = if expressions {
+        expression_targets(roles, g, l.bot_pos, &l.setup)
+    } else if all {
         strip_targets(roles, g, l.bot_pos)
     } else if b.channel_id.is_some() {
         if overwrites.is_empty() {
@@ -384,7 +397,12 @@ async fn fix(
             .call(
                 Method::PATCH,
                 &format!("/guilds/{guild}/roles/{}", r.id),
-                Some(json!({"permissions": stripped(r.id, g, r.permissions).to_string()})),
+                Some(json!({"permissions": if expressions {
+                    r.permissions & !EXPRESSION_PERMS
+                } else {
+                    stripped(r.id, g, r.permissions)
+                }
+                .to_string()})),
             )
             .await;
         let line = format!("role `{}`", r.name);
@@ -418,9 +436,14 @@ async fn fix(
         }
     }
     let mut text = format!(
-        "{} (<@{}>) stripped dangerous permissions from {}, backup #{backup}",
+        "{} (<@{}>) stripped {} permissions from {}, backup #{backup}",
         s.username,
         s.user_id,
+        if expressions {
+            "emoji, sticker, soundboard and event"
+        } else {
+            "dangerous"
+        },
         if done.is_empty() {
             "nothing".into()
         } else {
@@ -534,9 +557,48 @@ struct RevertBody {
     owners: bool,
 }
 
-async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<()> {
-    let (m, path, body) = inverse_request(guild, inv);
-    st.discord.call(m, &path, body).await.map(drop)
+/// Ok(false): a server name or icon revert skipped, since the server no longer has the value the
+/// entry set (renamed again since).
+async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result<bool> {
+    let live = match inv {
+        Inverse::GuildName { from: Some(_), .. } | Inverse::GuildIcon { from: Some(_), .. } => {
+            st.discord
+                .call(Method::GET, &format!("/guilds/{guild}"), None)
+                .await?
+        }
+        _ => Value::Null,
+    };
+    let still = match inv {
+        Inverse::GuildName { from, .. } => {
+            tommybot_antinuke::still_set(from, &live["name"].as_str().unwrap_or_default().into())
+        }
+        Inverse::GuildIcon { from, .. } => {
+            tommybot_antinuke::still_set(from, &live["icon"].as_str().map(String::from))
+        }
+        _ => true,
+    };
+    if !still {
+        return Ok(false);
+    }
+    let (m, path, body) = match inv {
+        // The old icon is downloaded first, so it cannot be a plain request.
+        Inverse::GuildIcon { hash, .. } => {
+            let icon = match hash {
+                Some(h) => Some(
+                    tommybot_automod::discord_api::icon_data_uri(&st.discord.http, guild as u64, h)
+                        .await?,
+                ),
+                None => None,
+            };
+            (
+                Method::PATCH,
+                format!("/guilds/{guild}"),
+                Some(json!({ "icon": icon })),
+            )
+        }
+        _ => inverse_request(guild, inv),
+    };
+    st.discord.call(m, &path, body).await.map(|_| true)
 }
 
 /// The Discord call that undoes `inv`.
@@ -564,7 +626,30 @@ fn inverse_request(guild: i64, inv: &Inverse) -> (Method, String, Option<Value>)
             format!("/guilds/{guild}/roles/{id}"),
             Some(json!({"permissions": perms.to_string()})),
         ),
-        Inverse::Unquarantine { .. } | Inverse::Reinvite { .. } => {
+        Inverse::DeleteIntegration { id } => (
+            Method::DELETE,
+            format!("/guilds/{guild}/integrations/{id}"),
+            None,
+        ),
+        Inverse::DeleteEmoji { id } => {
+            (Method::DELETE, format!("/guilds/{guild}/emojis/{id}"), None)
+        }
+        Inverse::DeleteSticker { id } => (
+            Method::DELETE,
+            format!("/guilds/{guild}/stickers/{id}"),
+            None,
+        ),
+        Inverse::DeleteScheduledEvent { id } => (
+            Method::DELETE,
+            format!("/guilds/{guild}/scheduled-events/{id}"),
+            None,
+        ),
+        Inverse::GuildName { name, .. } => (
+            Method::PATCH,
+            format!("/guilds/{guild}"),
+            Some(json!({ "name": name })),
+        ),
+        Inverse::Unquarantine { .. } | Inverse::Reinvite { .. } | Inverse::GuildIcon { .. } => {
             unreachable!("handled by the caller")
         }
     }
@@ -610,12 +695,18 @@ async fn revert(
                 continue;
             }
             Inverse::Reinvite { user } => reinvite.push(user.to_string()),
-            _ => {
-                if let Err(e) = run_inverse(&st, guild, &inv).await {
+            _ => match run_inverse(&st, guild, &inv).await {
+                Ok(true) => {}
+                // Renamed again since: left for staff, not marked reverted.
+                Ok(false) => {
+                    skipped.push(id);
+                    continue;
+                }
+                Err(e) => {
                     failed.push(json!({"id": id, "error": e.to_string()}));
                     continue;
                 }
-            }
+            },
         }
         // The revert unbans as the bot, so the bot cannot tell staff lifted a Raider List ban.
         if let Inverse::Unban { user } = inv {
@@ -804,6 +895,105 @@ mod tests {
         let (m, path, body) = inverse_request(5, &Inverse::RolePerms { id: 7, perms: 8 });
         assert_eq!((m, path.as_str()), (Method::PATCH, "/guilds/5/roles/7"));
         assert_eq!(body, Some(json!({"permissions": "8"})));
+    }
+
+    #[tokio::test]
+    async fn icon_revert_clears_a_new_icon_and_refuses_a_bad_hash() {
+        let seen: crate::Shared<String, Value> = Default::default();
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/guilds/5",
+            axum::routing::patch(move |Json(b): Json<Value>| async move {
+                s2.lock().unwrap().insert("body".into(), b);
+                "{}"
+            })
+            .get(|| async { r#"{"name":"Now","icon":null}"# }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let st = AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://x@127.0.0.1:1/x").unwrap(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api,
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        let clear = Inverse::GuildIcon {
+            hash: None,
+            from: None,
+        };
+        assert!(run_inverse(&st, 5, &clear).await.unwrap());
+        assert_eq!(seen.lock().unwrap()["body"], json!({"icon": null}));
+        let bad = Inverse::GuildIcon {
+            hash: Some("../../users/@me".into()),
+            from: None,
+        };
+        assert!(run_inverse(&st, 5, &bad).await.is_err());
+        // Compare-and-set: renamed again since the entry, so the old name is not put back.
+        let name = |from: &str| Inverse::GuildName {
+            name: "Home".into(),
+            from: Some(from.into()),
+        };
+        assert!(!run_inverse(&st, 5, &name("Nuked")).await.unwrap());
+        assert!(run_inverse(&st, 5, &name("Now")).await.unwrap());
+        assert_eq!(seen.lock().unwrap()["body"], json!({"name": "Home"}));
+        let icon = Inverse::GuildIcon {
+            hash: None,
+            from: Some(Some("0123456789abcdef0123456789abcdef".into())),
+        };
+        assert!(!run_inverse(&st, 5, &icon).await.unwrap());
+    }
+
+    #[test]
+    fn new_inverses_call_the_matching_routes() {
+        for (inv, m, path, body) in [
+            (
+                Inverse::DeleteIntegration { id: 7 },
+                Method::DELETE,
+                "/guilds/5/integrations/7",
+                None,
+            ),
+            (
+                Inverse::DeleteEmoji { id: 7 },
+                Method::DELETE,
+                "/guilds/5/emojis/7",
+                None,
+            ),
+            (
+                Inverse::DeleteSticker { id: 7 },
+                Method::DELETE,
+                "/guilds/5/stickers/7",
+                None,
+            ),
+            (
+                Inverse::DeleteScheduledEvent { id: 7 },
+                Method::DELETE,
+                "/guilds/5/scheduled-events/7",
+                None,
+            ),
+            (
+                Inverse::GuildName {
+                    name: "Home".into(),
+                    from: None,
+                },
+                Method::PATCH,
+                "/guilds/5",
+                Some(json!({"name": "Home"})),
+            ),
+        ] {
+            assert_eq!(inverse_request(5, &inv), (m, path.to_string(), body));
+        }
     }
 
     #[tokio::test]

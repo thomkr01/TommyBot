@@ -265,6 +265,26 @@ async fn roleless_staff_lists_admins_and_moderators_without_a_role() {
     cleanup(&p, g).await;
 }
 
+#[tokio::test]
+async fn mod_roles_leave_out_admin_roles() {
+    let Some(p) = pool().await else { return };
+    let g = gid(13);
+    cleanup(&p, g).await;
+    permit(&p, g, "Admins", 3, &[], 100).await;
+    permit(&p, g, "Moderators", 2, &[], 100).await;
+    permit(&p, g, "Helpers", 1, &[], 102).await;
+    sqlx::query(
+        "INSERT INTO permit_roles (permit_id, guild_id, role_id)
+         SELECT id, guild_id, 101 FROM permits WHERE guild_id = $1 AND name = 'Moderators'",
+    )
+    .bind(g)
+    .execute(&p)
+    .await
+    .unwrap();
+    assert_eq!(permits::mod_roles(&p, g).await.unwrap(), [101]);
+    cleanup(&p, g).await;
+}
+
 /// Mirrors the SQL in crates/bot/src/antinuke.rs (`quarantine_and_revert` and `quarantine`). Keep in sync.
 #[tokio::test]
 async fn antinuke_revert_and_quarantine_sql() {

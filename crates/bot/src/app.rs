@@ -175,7 +175,7 @@ pub struct App {
     pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
-    pub nuke_runs: Mutex<HashMap<(u64, u64), bool>>,
+    pub nuke_runs: Mutex<crate::antinuke::NukeRuns>,
     /// Lock and unlock of one guild run one at a time, so a second lock never saves locked
     /// permissions as its snapshot.
     pub lock_ops: Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>,
@@ -185,6 +185,10 @@ pub struct App {
     pub thread_parents: Mutex<HashMap<Id<ChannelMarker>, Id<ChannelMarker>>>,
     /// Sticky role adds per guild in the current minute: (minute, count).
     pub sticky_budget: Mutex<HashMap<u64, (i64, u32)>>,
+    /// Guilds watched for merged voice disconnect and move entries; see `voice_nuke`.
+    pub voice_audit: Mutex<crate::voice_nuke::State>,
+    /// Voice join raid state per guild; idle guilds are dropped on each voice join.
+    pub voice_raids: Mutex<HashMap<u64, tommybot_automod::voice::VoiceRaidDetector>>,
     /// NSFW image scan queue, model and score cache.
     pub nsfw: crate::nsfw::Scanner,
 }
@@ -254,6 +258,8 @@ impl App {
             thread_parents: Default::default(),
             reactions: Default::default(),
             sticky_budget: Default::default(),
+            voice_audit: Mutex::new(crate::voice_nuke::State::new(crate::automod::now_ms())),
+            voice_raids: Mutex::new(HashMap::new()),
             nsfw: Default::default(),
         }
     }

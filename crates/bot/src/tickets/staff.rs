@@ -34,7 +34,7 @@ pub(super) async fn relay(
     };
     let staff = &m.author;
     let (to_member, copy) = from_staff(&s, staff, &member.user, &text, anon);
-    let files = download(&m.attachments).await;
+    let files = download(app, &m.attachments).await;
     let dm = app
         .http
         .create_private_channel(user)

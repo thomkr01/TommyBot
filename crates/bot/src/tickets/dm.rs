@@ -247,7 +247,7 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         },
     };
     let text = body(&m.content, app.me);
-    let files = download(&m.attachments).await;
+    let files = download(app, &m.attachments).await;
     let (sent, got) = from_member(&s, &m.author, &text);
     let dm_msg = app
         .http

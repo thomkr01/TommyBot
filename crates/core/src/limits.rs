@@ -7,6 +7,14 @@ pub const NUKE_HOUR: (i64, i64) = (2, 500);
 pub const NUKE_HEAT: (i64, i64) = (1, 100);
 pub use tommybot_automod::heat::{HEAT_DECAY, HEAT_MAX, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS};
 pub use tommybot_automod::join::MIN_AGE_MS;
+pub use tommybot_automod::voice::{VOICE_ACTIVE_MS, VOICE_COUNT, VOICE_SPAN_MS};
+
+/// Join Raid's Voice Raid card: field and range.
+const VOICE: [(&str, (i64, i64)); 3] = [
+    ("count", VOICE_COUNT),
+    ("span_ms", VOICE_SPAN_MS),
+    ("active_ms", VOICE_ACTIVE_MS),
+];
 
 /// Auto slowmode card: field and range.
 const SLOWMODE: [(&str, (i64, i64)); 4] = [
@@ -40,6 +48,7 @@ pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
         ("joingate", ["min_age_override_ms"]) => Some(MIN_AGE_MS),
         ("automod", ["filters", "nsfw_threshold"]) => Some(NSFW_THRESHOLD),
         ("automod", ["auto_slowmode", k]) => SLOWMODE.iter().find(|s| s.0 == *k).map(|s| s.1),
+        ("joinraid", ["voice", k]) => VOICE.iter().find(|s| s.0 == *k).map(|s| s.1),
         _ => None,
     }
 }
@@ -76,6 +85,11 @@ pub fn check(section: &str, doc: &Value, old: &Value) -> Result<(), String> {
             }
         }
         "panic" => found.push(("heat_decay".into(), &doc["heat_decay"])),
+        "joinraid" => {
+            for (k, _) in VOICE {
+                found.push((format!("voice.{k}"), &doc["voice"][k]));
+            }
+        }
         _ => {}
     }
     for (path, v) in found {
@@ -146,6 +160,16 @@ mod tests {
         assert!(check("automod", &json!({"heat": {"max": "9"}}), &Value::Null).is_err());
         assert!(check("panic", &json!({"heat_decay": 0}), &Value::Null).is_err());
         assert!(check("panic", &json!({"heat_decay": 0.01}), &Value::Null).is_ok());
+        let voice = |k: &str, v: i64| json!({"voice": {k: v}});
+        assert!(check("joinraid", &voice("count", 2), &Value::Null).is_ok());
+        assert!(check("joinraid", &voice("count", 1), &Value::Null).is_err());
+        assert!(check("joinraid", &voice("count", 101), &Value::Null).is_err());
+        assert!(check("joinraid", &voice("span_ms", 999), &Value::Null).is_err());
+        assert!(check("joinraid", &voice("span_ms", 300_000), &Value::Null).is_ok());
+        assert!(check("joinraid", &voice("active_ms", 59_999), &Value::Null).is_err());
+        assert!(check("joinraid", &voice("active_ms", 3_600_001), &Value::Null).is_err());
+        assert!(check("joinraid", &json!({"count": 1000}), &Value::Null).is_ok());
+        assert_eq!(for_path("joinraid", "count"), None);
         // A value saved before the limits may stay; changing it must fit.
         let old = nuke("heat", json!(0));
         assert!(check("antinuke", &nuke("heat", json!(0)), &old).is_ok());
