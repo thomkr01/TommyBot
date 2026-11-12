@@ -47,6 +47,8 @@ mod voice_raid;
 mod webhooks;
 mod welcome;
 mod whitelist;
+#[cfg(test)]
+mod quarantine_tests;
 
 use anyhow::Result;
 use std::sync::Arc;
