@@ -899,7 +899,14 @@ pub async fn run(
                     reply::dm_and_act(reply::dm_first("untimeout"), notice("untimeout", user), act)
                         .await;
                 (told, _) = (d, r?);
-                crate::scheduler::forget_jobs(app, gid, user, &["timeout_renew", "raid_punish"], None).await;
+                crate::scheduler::forget_jobs(
+                    app,
+                    gid,
+                    user,
+                    &["timeout_renew", "raid_punish"],
+                    None,
+                )
+                .await;
                 let text = format!("Removed timeout of <@{user}>");
                 ("untimeout", user, None, None, text)
             }
