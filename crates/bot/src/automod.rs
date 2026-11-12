@@ -31,6 +31,11 @@ use crate::{
     lockdown, reply,
 };
 
+#[path = "automod_parts.rs"]
+mod parts;
+use parts::app_text;
+pub(crate) use parts::attachments;
+
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -47,7 +52,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
 /// A reply from an app the member installed on their own account says what the member wants it to,
 /// so it gets the instant filters (as on an edit) under the member's name. Server-installed bots stay
 /// exempt.
-fn as_app_user(m: &Message) -> Option<Message> {
+pub(crate) fn as_app_user(m: &Message) -> Option<Message> {
     let meta = m.interaction_metadata.as_deref()?;
     let owners = &meta.authorizing_integration_owners;
     (owners.user.is_some() && owners.guild.is_none()).then(|| Message {
@@ -102,14 +107,7 @@ async fn check_message(
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
-    // Server-installed apps' replies are not spam (user-installed ones were rewritten above).
-    let app_reply = m.interaction_metadata.is_some();
-    if !am.enabled || app_reply || (m.webhook_id.is_some() && !am.monitor_webhooks) {
-        return Ok(());
-    }
-    if !nsfw_image && am.filters.nsfw_images.enabled {
-        app.nsfw.enqueue(m, edit, false);
-    }
+    // Heat panic's raiders are held even with automod off.
     if crate::panic::is_raider(app, gid, m.author.id) {
         crate::http_err::best_effort(
             app.http.delete_message(m.channel_id, m.id).await,
@@ -123,6 +121,16 @@ async fn check_message(
             "Automod",
         )
         .await;
+    }
+    // Server-installed apps' replies are not spam (user-installed ones were rewritten above).
+    let app_reply = m.interaction_metadata.is_some();
+    if !am.enabled || app_reply || (m.webhook_id.is_some() && !am.monitor_webhooks) {
+        return Ok(());
+    }
+    // A user-installed app's reply runs as an edit (instant filters only), but its files are new.
+    let new_files = !nsfw_image && m.edited_timestamp.is_none();
+    if !nsfw_image && am.filters.nsfw_images.enabled {
+        app.nsfw.enqueue(m, !new_files, false);
     }
     let wl = &cfg.whitelist;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
@@ -138,19 +146,19 @@ async fn check_message(
     let now = now_ms();
     let text = filter_text(m);
     let content = text.as_str();
+    // Embed and button text only reach the link and word filters: their length or caps are no spam.
+    let linked = [content, &app_text(m)].join("\n");
     let f = &am.filters;
-    let hosts = filters::hosts(content);
+    let hosts = filters::hosts(&linked);
     let mut checked = hosts.clone();
     if f.nsfw_crawl_shorteners || f.invites.enabled {
-        for u in filters::shortener_urls(content).into_iter().take(3) {
+        for u in filters::shortener_urls(&linked).into_iter().take(3) {
             checked.extend(app.sites.unshorten(u).await);
         }
     }
     let bad_site = f.bad_sites.enabled && app.sites.phishing(&checked);
     let (upper_chars, lower_chars) = filters::case_counts(content);
-    let images = m
-        .attachments
-        .iter()
+    let images = attachments(m)
         .filter(|a| {
             a.content_type
                 .as_deref()
@@ -158,8 +166,8 @@ async fn check_message(
         })
         .count();
     // Edits cannot add attachments, so images are only read once.
-    let qr_scam = !edit && images > 0 && (f.scam_links.enabled || f.bad_sites.enabled) && {
-        let qr = crate::qr::texts(app, &m.attachments).await;
+    let qr_scam = new_files && images > 0 && (f.scam_links.enabled || f.bad_sites.enabled) && {
+        let qr = crate::qr::texts(app, attachments(m)).await;
         filters::is_discord_login(&qr)
             || f.bad_sites.enabled && app.sites.phishing(&filters::hosts(&qr))
             || f.scam_links.enabled && filters::is_nitro_steam_scam(&qr)
@@ -171,9 +179,9 @@ async fn check_message(
         everyone_mentions: usize::from(m.mention_everyone),
         role_mentions: m.mention_roles.len(),
         images,
-        files: m.attachments.len() - images,
+        files: attachments(m).count() - images,
         embeds: m.embeds.len(),
-        links: hosts.len(),
+        links: filters::hosts(content).len(),
         stickers: m.sticker_items.len(),
         channel_inactive: !edit
             && app
@@ -183,16 +191,16 @@ async fn check_message(
                 .entry(m.channel_id.get())
                 .or_default()
                 .on_message(now, f.inactive_messages, f.inactive_hours),
-        invite_link: f.invites.enabled && is_invite(content, &checked),
+        invite_link: f.invites.enabled && is_invite(&linked, &checked),
         malicious_link: bad_site
             || qr_scam
-            || f.scam_links.enabled && filters::is_nitro_steam_scam(content),
+            || f.scam_links.enabled && filters::is_nitro_steam_scam(&linked),
         nsfw_link: f.nsfw_links.enabled && app.sites.nsfw(&checked),
         nsfw_image: nsfw_image && f.nsfw_images.enabled,
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
         blacklisted_words: if f.words.filter.enabled && !f.words.use_discord_automod {
-            let forms = filters::word_forms(content);
+            let forms = filters::word_forms(&linked);
             filters::word_hits(&forms, &blacklist_words(f)) + f.words.regex.hits(&forms)
         } else {
             0
@@ -491,6 +499,8 @@ async fn strike_member(
     } else {
         reason.unwrap_or("Message spam")
     };
+    // A failed timeout or case must not skip the strike-cap lockdown; a failed timeout is returned last.
+    let mut failed = None;
     if am.strike.enabled {
         let why = if cfg.misc.show_reason_on_auto {
             format!(": {reason}")
@@ -502,35 +512,33 @@ async fn strike_member(
             .map_or(String::new(), |n| format!("\n{n}"));
         if let Err(e) = timeout(&app.http, gid, user, act.timeout_ms / 1000, "Automod").await {
             action_failed(app, gid, user.get(), "Timeout", &e).await;
-            return Err(e);
+            failed = Some(e);
+        } else {
+            // Only after it worked: a failed timeout must not tell them they were timed out.
+            reply::dm(
+                app,
+                user,
+                &format!("You were timed out by automod{why}{note}"),
+            )
+            .await;
+            let secs = Some(act.timeout_ms / 1000);
+            if let Err(e) = auto_case(app, gid, user, "timeout", reason, secs).await {
+                tracing::warn!(?e, "automod case failed");
+            }
         }
-        // Only after it worked: a failed timeout must not tell them they were timed out.
-        reply::dm(
-            app,
-            user,
-            &format!("You were timed out by automod{why}{note}"),
-        )
-        .await;
-        auto_case(
-            app,
-            gid,
-            user,
-            "timeout",
-            reason,
-            Some(act.timeout_ms / 1000),
-        )
-        .await?;
     }
-    let log = timeout_log(
-        name,
-        reason,
-        (user.get(), ch.get()),
-        act.timeout_ms,
-        act.strike,
-    );
-    // A failed log must not skip the strike-cap lockdown.
-    if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
-        tracing::warn!(?e, "automod log failed");
+    // A failed timeout was logged as failed above, not as done.
+    if failed.is_none() {
+        let log = timeout_log(
+            name,
+            reason,
+            (user.get(), ch.get()),
+            act.timeout_ms,
+            act.strike,
+        );
+        if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+            tracing::warn!(?e, "automod log failed");
+        }
     }
     if lock.enabled
         && lock.strikes.is_some_and(|n| act.strike >= n)
@@ -547,7 +555,7 @@ async fn strike_member(
         )
         .await?;
     }
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
 /// The tracked heat messages plus the triggering one (an edit is not tracked), as (channel, message).
@@ -957,3 +965,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "automod_tests.rs"]
+pub(crate) mod more_tests;

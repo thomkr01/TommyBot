@@ -448,7 +448,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         Event::MessageUpdate(m)
             if m.edited_timestamp.is_none()
                 && !m.embeds.is_empty()
-                && (!m.author.bot || m.webhook_id.is_some()) =>
+                && (!m.author.bot
+                    || m.webhook_id.is_some()
+                    || m.interaction_metadata.is_some()) =>
         {
             if let Some(gid) = m.guild_id {
                 let am = &app.cfg(gid.get()).await?.automod;
@@ -565,11 +567,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
         Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,
-        Event::ThreadUpdate(t) => {
-            if let Some(p) = t.parent_id {
-                app.note_thread(t.id, p);
-            }
-        }
+        Event::ThreadUpdate(t) => crate::activity::on_thread_update(app, &t.0).await?,
         Event::ThreadListSync(s) => s
             .threads
             .iter()

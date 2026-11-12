@@ -79,11 +79,10 @@ fn discord_media(url: &str) -> bool {
             || (host.starts_with("images-ext-") && host.ends_with(".discordapp.net")))
 }
 
-/// Image URLs worth scanning: attachments (not on an edit, which cannot add any) and embed images.
+/// Image URLs worth scanning: attachments (not on an edit, which cannot add any) and embed images,
+/// also of a forwarded message.
 fn image_urls(m: &Message, edit: bool) -> Vec<String> {
-    let files = m
-        .attachments
-        .iter()
+    let files = crate::automod::attachments(m)
         .filter(|_| !edit)
         .filter(|a| a.size <= MAX_BYTES as u64)
         .filter(|a| {
@@ -92,7 +91,8 @@ fn image_urls(m: &Message, edit: bool) -> Vec<String> {
                 .is_some_and(|t| t.starts_with("image/"))
         })
         .map(|a| a.proxy_url.clone());
-    let embeds = m.embeds.iter().flat_map(|e| {
+    let forwarded = m.message_snapshots.iter().flat_map(|s| &s.message.embeds);
+    let embeds = m.embeds.iter().chain(forwarded).flat_map(|e| {
         [
             e.image.as_ref().and_then(|i| i.proxy_url.clone()),
             e.thumbnail.as_ref().and_then(|t| t.proxy_url.clone()),
@@ -121,8 +121,15 @@ impl Scanner {
         if urls.is_empty() {
             return;
         }
+        // A user-installed app's reply is the member's post, as in automod; a server-installed
+        // app's is exempt.
+        let msg = match crate::automod::as_app_user(m) {
+            Some(u) => u,
+            None if m.interaction_metadata.is_some() => return,
+            None => m.clone(),
+        };
         let job = Job {
-            msg: Box::new(m.clone()),
+            msg: Box::new(msg),
             urls,
             at_ms: crate::automod::now_ms(),
         };
@@ -308,7 +315,15 @@ async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
             });
         }
     }
-    crate::automod::on_nsfw_image(app, &msg).await?;
+    // The hit row stands only once the action worked: a failed one is freed, so the next pass over
+    // this message (preview update, edit, sweep) acts again.
+    if let Err(e) = crate::automod::on_nsfw_image(app, &msg).await {
+        sqlx::query("DELETE FROM nsfw_scans WHERE id = $1")
+            .bind(id)
+            .execute(&app.pool)
+            .await?;
+        return Err(e);
+    }
     hit_log(app, gid, &msg, id, &scores).await
 }
 
@@ -499,7 +514,7 @@ async fn sweep_guild(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         .collect();
         for mut m in msgs {
             if m.timestamp.as_micros() / 1000 < since
-                || (m.author.bot && m.webhook_id.is_none())
+                || (m.author.bot && m.webhook_id.is_none() && m.interaction_metadata.is_none())
                 || done.contains(&(m.id.get() as i64))
             {
                 continue;
@@ -515,6 +530,33 @@ async fn sweep_guild(app: &App, gid: Id<GuildMarker>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// A user-installed app's reply is queued as the member's post, a server-installed app's not at
+    /// all; a forward's images are scanned.
+    #[test]
+    fn app_replies_and_forwards_are_queued_as_the_member_s() {
+        let file = json!({"id": "1", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                          "proxy_url": "https://media.discordapp.net/a.png", "content_type": "image/png"});
+        let meta = |owners: serde_json::Value| {
+            json!({"id": "5", "type": 2, "authorizing_integration_owners": owners,
+                   "user": {"id": "60", "username": "u", "discriminator": "0", "avatar": null}})
+        };
+        let s = Scanner::default();
+        let server = crate::automod::more_tests::msg(json!({
+            "attachments": [file], "interaction_metadata": meta(json!({"0": "1"}))}));
+        s.enqueue(&server, false, false);
+        assert!(s.take(0).is_none());
+        let user_app = crate::automod::more_tests::msg(json!({
+            "attachments": [file], "interaction_metadata": meta(json!({"1": "60"}))}));
+        s.enqueue(&user_app, false, false);
+        assert_eq!(s.take(0).unwrap().msg.author.id.get(), 60);
+        let forward = crate::automod::more_tests::msg(json!({"message_snapshots": [{"message": {
+            "attachments": [file], "content": "", "embeds": [], "mentions": [], "mention_roles": [],
+            "type": 0, "timestamp": "2026-01-01T00:00:00.000000+00:00", "edited_timestamp": null,
+        }}]}));
+        assert_eq!(image_urls(&forward, false).len(), 1);
+    }
 
     #[test]
     fn bundled_model_is_the_pinned_one_and_scores_a_plain_image_neutral() {

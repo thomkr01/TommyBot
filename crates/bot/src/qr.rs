@@ -8,9 +8,9 @@ const MAX_IMAGES: usize = 3;
 const MAX_SIDE: u32 = 1024;
 
 /// The text of every QR code in the first few image attachments, one per line.
-pub async fn texts(app: &App, attachments: &[Attachment]) -> String {
+pub async fn texts(app: &App, attachments: impl Iterator<Item = &Attachment>) -> String {
     let mut out = String::new();
-    let images = attachments.iter().filter(|a| {
+    let images = attachments.filter(|a| {
         a.size <= MAX_BYTES as u64
             && a.content_type
                 .as_deref()

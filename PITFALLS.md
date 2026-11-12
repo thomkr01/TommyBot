@@ -272,6 +272,23 @@ Removing auto slowmode's member count was argued with "heat punishes one member 
 Discord adds link previews and GIF previews in a `MESSAGE_UPDATE` without `edited_timestamp`, and `events.rs` skipped those, so an image filter that only looked at new posts would miss every linked image.
 *Avoid:* a filter on images or embeds also reads preview updates (only that filter, not the whole automod run), and is idempotent per message (a unique key), because the same message arrives again as an update, an edit and through the catch-up sweep.
 
+**Text and images in places the filters did not read.** (overlap deep dive g2b, 11-12)
+The link, invite, scam and word filters read only content, forwarded content and polls, so a webhook or user-installed app could post a phishing link in an embed or a link button with empty content. The NSFW scan, image heat and QR check skipped forwarded images, and a user-installed app's reply had its attachments dropped because it runs as an edit. Thread and reaction names were checked on raw text, and thread renames not at all. Root cause: each filter collected its own input, and a new carrier was added to some of them only.
+*Avoid:* the instant filters read `filter_text` plus `app_text` (embed text and URLs, link buttons and text blocks of webhook and app posts, skipping Discord's previews of links already in the content; a poster's embed is always `rich`, so it is never taken for a preview); heat still counts only `filter_text`, so a feed's long embed is no spam. Images come from `automod::attachments` (own plus forwarded). A new post is `edited_timestamp.is_none()`, not `!edit`. Names go through `filters::word_forms` like messages.
+
+**An exemption checked after the count, or not on every path.** (overlap deep dive g2b, 11-12)
+Native AutoMod scopes counted a whitelisted member's hits and checked the whitelist only when acting, so their hits filled a server scope for the next member. A bad emoji name in a reaction, and a bad thread name, timed out an automod-permit holder, while the same word in a message is exempt.
+*Avoid:* check the exemption before anything is counted or deleted, and use the same exemption on every path of one filter (`activity::words_exempt` = words or automod whitelist, as messages get).
+
+**A failed step returned before the next protective one.** (overlap deep dive g2b, 11-12)
+A failed strike timeout returned before the strike-cap lockdown, and a failed case did the same. Native rule actions and reaction or thread heat timeouts failed with only a trace line. *Avoid:* the same as "A failed log must not stop protection": keep the error, run the remaining protective steps, return it last, and report a failed action with `action_failed`. Searched: `filter_action` stops after a failed ban, but nothing protective follows there.
+
+**A done marker written before the action.** (overlap deep dive g2b, 11-12)
+The NSFW scan row was saved as a hit before automod acted. A failed action left the row, and the unique key then made every later pass (preview update, edit, sweep) skip the message for good. *Avoid:* a marker that makes later passes skip work stands only once the work succeeded: delete it when the action fails.
+
+**An early return in front of an unrelated protection.** (overlap deep dive g2b, 11-12)
+Heat panic's raider hold sat after "automod off", so with automod off raiders posted freely. The catch channel's test mode returned "handled", so automod skipped every message there. A restore job with no `joined_at` and a `?` on the member lookup gave main roles to a rejoined unverified member, and retried for a member who left. *Avoid:* before an early return, check that everything below it belongs to the switch or case it tests. A delayed role add carries its membership and treats 404 as done (`http_err::member`), and skips a member whose roles are held for verification (`sticky::pending`).
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)
