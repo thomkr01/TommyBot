@@ -231,6 +231,10 @@ The post-join username filter dedupes on username + global name + nick. Its Rena
 Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
 *Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the flag would turn a Grant into a challenge, and a failed lookup means a captcha.
 
+**Personal heat has no ceiling, so a pool can be filled by one member.** (#187, 11-12)
+Removing auto slowmode's member count was argued with "heat punishes one member at 100% first". But `HeatState::apply` never caps: one 20-mention message is 315% alone, and the pool is fed before the punishment gates (grace window, automod whitelist, failed timeouts, strikes off). One member could slow a channel, or every channel.
+*Avoid:* a shared pool caps each member's share at max heat (`ChannelHeat.shares`), and its trigger is above one share (`SLOW_PCT` from 200). The pool starts over when max heat or decay changes, or old heat outweighs the new caps. Before relying on "X stops it first", check that X has a ceiling and runs before the thing it guards.
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)

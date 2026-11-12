@@ -374,6 +374,9 @@ pub struct ChannelHeat {
     heat: HeatState,
     /// Each member's part of the pool, at most max heat, so 300% always takes three members.
     shares: HashMap<u64, HeatState>,
+    /// Max heat and decay the pool was filled with; a change starts it over.
+    filled_with: (f64, f64),
+    pruned_ms: i64,
     /// When the pool last fell (or will fall) under half the trigger.
     calm_since: i64,
     /// A slowmode was claimed and not released yet.
@@ -397,8 +400,16 @@ impl ChannelHeat {
         cfg: &AutoSlowmodeCfg,
         h: &HeatCfg,
     ) -> bool {
-        if self.shares.len() >= Self::KEEP {
-            self.shares.retain(|_, s| s.decayed(now, h) >= 1.0);
+        // Old heat under another max or decay would no longer be the sum of capped shares.
+        if self.filled_with != (h.max, h.decay_per_sec) {
+            self.filled_with = (h.max, h.decay_per_sec);
+            self.shares.clear();
+            self.heat.value = 0.0;
+        }
+        // At most once a second, so a channel with many hot members is not scanned per message.
+        if self.shares.len() >= Self::KEEP && now - self.pruned_ms >= 1_000 {
+            self.pruned_ms = now;
+            self.shares.retain(|_, s| s.decayed(now, h) >= h.max * 0.01);
         }
         // Shares decay like the pool, so the pool stays their sum.
         let share = self.shares.entry(user).or_default();
@@ -438,9 +449,11 @@ impl ChannelHeat {
         self.off_ms = now;
     }
 
-    /// Nothing worth keeping: no slowmode and no heat for 10 minutes.
+    /// Nothing worth keeping: no slowmode, no heat for 10 minutes and no flap guard left
+    /// (at most min on + calm).
     pub fn idle(&self, now: i64) -> bool {
-        !self.on && now - self.heat.at_ms > 600_000
+        let guard_ms = (SLOW_ON.1 + SLOW_CALM.1) * 1000;
+        !self.on && now - self.heat.at_ms > 600_000 && now - self.off_ms > guard_ms
     }
 }
 
@@ -892,6 +905,32 @@ mod tests {
         assert!(!c.on_message(10_000, 8, &hot(10_000.0), &cfg, &h));
         // A third heavy member at the same moment reaches 300%.
         assert!(c.on_message(10_000, 9, &hot(10_000.0), &cfg, &h));
+    }
+
+    #[test]
+    fn cold_shares_are_pruned_at_most_once_a_second() {
+        let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
+        let mut c = ChannelHeat::default();
+        for u in 0..ChannelHeat::KEEP as u64 {
+            c.on_message(0, u, &hot(0.5), &cfg, &h);
+        }
+        // 0.5 is under 1% of max heat: all cold, dropped on the next message.
+        c.on_message(1_000, 9_999, &hot(50.0), &cfg, &h);
+        assert_eq!(c.shares.len(), 1);
+    }
+
+    #[test]
+    fn a_new_max_heat_starts_the_pool_over() {
+        let (cfg, h) = (AutoSlowmodeCfg::default(), HeatCfg::default());
+        let mut c = ChannelHeat::default();
+        c.on_message(0, 1, &hot(100.0), &cfg, &h);
+        let low = HeatCfg {
+            max: 30.0,
+            ..HeatCfg::default()
+        };
+        // One member's heat from before must not count against the lower trigger (90).
+        assert!(!c.on_message(1, 2, &hot(0.0), &cfg, &low));
+        assert_eq!(c.heat.value, 0.0);
     }
 
     #[test]
