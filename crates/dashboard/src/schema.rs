@@ -87,6 +87,12 @@ fn unless(mut v: Value, key: &str, path: &str, vals: &[&str]) -> Value {
     v
 }
 
+/// Hides the field unless the switch at `path` is on.
+fn only_when_on(mut v: Value, path: &str) -> Value {
+    v["only"] = json!({"path": path, "in": [true]});
+    v
+}
+
 /// Log types as one channel picker each (true) or as cards added through a Customize dialog (false).
 const LOG_TYPE_PICKERS: bool = false;
 
@@ -1056,6 +1062,28 @@ pub fn schema() -> Vec<Value> {
             "only",
             "verification.mode",
             NOTE_MODES,
+        ),
+        unless(
+            hp(
+                ti(
+                    dv(fg("General", "block_vpn", "bool"), false),
+                    "Block VPNs and proxies",
+                ),
+                "Members on Tor, a VPN or a proxy are asked to turn it off before they can verify. Their IP is checked against free public lists on this server and is never stored or sent anywhere.",
+            ),
+            "only",
+            "verification.mode",
+            &["Web"],
+        ),
+        only_when_on(
+            hp(
+                ti(
+                    dv(fg("General", "block_hosting", "bool"), true),
+                    "Also block hosting networks",
+                ),
+                "Cloud and server providers (AWS, Google Cloud, Hetzner, OVH and others). Most VPNs and proxies run there. Someone on a work VPN may be refused until they turn it off.",
+            ),
+            "verification.block_vpn",
         ),
         ti(
             fg("General", "regen_ms", "int"),

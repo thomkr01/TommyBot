@@ -266,6 +266,10 @@ sqlx stores a checksum, so editing an applied migration breaks every existing da
 `sqlx::migrate!` embeds the migrations at compile time, and adding a file does not make cargo rebuild `tommybot-core`. Tests then failed with "relation mcp_... does not exist".
 *Avoid:* after adding a migration, `touch crates/core/src/db.rs` before testing. CI builds clean and is not affected. The same happened after `git merge` brought in a changed `RaidCfg` (MCP PR 4): two schema tests failed against the old build until `touch crates/automod/src/join.rs`. If a test fails right after a merge on code you did not touch, touch the changed crate's file and run it again before you debug.
 
+**A table stored personal data that PRIVACY.md did not list.** (VPN block, 11-12)
+`verify_ips` (salted IP hashes from web verification, kept 30 days) had no row in PRIVACY.md.
+*Avoid:* a migration that stores anything about a user adds its row to PRIVACY.md (what, why, how long) in the same PR.
+
 **Parallel worktrees shared one target and one DB.** (11-01)
 Cargo mixed crates from different worktrees, and one branch's migration broke the others' tests. Four targets (about 7 GB each) filled the disk.
 *Avoid:* one `CARGO_TARGET_DIR` and one database per worktree (`su postgres -c "createdb X"`; `createdb -h localhost` hangs on a password prompt). Delete finished targets.

@@ -72,6 +72,8 @@ async fn review_report_and_appeal() {
         secure: false,
         totp: Default::default(),
         rate: Default::default(),
+        ips: Default::default(),
+        vpn_logged: Default::default(),
     };
     let send = |m: &str, path: String, user: i64, up: bool, body: Option<Value>| {
         let mut req = Request::builder()
