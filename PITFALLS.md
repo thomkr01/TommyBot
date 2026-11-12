@@ -227,6 +227,10 @@ The post-join username filter dedupes on username + global name + nick. Its Rena
 Join Gate checks the cured username and display name; the verification Start button checked only the raw username. A member caught by the username filter at join (lookalike letters or the display name) was then let through without a captcha in "suspicious only" mode.
 *Avoid:* build the name for `is_suspicious` with `joingate::names`. Discord's spammer flag has the same gap: only the join frame carries it, so the Start button asks Discord (`Api::public_flags`) when the flag would turn a Grant into a challenge, and a failed lookup means a captcha.
 
+**Some content arrives after the post.** (NSFW image scan, 11-12)
+Discord adds link previews and GIF previews in a `MESSAGE_UPDATE` without `edited_timestamp`, and `events.rs` skipped those, so an image filter that only looked at new posts would miss every linked image.
+*Avoid:* a filter on images or embeds also reads preview updates (only that filter, not the whole automod run), and is idempotent per message (a unique key), because the same message arrives again as an update, an edit and through the catch-up sweep.
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)

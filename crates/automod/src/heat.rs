@@ -128,6 +128,8 @@ pub struct MsgFacts<'a> {
     pub blacklisted_words: usize,
     pub invite_link: bool,
     pub nsfw_link: bool,
+    /// The image scan found an NSFW image (weighs like an NSFW link).
+    pub nsfw_image: bool,
     pub malicious_link: bool,
     pub blacklisted_link: bool,
     pub from_webhook: bool,
@@ -240,6 +242,7 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     b.add("invites", hit(m.invite_link && !w.advertising, cfg.invite));
     b.add("malicious", hit(m.malicious_link, cfg.malicious));
     b.add("nsfw", hit(m.nsfw_link, cfg.nsfw));
+    b.add("nsfw_image", hit(m.nsfw_image, cfg.nsfw));
     b.add(
         "links_blacklist",
         hit(m.blacklisted_link, cfg.blacklisted_link),

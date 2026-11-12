@@ -689,6 +689,7 @@ mod tests {
             managed: HashSet::from([id(22)]),
             parents: HashMap::new(),
             channels: HashSet::new(),
+            nsfw: HashSet::new(),
             roles,
             fetched: Instant::now(),
         }
