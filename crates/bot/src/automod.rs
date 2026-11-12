@@ -220,7 +220,13 @@ async fn check_message(
             .unwrap()
             .entry(gid.get())
             .or_default()
-            .on_mentions(pings, now, lock.mention_count, lock.mention_window_ms);
+            .on_mentions(
+                m.author.id.get(),
+                pings,
+                now,
+                lock.mention_count,
+                lock.mention_window_ms,
+            );
     let over_hour_cap =
         am.anti_spam && f.mentions.enabled && !listed(&wl.mentions) && pings > 0 && {
             let mut map = app.pings.lock().unwrap();

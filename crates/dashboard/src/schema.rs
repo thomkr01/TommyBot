@@ -448,7 +448,10 @@ pub fn schema() -> Vec<Value> {
         ),
         ti(fg("Auto lockdown", "auto_lockdown.enabled", "bool"), "Use the auto lockdown module"),
         ti(dv(fg("Mentions lockdown", "auto_lockdown.mentions", "bool"), true), "Use the mentions auto lockdown trigger"),
-        ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_count", "int"), 50), "Trigger count (mentions)"),
+        hp(
+            ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_count", "int"), 50), "Trigger count (mentions)"),
+            "Each member counts for about a third of this at most (17 of 50), so it takes at least three members. One member's mass mention is punished by heat instead.",
+        ),
         ti(dv(fg("Mentions lockdown", "auto_lockdown.mention_window_ms", "int"), 3_000), "Trigger count history"),
         hp(
             ti(fg("Strikes lockdown", "auto_lockdown.strikes", "int"), "Lock at this strike number"),
