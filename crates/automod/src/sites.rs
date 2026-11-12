@@ -49,7 +49,7 @@ impl SiteList {
 }
 
 /// Not loopback, private, link-local, CGNAT, multicast or unspecified (v4-mapped v6 judged as v4).
-fn is_public(ip: IpAddr) -> bool {
+pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -113,18 +113,22 @@ pub struct Sites {
     http: reqwest::Client,
 }
 
+/// Client for list downloads and fetches: public addresses only, at most 5 redirects.
+pub(crate) fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .dns_resolver(std::sync::Arc::new(PublicOnly))
+        .redirect(Policy::custom(follow))
+        .build()
+        .unwrap_or_default()
+}
+
 impl Default for Sites {
     fn default() -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .dns_resolver(std::sync::Arc::new(PublicOnly))
-            .redirect(Policy::custom(follow))
-            .build()
-            .unwrap_or_default();
         Self {
             phishing: Default::default(),
             nsfw: Default::default(),
-            http,
+            http: client(),
         }
     }
 }

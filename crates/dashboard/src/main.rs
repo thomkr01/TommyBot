@@ -55,6 +55,10 @@ pub struct AppState {
     pub totp: Shared<i64, auth::TotpAttempts>,
     /// Per-session request buckets.
     pub rate: Shared<String, auth::Bucket>,
+    /// Tor, VPN and hosting ranges for web verification's VPN block.
+    pub ips: std::sync::Arc<tommybot_automod::iplist::IpLists>,
+    /// When a member's VPN refusal was last logged, per (guild, user).
+    pub vpn_logged: Shared<(i64, i64), i64>,
 }
 
 #[derive(Debug)]
@@ -205,6 +209,8 @@ async fn main() -> anyhow::Result<()> {
         secure: base.starts_with("https://"),
         totp: Default::default(),
         rate: Default::default(),
+        ips: Default::default(),
+        vpn_logged: Default::default(),
         discord: discord::Discord {
             // A hung Discord call would otherwise hold a dashboard request forever.
             http: reqwest::Client::builder()
@@ -224,6 +230,13 @@ async fn main() -> anyhow::Result<()> {
             memo: Default::default(),
         },
     };
+    let ips = st.ips.clone();
+    tokio::spawn(async move {
+        loop {
+            ips.refresh().await;
+            tokio::time::sleep(tommybot_automod::sites::REFRESH).await;
+        }
+    });
     if let Err(e) = st.discord.load_emojis().await {
         tracing::warn!(?e, "custom emojis not loaded, using Unicode fallbacks");
     }
@@ -261,6 +274,8 @@ mod tests {
             secure: false,
             totp: Default::default(),
             rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

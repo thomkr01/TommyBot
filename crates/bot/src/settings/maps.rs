@@ -362,6 +362,8 @@ pub(super) static VERIFICATION: Module = Module {
         r!("12a", "Regeneration Status", "verification.regen_ms", Kind::Switch("12000", "null"), |c| on(c.verification.verify.regen_ms.is_some())),
         r!("13", "Notes", "verification.show_notes", Kind::Bool, |c| on(c.verification.verify.show_notes)),
         r!("14", "Audit Log Reason", "verification.audit_reason", Kind::Bool, |c| on(c.verification.verify.audit_reason)),
+        r!("15", "Block VPN", "verification.block_vpn", Kind::Bool, |c| on(c.verification.verify.block_vpn)),
+        r!("16", "Block Hosting Networks", "verification.block_hosting", Kind::Bool, |c| on(c.verification.verify.block_hosting)),
     ],
 };
 
