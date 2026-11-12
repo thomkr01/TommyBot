@@ -44,7 +44,7 @@ const SWEEP_PER_CHANNEL: u16 = 100;
 const SWEEP_GAP: Duration = Duration::from_secs(2);
 pub const BUTTON: &str = "nsfw:";
 
-type Model = TypedRunnableModel<TypedModel>;
+type Model = TypedSimplePlan;
 
 pub struct Job {
     msg: Box<Message>,
@@ -170,7 +170,7 @@ impl Scanner {
     fn model(&self) -> Option<Arc<Model>> {
         self.model
             .get_or_init(|| match load() {
-                Ok(m) => Some(Arc::new(m)),
+                Ok(m) => Some(m),
                 Err(e) => {
                     tracing::error!(?e, "NSFW model did not load, the image scan is off");
                     None
@@ -188,7 +188,7 @@ fn push_capped(q: &mut VecDeque<Job>, j: Job, cap: usize) {
     q.push_back(j);
 }
 
-fn load() -> TractResult<Model> {
+fn load() -> TractResult<Arc<Model>> {
     tract_onnx::onnx()
         .model_for_read(&mut std::io::Cursor::new(MODEL_BYTES))?
         .with_input_fact(0, f32::fact([1, SIDE, SIDE, 3]).into())?
@@ -197,7 +197,7 @@ fn load() -> TractResult<Model> {
 }
 
 /// Scores of one image; None when it does not decode.
-fn infer(model: &Model, bytes: &[u8]) -> Option<[f32; 5]> {
+fn infer(model: &Arc<Model>, bytes: &[u8]) -> Option<[f32; 5]> {
     let img = crate::qr::read_image(bytes)?
         .resize_exact(
             SIDE as u32,
@@ -210,7 +210,7 @@ fn infer(model: &Model, bytes: &[u8]) -> Option<[f32; 5]> {
     })
     .into();
     let out = model.run(tvec!(x.into())).ok()?;
-    let v = out[0].to_array_view::<f32>().ok()?;
+    let v = out[0].to_plain_array_view::<f32>().ok()?;
     let mut s = [0.0; 5];
     for (d, v) in s.iter_mut().zip(v.iter()) {
         *d = *v;
