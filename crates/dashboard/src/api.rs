@@ -35,7 +35,20 @@ pub(crate) async fn is_discord_owner(
     s: &Sess,
     guild: i64,
 ) -> Result<bool, ApiError> {
-    Ok(st.discord.guild_owner(guild).await? == s.user_id.to_string())
+    if st.discord.guild_owner(guild).await? != s.user_id.to_string() {
+        return Ok(false);
+    }
+    // The Discord owner is memoized for 30 s, but the bot moves guild_owners and records the
+    // handover within a second, so a stale memo never keeps the previous owner at Owner level (D47).
+    let (other_owner, was_owner): (bool, bool) = sqlx::query_as(
+        "select exists(select 1 from guild_owners where guild_id = $1 and owner_id <> $2),
+                exists(select 1 from owner_handovers where guild_id = $1 and old_owner = $2)",
+    )
+    .bind(guild)
+    .bind(s.user_id)
+    .fetch_one(&st.db)
+    .await?;
+    Ok(!other_owner && !was_owner)
 }
 
 /// Re-resolved on every request, including writes (spec 3.1).
@@ -1507,5 +1520,33 @@ pub(crate) mod g3_handler_tests {
         let off = save("panic", json!({"executors": 0})).await;
         assert!(off.is_ok(), "{off:?}");
         cleanup(&st, g).await;
+    }
+
+    /// D47 (S1): the 30 s owner memo still names user 7, but the bot already moved the server on.
+    #[tokio::test]
+    async fn a_stale_owner_memo_gives_the_previous_owner_nothing() {
+        let Some((st, s, g)) = setup(9_894_000_000).await else {
+            return;
+        };
+        let wipe = || async {
+            for t in ["guild_owners", "owner_handovers"] {
+                sqlx::query(sqlx::AssertSqlSafe(format!("delete from {t} where guild_id = $1")))
+                    .bind(g)
+                    .execute(&st.db)
+                    .await
+                    .unwrap();
+            }
+        };
+        wipe().await;
+        assert!(is_discord_owner(&st, &s, g).await.unwrap());
+        for sql in [
+            "insert into guild_owners (guild_id, owner_id) values ($1, 8)",
+            "insert into owner_handovers (guild_id, old_owner, new_owner) values ($1, 7, 8)",
+        ] {
+            sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
+            assert!(!is_discord_owner(&st, &s, g).await.unwrap(), "{sql}");
+            assert!(level_of(&st, &s, g).await.unwrap() < Level::Owner);
+            wipe().await;
+        }
     }
 }
