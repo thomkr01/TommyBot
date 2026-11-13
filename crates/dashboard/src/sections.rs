@@ -231,7 +231,7 @@ async fn auto_setup(
     }
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
-    let quarantine_failed = quarantine_channels(&st, guild, &role).await;
+    let quarantine_failed = quarantine_channels(&st, guild, &role, &config).await;
     api::log_change(
         &st,
         guild,
@@ -273,6 +273,10 @@ async fn verify_channel(
     for r in &given {
         overwrites.push(json!({"id": r, "type": 0, "deny": "1024"}));
     }
+    // Members in the join quarantine read it too; the bot's enforce_quarantine knows this shape.
+    if let Some(q) = own(&config["antinuke"]["quarantine_role"]) {
+        overwrites.push(verification_overwrite(&q));
+    }
     let existing = own(&config["verification"]["channel"]);
     if existing.is_none() {
         let channels = st
@@ -300,6 +304,7 @@ async fn verify_channel(
     let mut tx = st.db.begin().await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
+    reshape_verification(&st, &channel, &config).await?;
     st.discord
         .call(
             Method::POST,
@@ -564,8 +569,21 @@ fn stale<'a>(channels: &'a Value, config: &Value, name: &str) -> Vec<&'a str> {
 
 /// The quarantine role. A picked role is kept and stripped of every permission. With none picked,
 /// leftover roles named Quarantine are deleted first so the server never ends up with several.
+/// A picked role that cannot be one (@everyone, managed, not below the bot) is replaced.
 async fn quarantine_role(st: &AppState, guild: i64, config: &Value) -> Result<String, ApiError> {
-    if let Some(id) = own(&config["antinuke"]["quarantine_role"]) {
+    let picked = own(&config["antinuke"]["quarantine_role"]);
+    let fit = match &picked {
+        Some(id) => {
+            let (roles, bot_pos) = crate::ops::roles_and_bot_pos(st, guild).await?;
+            // A role missing from the list is handled below as deleted in Discord.
+            roles
+                .iter()
+                .find(|r| r.id == *id)
+                .is_none_or(|r| r.unfit(guild, bot_pos).is_none())
+        }
+        None => false,
+    };
+    if let Some(id) = picked.filter(|_| fit) {
         let r = st
             .discord
             .call(
@@ -680,10 +698,38 @@ async fn log_setup(
     Ok(Json(json!({"version": version, "created": created})))
 }
 
-/// Sets the quarantine overwrite on every channel and returns how many it could not set (the
-/// bot lacks Manage Roles there); `None` when the channels could not be listed. Runs after the
-/// commit, so a failure here loses no setup.
-pub(crate) async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -> Option<usize> {
+/// Once the channel is saved: the bot's enforce_quarantine may have denied it before it knew the
+/// channel (with verification still off nothing marks a new one), so the shape goes back on.
+async fn reshape_verification(
+    st: &AppState,
+    channel: &str,
+    config: &Value,
+) -> Result<(), ApiError> {
+    if let Some(q) = own(&config["antinuke"]["quarantine_role"]) {
+        let path = format!("/channels/{channel}/permissions/{q}");
+        st.discord
+            .call(Method::PUT, &path, Some(verification_overwrite(&q)))
+            .await?;
+    }
+    Ok(())
+}
+
+/// The quarantine role's overwrite in the verification channel (`verification_shape`).
+fn verification_overwrite(role: &str) -> Value {
+    use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
+    json!({"id": role, "type": 0, "allow": VERIFY_ALLOW.to_string(), "deny": VERIFY_DENY.to_string()})
+}
+
+/// Sets the quarantine overwrite on every channel (the verification channel gets the shape the
+/// join quarantine can read) and returns how many it could not set (the bot lacks Manage Roles
+/// there); `None` when the channels could not be listed. Runs after the commit, so a failure here
+/// loses no setup.
+pub(crate) async fn quarantine_channels(
+    st: &AppState,
+    guild: i64,
+    role: &str,
+    config: &Value,
+) -> Option<usize> {
     let channels = st
         .discord
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
@@ -691,11 +737,16 @@ pub(crate) async fn quarantine_channels(st: &AppState, guild: i64, role: &str) -
         .ok()?;
     let body = json!({"type": 0, "deny": tommybot_core::sections::QUARANTINE_DENY.to_string()});
     let mut failed = 0;
+    let verification = own(&config["verification"]["channel"]);
     for id in channels.as_array()?.iter().filter_map(|c| c["id"].as_str()) {
         let path = format!("/channels/{id}/permissions/{role}");
+        let body = match verification.as_deref() == Some(id) {
+            true => verification_overwrite(role),
+            false => body.clone(),
+        };
         if st
             .discord
-            .call(Method::PUT, &path, Some(body.clone()))
+            .call(Method::PUT, &path, Some(body))
             .await
             .is_err()
         {
@@ -858,6 +909,50 @@ async fn log_channels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_saved_verification_channel_gets_the_shape_back() {
+        use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
+        let seen: crate::Shared<String, Value> = Default::default();
+        let s2 = seen.clone();
+        let app = axum::Router::new().route(
+            "/channels/700/permissions/500",
+            axum::routing::put(move |Json(b): Json<Value>| async move {
+                s2.lock().unwrap().insert("body".into(), b);
+                ""
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let st = AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://x@127.0.0.1:1/x").unwrap(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api,
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        reshape_verification(&st, "700", &json!({})).await.unwrap();
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no quarantine role, nothing to do"
+        );
+        let config = json!({"antinuke": {"quarantine_role": "500"}});
+        reshape_verification(&st, "700", &config).await.unwrap();
+        let body = seen.lock().unwrap()["body"].clone();
+        assert_eq!(body["allow"], json!(VERIFY_ALLOW.to_string()));
+        assert_eq!(body["deny"], json!(VERIFY_DENY.to_string()));
+    }
 
     #[test]
     fn log_channel_paths_are_real_log_routes() {

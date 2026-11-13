@@ -113,6 +113,17 @@ pub(crate) struct Mock {
     /// User ids that are bot accounts.
     pub(crate) bots: Vec<u64>,
     pub(crate) fail_user: bool,
+    /// Roles by guild: (id, managed, permissions, position). A member role list naming a role
+    /// missing here is refused, as Discord does, once the guild has any.
+    pub(crate) roles: HashMap<u64, Vec<(u64, bool, u64, i64)>>,
+    /// Channels whose messages fail (a log channel the bot cannot see).
+    pub(crate) fail_channels: Vec<u64>,
+    /// Role permission edits fail (the role is above the bot).
+    pub(crate) fail_role_edit: bool,
+    /// Members by (guild, user) timed out until this ISO time.
+    pub(crate) timeouts: HashMap<(u64, u64), String>,
+    /// Managed role -> the bot it belongs to (its tags.bot_id).
+    pub(crate) bot_roles: HashMap<u64, u64>,
     pub(crate) log: Vec<String>,
 }
 
@@ -149,6 +160,12 @@ fn guild(id: &str, owner: u64, members: u64) -> Value {
     })
 }
 
+fn role((id, managed, perms, position): (u64, bool, u64, i64), bot: Option<&u64>) -> Value {
+    let tags = bot.map(|b| json!({"bot_id": b.to_string()}));
+    json!({"tags": tags, "id": id.to_string(), "name": format!("r{id}"), "color": 0, "colors": {"primary_color": 0}, "hoist": false, "managed": managed,
+           "mentionable": false, "permissions": perms.to_string(), "position": position, "flags": 0})
+}
+
 fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -> (u16, String) {
     m.log.push(format!("{method} {target} {body}"));
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -162,9 +179,12 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
     let user = |id: &str| json!({"id": id, "username": "u", "discriminator": "0", "avatar": null});
     let err = |s: u16, code: u64| (s, json!({"code": code, "message": "x"}).to_string());
     let n = |s: &str| s.parse::<u64>().unwrap();
+    let bot = m.bots.clone();
     let member = |u: &str, roles: &[u64]| {
         let roles: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
-        json!({"user": user(u), "roles": roles, "joined_at": "2020-01-01T00:00:00.000000+00:00",
+        let mut usr = user(u);
+        usr["bot"] = json!(bot.iter().any(|b| b.to_string() == u));
+        json!({"user": usr, "roles": roles, "joined_at": "2020-01-01T00:00:00.000000+00:00",
                "deaf": false, "mute": false, "flags": 0})
     };
     match (method, parts.as_slice()) {
@@ -201,7 +221,13 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 j["joined_at"] = json!("2099-01-01T00:00:00.000000+00:00");
                 (200, j.to_string())
             }
-            Some(r) => (200, member(u, r).to_string()),
+            Some(r) => {
+                let mut j = member(u, r);
+                if let Some(until) = m.timeouts.get(&(n(g), n(u))) {
+                    j["communication_disabled_until"] = json!(until);
+                }
+                (200, j.to_string())
+            }
             None => err(404, 10007),
         },
         ("GET", ["guilds", g, "members"]) => {
@@ -232,8 +258,83 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             j["bot"] = json!(m.bots.iter().any(|b| b.to_string() == *u));
             (200, j.to_string())
         }
+        ("GET", ["guilds", g, "roles"]) => {
+            let all = m.roles.get(&n(g)).cloned().unwrap_or_default();
+            let all: Vec<Value> = all
+                .iter()
+                .map(|r| role(*r, m.bot_roles.get(&r.0)))
+                .collect();
+            (200, json!(all).to_string())
+        }
+        ("GET", ["guilds", _, "channels"]) => (200, "[]".into()),
+        ("PATCH", ["guilds", _, "roles", _]) if m.fail_role_edit => err(403, 50013),
+        ("PATCH", ["guilds", g, "roles", r]) => {
+            let perms = serde_json::from_str::<Value>(body).unwrap_or_default()["permissions"]
+                .as_str()
+                .and_then(|p| p.parse().ok());
+            let bot = m.bot_roles.get(&n(r)).copied();
+            let all = m.roles.entry(n(g)).or_default();
+            match all.iter_mut().find(|x| x.0 == n(r)) {
+                Some(x) => {
+                    x.2 = perms.unwrap_or(x.2);
+                    (200, role(*x, bot.as_ref()).to_string())
+                }
+                None => err(404, 10011),
+            }
+        }
+        ("PATCH", ["guilds", g, "members", u]) => {
+            let ids: Option<Vec<u64>> = serde_json::from_str::<Value>(body).unwrap_or_default()
+                ["roles"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|r| r.as_str()?.parse().ok()).collect());
+            let known = m.roles.get(&n(g)).cloned().unwrap_or_default();
+            let Some(have) = m.members.get_mut(&(n(g), n(u))) else {
+                return err(404, 10007);
+            };
+            if let Some(ids) = ids {
+                if !known.is_empty() && ids.iter().any(|r| !known.iter().any(|k| k.0 == *r)) {
+                    return err(400, 10011);
+                }
+                *have = ids;
+            }
+            let have = have.clone();
+            (200, member(u, &have).to_string())
+        }
+        ("PUT", ["guilds", g, "members", u, "roles", r]) => {
+            match m.members.get_mut(&(n(g), n(u))) {
+                Some(have) => {
+                    if !have.contains(&n(r)) {
+                        have.push(n(r));
+                    }
+                    (204, String::new())
+                }
+                None => err(404, 10007),
+            }
+        }
+        ("DELETE", ["guilds", g, "members", u, "roles", r]) => {
+            let managed = m
+                .roles
+                .get(&n(g))
+                .is_some_and(|all| all.iter().any(|x| x.0 == n(r) && x.1));
+            match m.members.get_mut(&(n(g), n(u))) {
+                _ if managed => err(403, 50013),
+                Some(have) => {
+                    have.retain(|x| *x != n(r));
+                    (204, String::new())
+                }
+                None => err(404, 10007),
+            }
+        }
+        ("PUT", ["channels", _, "permissions", _]) => (204, String::new()),
+        ("POST", ["channels", c, "messages"]) if m.fail_channels.contains(&n(c)) => err(403, 50001),
         ("POST", ["users", "@me", "channels"]) => (200, json!({"id": "77", "type": 1}).to_string()),
-        ("POST", ["channels", _, "messages"]) => (200, "{}".into()),
+        ("POST", ["channels", c, "messages"]) => {
+            let msg = json!({"id": "1", "channel_id": c, "author": user("1"), "content": "",
+                "timestamp": "2026-01-01T00:00:00.000000+00:00", "edited_timestamp": null, "tts": false,
+                "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": [],
+                "embeds": [], "components": [], "pinned": false, "type": 0});
+            (200, msg.to_string())
+        }
         _ => err(404, 10004),
     }
 }

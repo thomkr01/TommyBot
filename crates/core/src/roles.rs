@@ -12,9 +12,38 @@ pub fn ranks(roles: impl IntoIterator<Item = (u64, i64)>, everyone: u64) -> Hash
         .collect()
 }
 
+/// Why `role` cannot be the quarantine role or a main role, which the bot edits and hands out:
+/// @everyone, a managed (bot, booster, integration) role, or one not below the bot's top role.
+/// `rank` and `bot_top` are [`ranks`] positions.
+pub fn unfit(
+    guild: u64,
+    role: u64,
+    managed: bool,
+    rank: i64,
+    bot_top: i64,
+) -> Option<&'static str> {
+    if role == guild {
+        Some("it is @everyone (leave the main roles empty to use @everyone)")
+    } else if managed {
+        Some("Discord manages it (a bot, booster or integration role)")
+    } else if rank >= bot_top {
+        Some("it is not below TommyBot's highest role")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn everyone_managed_and_high_roles_are_unfit() {
+        assert!(unfit(1, 1, false, 0, 5).is_some());
+        assert!(unfit(1, 2, true, 2, 5).is_some());
+        assert!(unfit(1, 2, false, 5, 5).is_some());
+        assert_eq!(unfit(1, 2, false, 4, 5), None);
+    }
 
     #[test]
     fn ties_rank_the_older_id_higher() {

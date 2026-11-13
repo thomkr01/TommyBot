@@ -534,6 +534,16 @@ pub fn desired(live: &[ChannelImg], draft: &Draft, ctx: &Ctx) -> Vec<Node> {
         if let Some(o) = held.filter(|o| !ows.iter().any(|x| x.is_role && x.target == o.target)) {
             ows.push(o.clone());
         }
+        // The verification channel keeps the shape the join quarantine reads, whatever it takes.
+        if let Some(q) = q.filter(|_| ctx.setup.verification_channel == Some(id_of[&key])) {
+            ows.retain(|o| !(o.is_role && o.target == q));
+            ows.push(OverwriteImg {
+                target: q,
+                is_role: true,
+                allow: tommybot_core::sections::VERIFY_ALLOW,
+                deny: tommybot_core::sections::VERIFY_DENY,
+            });
+        }
         for o in ows.iter_mut() {
             if it.strip.contains(&o.target.to_string()) {
                 *o = stripped_overwrite(o, ctx.guild, &ctx.setup);
@@ -1421,6 +1431,7 @@ mod tests {
                 mod_roles: vec![],
                 trusted: vec![],
                 log_channels: vec![13],
+                verification_channel: None,
             },
             bot_pos: 10,
         }
@@ -1513,6 +1524,24 @@ mod tests {
         assert!(node(&n, "new-1").exception, "10 lacks the quarantine deny");
         assert!(!node(&n, "new-2").exception && node(&n, "new-2").new);
         assert_eq!(node(&n, "new-3").img.overwrites, vec![qdeny]);
+    }
+
+    #[test]
+    fn the_verification_channel_keeps_its_shape_when_it_follows_a_category() {
+        use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
+        let (live, mut ctx) = (live(), ctx());
+        ctx.setup.verification_channel = Some(11);
+        let d = draft(json!({"11": {"parent": "20"}, "12": {"parent": "20"}}));
+        let n = desired(&live, &d, &ctx);
+        assert_eq!(
+            node(&n, "11").img.overwrites,
+            vec![ow(Q, VERIFY_ALLOW, VERIFY_DENY)]
+        );
+        let other = &node(&n, "12").img.overwrites;
+        assert!(
+            !other.iter().any(|o| o.allow == VERIFY_ALLOW),
+            "only the verification channel"
+        );
     }
 
     #[test]

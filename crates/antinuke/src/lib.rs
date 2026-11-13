@@ -255,6 +255,22 @@ pub const DANGEROUS_PERMS: u64 = (1 << 1)  // kick
     | (1 << 40); // moderate members
 
 /// Tripwire: a role or overwrite *gained* a dangerous permission (instant, no counting).
+/// Quarantine role overwrite in every channel: denies View Channel, Send Messages, Add Reactions,
+/// Connect, Create Invite, Send Messages in Threads and Create Public/Private Threads.
+pub const QUARANTINE_DENY: u64 = 377_958_173_761;
+
+/// The quarantine role in the verification channel, which the join quarantine must read: View
+/// Channel and Read Message History allowed; the rest of [`QUARANTINE_DENY`], Use Application
+/// Commands and Use External Apps denied.
+pub const VERIFY_ALLOW: u64 = (1 << 10) | (1 << 16);
+pub const VERIFY_DENY: u64 = (QUARANTINE_DENY | (1 << 31) | (1 << 50)) & !VERIFY_ALLOW;
+
+/// The quarantine role's overwrite in a channel has the verification channel's shape. It allows
+/// exactly [`VERIFY_ALLOW`], so no other right (Manage Messages, Webhooks) rides along.
+pub fn verification_shape(allow: u64, deny: u64) -> bool {
+    allow == VERIFY_ALLOW && deny & VERIFY_DENY == VERIFY_DENY
+}
+
 pub fn gained_dangerous(old: u64, new: u64) -> bool {
     has_dangerous(new & !old)
 }
@@ -444,6 +460,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_verification_shape_reads_but_denies_the_rest() {
+        assert!(verification_shape(VERIFY_ALLOW, VERIFY_DENY));
+        const { assert!(VERIFY_DENY & (1 << 11) != 0, "no Send") };
+        assert!(
+            !verification_shape(VERIFY_ALLOW, 1 << 11),
+            "D55's old overwrite"
+        );
+        assert!(!verification_shape(VERIFY_ALLOW | (1 << 11), VERIFY_DENY));
+        assert!(
+            !verification_shape(VERIFY_ALLOW | (1 << 13), VERIFY_DENY),
+            "Manage Messages rides along"
+        );
+        const { assert!(VERIFY_DENY & (1 << 31) != 0 && VERIFY_DENY & (1 << 50) != 0) };
+        assert!(!verification_shape(0, QUARANTINE_DENY), "the normal deny");
+    }
 
     fn engine(pm: u32, ph: u32) -> AntiNuke {
         AntiNuke::new(HashMap::from([(

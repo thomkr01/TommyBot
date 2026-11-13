@@ -757,9 +757,7 @@ impl Default for PanicCfg {
     }
 }
 
-/// Quarantine role overwrite in every channel: denies View Channel, Send Messages, Add Reactions,
-/// Connect, Create Invite, Send Messages in Threads and Create Public/Private Threads.
-pub const QUARANTINE_DENY: u64 = 377_958_173_761;
+pub use tommybot_antinuke::{verification_shape, QUARANTINE_DENY, VERIFY_ALLOW, VERIFY_DENY};
 
 /// Server backups: off until a guild turns on `enabled`; then the 3-hour auto backup runs. The rest are the
 /// restore filters (`anr`), used by anti-nuke reverts and panic mode, never by `/backup load`.

@@ -64,6 +64,12 @@ impl Role {
     pub fn perms(&self) -> u64 {
         self.permissions.parse().unwrap_or(0)
     }
+
+    /// [`tommybot_core::roles::unfit`]; `position` is already a rank.
+    pub fn unfit(&self, guild: i64, bot_pos: i64) -> Option<&'static str> {
+        let id = self.id.parse().unwrap_or(0);
+        tommybot_core::roles::unfit(guild as u64, id, self.managed, self.position, bot_pos)
+    }
 }
 
 /// Positions are ranks in Discord's order (ties broken by id), as in `recovery::live_image`.
@@ -208,6 +214,7 @@ pub(crate) async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Li
             .iter()
             .map(|c| c.get())
             .collect(),
+            verification_channel: id(&config["verification"]["channel"]),
         },
         bot_pos,
         image,
@@ -256,7 +263,7 @@ async fn fix(
             .as_str()
             .ok_or_else(|| ApiError::BadRequest("no quarantine role".into()))?;
         // Only adds the deny; Backups is not needed to undo a stricter quarantine.
-        let failed = crate::sections::quarantine_channels(&st, guild, role)
+        let failed = crate::sections::quarantine_channels(&st, guild, role, &c)
             .await
             .ok_or_else(|| anyhow::anyhow!("could not list the channels"))?;
         log_change(

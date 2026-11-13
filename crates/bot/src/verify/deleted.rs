@@ -129,18 +129,24 @@ async fn alert(app: &App, gid: Id<GuildMarker>, text: &str) {
     crate::reply::dm_owner(app, gid, text).await;
 }
 
-/// A new channel with the deleted one's name, category, position and overwrites. Once it
-/// exists it counts as made; a failed save or panel post is reported on its own.
+/// A new channel with the deleted one's name, category, position and overwrites, the quarantine
+/// role's set to the verification shape (the old one may have been broken). Once it exists it
+/// counts as made; a failed save or panel post is reported on its own.
 async fn remake(
     app: &App,
     gid: Id<GuildMarker>,
     c: &Channel,
     name: &str,
 ) -> Result<Id<ChannelMarker>> {
+    let mut overwrites = c.permission_overwrites.clone().unwrap_or_default();
+    if let Some(q) = app.cfg(gid.get()).await?.antinuke.quarantine_role {
+        overwrites.retain(|o| o.id != q.cast());
+        overwrites.push(super::quarantine_shape(q));
+    }
     let mut req = app
         .http
         .create_guild_channel(gid, name)
-        .permission_overwrites(c.permission_overwrites.as_deref().unwrap_or_default());
+        .permission_overwrites(&overwrites);
     if let Some(p) = c.parent_id {
         req = req.parent_id(p);
     }

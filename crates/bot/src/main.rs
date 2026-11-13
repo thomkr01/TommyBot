@@ -29,6 +29,8 @@ mod prefix;
 mod previews;
 mod purge;
 mod qr;
+#[cfg(test)]
+mod quarantine_tests;
 mod raiders;
 mod reply;
 mod reports;

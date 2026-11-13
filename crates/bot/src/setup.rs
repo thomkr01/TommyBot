@@ -17,7 +17,10 @@ use twilight_model::{
     gateway::payload::incoming::MessageCreate,
     guild::{Permissions, RolePosition},
     http::permission_overwrite::{PermissionOverwrite, PermissionOverwriteType},
-    id::{marker::GuildMarker, Id},
+    id::{
+        marker::{ChannelMarker, GuildMarker, RoleMarker},
+        Id,
+    },
 };
 
 use twilight_http::request::AuditLogReason;
@@ -27,9 +30,11 @@ use crate::{
     settings::{apply, save, Edit},
 };
 
-use tommybot_core::sections::QUARANTINE_DENY;
+use tommybot_core::sections::{verification_shape, QUARANTINE_DENY, VERIFY_ALLOW, VERIFY_DENY};
 
 /// `misc.enforce_quarantine_perms`: puts the quarantine overwrite back on a channel that lacks it.
+/// The verification channel gets [`quarantine_overwrite`]'s verification shape instead, which the
+/// join quarantine can read.
 pub async fn enforce_quarantine(app: &App, c: &Channel) -> Result<()> {
     let Some(gid) = c.guild_id else {
         return Ok(());
@@ -42,24 +47,69 @@ pub async fn enforce_quarantine(app: &App, c: &Channel) -> Result<()> {
     else {
         return Ok(());
     };
-    let want = Permissions::from_bits_truncate(QUARANTINE_DENY);
-    let ok =
-        c.permission_overwrites.iter().flatten().any(|o| {
-            o.id.get() == role.get() && o.deny.contains(want) && !o.allow.intersects(want)
-        });
-    if !ok {
-        let o = PermissionOverwrite {
-            id: role.cast(),
-            kind: PermissionOverwriteType::Role,
-            allow: None,
-            deny: Some(want),
-        };
-        app.http
-            .update_channel_permission(c.id, &o)
-            .reason("Sanitizing the channel: quarantine permissions were missing")
-            .await?;
+    let (mut normal, mut shaped) = (false, false);
+    for o in c
+        .permission_overwrites
+        .iter()
+        .flatten()
+        .filter(|o| o.id == role.cast())
+    {
+        let (allow, deny) = (o.allow.bits(), o.deny.bits());
+        normal = deny & QUARANTINE_DENY == QUARANTINE_DENY && allow & QUARANTINE_DENY == 0;
+        shaped = verification_shape(allow, deny);
     }
+    let verification = cfg.verification.channel == Some(c.id)
+        || (shaped && new_verification_channel(app, gid, c.id).await?);
+    if (verification && shaped) || (!verification && normal) {
+        return Ok(());
+    }
+    app.http
+        .update_channel_permission(c.id, &quarantine_overwrite(role, verification))
+        .reason("Sanitizing the channel: quarantine permissions were missing")
+        .await?;
     Ok(())
+}
+
+/// The quarantine role's overwrite: the full deny, or the verification channel's shape.
+pub(crate) fn quarantine_overwrite(
+    role: Id<RoleMarker>,
+    verification: bool,
+) -> PermissionOverwrite {
+    let (allow, deny) = if verification {
+        (VERIFY_ALLOW, VERIFY_DENY)
+    } else {
+        (0, QUARANTINE_DENY)
+    };
+    PermissionOverwrite {
+        id: role.cast(),
+        kind: PermissionOverwriteType::Role,
+        allow: Some(Permissions::from_bits_truncate(allow)),
+        deny: Some(Permissions::from_bits_truncate(deny)),
+    }
+}
+
+/// A channel with the verification shape that is being set up as the verification channel: the
+/// bot saves the one it made under `CHANNEL_LOCK` (its ChannelCreate can come in first), and the
+/// dashboard's Setup Channel saves after making it, so while verification is on and no live
+/// channel is saved, the shape marks it.
+async fn new_verification_channel(
+    app: &App,
+    gid: Id<GuildMarker>,
+    c: Id<ChannelMarker>,
+) -> Result<bool> {
+    let _made = crate::verify::CHANNEL_LOCK.lock().await;
+    let cfg = app.cfg(gid.get()).await?;
+    let v = &cfg.verification;
+    Ok(match v.channel {
+        Some(saved) if saved == c => true,
+        _ if !v.enabled => false,
+        None => true,
+        // A saved channel deleted in Discord counts as none.
+        Some(saved) => match app.http.channel(saved).await {
+            Ok(_) => false,
+            Err(e) => crate::http_err::gone(&e),
+        },
+    })
 }
 
 const STEPS: [&str; 9] = [
@@ -151,10 +201,11 @@ where
     let cfg = app.cfg(gid.get()).await?;
     let roles = http.roles(gid).await?.models().await?;
     tick(4).await;
+    // A saved role that is gone, or one that cannot be a quarantine role, is replaced.
     let role = match cfg
         .antinuke
         .quarantine_role
-        .filter(|r| roles.iter().any(|x| x.id == *r))
+        .filter(|r| roles.iter().any(|x| x.id == *r) && info.unfit(gid, *r).is_none())
     {
         Some(r) => r,
         None => {
@@ -168,14 +219,8 @@ where
         }
     };
     tick(5).await;
-    let deny = Permissions::from_bits_truncate(QUARANTINE_DENY);
     for c in http.guild_channels(gid).await?.models().await? {
-        let o = PermissionOverwrite {
-            id: role.cast(),
-            kind: PermissionOverwriteType::Role,
-            allow: None,
-            deny: Some(deny),
-        };
+        let o = quarantine_overwrite(role, cfg.verification.channel == Some(c.id));
         // shortcut: a channel the bot cannot manage is skipped; run setup again after fixing access.
         let r = http.update_channel_permission(c.id, &o).await;
         crate::http_err::best_effort(r, "deny quarantine role in channel");

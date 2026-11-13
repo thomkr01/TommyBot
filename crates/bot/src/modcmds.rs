@@ -921,17 +921,24 @@ pub async fn run(
                 )
             }
             ModCmd::Quarantine { user } => {
-                let act = antinuke::quarantine(app, gid, Id::new(user));
+                // Through contain(), so a bot also loses its managed role's permissions.
+                let act = antinuke::contain(app, gid, Id::new(user), None, antinuke::Kind::Real);
                 let (d, r) = reply::dm_and_act(
                     reply::dm_first("quarantine"),
                     notice("quarantine", user),
                     act,
                 )
                 .await;
-                (told, _) = (d, r?);
-                let inv = json!({"op":"unquarantine","user":user});
-                let text = format!("Quarantined <@{user}>");
-                ("quarantine", user, Some(inv), None, text)
+                told = d;
+                let done = r?;
+                if done.applied == antinuke::Applied::Kicked {
+                    let text = format!("Kicked <@{user}>: the bot could not be quarantined");
+                    ("kick", user, None, None, text)
+                } else {
+                    let inv = json!({"op":"unquarantine","user":user});
+                    let text = format!("Quarantined <@{user}>");
+                    ("quarantine", user, Some(inv), None, text)
+                }
             }
             ModCmd::Unquarantine { user } => {
                 let held: Option<(i64,)> = sqlx::query_as(
