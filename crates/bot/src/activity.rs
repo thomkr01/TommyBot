@@ -372,7 +372,7 @@ mod tests {
     /// reaches the strike-cap lockdown, as a message does, but times nobody out.
     #[tokio::test]
     async fn strikes_off_still_records_the_strike() {
-        let Some(t) = T::new(25).await else { return };
+        let Some(t) = T::new(255).await else { return };
         let gid = t.g(0);
         let cfg = json!({"automod": {"enabled": true, "strike": {"enabled": false},
             "auto_lockdown": {"enabled": true, "strikes": 1}}});
@@ -475,7 +475,7 @@ mod tests {
     /// a mod's rename, or an old entry, is only logged.
     #[tokio::test]
     async fn an_owner_s_rename_deletes_the_thread() {
-        let Some(t) = T::new(20).await else { return };
+        let Some(t) = T::new(250).await else { return };
         let gid = t.g(0);
         let cfg = json!({"automod": {"enabled": true,
             "filters": {"words": {"filter": {"enabled": true}, "strict": ["scam"]}}}});

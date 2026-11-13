@@ -400,7 +400,7 @@ fn create(m: Message) -> MessageCreate {
 /// The permit still skips a blacklisted word.
 #[tokio::test]
 async fn a_scam_ban_skips_the_permit_and_the_grace_window() {
-    let Some(t) = T::new(21).await else { return };
+    let Some(t) = T::new(251).await else { return };
     let gid = t.g(0);
     let cfg = json!({"automod": {"enabled": true, "filters": {
         "scam_links": {"enabled": true, "action": "ban"},
@@ -457,7 +457,7 @@ async fn a_scam_ban_skips_the_permit_and_the_grace_window() {
 /// invite deleted; its plain messages stay.
 #[tokio::test]
 async fn an_exempt_webhook_still_loses_an_invite() {
-    let Some(t) = T::new(22).await else { return };
+    let Some(t) = T::new(252).await else { return };
     let gid = t.g(0);
     let cfg = json!({"whitelist": {"webhooks": ["9"]},
         "automod": {"enabled": true, "filters": {"invites": {"enabled": true}}}});
@@ -480,7 +480,7 @@ async fn an_exempt_webhook_still_loses_an_invite() {
 /// Mentions by a mention-whitelisted member never count towards the mention lockdown.
 #[tokio::test]
 async fn whitelisted_pings_do_not_lock_the_server() {
-    let Some(t) = T::new(23).await else { return };
+    let Some(t) = T::new(253).await else { return };
     let gid = t.g(0);
     let (trusted, member) = (t.base + 5, t.base + 6);
     let cfg = json!({"whitelist": {"mentions": {"users": [trusted.to_string()]}},
@@ -508,7 +508,7 @@ async fn whitelisted_pings_do_not_lock_the_server() {
 /// Admins are left alone.
 #[tokio::test]
 async fn the_catch_channel_catches_permit_holders() {
-    let Some(t) = T::new(24).await else { return };
+    let Some(t) = T::new(254).await else { return };
     let gid = t.g(0);
     t.server_config(
         0,
@@ -586,7 +586,7 @@ fn acted_unclaim_keeps_a_newer_claim() {
 /// the local filter still counts its words.
 #[tokio::test]
 async fn synced_words_still_count_locally() {
-    let Some(t) = T::new(32).await else { return };
+    let Some(t) = T::new(262).await else { return };
     let cfg = json!({"automod": {"enabled": true, "filters": {"words": {
         "filter": {"enabled": true, "action": "delete"}, "strict": ["darn"],
         "use_discord_automod": true}}}});
@@ -672,7 +672,7 @@ async fn done(t: T) {
 /// A Trusted Admin's scam link is left alone: immune levels are exempt from every bot action.
 #[tokio::test]
 async fn a_trusted_admin_stays_exempt() {
-    let Some(t) = scam_guild(27, Some("ban"), json!({})).await else {
+    let Some(t) = scam_guild(257, Some("ban"), json!({})).await else {
         return;
     };
     t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $1 + 7)")
@@ -688,7 +688,7 @@ async fn a_trusted_admin_stays_exempt() {
 #[tokio::test]
 async fn a_permit_holder_s_scam_is_always_acted_on() {
     let heat = json!({"heat": {"malicious": 10.0}});
-    let Some(t) = scam_guild(28, None, heat).await else {
+    let Some(t) = scam_guild(258, None, heat).await else {
         return;
     };
     let (gid, staff) = (t.g(0), t.base + 5);
@@ -718,7 +718,7 @@ async fn a_permit_holder_s_scam_is_always_acted_on() {
 /// filter: the stronger punishment lands.
 #[tokio::test]
 async fn a_strike_then_a_ban_on_the_same_message_escalates() {
-    let Some(t) = scam_guild(29, Some("ban"), json!({})).await else {
+    let Some(t) = scam_guild(259, Some("ban"), json!({})).await else {
         return;
     };
     let (gid, member) = (t.g(0), t.base + 6);
@@ -747,7 +747,7 @@ async fn a_strike_then_a_ban_on_the_same_message_escalates() {
 /// Three scam messages in a burst with a Warn filter give one warn; the rest are deleted.
 #[tokio::test]
 async fn a_burst_of_warn_hits_warns_once() {
-    let Some(t) = scam_guild(30, Some("warn"), json!({})).await else {
+    let Some(t) = scam_guild(260, Some("warn"), json!({})).await else {
         return;
     };
     let member = t.base + 6;
@@ -768,7 +768,7 @@ async fn a_burst_of_warn_hits_warns_once() {
 /// Two passes over one message at once (a create and its image scan) ban once.
 #[tokio::test]
 async fn concurrent_passes_punish_once() {
-    let Some(t) = scam_guild(31, Some("ban"), json!({})).await else {
+    let Some(t) = scam_guild(261, Some("ban"), json!({})).await else {
         return;
     };
     let member = t.base + 8;

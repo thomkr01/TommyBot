@@ -428,6 +428,10 @@ pub(crate) struct T {
 
 impl T {
     pub(crate) async fn new(n: u64) -> Option<T> {
+        assert!(
+            n < 1000,
+            "test number {n} would leave this process's guild ids"
+        );
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let mock = Arc::new(StdMutex::new(Mock::default()));
@@ -457,7 +461,9 @@ impl T {
         let t = T {
             app,
             mock,
-            base: 3_300_000_000_000 + std::process::id() as u64 * 1000 + n * 10,
+            // Ten guild ids per test number; n < 1000 stays inside this process's 10_000 ids, so
+            // test binaries running side by side never share a guild.
+            base: 3_300_000_000_000 + std::process::id() as u64 * 10_000 + n * 10,
         };
         t.cleanup().await;
         Some(t)
