@@ -150,7 +150,7 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
             .context("saved overwrite has no channel")?,
     );
     if saved["had"].as_bool().unwrap_or(false) {
-        let bits = |k: &str| Permissions::from_bits_truncate(saved[k].as_u64().unwrap_or(0));
+        let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
         put_everyone(app, gid, channel, bits("allow"), bits("deny")).await
     } else {
         app.http

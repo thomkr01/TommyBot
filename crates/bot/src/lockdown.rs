@@ -31,7 +31,7 @@ use twilight_model::channel::message::Embed;
 async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Result<Option<u64>> {
     match op {
         Op::SetRolePerms { role, perms } => {
-            let perms = Permissions::from_bits_truncate(*perms);
+            let perms = Permissions::from_bits_retain(*perms);
             app.http
                 .update_role(gid, Id::new(*role))
                 .permissions(perms)
@@ -47,8 +47,8 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
             let o = PermissionOverwrite {
                 id: Id::new(*role),
                 kind: PermissionOverwriteType::Role,
-                allow: Some(Permissions::from_bits_truncate(allow & !SILENCE)),
-                deny: Some(Permissions::from_bits_truncate(deny | SILENCE)),
+                allow: Some(Permissions::from_bits_retain(allow & !SILENCE)),
+                deny: Some(Permissions::from_bits_retain(deny | SILENCE)),
             };
             app.http
                 .update_channel_permission(Id::new(*channel), &o)
@@ -388,8 +388,8 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
                     let o = PermissionOverwrite {
                         id: Id::new(role),
                         kind: PermissionOverwriteType::Role,
-                        allow: Some(Permissions::from_bits_truncate(allow)),
-                        deny: Some(Permissions::from_bits_truncate(deny)),
+                        allow: Some(Permissions::from_bits_retain(allow)),
+                        deny: Some(Permissions::from_bits_retain(deny)),
                     };
                     app.http
                         .update_channel_permission(Id::new(channel), &o)

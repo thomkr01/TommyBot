@@ -1204,7 +1204,6 @@ async fn bot_role(
 }
 
 /// Logs the bot role's old permissions, so the revert center can put them back.
-// shortcut: twilight drops permission bits newer than it knows; read the raw string if Discord adds some.
 async fn record_bot_role(
     app: &App,
     gid: Id<GuildMarker>,
@@ -1621,7 +1620,7 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
         Inverse::RolePerms { id, perms } => {
             app.http
                 .update_role(gid, Id::new(*id))
-                .permissions(Permissions::from_bits_truncate(*perms))
+                .permissions(Permissions::from_bits_retain(*perms))
                 .await?;
         }
         Inverse::DeleteIntegration { id } => {

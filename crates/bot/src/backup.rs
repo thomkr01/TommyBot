@@ -407,8 +407,8 @@ fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
             } else {
                 PermissionOverwriteType::Member
             },
-            allow: Permissions::from_bits_truncate(o.allow),
-            deny: Permissions::from_bits_truncate(o.deny),
+            allow: Permissions::from_bits_retain(o.allow),
+            deny: Permissions::from_bits_retain(o.deny),
         })
         .collect()
 }
@@ -503,7 +503,7 @@ async fn execute(
                         .create_role(gid)
                         .name(&r.name)
                         .color(r.color)
-                        .permissions(Permissions::from_bits_truncate(r.permissions))
+                        .permissions(Permissions::from_bits_retain(r.permissions))
                         .hoist(r.hoist)
                         .mentionable(r.mentionable)
                         .await?
@@ -515,7 +515,7 @@ async fn execute(
                     http.update_role(gid, Id::new(*live))
                         .name(Some(&to.name))
                         .color(Some(to.color))
-                        .permissions(Permissions::from_bits_truncate(to.permissions))
+                        .permissions(Permissions::from_bits_retain(to.permissions))
                         .hoist(to.hoist)
                         .mentionable(to.mentionable)
                         .await?;

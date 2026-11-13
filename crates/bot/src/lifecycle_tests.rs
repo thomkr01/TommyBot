@@ -470,3 +470,43 @@ async fn panic_owns_only_a_lock_it_saved() {
         .await;
     t.cleanup().await;
 }
+
+/// Live 11-13: a role lock and unlock keep permission bits twilight does not know (1<<48, Set
+/// Voice Channel Status), on the role and on a channel overwrite.
+#[tokio::test]
+async fn a_lock_and_unlock_keep_unknown_permission_bits() {
+    let Some(t) = T::new(86).await else { return };
+    t.server_config(0, t.owner(), json!({})).await;
+    let (g, gid) = (t.g(0).get(), t.g(0));
+    let (voice_status, ban) = (1u64 << 48, 1u64 << 2);
+    t.set(|m| {
+        m.roles.insert(
+            g,
+            vec![(g, false, voice_status | ban, 0), (500, true, 8, 10)],
+        );
+        m.members.insert((g, bansync::tests::ME), vec![500]);
+    });
+    assert!(crate::lockdown::lock(&t.app, gid, LockKind::Role)
+        .await
+        .unwrap());
+    let perms = |t: &T| t.mock.lock().unwrap().roles[&g][0].2;
+    assert_eq!(
+        perms(&t),
+        voice_status,
+        "locked: Ban Members goes, bit 48 stays"
+    );
+    crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Role))
+        .await
+        .unwrap();
+    assert_eq!(perms(&t), voice_status | ban);
+    // Overwrites are read through the same twilight type.
+    let o: twilight_model::channel::permission_overwrite::PermissionOverwrite =
+        serde_json::from_value(
+            json!({"id": "5", "type": 0, "allow": voice_status.to_string(), "deny": "0"}),
+        )
+        .unwrap();
+    assert_eq!(o.allow.bits(), voice_status);
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
