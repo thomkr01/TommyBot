@@ -25,11 +25,6 @@ const SLOWMODE: [(&str, (i64, i64)); 4] = [
 ];
 /// NSFW image scan: score in percent from which an image counts as NSFW.
 pub const NSFW_THRESHOLD: (i64, i64) = (50, 99);
-/// Ban Sync: seconds a ban waits before it is shared, so anti-nuke can stop a hacked account first.
-pub const BAN_SYNC_HOLD_S: i64 = 60;
-/// Ban Sync: bans one server may share per hour before sharing pauses for the owner.
-pub const BAN_SYNC_HOURLY: i64 = 30;
-
 /// Raider List: different server owners whose strong detections list a user by themselves.
 pub const RAIDER_AUTO_OWNERS: i64 = 3;
 /// Raider List reports: per owner per day, and what a reporting server needs.
