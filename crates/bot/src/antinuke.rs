@@ -2876,7 +2876,7 @@ mod tests {
             tommybot_automod::discord_api::Api::new(""),
             Id::new(1),
         );
-        let gid = Id::new(6_470_000_000 + std::process::id() as u64);
+        let gid = Id::new(6_460_000_000 + std::process::id() as u64);
         for (action, inv) in [
             ("quarantine", json!(Inverse::Unquarantine { user: 7 })),
             (

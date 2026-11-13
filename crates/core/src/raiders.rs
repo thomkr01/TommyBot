@@ -258,7 +258,7 @@ mod tests {
             return;
         };
         let pool = crate::db::connect(&url).await.unwrap();
-        let g = 3_311_000_000_000 + std::process::id() as i64 * 10;
+        let g = 3_250_000_000_000 + std::process::id() as i64 * 10; // below the bot T harness band (3.3e12..)
         let (owner, user) = (g + 1, g * 10);
         let users = (user, user + 9);
         let clean = |pool: PgPool| async move {
