@@ -138,6 +138,10 @@ pub(crate) struct Mock {
     pub(crate) fail_message_5xx: bool,
     /// Channel deletes fail with 500.
     pub(crate) fail_delete_channel: bool,
+    /// Audit log entries any audit log lookup returns.
+    pub(crate) audit: Vec<Value>,
+    /// The next this many audit log lookups fail with 500.
+    pub(crate) fail_audit: u32,
     pub(crate) log: Vec<String>,
 }
 
@@ -267,6 +271,16 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, j.to_string())
         }
         ("DELETE", ["channels", _]) if m.fail_delete_channel => err(500, 0),
+        ("GET", ["guilds", _, "audit-logs"]) if m.fail_audit > 0 => {
+            m.fail_audit -= 1;
+            err(500, 0)
+        }
+        ("GET", ["guilds", _, "audit-logs"]) => {
+            let log = json!({"audit_log_entries": m.audit, "users": [], "webhooks": [],
+                "integrations": [], "threads": [], "application_commands": [],
+                "auto_moderation_rules": [], "guild_scheduled_events": []});
+            (200, log.to_string())
+        }
         ("DELETE", ["guilds", g, "members", u]) => match m.members.remove(&(n(g), n(u))) {
             Some(_) => (204, String::new()),
             None => err(404, 10007),
@@ -1409,5 +1423,28 @@ async fn a_discord_outage_on_the_ban_retries_instead_of_skipping() {
     t.set(|m| m.fail_put_5xx = false);
     copy_job(&t.app, t.g(1), &copy).await.unwrap();
     assert_eq!(t.rows(620).await, [T::row(1, "banned", None)]);
+    t.cleanup().await;
+}
+
+/// D59: the unauthorized-bot filter reads who added a bot once more after 1.5 s, and a lookup
+/// that fails or finds nothing twice blocks the bot.
+#[tokio::test]
+async fn a_bot_adder_is_read_twice_then_the_bot_is_blocked() {
+    let Some(t) = T::new(19).await else {
+        return;
+    };
+    let (g, bot) = (t.g(0), Id::new(77));
+    let entry =
+        json!({"id": "5", "action_type": 28, "target_id": "77", "user_id": "9", "changes": []});
+    let app = &t.app;
+    let adder = |_: &T| crate::welcome::bot_adder_retry(app, g, bot);
+    t.set(|m| m.audit = vec![entry.clone()]);
+    assert_eq!(adder(&t).await.unwrap(), Id::new(9));
+    t.set(|m| m.fail_audit = 1);
+    assert_eq!(adder(&t).await.unwrap(), Id::new(9), "the retry reads it");
+    t.set(|m| m.fail_audit = 2);
+    assert!(adder(&t).await.is_err(), "failed twice");
+    t.set(|m| m.audit.clear());
+    assert!(adder(&t).await.is_err(), "no entry after the retry");
     t.cleanup().await;
 }

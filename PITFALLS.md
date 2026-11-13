@@ -268,7 +268,7 @@ Anyone with Manage Roles could give themselves a role that carries a permit, and
 
 **The unauthorized-bot filter let a bot in when the audit lookup failed.** (overlap deep dive D59, 13-11)
 A bot whose adder could not be read (5xx, 429, the audit entry not written yet) counted as authorised, on purpose, and a failed immunity check of the adder did too. Root cause: "unknown" was read as "allowed" on a protection path.
-*Avoid:* `welcome::bot_adder_retry` tries once more after 1.5 s (each try bounded to 3 s) and Join Gate blocks the bot when that fails too, or when the adder's level cannot be read. No entry at all after the retry still counts as authorised, as before.
+*Avoid:* `welcome::bot_adder_retry` tries once more after 1.5 s (each try bounded to 3 s) and Join Gate blocks the bot when that fails too, finds no entry, or the adder's level cannot be read. The mock Discord answers `audit-logs` (`Mock::audit`, `fail_audit`).
 
 **During a Role lock the stripped permissions were read as the real ones.** (overlap deep dive D62, 13-11)
 A Role lock saves each role's permissions and strips them, so sticky roles and verification saw a stripped Admin role as harmless and handed it out, and `strict_member_roles` and "enforce permits" did not see it either; when the lock ended the member held Administrator. Root cause: live role permissions are not the role's permissions while a lock holds them.
