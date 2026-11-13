@@ -238,39 +238,23 @@ pub async fn requarantine_missed(
         all.entry(gid.get()).or_default().clone()
     };
     let _one = lock.lock().await;
-    let now = now_secs();
-    let first = first.unwrap_or(now);
-    let wait = match lockdown::raid_or_lock(app, gid).await {
-        Ok(on) => on && now - first < MAX_WAIT_SECS,
-        Err(e) => {
-            tracing::warn!(?e, "raid or lock check failed, checking missed rejoins anyway");
-            false
-        }
-    };
-    let run = async {
-        if wait {
-            return anyhow::Ok(true);
-        }
-        missed(app, gid, known, complete).await?;
-        Ok(false)
-    };
-    let requeue = match run.await {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(?e, "checking members who rejoined while the bot was down failed, retrying in a job");
-            true
-        }
+    let defer = lockdown::Deferred::new(app, gid, MISSED_REJOINS, first).await;
+    let requeue = if defer.waits(app, gid).await {
+        true
+    } else if let Err(e) = missed(app, gid, known, complete).await {
+        tracing::warn!(?e, "checking members who rejoined while the bot was down failed, retrying in a job");
+        true
+    } else {
+        false
     };
     if requeue {
-        let payload = serde_json::json!({ "first": first });
-        jobs::replace(&app.pool, gid.get() as i64, MISSED_REJOINS, payload, now + 300).await?;
+        defer.later(app, gid).await?;
     }
     Ok(())
 }
 
 type GuildLocks = std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<tokio::sync::Mutex<()>>>>;
 static MISSED_LOCKS: std::sync::LazyLock<GuildLocks> = std::sync::LazyLock::new(Default::default);
-const MAX_WAIT_SECS: i64 = 1800;
 
 async fn missed(
     app: &App,

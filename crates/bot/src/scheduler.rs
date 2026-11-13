@@ -142,6 +142,9 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "raid_punish" => crate::joingate::punish_job(app, gid, &job.payload).await?,
         crate::reply::QUARANTINE_DM => crate::reply::quarantine_dm_job(app, gid, &job.payload).await?,
         crate::reply::QUARANTINE_DM_COOLDOWN => {}
+        crate::verify::given::CATCH_UP => {
+            crate::verify::given::catch_up(app, gid, job.payload["first"].as_i64()).await?
+        }
         crate::joingate::MISSED_REJOINS => {
             crate::joingate::requarantine_missed(app, gid, &[], false, job.payload["first"].as_i64()).await?
         }

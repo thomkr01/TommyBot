@@ -134,7 +134,7 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
     if let Err(e) = crate::joingate::requarantine_missed(app, g.id, &g.members, complete, None).await {
         tracing::warn!(?e, "quarantining members who rejoined while the bot was down failed");
     }
-    if let Err(e) = crate::verify::given::catch_up(app, g.id).await {
+    if let Err(e) = crate::verify::given::catch_up(app, g.id, None).await {
         tracing::warn!(?e, "checking verification roles given while the bot was down failed");
     }
     let fresh = g

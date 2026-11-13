@@ -1811,7 +1811,7 @@ fn rejoined_recently(gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
 }
 
 /// The entry adds only roles an autorole gives: no dangerous permissions (as held before a role
-/// lock) and no permit. A failed lookup counts as not plain.
+/// lock, read live) and no permit. A failed lookup or an unknown role counts as not plain.
 async fn plain_roles_added(app: &App, gid: Id<GuildMarker>, e: &AuditLogEntry) -> bool {
     let added: Vec<Id<RoleMarker>> = e
         .changes
@@ -1824,11 +1824,14 @@ async fn plain_roles_added(app: &App, gid: Id<GuildMarker>, e: &AuditLogEntry) -
         .map(|r| r.id)
         .collect();
     let check = async {
-        let perms = crate::lockdown::unlocked_role_perms(app, gid).await?;
+        // Read live: a role created a moment ago is not in the cached guild info.
+        let live = app.http.roles(gid).await?.models().await?;
+        let live = live.iter().map(|r| (r.id, r.permissions.bits())).collect();
+        let perms = crate::lockdown::unlocked(app, gid, live).await?;
         let permit = permits::permit_roles(&app.pool, gid.get() as i64).await?;
         anyhow::Ok(added.iter().all(|r| {
             !permit.contains(&(r.get() as i64))
-                && perms.get(r).is_none_or(|p| p & tommybot_antinuke::DANGEROUS_PERMS == 0)
+                && perms.get(r).is_some_and(|p| p & tommybot_antinuke::DANGEROUS_PERMS == 0)
         }))
     };
     check.await.unwrap_or(false)

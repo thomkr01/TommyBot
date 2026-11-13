@@ -318,6 +318,54 @@ pub async fn unlocked(
     Ok(perms)
 }
 
+/// A startup check that waits out a raid or lock (D17, D58): `kind` is one job per guild.
+pub struct Deferred {
+    pub kind: &'static str,
+    /// When the first wait began (unix secs), from the caller or the pending job.
+    pub first: i64,
+}
+
+/// Longest a [`Deferred`] check waits before it runs anyway.
+const MAX_WAIT_SECS: i64 = 1800;
+
+impl Deferred {
+    /// `first` from the job, else from a pending one (a GuildCreate must not restart the cap).
+    pub async fn new(app: &App, gid: Id<GuildMarker>, kind: &'static str, first: Option<i64>) -> Self {
+        let pending = match first {
+            Some(f) => Some(f),
+            None => sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT (payload->>'first')::bigint FROM scheduled_jobs WHERE guild_id = $1 AND kind = $2 LIMIT 1",
+            )
+            .bind(gid.get() as i64)
+            .bind(kind)
+            .fetch_optional(&app.pool)
+            .await
+            .ok()
+            .flatten()
+            .flatten(),
+        };
+        Deferred { kind, first: pending.unwrap_or_else(now_secs) }
+    }
+
+    /// True while a raid or lock is on and the 30 minutes are not up. A failed check runs.
+    pub async fn waits(&self, app: &App, gid: Id<GuildMarker>) -> bool {
+        match raid_or_lock(app, gid).await {
+            Ok(on) => on && now_secs() - self.first < MAX_WAIT_SECS,
+            Err(e) => {
+                tracing::warn!(?e, "raid or lock check failed, running anyway");
+                false
+            }
+        }
+    }
+
+    /// Runs the check again in 5 minutes, keeping `first`.
+    pub async fn later(&self, app: &App, gid: Id<GuildMarker>) -> Result<()> {
+        let payload = serde_json::json!({ "first": self.first });
+        tommybot_core::jobs::replace(&app.pool, gid.get() as i64, self.kind, payload, now_secs() + 300)
+            .await
+    }
+}
+
 /// A join raid is running or a lock is on: member edits and new tickets wait.
 pub async fn raid_or_lock(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
     let now = crate::automod::now_ms();

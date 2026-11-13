@@ -901,9 +901,9 @@ async fn the_rejoin_grace_covers_plain_roles_only() {
     server(&t, 0, json!({ "antinuke": an })).await;
     const ADMIN: u64 = 507;
     const PERMIT: u64 = 511;
-    let [u, v, w, admin_bot, auto_bot, level_bot, permit_bot] =
-        [1, 2, 3, 4, 5, 6, 7].map(|n| t.base * 10 + n);
-    let bots = [admin_bot, auto_bot, level_bot, permit_bot];
+    let [u, v, w, admin_bot, auto_bot, level_bot, permit_bot, unknown_bot] =
+        [1, 2, 3, 4, 5, 6, 7, 8].map(|n| t.base * 10 + n);
+    let bots = [admin_bot, auto_bot, level_bot, permit_bot, unknown_bot];
     t.set(|m| {
         let g = t.g(0).get();
         m.roles.get_mut(&g).unwrap().extend([(ADMIN, false, 8, 6), (PERMIT, false, 0, 7)]);
@@ -942,6 +942,9 @@ async fn the_rejoin_grace_covers_plain_roles_only() {
     }
     give(permit_bot, w, PERMIT).await;
     assert!(saved(&t, 0, permit_bot).await.is_some(), "a permit role is no autorole");
+    // A role Discord does not list (created a moment ago, or the read failed) is not plain.
+    give(unknown_bot, v, 599).await;
+    assert!(saved(&t, 0, unknown_bot).await.is_some(), "an unknown role is no autorole");
     t.cleanup().await;
 }
 
@@ -1030,8 +1033,14 @@ async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
             .unwrap();
     }
     assert_eq!(t.calls(&format!("GET /guilds/{}/members", t.g(0))), reads);
-    let long_ago = crate::app::now_secs() - 1801;
-    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false, Some(long_ago))
+    // GuildCreate (no `first`) takes the first wait from the pending job, so the cap holds.
+    sqlx::query("UPDATE scheduled_jobs SET payload = jsonb_build_object('first', $2::bigint) WHERE guild_id = $1 AND kind = 'requarantine_missed'")
+        .bind(t.g(0).get() as i64)
+        .bind(crate::app::now_secs() - 1801)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false, None)
         .await
         .unwrap();
     t.app.raids.lock().unwrap().clear();
@@ -1193,8 +1202,8 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     const TALK: u64 = 514;
     const SENDS: u64 = 515;
     let (view, send) = (1024u64, 2048u64);
-    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human] =
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(|n| t.base * 100 + n);
+    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human, s4, d] =
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map(|n| t.base * 100 + n);
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(), "quarantine_hold": false});
     for i in 0..3 {
         server(&t, i, json!({"verification": web_verification(), "antinuke": an})).await;
@@ -1238,7 +1247,10 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
                    "target_id": target.to_string(), "user_id": actor.to_string(), "reason": null,
                    "changes": [{"key": "$add", "new_value": [{"id": VERIFIED.to_string(), "name": "v"}]}]})
         };
-        m.audit.insert(g, vec![add(9, ME, c), add(8, bot, a), add(7, human, b), add(6, bot, c)]);
+        let mut taken = add(10, ME, d);
+        taken["changes"][0]["key"] = json!("$remove");
+        m.members.insert((g, d), vec![VERIFIED]);
+        m.audit.insert(g, vec![taken, add(9, ME, c), add(8, bot, a), add(7, human, b), add(6, bot, c), add(5, bot, d)]);
     });
     let give = |i: u64, target: u64, role: u64| {
         let mut e = role_added(&t, bot, target, role);
@@ -1270,6 +1282,28 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
         given(give(0, vfd, MEMBER)).await;
     }
     assert_eq!((roles(&t, 0, vfd), reads(0, vfd)), (Some(vec![VERIFIED, MEMBER]), 1));
+    // Staff un-verify them: they are no longer remembered as verified.
+    let mut unverify = role_added(&t, human, vfd, VERIFIED);
+    unverify.changes = serde_json::from_value(json!([{"key": "$remove", "new_value": [{"id": VERIFIED.to_string(), "name": "v"}]}])).unwrap();
+    given(unverify).await;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), vfd), vec![MEMBER]);
+    });
+    given(give(0, vfd, MEMBER)).await;
+    assert_eq!(roles(&t, 0, vfd), Some(vec![]), "checked again after the un-verify");
+    // A role edited to open the verified channels counts at once: the edit drops the cached gate.
+    t.set(|m| {
+        let g = t.g(0).get();
+        m.roles.get_mut(&g).unwrap().iter_mut().filter(|r| r.0 == PINGS).for_each(|r| r.2 = view);
+    });
+    let edit: AuditLogEntry = serde_json::from_value(json!({
+        "id": "4", "action_type": 31, "guild_id": t.g(0).to_string(), "target_id": PINGS.to_string(),
+        "user_id": human.to_string(), "reason": null, "changes": [],
+    }))
+    .unwrap();
+    given(edit).await;
+    given(give(0, p, PINGS)).await;
+    assert_eq!(roles(&t, 0, p), Some(vec![]), "the edited role is taken back");
     // Send only: a role allowed to write there goes, one whose base Send @everyone's deny blocks stays.
     t.set(|m| {
         m.members.insert((t.g(1).get(), s1), vec![TALK]);
@@ -1287,8 +1321,45 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     .unwrap();
     given(over).await;
     assert_eq!(t.calls(&format!("DELETE /channels/712/permissions/{s3}")), 1);
+    // A verification role and an overwrite at once: the bot's own role proves nothing, both go,
+    // and the member is not remembered as verified.
+    t.set(|m| {
+        m.members.insert((t.g(1).get(), s4), vec![VERIFIED]);
+    });
+    let mut over4 = serde_json::to_value(role_added(&t, bot, s4, VERIFIED)).unwrap();
+    over4["action_type"] = json!(13);
+    over4["guild_id"] = json!(t.g(1).to_string());
+    over4["target_id"] = json!("712");
+    over4["options"] = json!({"id": s4.to_string(), "type": "1"});
+    over4["changes"] = json!([{"key": "allow", "new_value": send.to_string()}]);
+    let over4: AuditLogEntry = serde_json::from_value(over4).unwrap();
+    // The overwrite handler goes first, while the bot's role is still on the member.
+    tokio::join!(given(over4), async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        given(give(1, s4, VERIFIED)).await
+    });
+    assert_eq!(roles(&t, 1, s4), Some(vec![]));
+    assert_eq!(t.calls(&format!("DELETE /channels/712/permissions/{s4}")), 1);
+    t.set(|m| {
+        m.members.insert((t.g(1).get(), s4), vec![VERIFIED]);
+    });
+    given(give(1, s4, VERIFIED)).await;
+    assert_eq!(roles(&t, 1, s4), Some(vec![]), "a later grant is still checked");
     // At GuildCreate: only a role whose newest grant came from another bot goes.
-    crate::verify::given::catch_up(&t.app, t.g(2)).await.unwrap();
+    // During a raid the catch-up waits in a job and reads nothing.
+    let raid = tommybot_automod::join::RaidDetector::restored(0, i64::MAX, String::new());
+    t.app.raids.lock().unwrap().insert(t.g(2).get(), raid);
+    crate::verify::given::catch_up(&t.app, t.g(2), None).await.unwrap();
+    t.app.raids.lock().unwrap().clear();
+    assert_eq!(t.calls(&format!("GET /guilds/{}/audit-logs", t.g(2))), 0);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'verify_catch_up'")
+        .bind(t.g(2).get() as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    crate::verify::given::catch_up(&t.app, t.g(2), None).await.unwrap();
+    assert_eq!(reads(2, d), 0, "TommyBot took it back last: no member read");
     assert_eq!(roles(&t, 2, a), Some(vec![]), "a bot verified them while TommyBot was down");
     assert_eq!(roles(&t, 2, b), Some(vec![VERIFIED]), "staff gave it");
     assert_eq!(roles(&t, 2, c), Some(vec![VERIFIED]), "TommyBot gave it last");

@@ -144,6 +144,16 @@ async fn gate(
     Ok(g)
 }
 
+/// Drops the guild's [`Gate`]: a role or channel changed (with `invalidate_guild`, and on the
+/// matching audit events, whichever comes first).
+pub(crate) fn forget_gate(gid: Id<GuildMarker>) {
+    GATES.lock().unwrap_or_else(|p| p.into_inner()).remove(&gid.get());
+}
+
+fn forget(map: &Recent, gid: Id<GuildMarker>, user: Id<UserMarker>) {
+    map.lock().unwrap_or_else(|p| p.into_inner()).remove(&(gid.get(), user.get()));
+}
+
 fn note(map: &Recent, gid: Id<GuildMarker>, user: Id<UserMarker>, roles: &[Id<RoleMarker>]) {
     let mut all = map.lock().unwrap_or_else(|p| p.into_inner());
     all.retain(|_, (_, at)| at.elapsed() < SEEN_FOR);
@@ -199,10 +209,16 @@ async fn is_bot(app: &App, user: Id<UserMarker>) -> Result<bool> {
 }
 
 fn roles_added(e: &AuditLogEntry) -> Vec<Id<RoleMarker>> {
+    roles_changed(e, true)
+}
+
+/// The roles an entry added (`added`) or removed.
+fn roles_changed(e: &AuditLogEntry, added: bool) -> Vec<Id<RoleMarker>> {
     e.changes
         .iter()
         .filter_map(|c| match c {
-            AuditLogChange::RoleAdded { new, .. } => Some(new),
+            AuditLogChange::RoleAdded { new, .. } if added => Some(new),
+            AuditLogChange::RoleRemoved { new, .. } if !added => Some(new),
             _ => None,
         })
         .flatten()
@@ -211,9 +227,19 @@ fn roles_added(e: &AuditLogEntry) -> Vec<Id<RoleMarker>> {
 }
 
 pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
+    let Some(gid) = e.guild_id else {
+        return Ok(());
+    };
     match e.action_type {
         A::MemberRoleUpdate => on_roles(app, e).await,
-        A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate => on_overwrite(app, e).await,
+        A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate => {
+            forget_gate(gid);
+            on_overwrite(app, e).await
+        }
+        A::RoleCreate | A::RoleUpdate | A::ChannelCreate | A::ChannelUpdate | A::ChannelOverwriteDelete => {
+            forget_gate(gid);
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -222,7 +248,16 @@ async fn on_roles(app: &App, e: &AuditLogEntry) -> Result<()> {
     let (Some(gid), Some(actor), Some(target)) = (e.guild_id, e.user_id, e.target_id) else {
         return Ok(());
     };
+    let target: Id<UserMarker> = target.cast();
     let added = roles_added(e);
+    let removed = roles_changed(e, false);
+    if !removed.is_empty() {
+        // An un-verify: the member no longer counts as seen verified.
+        let cfg = app.cfg(gid.get()).await?;
+        if removed.iter().any(|r| cfg.verification.roles.contains(r)) {
+            forget(&SEEN_VERIFIED, gid, target);
+        }
+    }
     if actor == app.me || added.is_empty() {
         return Ok(());
     }
@@ -231,7 +266,6 @@ async fn on_roles(app: &App, e: &AuditLogEntry) -> Result<()> {
     if !v.enabled || v.roles.is_empty() {
         return Ok(());
     }
-    let target: Id<UserMarker> = target.cast();
     // Cheap filters first: no REST call for a role that opens nothing verification opens, or
     // for a member found verified already.
     let gate = gate(app, gid, &v.roles, &added).await?;
@@ -306,6 +340,8 @@ async fn on_overwrite(app: &App, e: &AuditLogEntry) -> Result<()> {
         Ok(false) => return Ok(()),
         Err(e) => return failed(app, gid, target, actor, &e).await,
     }
+    // As for roles: a verification role the bot gives at the same moment proves nothing.
+    tokio::time::sleep(SETTLE).await;
     let lock = member_lock(gid, target);
     let _one = lock.lock().await;
     let remove = || async {
@@ -315,7 +351,8 @@ async fn on_overwrite(app: &App, e: &AuditLogEntry) -> Result<()> {
         let Some(m) = crate::http_err::member(&app.http, gid, target).await? else {
             return Ok(false);
         };
-        if m.roles.iter().any(|r| v.roles.contains(r)) {
+        let bot_given = recent(&BOT_GIVEN, gid, target, RECENT).unwrap_or_default();
+        if m.roles.iter().any(|r| v.roles.contains(r) && !bot_given.contains(r)) {
             note(&SEEN_VERIFIED, gid, target, &[]);
             return Ok(false);
         }
@@ -415,22 +452,84 @@ async fn remove_roles(
     Ok(())
 }
 
-/// Grants made while TommyBot was down (GuildCreate): the newest add of each role in the audit
-/// log says who gave it. A member whose verification roles all came from another bot loses the
-/// roles that bot gave in [`Gate::roles`]; a role given by TommyBot, by staff or before the log
-/// counts as verified.
-pub async fn catch_up(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+/// The job that runs [`catch_up`] again after a raid or lock, or after a failed audit read.
+pub(crate) const CATCH_UP: &str = "verify_catch_up";
+/// Audit pages of 100 that [`catch_up`] reads at most.
+const CATCH_UP_PAGES: usize = 5;
+
+/// Grants made while TommyBot was down (GuildCreate): the newest change of each (member, role)
+/// in the audit log says who gave it. A member whose verification roles all came from another
+/// bot loses the roles that bot gave in [`Gate::roles`]; a role given by TommyBot, by staff or
+/// before the log counts as verified, and a pair whose newest change is a removal (TommyBot
+/// taking it back live) costs no member read. Waits out a raid or lock like D17.
+pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let v = &cfg.verification;
     if !v.enabled || v.roles.is_empty() {
         return Ok(());
     }
-    let gate = gate(app, gid, &v.roles, &[]).await?;
-    // (member, role) -> who added it last. Entries come newest first.
-    let mut by: HashMap<(Id<UserMarker>, Id<RoleMarker>), Id<UserMarker>> = HashMap::new();
+    let defer = crate::lockdown::Deferred::new(app, gid, CATCH_UP, first).await;
+    if defer.waits(app, gid).await {
+        return defer.later(app, gid).await;
+    }
+    let read = async {
+        let gate = gate(app, gid, &v.roles, &[]).await?;
+        let newest = newest_changes(app, gid, &gate).await?;
+        anyhow::Ok((gate, newest))
+    };
+    let (gate, (by, capped)) = match read.await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(?e, "reading the audit log for missed verification roles failed, retrying in a job");
+            return defer.later(app, gid).await;
+        }
+    };
+    if capped {
+        let log = Log::new("Verification", ORANGE).text(
+            "Checked only the newest 500 role changes for verification roles another bot gave while TommyBot was offline.",
+        );
+        if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
+            tracing::warn!(?e, "catch-up cap log failed");
+        }
+    }
+    let mut bots = HashSet::new();
+    let actors: HashSet<_> = by.values().filter(|(a, add)| *add && *a != app.me).map(|(a, _)| *a).collect();
+    for actor in actors {
+        match is_bot(app, actor).await {
+            Ok(true) => {
+                bots.insert(actor);
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(?e, actor = actor.get(), "bot lookup failed, its grants are skipped"),
+        }
+    }
+    let members: HashSet<Id<UserMarker>> = by
+        .keys()
+        .filter(|(u, r)| from_bot(&by, &bots, *u, r))
+        .map(|(u, _)| *u)
+        .collect();
+    for target in members {
+        if let Err(e) = catch_up_member(app, &cfg, &gate, gid, target, &by, &bots).await {
+            tracing::warn!(?e, user = target.get(), "checking one member's verification roles failed");
+        }
+    }
+    Ok(())
+}
+
+type Newest = HashMap<(Id<UserMarker>, Id<RoleMarker>), (Id<UserMarker>, bool)>;
+
+/// The newest change of this pair is another bot adding the role.
+fn from_bot(by: &Newest, bots: &HashSet<Id<UserMarker>>, u: Id<UserMarker>, r: &Id<RoleMarker>) -> bool {
+    by.get(&(u, *r)).is_some_and(|(a, add)| *add && bots.contains(a))
+}
+
+/// (member, role) -> (who changed it last, whether that was an add), for candidate roles, and
+/// whether the page cap was hit. Entries come newest first.
+async fn newest_changes(app: &App, gid: Id<GuildMarker>, gate: &Gate) -> Result<(Newest, bool)> {
+    let mut by = Newest::new();
     let mut before = None;
-    // shortcut: reads the newest 500 role changes; read further if outages get long and busy.
-    for _ in 0..5 {
+    // shortcut: reads the newest 500 role changes (logged when hit); read further if outages get long and busy.
+    for _ in 0..CATCH_UP_PAGES {
         let req = app.http.audit_log(gid).action_type(A::MemberRoleUpdate).limit(100);
         let req = match before {
             Some(b) => req.before(b),
@@ -441,61 +540,61 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>) -> Result<()> {
             let (Some(actor), Some(t)) = (e.user_id, e.target_id) else {
                 continue;
             };
-            for r in roles_added(e).into_iter().filter(|r| gate.roles.contains(r)) {
-                by.entry((t.cast(), r)).or_insert(actor);
+            for add in [true, false] {
+                for r in roles_changed(e, add).into_iter().filter(|r| gate.roles.contains(r)) {
+                    by.entry((t.cast(), r)).or_insert((actor, add));
+                }
             }
         }
         match log.entries.last() {
             Some(e) if log.entries.len() == 100 => before = Some(e.id.get()),
-            _ => break,
+            _ => return Ok((by, false)),
         }
     }
-    let mut bots = HashSet::new();
-    for actor in by.values().copied().collect::<HashSet<_>>() {
-        if actor != app.me && is_bot(app, actor).await? {
-            bots.insert(actor);
-        }
+    Ok((by, true))
+}
+
+async fn catch_up_member(
+    app: &App,
+    cfg: &GuildCfg,
+    gate: &Gate,
+    gid: Id<GuildMarker>,
+    target: Id<UserMarker>,
+    by: &Newest,
+    bots: &HashSet<Id<UserMarker>>,
+) -> Result<()> {
+    let v = &cfg.verification;
+    let lock = member_lock(gid, target);
+    let _one = lock.lock().await;
+    if recent(&VERIFIED, gid, target, RECENT).is_some() {
+        return Ok(());
     }
-    let members: HashSet<Id<UserMarker>> = by
+    let Some(member) = crate::http_err::member(&app.http, gid, target).await? else {
+        return Ok(());
+    };
+    let actor = by
         .iter()
-        .filter(|(_, a)| bots.contains(*a))
-        .map(|((u, _), _)| *u)
-        .collect();
-    for target in members {
-        let from_bot = |r: &Id<RoleMarker>| by.get(&(target, *r)).is_some_and(|a| bots.contains(a));
-        let lock = member_lock(gid, target);
-        let _one = lock.lock().await;
-        if recent(&VERIFIED, gid, target, RECENT).is_some() {
-            continue;
-        }
-        let Some(member) = crate::http_err::member(&app.http, gid, target).await? else {
-            continue;
-        };
-        let actor = by
-            .iter()
-            .find(|((u, _), a)| *u == target && bots.contains(*a))
-            .map(|(_, a)| *a)
-            .unwrap_or(app.me);
-        if member.roles.iter().any(|r| v.roles.contains(r) && !from_bot(r))
-            || hold_takes_it(app, &cfg, gid, target, actor).await?
-        {
-            continue;
-        }
-        let taken: Vec<_> = member
-            .roles
-            .iter()
-            .copied()
-            .filter(|r| gate.roles.contains(r) && from_bot(r))
-            .collect();
-        if taken.is_empty() {
-            continue;
-        }
-        match remove_roles(app, gid, target, &taken).await {
-            Ok(()) => taken_log(app, gid, target, actor, "A verification role given by another bot while TommyBot was offline was taken back").await?,
-            Err(e) => failed(app, gid, target, actor, &e).await?,
-        }
+        .find(|((u, _), (a, add))| *u == target && *add && bots.contains(a))
+        .map(|(_, (a, _))| *a)
+        .unwrap_or(app.me);
+    if member.roles.iter().any(|r| v.roles.contains(r) && !from_bot(by, bots, target, r))
+        || hold_takes_it(app, cfg, gid, target, actor).await?
+    {
+        return Ok(());
     }
-    Ok(())
+    let taken: Vec<_> = member
+        .roles
+        .iter()
+        .copied()
+        .filter(|r| gate.roles.contains(r) && from_bot(by, bots, target, r))
+        .collect();
+    if taken.is_empty() {
+        return Ok(());
+    }
+    match remove_roles(app, gid, target, &taken).await {
+        Ok(()) => taken_log(app, gid, target, actor, "A verification role given by another bot while TommyBot was offline was taken back").await,
+        Err(e) => failed(app, gid, target, actor, &e).await,
+    }
 }
 
 async fn taken_log(
