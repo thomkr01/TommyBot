@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Runs the real updater image against a throwaway compose project and a local registry: one good
-# update, then one whose dashboard crashes and must be rolled back. Needs Docker. Run from the repo root.
+# update, one whose dashboard crashes and must be rolled back, and one that also breaks the old version
+# (like a migration the old binary does not know), which must be reported as failed. Needs Docker. Run from the repo root.
 set -euo pipefail
 reg=localhost:5555
 dir=$(mktemp -d)
+mkdir "$dir/m"
 cp crates/core/migrations/1700_update_runs.sql "$dir/"
 docker build -q --target updater -t tommybot-updater:test . > /dev/null
 docker run -d --rm --name updtest-registry -p 5555:5000 registry:2 > /dev/null
@@ -17,7 +19,8 @@ push() {
     | docker build -q -t "127.0.0.1:5555/$1:latest" - > /dev/null
   docker push -q "127.0.0.1:5555/$1:latest" > /dev/null
 }
-serve='mkdir -p /w && echo ok > /w/index.html && exec httpd -f -p 8080 -h /w'
+# The marker in /m stands in for a newer migration: a version that finds it does not start.
+serve='[ ! -e /m/new ] || exit 1; mkdir -p /w && echo ok > /w/index.html && exec httpd -f -p 8080 -h /w'
 sha() { printf "$1%.0s" $(seq 40); }
 
 cat > "$dir/docker-compose.yml" <<YML
@@ -28,7 +31,7 @@ services:
     environment: { POSTGRES_PASSWORD: x }
     healthcheck: { test: ["CMD", "pg_isready", "-U", "postgres"], interval: 1s, retries: 30 }
   bot: { image: "$reg/bot:latest", restart: unless-stopped }
-  dashboard: { image: "$reg/dashboard:latest", restart: unless-stopped }
+  dashboard: { image: "$reg/dashboard:latest", restart: unless-stopped, volumes: ["$dir/m:/m"] }
   updater:
     image: tommybot-updater:test
     depends_on: { postgres: { condition: service_healthy } }
@@ -41,7 +44,7 @@ label() { docker inspect -f '{{index .Config.Labels "org.opencontainers.image.re
 # update: queues a run and prints "status to_sha steps" once the updater has finished it.
 update() {
   sql "insert into update_runs (requested_by) values (1)"
-  for _ in $(seq 120); do
+  for _ in $(seq 240); do
     r=$(sql "select status, to_sha, cardinality(step_times) from update_runs order by id desc limit 1")
     case $r in queued* | running*) sleep 1 ;; *) echo "$r"; return ;; esac
   done
@@ -70,6 +73,14 @@ case $r in rolled_back*) ;; *) fail "bad update: $r" ;; esac
 [ "$(label)" = "$(sha b)" ] || fail "dashboard not rolled back"
 [ "$(docker inspect -f '{{.State.Running}}' "$(dc ps -q dashboard)")" = true ] || fail "dashboard down after rollback"
 echo "ok: crashing update rolled back"
+
+push dashboard "$(sha d)" 'touch /m/new; exit 1'
+r=$(update)
+case $r in failed*) ;; *) fail "update that breaks the old version: $r" ;; esac
+case $(sql "select error from update_runs order by id desc limit 1") in
+  *"does not start either"*) ;; *) fail "failed rollback not explained" ;;
+esac
+echo "ok: rollback that does not start reported as failed"
 
 sql "insert into update_runs (requested_by) values (1), (1)" 2> /dev/null && fail "two runs queued at once"
 echo PASS

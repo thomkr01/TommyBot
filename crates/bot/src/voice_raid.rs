@@ -19,7 +19,7 @@ use crate::{
     app::{App, GuildCfg},
     automod::now_ms,
     events::send_log_pinging,
-    joingate::{self, Detail},
+    joingate,
 };
 
 const JOB: &str = "voice_raid_end";
@@ -98,6 +98,16 @@ pub async fn on_voice(app: &App, v: &VoiceState, old: Option<Id<ChannelMarker>>)
     // One member who already left or a refused step must not let the rest go.
     for (id, _) in out.flagged {
         let uid = Id::new(id);
+        // An earlier flagged member may have been made staff since. A failed lookup still
+        // disconnects (harmless to staff); the punishment waits for the retry job, which checks
+        // again (D60b).
+        let immune = match uid == v.user_id {
+            true => Ok(false),
+            false => app.is_immune(gid, uid).await,
+        };
+        if matches!(immune, Ok(true)) {
+            continue;
+        }
         let left = app
             .http
             .update_guild_member(gid, uid)
@@ -107,19 +117,16 @@ pub async fn on_voice(app: &App, v: &VoiceState, old: Option<Id<ChannelMarker>>)
         if let Err(e) = left {
             tracing::warn!(?e, user = id, "voice raid: disconnecting failed");
         }
-        let r = joingate::punish(
-            app,
-            &cfg,
-            gid,
-            id,
-            raid.action(),
-            "voice raid",
-            Detail::default(),
-        )
-        .await;
-        if let Err(e) = r {
-            tracing::warn!(?e, user = id, "voice raid: punishing failed");
+        if let Err(e) = immune {
+            tracing::warn!(
+                ?e,
+                user = id,
+                "voice raid: immunity check failed, retrying later"
+            );
+            joingate::queue_retry(app, gid, id, raid.action(), "voice raid").await;
+            continue;
         }
+        joingate::punish_or_retry(app, &cfg, gid, id, raid.action(), "voice raid").await;
     }
     Ok(())
 }

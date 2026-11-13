@@ -272,13 +272,14 @@ pub fn kind_from(name: &str, channel: Option<u64>) -> Option<LockKind> {
     })
 }
 
-/// A role-type permission overwrite on a channel.
+/// A permission overwrite on a channel; `role` is the member's id when `member` is set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Overwrite {
     pub channel: u64,
     pub role: u64,
     pub allow: u64,
     pub deny: u64,
+    pub member: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -292,6 +293,9 @@ pub struct Problem {
     pub id: String,
     pub text: String,
     pub fix: Option<Fix>,
+    /// Apply Fix runs this fix only when the user ticked it: an @everyone allow beside the main
+    /// roles can be on purpose (a greeting channel), and the bot cannot undo it (D76b).
+    pub opt_in: bool,
 }
 
 pub fn tshoot(
@@ -319,6 +323,7 @@ pub fn tshoot(
                     r.id
                 ),
                 fix: None,
+                opt_in: false,
             });
         } else if r.perms & (VIEW_CHANNEL | SEND_MESSAGES) != VIEW_CHANNEL | SEND_MESSAGES {
             out.push(Problem {
@@ -331,6 +336,7 @@ pub fn tshoot(
                     role: r.id,
                     perms: r.perms | VIEW_CHANNEL | SEND_MESSAGES,
                 }),
+                opt_in: false,
             });
         }
     }
@@ -343,6 +349,7 @@ pub fn tshoot(
                     r.id
                 ),
                 fix: None,
+                opt_in: false,
             });
         } else if r.perms & WRITE != 0 {
             let fixable = r.position < bot_position;
@@ -357,28 +364,38 @@ pub fn tshoot(
                     role: r.id,
                     perms: r.perms & !WRITE,
                 }),
+                opt_in: false,
             });
         }
     }
-    // An explicit allow on a main role beats the stripped role perm, so the lock would not hold there.
+    // An explicit allow beats the stripped role perm, so the lock would not hold there. Bots keep
+    // their managed roles' allows.
+    let managed = |id: u64| roles.iter().any(|r| r.id == id && r.managed);
     for o in overwrites
         .iter()
-        .filter(|o| main.contains(&o.role) && o.allow & WRITE != 0)
+        .filter(|o| o.allow & WRITE != 0 && (o.member || !managed(o.role)))
     {
+        let who = match o.role {
+            _ if o.member => format!("<@{}>", o.role),
+            g if g == guild_id => "@everyone".into(),
+            r => format!("<@&{r}>"),
+        };
+        // Another role's or a member's allow can be on purpose (a staff channel), so only report it.
+        let fixable = !o.member && (main.contains(&o.role) || o.role == guild_id);
         out.push(Problem {
             id: format!("overwrite_{}_{}", o.channel, o.role),
             text: format!(
-                "Channel <#{}> explicitly allows {} for <@&{}>, so a lock does not apply there.",
+                "Channel <#{}> explicitly allows {} for {who}, so a lock does not apply there.",
                 o.channel,
                 perm_names(o.allow & WRITE),
-                o.role
             ),
-            fix: Some(Fix::SetOverwrite(Overwrite {
-                channel: o.channel,
-                role: o.role,
+            fix: fixable.then_some(Fix::SetOverwrite(Overwrite {
                 allow: o.allow & !WRITE,
-                deny: o.deny,
+                ..*o
             })),
+            // Only the main roles are changed by Apply Fix itself; @everyone (when main roles are set)
+            // is listed with its fix, for the user to tick.
+            opt_in: !main.contains(&o.role),
         });
     }
     out
@@ -704,15 +721,49 @@ mod tests {
 
     #[test]
     fn tshoot_flags_bypass_roles_and_unlockable_main_roles() {
-        let ow = [Overwrite {
+        let o = |role, member| Overwrite {
             channel: 7,
-            role: 10,
+            role,
             allow: SEND_MESSAGES | VIEW_CHANNEL,
             deny: 0,
-        }];
-        let p = tshoot(G, &[10], &roles(), &ow, 5);
+            member,
+        };
+        // Main role, another role, a member, @everyone, and a bot's managed role (skipped).
+        let ow = [
+            o(10, false),
+            o(11, false),
+            o(99, true),
+            o(G, false),
+            o(13, false),
+        ];
+        let mut rs = roles();
+        rs.push(RoleInfo {
+            managed: true,
+            ..role(13, 0, 1)
+        });
+        let p = tshoot(G, &[10], &rs, &ow, 5);
         let ids: Vec<&str> = p.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["bypass_1", "admin_12", "overwrite_7_10"]);
+        assert_eq!(
+            ids,
+            vec![
+                "bypass_1",
+                "admin_12",
+                "overwrite_7_10",
+                "overwrite_7_11",
+                "overwrite_7_99",
+                "overwrite_7_1"
+            ]
+        );
+        let fixable: Vec<bool> = p[2..].iter().map(|p| p.fix.is_some()).collect();
+        assert_eq!(fixable, [true, false, false, true]);
+        // D76b: @everyone beside set main roles is ticked by hand; with no main roles it is the main role.
+        let opt: Vec<bool> = p[2..].iter().map(|p| p.opt_in).collect();
+        assert_eq!(opt, [false, true, true, true]);
+        let solo = tshoot(G, &[], &roles(), &[o(G, false)], 5);
+        assert!(solo
+            .iter()
+            .any(|p| p.id == format!("overwrite_7_{G}") && !p.opt_in));
+        assert!(p[4].text.contains("<@99>") && p[5].text.contains("for @everyone"));
         assert_eq!(
             p[0].fix,
             Some(Fix::SetRolePerms {
@@ -726,7 +777,8 @@ mod tests {
                 channel: 7,
                 role: 10,
                 allow: VIEW_CHANNEL,
-                deny: 0
+                deny: 0,
+                member: false,
             }))
         );
         assert!(tshoot(G, &[12], &roles(), &[], 5)[0]

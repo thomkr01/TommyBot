@@ -34,7 +34,8 @@ async fn targets(app: &App, kind: &str, user: i64) -> Result<Vec<i64>> {
             "SELECT o.guild_id FROM guild_owners o
              JOIN LATERAL (SELECT config FROM guild_config WHERE guild_id = o.guild_id
                            ORDER BY version DESC LIMIT 1) c ON true
-             WHERE c.config->'raider_list'->>'enabled' = 'true'",
+             WHERE c.config->'raider_list'->>'enabled' = 'true'
+               AND o.guild_id NOT IN (SELECT guild_id FROM guild_left)",
         ),
         "raider_lift" => {
             sqlx::query_scalar("SELECT guild_id FROM raider_actions WHERE user_id = $1").bind(user)

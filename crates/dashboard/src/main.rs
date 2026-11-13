@@ -232,9 +232,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let ips = st.ips.clone();
     tokio::spawn(async move {
+        let mut failures = 0;
         loop {
-            ips.refresh().await;
-            tokio::time::sleep(tommybot_automod::sites::REFRESH).await;
+            let loaded = ips.refresh().await;
+            let wait = tommybot_automod::sites::next_refresh(loaded, &mut failures);
+            tokio::time::sleep(wait).await;
         }
     });
     if let Err(e) = st.discord.load_emojis().await {

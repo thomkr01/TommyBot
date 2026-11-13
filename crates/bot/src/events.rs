@@ -64,10 +64,25 @@ async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
         return Ok(p);
     }
     let c = app.http.channel(channel).await?.model().await?;
+    let main = match c.guild_id {
+        Some(gid) => app.cfg(gid.get()).await?.lockdown.main_roles.clone(),
+        None => vec![],
+    };
+    public_with(app, c, &main).await
+}
+
+/// [`public`] for a fetched channel with the main roles given; it reads no config, so a caller
+/// inside `App::cfg` can use it.
+pub(crate) async fn public_with(
+    app: &App,
+    c: twilight_model::channel::Channel,
+    main: &[Id<RoleMarker>],
+) -> Result<bool> {
+    let channel = c.id;
     let p = match c.guild_id {
         Some(gid) => {
-            let info = app.guild_info(gid).await?;
-            let main = app.cfg(gid.get()).await?.lockdown.main_roles.clone();
+            // By the permissions a lock saved: the channel is public again once it ends (D62).
+            let info = crate::lockdown::unlocked_info(app, gid).await?;
             let perms = |r: u64| {
                 Permissions::from_bits_truncate(
                     info.role_perms.get(&Id::new(r)).copied().unwrap_or(0),
@@ -366,14 +381,32 @@ pub async fn shutdown(app: &App) {
             tracing::warn!(?e, "log send failed during shutdown");
         }
     }
+    crate::welcome::flush_audit(app).await;
     app.pool.close().await;
 }
 
 async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
     // Before any await: each event runs in its own task, so an await here would let a later voice
     // update of the same member (or one after a GuildCreate) take the logger lock first.
-    if let Event::GuildCreate(g) = ev {
-        crate::welcome::seed_voice(app, g);
+    match ev {
+        Event::GuildCreate(g) => {
+            crate::welcome::seed_voice(app, g);
+            if let twilight_model::gateway::payload::incoming::GuildCreate::Available(g) = &**g {
+                for c in &g.channels {
+                    app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true);
+                }
+            }
+        }
+        // Before any await too: the delete of a channel just moved must see the move (D4).
+        Event::ChannelCreate(c) => {
+            app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true)
+        }
+        Event::ChannelUpdate(c) => {
+            app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), false)
+        }
+        Event::MemberUpdate(m) => app.forget_level(m.guild_id.get(), m.user.id.get()),
+        Event::MemberRemove(m) => app.forget_level(m.guild_id.get(), m.user.id.get()),
+        _ => {}
     }
     // A voice member's channel before this event, read as the update is recorded.
     let voice = match ev {
@@ -435,31 +468,29 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             }
             automod::on_message(app, m).await?;
         }
+        // A webhook or app can change its text or files without edited_timestamp (a deferred fill,
+        // a button update): new text or files are filtered (unseen files scanned and QR-read),
+        // the same ones never twice.
+        Event::MessageUpdate(m) if app_post(app, &m.0) => {
+            if automod::new_text(&m.0) {
+                automod::on_edit(app, &m.0).await?;
+            } else if !m.embeds.is_empty() {
+                scan_preview(app, &m.0).await?;
+            }
+        }
         // Discord also sends updates for link previews; only real edits are checked again.
-        Event::MessageUpdate(m)
-            if m.edited_timestamp.is_some()
-                && (!m.author.bot
-                    || m.webhook_id.is_some()
-                    || m.interaction_metadata.is_some()) =>
-        {
+        Event::MessageUpdate(m) if m.edited_timestamp.is_some() && !m.author.bot => {
             automod::on_edit(app, &m.0).await?;
         }
         // A link preview or GIF arrived after the post: only the image scan looks at it.
         Event::MessageUpdate(m)
-            if m.edited_timestamp.is_none()
-                && !m.embeds.is_empty()
-                && (!m.author.bot || m.webhook_id.is_some()) =>
+            if m.edited_timestamp.is_none() && !m.embeds.is_empty() && !m.author.bot =>
         {
-            if let Some(gid) = m.guild_id {
-                let am = &app.cfg(gid.get()).await?.automod;
-                if am.enabled && am.filters.nsfw_images.enabled {
-                    app.nsfw.enqueue(&m.0, true, false);
-                }
-            }
+            scan_preview(app, &m.0).await?;
         }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
-            app.invalidate_guild(r.guild_id);
+            app.invalidate_object(r.guild_id, r.role.id.get());
             app.log_public.lock().unwrap().clear();
         }
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
@@ -472,7 +503,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::ChannelUpdate(c) => {
             app.log_public.lock().unwrap().remove(&c.id);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            c.guild_id
+                .into_iter()
+                .for_each(|g| app.invalidate_object(g, c.id.get()));
             if let Err(e) = crate::setup::enforce_quarantine(app, c).await {
                 tracing::warn!(?e, channel = %c.id, "quarantine overwrite failed");
             }
@@ -495,9 +528,13 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::GuildUpdate(g) => {
             app.invalidate_guild(g.id);
-            crate::bansync::on_owner(app, g.id, g.owner_id).await?
+            crate::bansync::owner_seen(app, g.id, g.owner_id).await?
         }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
+        Event::AutoModerationRuleUpdate(r) => {
+            crate::automod::on_rule_change(app, &r.0, false).await
+        }
+        Event::AutoModerationRuleDelete(r) => crate::automod::on_rule_change(app, &r.0, true).await,
         Event::GuildDelete(g) => crate::welcome::on_guild_delete(app, g).await?,
         Event::Ready(r) => crate::welcome::on_ready(app, r).await?,
         Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),
@@ -542,12 +579,32 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         // Anti-nuke first: the verification check can wait for the gateway delete.
         Event::GuildAuditLogEntryCreate(e) => {
-            let nuke = antinuke::on_audit(app, &e.0).await;
+            // Before anything slow: a grant handled in parallel must not use the old gate.
+            verify::given::audit_changed(app, &e.0);
+            // The catch-up after a reconnect may have handled this entry already (D20).
+            let g = e.0.guild_id.map(|g| g.get());
+            let inflight = g.and_then(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
+            let new = g.is_none() || inflight.is_some();
+            let nuke = if new {
+                antinuke::on_audit(app, &e.0).await
+            } else {
+                Ok(())
+            };
+            if let (true, Some(g)) = (new, g) {
+                crate::welcome::handled_audit(app, g, &e.0).await;
+            }
+            drop(inflight);
             let ban = crate::bansync::on_ban(app, &e.0).await;
             let unban = crate::bansync::on_unban(app, &e.0).await;
             let allow = crate::raiders::on_unban(app, &e.0).await;
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
+            }
+            if let Err(err) = verify::given::on_audit(app, &e.0).await {
+                tracing::warn!(
+                    ?err,
+                    "taking back a verification role from another bot failed"
+                );
             }
             // Stats are a side effect: their failure never stops protection.
             if let Err(err) = crate::modstats::on_audit(app, &e.0).await {
@@ -565,17 +622,29 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
         Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,
-        Event::ThreadUpdate(t) => {
-            if let Some(p) = t.parent_id {
-                app.note_thread(t.id, p);
-            }
-        }
+        Event::ThreadUpdate(t) => crate::activity::on_thread_update(app, &t.0).await?,
         Event::ThreadListSync(s) => s
             .threads
             .iter()
             .filter_map(|t| Some((t.id, t.parent_id?)))
             .for_each(|(t, p)| app.note_thread(t, p)),
         _ => {}
+    }
+    Ok(())
+}
+
+/// A webhook's or another app's message (not TommyBot's own).
+fn app_post(app: &App, m: &twilight_model::channel::Message) -> bool {
+    m.author.id != app.me && automod::app_message(m)
+}
+
+/// Only the image scan reads a preview update.
+async fn scan_preview(app: &App, m: &twilight_model::channel::Message) -> Result<()> {
+    if let Some(gid) = m.guild_id {
+        let am = &app.cfg(gid.get()).await?.automod;
+        if am.enabled && am.filters.nsfw_images.enabled {
+            app.nsfw.enqueue(m, !automod::files_can_be_new(m), false);
+        }
     }
     Ok(())
 }

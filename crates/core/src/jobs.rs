@@ -36,12 +36,15 @@ pub async fn enqueue<'e>(
 /// Jobs that fail this many times are dropped by the scheduler.
 pub const MAX_ATTEMPTS: i32 = 5;
 /// Kinds that can run for minutes; a separate worker takes them so they never delay unbans or unlocks.
-pub const HEAVY: [&str; 5] = [
+pub const HEAVY: [&str; 7] = [
     "backup_load",
     "panic_start",
     "nuke_revert",
     "ban_sync_import",
     "raider_scan",
+    // Startup catch-ups that page members or the audit log (D17, D58).
+    "requarantine_missed",
+    "verify_catch_up",
 ];
 const LEASE_SECS: i32 = 60;
 const HEAVY_LEASE_SECS: i32 = 900;
@@ -114,6 +117,28 @@ pub async fn of_user(
     .bind(user.to_string())
     .fetch_optional(pool)
     .await?)
+}
+
+/// Deletes the pending jobs of these `kinds` for `user` (payload `user`) other than `keep`: a later
+/// ban or a lift makes an older temp ban's unban, or an older timeout's renewal, wrong.
+pub async fn cancel_user<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    guild: i64,
+    kinds: &[&str],
+    user: u64,
+    keep: Option<i64>,
+) -> Result<u64> {
+    Ok(sqlx::query(
+        "DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = ANY($2) AND payload->>'user' = $3
+           AND id IS DISTINCT FROM $4",
+    )
+    .bind(guild)
+    .bind(kinds)
+    .bind(user.to_string())
+    .bind(keep)
+    .execute(db)
+    .await?
+    .rows_affected())
 }
 
 /// Moves a pending job to a new time and payload.
@@ -288,6 +313,42 @@ mod tests {
             .unwrap();
         let got = of_user(&pool, gid, "v", 42).await.unwrap().unwrap();
         assert_eq!(got, (id, at + 300, moved));
+        clean(&pool, gid).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_user_keeps_other_users_and_the_new_job() {
+        let Some((pool, gid)) = setup(5).await else {
+            return;
+        };
+        let at = now() + 600;
+        let user = |u: u64| serde_json::json!({ "user": u });
+        enqueue(&pool, gid, "unban", user(42), at).await.unwrap();
+        enqueue(&pool, gid, "unban", user(43), at).await.unwrap();
+        enqueue(&pool, gid, "timeout_renew", user(42), at)
+            .await
+            .unwrap();
+        let new = enqueue(&pool, gid, "unban", user(42), at).await.unwrap();
+        assert_eq!(
+            cancel_user(&pool, gid, &["unban"], 42, Some(new))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            of_user(&pool, gid, "unban", 42).await.unwrap().unwrap().0,
+            new
+        );
+        assert!(of_user(&pool, gid, "unban", 43).await.unwrap().is_some());
+        assert!(of_user(&pool, gid, "timeout_renew", 42)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            cancel_user(&pool, gid, &["unban"], 42, None).await.unwrap(),
+            1
+        );
+        assert!(of_user(&pool, gid, "unban", 42).await.unwrap().is_none());
         clean(&pool, gid).await;
     }
 

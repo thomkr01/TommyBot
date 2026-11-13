@@ -6,16 +6,13 @@ use crate::app::App;
 
 /// The invite the next joiner used: the one whose use count grew since the last join, or the
 /// only one that vanished (a last use deletes it). Needs Manage Server; without it nothing is
-/// tracked. Returns (code, inviter name).
+/// tracked. Returns (code, inviter name). It runs before raid detection on every join, so a slow or
+/// rate-limited lookup gives up after 1.5 s (no invite is named for that joiner).
 pub async fn used_invite(app: &App, gid: Id<GuildMarker>) -> Option<(String, String)> {
-    let list = app
-        .http
-        .guild_invites(gid)
+    let fetch = async { app.http.guild_invites(gid).await.ok()?.models().await.ok() };
+    let list = tokio::time::timeout(std::time::Duration::from_millis(1500), fetch)
         .await
-        .ok()?
-        .models()
-        .await
-        .ok()?;
+        .ok()??;
     let now: HashMap<String, u64> = list
         .iter()
         .map(|i| (i.code.clone(), i.uses.unwrap_or(0)))

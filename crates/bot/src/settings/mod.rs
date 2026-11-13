@@ -304,11 +304,14 @@ async fn edit_trusted_admins(
     } else {
         "insert into trusted_admins (guild_id, user_id) select $1, unnest($2::bigint[]) on conflict do nothing"
     };
+    // A config version of its own, so a rollback or a stale Permits page save cannot undo it unseen.
+    let (mut tx, version, mut doc) = locked(app, gid).await?;
     sqlx::query(sql)
         .bind(gid.get() as i64)
         .bind(&ids)
-        .execute(&app.pool)
+        .execute(&mut *tx)
         .await?;
+    append(app, tx, gid, version, &mut doc, level_user).await?;
     let now: Vec<i64> = sqlx::query_scalar(
         "select user_id from trusted_admins where guild_id = $1 order by user_id",
     )
@@ -410,7 +413,7 @@ pub(crate) fn needs_2fa(gid: u64) -> String {
     )
 }
 
-fn dashboard_link(gid: u64) -> String {
+pub(crate) fn dashboard_link(gid: u64) -> String {
     match std::env::var("DASHBOARD_URL")
         .ok()
         .filter(|u| !u.is_empty())
@@ -597,24 +600,13 @@ pub async fn save(
     sections: &[&str],
     f: impl FnOnce(&mut Value) -> Result<(), String>,
 ) -> Result<Result<Value, String>> {
-    let guild = gid.get() as i64;
-    let mut tx = app.pool.begin().await?;
-    sqlx::query("select pg_advisory_xact_lock($1)")
-        .bind(guild)
-        .execute(&mut *tx)
-        .await?;
-    let (version, mut doc): (i32, Value) = sqlx::query_as(
-        "select version, config from guild_config where guild_id = $1 order by version desc limit 1",
-    )
-    .bind(guild)
-    .fetch_optional(&mut *tx)
-    .await?
-    .unwrap_or((0, json!({})));
+    let (tx, version, mut doc) = locked(app, gid).await?;
+    let before = doc.clone();
     if let Err(e) = f(&mut doc) {
         return Ok(Err(e));
     }
     for s in sections.iter().filter(|s| !doc[**s].is_null()) {
-        if let Err(e) = crate::app::check_section(s, &doc[*s]) {
+        if let Err(e) = crate::app::check_section(s, &doc[*s], &before[*s]) {
             return Ok(Err(format!("Not saved: {e}")));
         }
     }
@@ -624,12 +616,48 @@ pub async fn save(
     if let Some(e) = tommybot_automod::join::web_mode_error(&doc).filter(|_| touches) {
         return Ok(Err(format!("Not saved: {e}")));
     }
+    append(app, tx, gid, version, &mut doc, actor).await?;
+    Ok(Ok(doc))
+}
+
+/// A transaction holding the guild's config lock, with the newest version and its config.
+pub(crate) async fn locked(
+    app: &App,
+    gid: Id<GuildMarker>,
+) -> Result<(sqlx::Transaction<'static, sqlx::Postgres>, i32, Value)> {
+    let guild = gid.get() as i64;
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(guild)
+        .execute(&mut *tx)
+        .await?;
+    let (version, doc) = sqlx::query_as(
+        "select version, config from guild_config where guild_id = $1 order by version desc limit 1",
+    )
+    .bind(guild)
+    .fetch_optional(&mut *tx)
+    .await?
+    .unwrap_or((0, json!({})));
+    Ok((tx, version, doc))
+}
+
+/// Saves `doc` as version `version + 1` with the live permits as its `permits` copy, then commits.
+pub(crate) async fn append(
+    app: &App,
+    mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    gid: Id<GuildMarker>,
+    version: i32,
+    doc: &mut Value,
+    actor: u64,
+) -> Result<()> {
+    let guild = gid.get() as i64;
+    doc["permits"] = tommybot_core::permits::snapshot(&mut tx, guild).await?;
     sqlx::query(
         "insert into guild_config (guild_id, version, config, changed_by) values ($1,$2,$3,$4)",
     )
     .bind(guild)
     .bind(version + 1)
-    .bind(&doc)
+    .bind(&*doc)
     .bind(actor as i64)
     .execute(&mut *tx)
     .await?;
@@ -639,7 +667,7 @@ pub async fn save(
         .await?;
     tx.commit().await?;
     app.forget_cfg(gid.get());
-    Ok(Ok(doc))
+    Ok(())
 }
 
 /// One reply; mentions never ping.
@@ -793,6 +821,35 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         },
         _ => vec![],
     };
+    // Anti-nuke guards the main roles while a monitor is on, so they need its bar then (D67).
+    if row.path == "lockdown.main_roles" {
+        let an = &app.cfg(gid.get()).await?.antinuke;
+        let text = if !(an.monitor_public_roles || an.monitor_channel_perms) {
+            None
+        } else if !matches!(level, Level::Owner | Level::ExtraOwner) {
+            Some("Anti-nuke monitors the main roles, so only the owner and Extra Owners can change them".into())
+        } else if !fresh_2fa(app, msg.author.id.get()).await? {
+            Some(needs_2fa(gid.get()))
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            send(app, msg, &text, None, vec![]).await?;
+            return Ok(true);
+        }
+    }
+    // The dashboard's rule too: a main role is never @everyone, managed or above the bot.
+    if row.path == "lockdown.main_roles" && !matches!(op, Op::Remove(..)) {
+        let info = app.guild_info(gid).await?;
+        let bad = ids
+            .iter()
+            .find_map(|&id| Some((id, info.unfit(gid, Id::new_checked(id)?)?)));
+        if let Some((id, why)) = bad {
+            let text = format!("<@&{id}> cannot be a main role: {why}");
+            send(app, msg, &text, None, vec![]).await?;
+            return Ok(true);
+        }
+    }
     let sections = [section];
     let saved = save(app, gid, msg.author.id.get(), &sections, |doc| {
         let e = edit_for(row, &op, &ids, get_path(doc, row.path))?;
@@ -902,6 +959,61 @@ mod tests {
         m.rows.iter().find(|r| r.code == code).unwrap()
     }
 
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Removing a TA from Discord is a
+    /// config version holding the live list, so a rollback to the version before shows it.
+    #[tokio::test]
+    async fn trusted_admin_removal_is_a_config_version() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let g = 9_830_000_000 + std::process::id() as i64;
+        let gid = Id::new(g as u64);
+        sqlx::query("insert into trusted_admins (guild_id, user_id) values ($1, 55)")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        // A stale copy, as left by the unversioned removal before this fix.
+        sqlx::query("insert into guild_config (guild_id, version, config) values ($1, 1, $2)")
+            .bind(g)
+            .bind(json!({"misc": {"prefix": "x!"}, "permits": {"eo": [], "ta": ["55", "66"], "custom": []}}))
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let op = Op::Remove("10".into(), "<@55>".into());
+        let r = edit_trusted_admins(&app, gid, (7, &Level::Owner), &op)
+            .await
+            .unwrap();
+        assert!(r.starts_with(&YES.to_string()), "{r}");
+        let (v, by, c): (i32, i64, Value) = sqlx::query_as(
+            "select version, changed_by, config from guild_config where guild_id = $1 order by version desc limit 1",
+        )
+        .bind(g)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!((v, by), (2, 7));
+        assert_eq!(c["permits"], json!({"eo": [], "ta": [], "custom": []}));
+        assert_eq!(c["misc"]["prefix"], "x!", "the rest of the config is kept");
+        for t in ["guild_config", "trusted_admins"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        }
+    }
+
     #[test]
     fn prefix_edits_the_first_warn_action() {
         let mut doc = json!({});
@@ -1000,7 +1112,7 @@ mod tests {
                 let e = edit_for(r, &op, &[5], None).unwrap_or_else(|e| panic!("{e}"));
                 apply(&mut doc, r.path, e);
                 let section = r.path.split('.').next().unwrap();
-                crate::app::check_section(section, &doc[section])
+                crate::app::check_section(section, &doc[section], &Value::Null)
                     .unwrap_or_else(|e| panic!("{} {}: {e}", m.title, r.code));
                 // The panel getter reads the result back without panicking.
                 (r.get)(&GuildCfg::parse(&doc));

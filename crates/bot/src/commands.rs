@@ -3,8 +3,13 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::lockdown::{kind_from, LockKind};
-use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
+use tommybot_core::{
+    cases, jobs, permits,
+    sections::{AntinukeCfg, MiscCfg},
+    warn,
+};
 use tommybot_logging::{
     embed::{self, duration, ARROW, ORANGE, RED},
     Log, LogKind,
@@ -85,13 +90,64 @@ pub(crate) async fn gated(
     if app.mod_commands_locked(gid.get()) && !actor.immune() {
         return Ok(Some("Mod commands are locked during panic mode".into()));
     }
-    if app.command_allowed(actor_id, actor, action) {
+    let cfg = app.cfg(gid.get()).await?;
+    let fallback = nuke_fallback(&cfg.antinuke, action);
+    let own = permits::command_limit(actor, action, None);
+    let Some(limit) = own.or(permits::command_limit(actor, action, fallback)) else {
+        return Ok(None);
+    };
+    let action = limit_key(own.is_some(), action);
+    let ok = app.rate_limiter.lock().unwrap().allow(
+        actor_id.get() as i64,
+        action,
+        limit,
+        std::time::Instant::now(),
+    );
+    // Kept for a restart (N3); a lost row only makes the limit forget one use.
+    let kept = sqlx::query("INSERT INTO command_uses (actor_id, action) VALUES ($1, $2)")
+        .bind(actor_id.get() as i64)
+        .bind(action)
+        .execute(&app.pool)
+        .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "saving a command use failed");
+    }
+    if ok {
         return Ok(None);
     }
     antinuke::quarantine_actor(app, gid, actor_id, "command rate limit exceeded").await?;
+    // What the bot already did for them (bans, kicks) is undone, as for a nuke (D22).
+    if let Err(e) = antinuke::revert_breach(app, gid, actor_id, &cfg.backups).await {
+        tracing::warn!(?e, "reverting a command rate limit breach failed");
+    }
     Ok(Some(format!(
         "Command rate limit hit for `{action}`: nothing done, you have been quarantined"
     )))
+}
+
+/// The rate limiter key of a command. Anti-nuke counts bans and kicks on one card, so under its
+/// fallback limit they share one key too (D5); a permit's own limit stays per action.
+fn limit_key(own: bool, action: &str) -> &str {
+    match (own, action) {
+        (false, "ban" | "kick") => "ban+kick",
+        _ => action,
+    }
+}
+
+/// Anti-nuke's limit for the same action, for a permit without its own (D5). Anti-nuke trips when
+/// a count reaches its limit and the permit limit when one goes past it, so one less.
+fn nuke_fallback(an: &AntinukeCfg, action: &str) -> Option<permits::Limit> {
+    let card = match action {
+        "ban" => NukeAction::Ban,
+        "kick" => NukeAction::Kick,
+        "timeout" => NukeAction::Timeout,
+        _ => return None,
+    };
+    let (l, _) = an.limit(card).filter(|_| an.enabled)?;
+    Some(permits::Limit {
+        per_min: l.per_minute.saturating_sub(1),
+        per_hour: l.per_hour.saturating_sub(1),
+    })
 }
 
 /// Readable reason for a refused permit check.
@@ -212,21 +268,23 @@ pub async fn apply_dm(
                     .reason(&audit)
                     .await?;
                 app.http.delete_ban(gid, target).reason(&audit).await?;
+                crate::scheduler::forget_jobs(app, gid, t, &["unban"], None).await;
                 (None, 0)
             }
             ModKind::Ban => {
                 // Queued first: a restart right after the ban must not make it permanent. If the ban
                 // fails, the unban later finds no ban and is dropped.
+                let mut job = None;
                 if let Some(d) = duration_s {
-                    let job = json!({"user":t});
-                    jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d)
-                        .await?;
+                    let (g, at) = (gid.get() as i64, now_secs() + d);
+                    job = Some(jobs::enqueue(&app.pool, g, "unban", json!({"user":t}), at).await?);
                 }
                 app.http
                     .create_ban(gid, target)
                     .delete_message_seconds(cfg.misc.purge_secs())
                     .reason(&audit)
                     .await?;
+                crate::scheduler::forget_jobs(app, gid, t, crate::scheduler::BANNED, job).await;
                 (Some(json!({"op":"unban","user":t})), 0)
             }
             ModKind::Kick => {
@@ -660,6 +718,9 @@ pub(crate) async fn apply_warn_actions(
     };
     // Same rule as a typed punishment: tell the member first.
     reply::dm_and_act(true, dm, act).await.1?;
+    if kind == "ban" {
+        crate::scheduler::forget_jobs(app, g, u.get(), crate::scheduler::BANNED, None).await;
+    }
     let case_no = cases::create(
         &app.pool,
         cases::NewCase {
@@ -700,7 +761,8 @@ fn timeout_chunk(remaining: i64) -> (i64, bool) {
     (remaining.min(MAX_TIMEOUT_S), remaining > MAX_TIMEOUT_S)
 }
 
-/// Single capped timeout for callers that cannot renew (warn thresholds, automod).
+/// Single capped timeout for callers that cannot renew (warn thresholds, automod). Keeps a longer
+/// running timeout; a failed read times out anyway.
 pub async fn timeout(
     http: &Client,
     g: Id<GuildMarker>,
@@ -708,9 +770,16 @@ pub async fn timeout(
     secs: i64,
     reason: &str,
 ) -> Result<()> {
-    let until = Timestamp::from_secs(now_secs() + timeout_chunk(secs).0)?;
+    let until = now_secs() + timeout_chunk(secs).0;
+    let running = crate::http_err::member(http, g, u).await.ok().flatten();
+    if running
+        .and_then(|m| m.communication_disabled_until)
+        .is_some_and(|t| t.as_secs() >= until)
+    {
+        return Ok(());
+    }
     http.update_guild_member(g, u)
-        .communication_disabled_until(Some(until))
+        .communication_disabled_until(Some(Timestamp::from_secs(until)?))
         .reason(reason)
         .await?;
     Ok(())
@@ -734,18 +803,15 @@ pub async fn timeout_until(
         .communication_disabled_until(Some(Timestamp::from_secs(now + chunk)?))
         .reason(reason)
         .await?;
+    let mut job = None;
     if more {
         // Renewed a day early so scheduler lag cannot open a gap.
-        let job = json!({"user":u.get(),"until_secs":until});
-        jobs::enqueue(
-            &app.pool,
-            g.get() as i64,
-            "timeout_renew",
-            job,
-            now + chunk - 86_400,
-        )
-        .await?;
+        let p = json!({"user":u.get(),"until_secs":until});
+        let at = now + chunk - 86_400;
+        job = Some(jobs::enqueue(&app.pool, g.get() as i64, "timeout_renew", p, at).await?);
     }
+    // After the PATCH: a failed one keeps the old timeout's renewal. One chain per member.
+    crate::scheduler::forget_jobs(app, g, u.get(), &["timeout_renew"], job).await;
     Ok(())
 }
 
@@ -842,6 +908,29 @@ pub async fn backup_cmd(
     if let Some(msg) = gated(app, gid, actor_id, actor, "backups").await? {
         return Ok(msg);
     }
+    // Loading deletes whatever the backup lacks, and clearing or deleting (ten deletes are a clear)
+    // removes anti-nuke's restore source: owner level plus a fresh 2FA, as the dashboard asks
+    // (D10/D11, S-h3 2). The load preview only reads.
+    if matches!(
+        cmd,
+        BackupCmd::Clear | BackupCmd::Delete { .. } | BackupCmd::Load { confirm: true, .. }
+    ) {
+        if !matches!(actor, permits::Level::Owner | permits::Level::ExtraOwner) {
+            return Ok("Only the owner and Extra Owners can load or delete backups".into());
+        }
+        if !crate::settings::fresh_2fa(app, actor_id.get()).await? {
+            return Ok(crate::settings::needs_2fa(gid.get()));
+        }
+    }
+    // A nuke under way should not lose its restore source to a hijacked owner account.
+    if matches!(cmd, BackupCmd::Clear | BackupCmd::Delete { .. })
+        && backup::locked_or_panic(app, gid).await?
+    {
+        return Ok(
+            "Cannot delete backups while the server is locked or in panic mode. End it first."
+                .into(),
+        );
+    }
     Ok(match cmd {
         BackupCmd::Create => match backup::save(app, gid, Some(actor_id.get())).await {
             Ok(code) => format!("Saved backup `{code}`"),
@@ -887,14 +976,15 @@ pub async fn revert_cmd(
         return Ok("Cannot revert: no permit".into());
     }
     // Owner, Extra Owner and TA actions are undone only when an Owner or Extra Owner asks for it.
+    // So are TommyBot's own (automatic bans; its quarantines are never lifted here, D3).
     let owner = app.guild_info(gid).await?.owner;
-    if app.level(gid, owner, target).await?.immune() {
+    if target == app.me || app.level(gid, owner, target).await?.immune() {
         let may = matches!(actor, permits::Level::Owner | permits::Level::ExtraOwner);
         if !may {
-            return Ok(format!("Cannot revert <@{target}>: only an Owner or Extra Owner can undo what an Owner, Extra Owner or Trusted Admin did"));
+            return Ok(format!("Cannot revert <@{target}>: only an Owner or Extra Owner can undo what an Owner, Extra Owner, Trusted Admin or TommyBot did"));
         }
         if !owners {
-            return Ok(format!("<@{target}> is an Owner, Extra Owner or Trusted Admin. Nothing was reverted: run it again with `include_owners: True` to undo their actions too."));
+            return Ok(format!("<@{target}> is an Owner, Extra Owner, Trusted Admin or TommyBot. Nothing was reverted: run it again with `include_owners: True` to undo their actions too."));
         }
     }
     if let Some(msg) = gated(app, gid, actor_id, actor, "revert").await? {
@@ -920,6 +1010,35 @@ mod tests {
     use super::{above_bot, timeout_chunk, Flags, Id, ModKind, MAX_TIMEOUT_S};
     use crate::confirm::Action;
     use crate::modcmds::ModCmd;
+
+    #[test]
+    fn a_permit_without_limits_takes_the_anti_nuke_limit() {
+        let on =
+            |v: serde_json::Value| -> super::AntinukeCfg { serde_json::from_value(v).unwrap() };
+        let an = on(
+            serde_json::json!({"enabled": true, "limits": {"Ban": {"per_minute": 3, "per_hour": 9}}}),
+        );
+        let l = super::nuke_fallback(&an, "kick").unwrap();
+        assert_eq!((l.per_min, l.per_hour), (2, 8), "kicks share the ban card");
+        assert!(super::nuke_fallback(&an, "purge").is_none());
+        assert_eq!(
+            super::limit_key(false, "kick"),
+            super::limit_key(false, "ban")
+        );
+        assert_eq!(
+            super::limit_key(true, "kick"),
+            "kick",
+            "a permit's own limit"
+        );
+        assert!(
+            super::nuke_fallback(&an, "timeout").is_none(),
+            "opt-in card not set"
+        );
+        assert!(
+            super::nuke_fallback(&on(serde_json::json!({})), "ban").is_none(),
+            "anti-nuke off"
+        );
+    }
 
     #[test]
     fn pending_action_survives_the_database_round_trip() {

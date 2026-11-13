@@ -260,6 +260,8 @@ impl ModCmd {
             | Self::ClearWarns { user }
             | Self::Quarantine { user }
             | Self::Unquarantine { user }
+            // Verify can end a quarantine, so it gets the same checks as unquarantine (D25).
+            | Self::Verify { user }
             | Self::Sanitize { user }
             | Self::NoteAdd { user, .. }
             | Self::NoteList {
@@ -606,14 +608,18 @@ pub async fn run(
         let mut level = app.level(gid, owner, target).await?;
         // Quarantine took the member's roles, so judge a release by the roles it gives back.
         if matches!(cmd, ModCmd::Unquarantine { .. } | ModCmd::Verify { .. }) {
-            let saved: Option<Vec<i64>> = sqlx::query_scalar(
-                "SELECT saved_roles FROM quarantines WHERE guild_id=$1 AND user_id=$2",
+            let saved: Option<(Vec<i64>, bool)> = sqlx::query_as(
+                "SELECT saved_roles, on_join FROM quarantines WHERE guild_id=$1 AND user_id=$2",
             )
             .bind(gid.get() as i64)
             .bind(t as i64)
             .fetch_optional(&app.pool)
             .await?;
-            if let Some(roles) = saved {
+            if let Some((roles, on_join)) = saved {
+                // Verify ends only verification's join quarantine; any other needs the quarantine permit (D25).
+                if matches!(cmd, ModCmd::Verify { .. }) && !on_join && !actor.has("quarantine") {
+                    return plain(format!("Cannot verify <@{t}>: they are quarantined for another reason, which needs the `quarantine` permit"));
+                }
                 let held = permits::resolve(
                     &app.pool,
                     gid.get() as i64,
@@ -622,9 +628,17 @@ pub async fn run(
                     &roles,
                 )
                 .await?;
+                // Restoring roles with Administrator or other dangerous permissions needs an owner or TA too,
+                // judged by what they held before a role lock stripped them.
+                let perms = crate::lockdown::unlocked_role_perms(app, gid).await?;
+                let dangerous = roles.iter().any(|r| {
+                    Id::new_checked(*r as u64)
+                        .and_then(|r| perms.get(&r))
+                        .is_some_and(|p| p & tommybot_antinuke::DANGEROUS_PERMS != 0)
+                });
                 // Staff caught by anti-nuke or a rate limit go free only through an owner or TA.
-                if held != permits::Level::None && !actor.immune() {
-                    return plain(format!("Cannot release <@{t}>: their roles hold a permit, so only an owner or trusted admin can"));
+                if (held != permits::Level::None || dangerous) && !actor.immune() {
+                    return plain(format!("Cannot release <@{t}>: their roles hold a permit or dangerous permissions, so only an owner or trusted admin can"));
                 }
                 if held.immune() {
                     level = held;
@@ -865,6 +879,7 @@ pub async fn run(
                 let (d, r) =
                     reply::dm_and_act(reply::dm_first("unban"), notice("unban", user), act).await;
                 (told, _) = (d, r?);
+                crate::scheduler::forget_jobs(app, gid, user, &["unban"], None).await;
                 crate::raiders::lifted(app, gid, Id::new(user), actor_id).await;
                 ("unban", user, None, None, format!("Unbanned <@{user}>"))
             }
@@ -875,6 +890,7 @@ pub async fn run(
                     .delete_message_seconds(secs)
                     .reason(&audit)
                     .await?;
+                crate::scheduler::forget_jobs(app, gid, user, crate::scheduler::BANNED, None).await;
                 let inv = json!({"op":"unban","user":user});
                 (
                     "ban",
@@ -897,6 +913,14 @@ pub async fn run(
                     reply::dm_and_act(reply::dm_first("untimeout"), notice("untimeout", user), act)
                         .await;
                 (told, _) = (d, r?);
+                crate::scheduler::forget_jobs(
+                    app,
+                    gid,
+                    user,
+                    &["timeout_renew", "raid_punish"],
+                    None,
+                )
+                .await;
                 let text = format!("Removed timeout of <@{user}>");
                 ("untimeout", user, None, None, text)
             }
@@ -921,17 +945,24 @@ pub async fn run(
                 )
             }
             ModCmd::Quarantine { user } => {
-                let act = antinuke::quarantine(app, gid, Id::new(user));
+                // Through contain(), so a bot also loses its managed role's permissions.
+                let act = antinuke::contain(app, gid, Id::new(user), None, antinuke::Kind::Real);
                 let (d, r) = reply::dm_and_act(
                     reply::dm_first("quarantine"),
                     notice("quarantine", user),
                     act,
                 )
                 .await;
-                (told, _) = (d, r?);
-                let inv = json!({"op":"unquarantine","user":user});
-                let text = format!("Quarantined <@{user}>");
-                ("quarantine", user, Some(inv), None, text)
+                told = d;
+                let done = r?;
+                if done.applied == antinuke::Applied::Kicked {
+                    let text = format!("Kicked <@{user}>: the bot could not be quarantined");
+                    ("kick", user, None, None, text)
+                } else {
+                    let inv = json!({"op":"unquarantine","user":user});
+                    let text = format!("Quarantined <@{user}>");
+                    ("quarantine", user, Some(inv), None, text)
+                }
             }
             ModCmd::Unquarantine { user } => {
                 let held: Option<(i64,)> = sqlx::query_as(

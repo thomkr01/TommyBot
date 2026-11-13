@@ -201,13 +201,16 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
         })
     };
     check();
+    // @everyone allows beside the main roles are fixed only when ticked (D76b).
+    let picked = RwSignal::new(Vec::<String>::new());
     let fix = move || {
+        let body = json!({"picked": picked.get_untracked()});
         run_act(
             async move {
                 api(
                     "POST",
                     &format!("/api/guilds/{}/lockdown/fix", g.get_value()),
-                    None,
+                    Some(body),
                 )
                 .await
             },
@@ -221,9 +224,17 @@ pub fn LockdownSettings(guild: String, enrolled: ReadSignal<bool>) -> impl IntoV
             <div class="row"><h2>"Compatibility check"</h2>
                 <Show when=move || problems.get().is_some_and(|p| !p.is_empty())><span class="chip">{move || format!("{} ISSUES", problems.get().map_or(0, |p| p.len()))}</span></Show>
                 <button on:click=move |_| fix() disabled=move || !problems.get().is_some_and(|p| p.iter().any(|p| !p["fix"].is_null()))>"Fix issues"</button></div>
-            <p class="muted">"Checks that only the main roles can view and send, so a lockdown works in a few calls. Apply Fix corrects the role and channel permissions."</p>
+            <p class="muted">"Checks that only the main roles can view and send, so a lockdown works in a few calls. Apply Fix corrects the role and channel permissions. An @everyone allow in a channel can be on purpose, so it is only changed when you tick it."</p>
             <Show when=move || problems.get().is_some_and(|p| p.is_empty())><p class="ok">"No lockdown compatibility issues found."</p></Show>
-            {move || problems.get().unwrap_or_default().into_iter().map(|p| view! { <div class="row"><span class="warn">{s(&p["text"]).replace("<@&", "role ").replace("<#", "channel ").replace('>', "")}</span></div> }).collect_view()}
+            {move || problems.get().unwrap_or_default().into_iter().map(|p| {
+                let text = s(&p["text"]).replace("<@&", "role ").replace("<#", "channel ").replace('>', "");
+                let id = s(&p["id"]);
+                let tick = (p["opt_in"] == true && !p["fix"].is_null()).then(|| {
+                    let (id2, label) = (id.clone(), format!("also fix {text}"));
+                    view! { <input type="checkbox" aria-label=label prop:checked=move || picked.with(|v| v.contains(&id2)) on:change=move |e| { let on = event_target_checked(&e); picked.update(|v| { v.retain(|x| *x != id); if on { v.push(id.clone()) } }) } /> }
+                });
+                view! { <div class="row">{tick}<span class="warn">{text}</span></div> }
+            }).collect_view()}
             <button class="ghost" on:click=move |_| check()>"Check again"</button>
             <Toast msg />
         </div>
@@ -429,8 +440,8 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
             <button class="go" title="Turn on every rule that is off" disabled=move || rules.get().iter().all(|r| r["enabled"] == true)
                 on:click=move |_| for r in rules.get_untracked().iter().filter(|r| r["enabled"] != true) { call("POST", format!("/{}/enabled", s(&r["id"])), Some(json!({"enabled": true}))) }>"Activate"</button>
             <span class="sp"></span>
-            <button class="ghost" title="Copy the local word blacklist into a Discord rule, then clear the local lists"
-                on:click=move |_| if confirm("Copy your word blacklist into a new Discord AutoMod rule and clear the local lists? This cannot be undone.") {
+            <button class="ghost" title="Copy the local word blacklist into a Discord rule that TommyBot keeps in sync. The local lists stay for thread and reaction names"
+                on:click=move |_| if confirm("Copy your word blacklist into a Discord AutoMod rule? TommyBot keeps the rule in sync with your lists, which stay for thread and reaction names.") {
                     spawn_local(async move {
                         match api("POST", &format!("/api/guilds/{}/discord-rules-migrate-words", g.get_value()), None).await {
                             Ok(_) => { load(); msg.ok("Words migrated."); }

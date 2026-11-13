@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 use twilight_model::{
-    guild::{Permissions, Role},
+    guild::Role,
     id::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
@@ -17,6 +17,7 @@ use crate::app::App;
 
 const TTL: Duration = Duration::from_secs(300);
 
+#[derive(Clone)]
 pub struct GuildInfo {
     pub owner: Id<UserMarker>,
     pub roles: HashMap<Id<RoleMarker>, i64>,
@@ -52,6 +53,15 @@ pub fn top_position(roles: &HashMap<Id<RoleMarker>, i64>, member_roles: &[Id<Rol
         .copied()
         .max()
         .unwrap_or(0)
+}
+
+impl GuildInfo {
+    /// [`tommybot_core::roles::unfit`] for a role of this guild.
+    pub fn unfit(&self, gid: Id<GuildMarker>, role: Id<RoleMarker>) -> Option<&'static str> {
+        let rank = self.roles.get(&role).copied().unwrap_or(0);
+        let managed = self.managed.contains(&role);
+        tommybot_core::roles::unfit(gid.get(), role.get(), managed, rank, self.bot_top)
+    }
 }
 
 impl App {
@@ -92,6 +102,14 @@ impl App {
 
     pub fn invalidate_guild(&self, gid: Id<GuildMarker>) {
         self.guilds.lock().unwrap().remove(&gid);
+        crate::verify::given::invalidated(gid, None);
+    }
+
+    /// [`App::invalidate_guild`] for an event about one role or channel: TommyBot's own marked
+    /// edit of it only softens the verification gate.
+    pub fn invalidate_object(&self, gid: Id<GuildMarker>, object: u64) {
+        self.guilds.lock().unwrap().remove(&gid);
+        crate::verify::given::invalidated(gid, Some(object));
     }
 
     /// Tests: a cached server with this owner, so no Discord call is needed for it.
@@ -109,30 +127,6 @@ impl App {
             fetched: Instant::now(),
         };
         self.guilds.lock().unwrap().insert(gid, Arc::new(info));
-    }
-
-    /// Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
-    pub async fn staff_by_perms(
-        &self,
-        cfg: &crate::app::GuildCfg,
-        gid: Id<GuildMarker>,
-        roles: &[Id<RoleMarker>],
-    ) -> bool {
-        const BITS: Permissions = Permissions::ADMINISTRATOR
-            .union(Permissions::KICK_MEMBERS)
-            .union(Permissions::BAN_MEMBERS)
-            .union(Permissions::MANAGE_CHANNELS)
-            .union(Permissions::MANAGE_GUILD)
-            .union(Permissions::MANAGE_MESSAGES)
-            .union(Permissions::MANAGE_ROLES)
-            .union(Permissions::MANAGE_WEBHOOKS);
-        // A failed lookup must not switch automod off.
-        !cfg.misc.staff_only_permitted
-            && self.guild_info(gid).await.is_ok_and(|info| {
-                roles
-                    .iter()
-                    .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
-            })
     }
 
     /// The channel and category whitelists apply to: a thread's parent channel, and that
@@ -171,6 +165,31 @@ impl App {
         m.insert(thread, parent);
     }
 
+    /// A channel's category as a gateway event shows it (D4). A snapshot (`GuildCreate`, a new
+    /// channel) sets the baseline; an update to another category is a move.
+    pub fn note_category(&self, channel: u64, parent: Option<u64>, snapshot: bool) {
+        let mut m = self.category_moves.lock().unwrap();
+        // shortcut: past the cap everything is dropped; a later update then counts as a move.
+        if m.len() > 200_000 {
+            m.clear();
+        }
+        let moved = moved(m.get(&channel), parent, snapshot, Instant::now());
+        m.insert(channel, (parent, moved));
+    }
+
+    /// The channel came from outside `cats` (or from where nobody saw) in the last hour.
+    pub fn moved_in(&self, channel: u64, cats: &[Id<ChannelMarker>]) -> bool {
+        self.category_moves
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .and_then(|e| e.1)
+            .is_some_and(|(t, from)| {
+                t.elapsed() < MOVE_WINDOW
+                    && !from.is_some_and(|f| cats.iter().any(|c| c.get() == f))
+            })
+    }
+
     /// Remembers a created or deleted channel's category until its audit entry arrives.
     /// Channels without a category are noted too, so anti-nuke can tell "no category" from "not seen yet".
     pub fn note_parent(&self, c: &twilight_model::channel::Channel) {
@@ -183,9 +202,62 @@ impl App {
     }
 }
 
+/// How long a move into a category counts against it.
+const MOVE_WINDOW: Duration = Duration::from_secs(3600);
+
+/// The channel's first move in the last hour and the category it left: kept while the category
+/// stays or the move is recent, none for a snapshot, now for another move (from an unseen place
+/// with nothing seen before).
+fn moved(
+    prev: Option<&(Option<u64>, CategoryMove)>,
+    parent: Option<u64>,
+    snapshot: bool,
+    now: Instant,
+) -> CategoryMove {
+    match prev {
+        Some((old, m)) if *old == parent => *m,
+        _ if snapshot => None,
+        Some((_, Some((t, from)))) if now.duration_since(*t) < MOVE_WINDOW => Some((*t, *from)),
+        Some((old, _)) => Some((now, *old)),
+        None => Some((now, None)),
+    }
+}
+
+/// When a channel moved category and the category it left.
+pub(crate) type CategoryMove = Option<(Instant, Option<u64>)>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_into_another_category_is_remembered() {
+        let t = Instant::now();
+        assert_eq!(moved(None, Some(5), true, t), None, "new channel");
+        assert_eq!(
+            moved(Some(&(Some(4), None)), Some(5), false, t),
+            Some((t, Some(4)))
+        );
+        assert_eq!(
+            moved(Some(&(Some(5), None)), Some(5), false, t),
+            None,
+            "a rename"
+        );
+        assert_eq!(
+            moved(None, Some(5), false, t),
+            Some((t, None)),
+            "no baseline"
+        );
+        // Outside, then ticket category 4, then 5: the first move, from outside, still counts.
+        let first = Some((t, Some(1)));
+        let later = t + Duration::from_secs(5);
+        assert_eq!(moved(Some(&(Some(4), first)), Some(5), false, later), first);
+        let old = t + MOVE_WINDOW;
+        assert_eq!(
+            moved(Some(&(Some(4), first)), Some(5), false, old),
+            Some((old, Some(4)))
+        );
+    }
 
     #[test]
     fn top_position_picks_highest_known_role() {

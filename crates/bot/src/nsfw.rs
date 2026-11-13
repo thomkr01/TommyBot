@@ -33,6 +33,8 @@ const SIDE: usize = 224;
 const CLASSES: [&str; 5] = ["drawings", "hentai", "neutral", "porn", "sexy"];
 const MAX_BYTES: usize = 8 << 20;
 const PER_MESSAGE: usize = 4;
+/// Images one member may have waiting in the live lane; the rest wait in the backlog (plan 2.8).
+const PER_MEMBER_LIVE: usize = 4;
 const LIVE_CAP: usize = 256;
 const BACKLOG_CAP: usize = 2_000;
 /// A live job older than this goes to the backlog, so a burst never leaves new posts waiting.
@@ -54,8 +56,13 @@ pub struct Job {
 
 #[derive(Default)]
 pub struct Scanner {
+    /// Attachments already queued: an edit of a webhook or app message rescans only new files.
+    seen: crate::automod::Seen,
     /// (live, backlog).
     lanes: Mutex<(VecDeque<Job>, VecDeque<Job>)>,
+    /// (turn counter, guild -> turn it was last served): servers take turns, so one server's
+    /// flood never holds up the others.
+    turns: Mutex<(u64, HashMap<u64, u64>)>,
     wake: tokio::sync::Notify,
     /// Image hash -> scores, shared by every server (the threshold is applied per server).
     cache: Mutex<HashMap<[u8; 32], [f32; 5]>>,
@@ -79,20 +86,22 @@ fn discord_media(url: &str) -> bool {
             || (host.starts_with("images-ext-") && host.ends_with(".discordapp.net")))
 }
 
-/// Image URLs worth scanning: attachments (not on an edit, which cannot add any) and embed images.
+/// An image within the download cap.
+fn scannable(a: &twilight_model::channel::Attachment) -> bool {
+    a.size <= MAX_BYTES as u64
+        && a.content_type
+            .as_deref()
+            .is_some_and(|t| t.starts_with("image/"))
+}
+
+/// Image URLs worth scanning: attachments (not on an edit, which cannot add any) and embed images,
+/// also of a forwarded message.
 fn image_urls(m: &Message, edit: bool) -> Vec<String> {
-    let files = m
-        .attachments
-        .iter()
-        .filter(|_| !edit)
-        .filter(|a| a.size <= MAX_BYTES as u64)
-        .filter(|a| {
-            a.content_type
-                .as_deref()
-                .is_some_and(|t| t.starts_with("image/"))
-        })
+    let files = crate::automod::attachments(m)
+        .filter(|a| !edit && scannable(a))
         .map(|a| a.proxy_url.clone());
-    let embeds = m.embeds.iter().flat_map(|e| {
+    let forwarded = m.message_snapshots.iter().flat_map(|s| &s.message.embeds);
+    let embeds = m.embeds.iter().chain(forwarded).flat_map(|e| {
         [
             e.image.as_ref().and_then(|i| i.proxy_url.clone()),
             e.thumbnail.as_ref().and_then(|t| t.proxy_url.clone()),
@@ -117,29 +126,56 @@ fn small(url: &str) -> String {
 impl Scanner {
     /// Queues the message's images (the caller checked the filter is on). Never waits.
     pub fn enqueue(&self, m: &Message, edit: bool, backlog: bool) {
-        let urls = image_urls(m, edit);
+        // Files are marked once their scan row is saved (in `scan`).
+        let fresh = crate::automod::attachments(m)
+            .any(|a| scannable(a) && !self.seen.contains((m.id.get(), a.id.get())));
+        let urls = image_urls(m, edit || !fresh);
         if urls.is_empty() {
             return;
         }
+        // A user-installed app's reply is the member's post, as in automod. A server-installed
+        // app's stays exempt, but its hit is logged under the member who ran the command.
+        let msg = match (
+            crate::automod::as_app_user(m),
+            m.interaction_metadata.as_deref(),
+        ) {
+            (Some(u), _) => u,
+            (None, Some(meta)) if !crate::automod::clicked(m) => Message {
+                author: meta.user.clone(),
+                member: None,
+                ..m.clone()
+            },
+            _ => m.clone(),
+        };
         let job = Job {
-            msg: Box::new(m.clone()),
+            msg: Box::new(msg),
             urls,
             at_ms: crate::automod::now_ms(),
         };
+        self.push(job, backlog);
+        self.wake.notify_one();
+    }
+
+    fn push(&self, job: Job, backlog: bool) {
         let mut l = self.lanes.lock().unwrap();
         let (live, old) = &mut *l;
-        if backlog {
+        let author = (job.msg.guild_id, job.msg.author.id);
+        let waiting: usize = live
+            .iter()
+            .filter(|j| (j.msg.guild_id, j.msg.author.id) == author)
+            .map(|j| j.urls.len())
+            .sum();
+        if backlog || waiting + job.urls.len() > PER_MEMBER_LIVE {
             push_capped(old, job, BACKLOG_CAP);
         } else {
+            // A full live lane moves the flooding server's oldest job, not another server's.
             if live.len() >= LIVE_CAP {
-                if let Some(j) = live.pop_front() {
+                if let Some(j) = live.remove(most_jobs(live)) {
                     push_capped(old, j, BACKLOG_CAP);
                 }
             }
             live.push_back(job);
         }
-        drop(l);
-        self.wake.notify_one();
     }
 
     fn take(&self, now: i64) -> Option<Job> {
@@ -152,8 +188,25 @@ impl Scanner {
             let j = live.pop_front().unwrap();
             push_capped(old, j, BACKLOG_CAP);
         }
-        // Newest backlog first: what is still on screen matters more than what scrolled away.
-        live.pop_front().or_else(|| old.pop_back())
+        let mut t = self.turns.lock().unwrap();
+        let (tick, served) = &mut *t;
+        let turn = |j: &Job| served.get(&guild(j)).copied().unwrap_or(0);
+        // The server served longest ago goes next: its oldest live job, or else its newest backlog
+        // job (what is still on screen matters more than what scrolled away).
+        let job = match live.iter().enumerate().min_by_key(|(_, j)| turn(j)) {
+            Some((i, _)) => live.remove(i)?,
+            None => {
+                let (i, _) = old.iter().enumerate().rev().min_by_key(|(_, j)| turn(j))?;
+                old.remove(i)?
+            }
+        };
+        // shortcut: past the cap the turns start over; fairness only resets.
+        if served.len() > 10_000 {
+            served.clear();
+        }
+        *tick += 1;
+        served.insert(guild(&job), *tick);
+        Some(job)
     }
 
     async fn next(&self) -> Job {
@@ -180,10 +233,26 @@ impl Scanner {
     }
 }
 
+fn guild(j: &Job) -> u64 {
+    j.msg.guild_id.map_or(0, |g| g.get())
+}
+
+/// Index of the oldest job of the server with the most jobs in `q`.
+fn most_jobs(q: &VecDeque<Job>) -> usize {
+    let mut per: HashMap<u64, usize> = HashMap::new();
+    for x in q.iter() {
+        *per.entry(guild(x)).or_default() += 1;
+    }
+    let most = per.into_iter().max_by_key(|e| e.1).map(|e| e.0);
+    q.iter().position(|x| Some(guild(x)) == most).unwrap_or(0)
+}
+
+/// A full lane drops the oldest job of the server with the most jobs in it, so one server's flood
+/// drops its own jobs, not the others'.
 fn push_capped(q: &mut VecDeque<Job>, j: Job, cap: usize) {
     if q.len() >= cap {
-        q.pop_front();
-        tracing::debug!("NSFW scan backlog full, dropped the oldest job");
+        q.remove(most_jobs(q));
+        tracing::debug!("NSFW scan backlog full, dropped a job");
     }
     q.push_back(j);
 }
@@ -228,13 +297,17 @@ pub async fn run(app: Arc<App>) {
     }
 }
 
-async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
+async fn scan(app: &App, job: Job) -> Result<()> {
     let m = job.msg;
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let f = &cfg.automod.filters;
     // Read again now: the filter may have been switched off while the job waited.
     if !cfg.automod.enabled || !f.nsfw_images.enabled {
+        return Ok(());
+    }
+    // Automod does not watch webhooks with Monitor Webhooks off: no scan, row or hit log either.
+    if m.webhook_id.is_some() && !cfg.automod.monitor_webhooks {
         return Ok(());
     }
     let (parent, _) = app.channel_scope(gid, m.channel_id).await?;
@@ -279,6 +352,9 @@ async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
             threshold,
         )
         .await?;
+        if let Some(a) = crate::automod::attachments(&m).find(|a| a.proxy_url == *url) {
+            app.nsfw.seen.first((m.id.get(), a.id.get()));
+        }
         if let (Some(id), None) = (row, hit) {
             hit = Some((id, scores));
         }
@@ -308,8 +384,34 @@ async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
             });
         }
     }
-    crate::automod::on_nsfw_image(app, &msg).await?;
-    hit_log(app, gid, &msg, id, &scores).await
+    act(app, gid, &msg, (id, &scores)).await
+}
+
+/// Automod's action for a hit, then the hit log.
+async fn act(
+    app: &App,
+    gid: Id<GuildMarker>,
+    msg: &Message,
+    (id, scores): (i64, &[f32; 5]),
+) -> Result<()> {
+    let acted = crate::automod::on_nsfw_image(app, msg).await;
+    // Unless the punishment landed, a failure frees the message: all its rows and files, so the next
+    // pass (sweep, preview update, edit) scans it whole again. A failed case, log or lockdown after
+    // a landed punishment (or a saved strike) must not punish twice.
+    let failed = |e: &anyhow::Error| e.downcast_ref::<crate::automod::Punished>().is_none();
+    if acted.as_ref().is_err_and(failed) {
+        sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1 AND message_id = $2")
+            .bind(gid.get() as i64)
+            .bind(msg.id.get() as i64)
+            .execute(&app.pool)
+            .await?;
+        app.nsfw
+            .seen
+            .forget(crate::automod::attachments(msg).map(|a| (msg.id.get(), a.id.get())));
+        return acted;
+    }
+    hit_log(app, gid, msg, id, scores).await?;
+    acted
 }
 
 /// Saves one scan; Some(id) only for a new hit. One row per (message, image), so a preview update and
@@ -499,7 +601,7 @@ async fn sweep_guild(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         .collect();
         for mut m in msgs {
             if m.timestamp.as_micros() / 1000 < since
-                || (m.author.bot && m.webhook_id.is_none())
+                || (m.author.bot && m.webhook_id.is_none() && m.interaction_metadata.is_none())
                 || done.contains(&(m.id.get() as i64))
             {
                 continue;
@@ -515,6 +617,190 @@ async fn sweep_guild(app: &App, gid: Id<GuildMarker>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// Only a punishment that did not land frees the message's rows; a lockdown failing after the
+    /// strike keeps them, so the next pass does not punish again.
+    #[tokio::test]
+    async fn only_a_failed_punishment_frees_the_scan_rows() {
+        let Some(t) = crate::bansync::tests::T::new(96).await else {
+            return;
+        };
+        let gid = t.g(0);
+        let porn = [0.0, 0.0, 0.05, 0.9, 0.05];
+        let rows = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM nsfw_scans WHERE guild_id = $1 AND message_id = 100",
+            )
+            .bind(gid.get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap()
+        };
+        // A new author each time: the heat claim allows one punishment per member in 10 s.
+        let try_once = |filter: serde_json::Value, author: u64, strikes: bool| {
+            let t = &t;
+            async move {
+                let msg = crate::automod::more_tests::msg(json!({"guild_id": gid.to_string(),
+                    "author": {"id": author.to_string(), "username": "x", "discriminator": "0", "avatar": null}}));
+                t.cleanup().await;
+                sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1")
+                    .bind(gid.get() as i64)
+                    .execute(&t.app.pool)
+                    .await
+                    .unwrap();
+                t.app.forget_cfg(gid.get());
+                let cfg = json!({"automod": {"enabled": true, "auto_lockdown": {"enabled": !strikes, "strikes": 1},
+                    "strike": {"enabled": strikes}, "filters": {"nsfw_images": filter}}});
+                t.server_config(0, t.owner(), cfg).await;
+                let ids = (gid.get(), 7, 100, 50);
+                let id = record(&t.app.pool, ids, &[1; 32], &porn, 0.8)
+                    .await
+                    .unwrap();
+                record(&t.app.pool, ids, &[2; 32], &[0.0, 0.0, 1.0, 0.0, 0.0], 0.8)
+                    .await
+                    .unwrap();
+                act(&t.app, gid, &msg, (id.unwrap(), &porn)).await
+            }
+        };
+        // The filter's own timeout fails at the mock: nothing landed, both rows go.
+        let failed = try_once(
+            json!({"enabled": true, "action": "timeout", "duration_secs": 60}),
+            t.base + 5,
+            false,
+        )
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(rows().await, 0);
+        // A strike without a timeout, then the strike-cap lockdown fails: the rows stay.
+        let locked = try_once(json!({"enabled": true}), t.base + 6, false).await;
+        assert!(locked.is_err());
+        assert_eq!(rows().await, 2);
+        // The strike is saved, then its timeout fails: the rows stay, so no pass adds a second strike.
+        let timed = try_once(json!({"enabled": true}), t.base + 7, true).await;
+        assert!(timed.is_err());
+        assert_eq!(rows().await, 2);
+        // An error before any punishment (a held raider's timeout fails): the rows go, to retry.
+        let raider = t.base + 8;
+        t.app
+            .heat_raiders
+            .lock()
+            .unwrap()
+            .insert(gid.get(), ([raider].into(), crate::app::now_secs() + 600));
+        let early = try_once(json!({"enabled": true}), raider, true).await;
+        assert!(early.is_err());
+        assert_eq!(rows().await, 0);
+        sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.cleanup().await;
+    }
+
+    /// An edit of a webhook message queues only files not queued before.
+    #[test]
+    fn an_edit_rescans_only_new_files() {
+        let file = |id: &str| {
+            json!({"id": id, "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                   "proxy_url": format!("https://media.discordapp.net/{id}.png"), "content_type": "image/png"})
+        };
+        let s = Scanner::default();
+        let hook = |files: serde_json::Value| {
+            crate::automod::more_tests::msg(json!({"webhook_id": "9", "attachments": files}))
+        };
+        s.enqueue(&hook(json!([file("1")])), false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
+        // Not scanned yet (dropped, or the scan stopped early): queued again.
+        s.enqueue(&hook(json!([file("1")])), false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
+        // `scan` marks a file once its row is saved.
+        s.seen.first((100, 1));
+        s.enqueue(&hook(json!([file("1")])), false, false);
+        assert!(s.take(0).is_none(), "same file again");
+        s.enqueue(&hook(json!([file("1"), file("2")])), false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 2, "a new file came");
+        // A file the scan never queues (not an image) is no reason to fetch the seen ones again.
+        let pdf = json!({"id": "4", "filename": "a.pdf", "size": 10, "url": "https://cdn.discordapp.com/a.pdf",
+                         "proxy_url": "https://media.discordapp.net/a.pdf", "content_type": "application/pdf"});
+        s.enqueue(&hook(json!([file("1"), pdf])), false, false);
+        assert!(s.take(0).is_none(), "only a PDF is new");
+        // A forward keeps the attachment id but is another message: scanned.
+        let fwd = crate::automod::more_tests::msg(
+            json!({"id": "101", "webhook_id": "9", "attachments": [file("1")]}),
+        );
+        s.enqueue(&fwd, false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
+    }
+
+    /// With Monitor Webhooks off a webhook's image is not scanned, saved or logged.
+    #[tokio::test]
+    async fn unmonitored_webhooks_are_not_scanned() {
+        let Some(t) = crate::bansync::tests::T::new(94).await else {
+            return;
+        };
+        let gid = t.g(0);
+        let job = |hook: bool| Job {
+            msg: Box::new(crate::automod::more_tests::msg(json!({
+                "guild_id": gid.to_string(), "webhook_id": if hook { json!("9") } else { json!(null) },
+            }))),
+            urls: vec!["https://media.discordapp.net/a.png".into()],
+            at_ms: 0,
+        };
+        let on = json!({"enabled": true, "monitor_webhooks": false, "filters": {"nsfw_images": {"enabled": true}}});
+        t.server_config(0, t.owner(), json!({ "automod": on }))
+            .await;
+        scan(&t.app, job(true)).await.unwrap();
+        assert!(t.mock.lock().unwrap().log.is_empty(), "nothing fetched");
+        // A member's post in the same server is looked at (the mock refuses the channel lookup).
+        let _ = scan(&t.app, job(false)).await;
+        assert!(!t.mock.lock().unwrap().log.is_empty());
+        t.cleanup().await;
+    }
+
+    /// A user-installed app's reply is queued as the member's post, a server-installed app's not at
+    /// all; a forward's images are scanned.
+    #[test]
+    fn app_replies_and_forwards_are_queued_as_the_member_s() {
+        let file = json!({"id": "1", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                          "proxy_url": "https://media.discordapp.net/a.png", "content_type": "image/png"});
+        let meta = |owners: serde_json::Value| {
+            json!({"id": "5", "type": 2, "authorizing_integration_owners": owners,
+                   "user": {"id": "60", "username": "u", "discriminator": "0", "avatar": null}})
+        };
+        let s = Scanner::default();
+        let server = crate::automod::more_tests::msg(json!({
+            "attachments": [file], "interaction_metadata": meta(json!({"0": "1"}))}));
+        s.enqueue(&server, false, false);
+        // Log-only: still exempt (metadata kept), but credited to the member who ran it.
+        let j = s.take(0).unwrap();
+        assert_eq!(j.msg.author.id.get(), 60);
+        assert!(j.msg.interaction_metadata.is_some());
+        // A button click's message is not the clicker's: not credited to them.
+        let click = crate::automod::more_tests::msg(json!({"id": "99",
+            "attachments": [file], "interaction_metadata": {"id": "5", "type": 3,
+                "authorizing_integration_owners": {"0": "1"},
+                "user": {"id": "60", "username": "u", "discriminator": "0", "avatar": null}}}));
+        s.enqueue(&click, false, false);
+        assert_eq!(s.take(0).unwrap().msg.author.id.get(), 50);
+        let file = json!({"id": "2", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                          "proxy_url": "https://media.discordapp.net/b.png", "content_type": "image/png"});
+        let user_app = crate::automod::more_tests::msg(json!({
+            "attachments": [file], "interaction_metadata": meta(json!({"1": "60"}))}));
+        s.enqueue(&user_app, false, false);
+        assert_eq!(s.take(0).unwrap().msg.author.id.get(), 60);
+        let file = json!({"id": "3", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                          "proxy_url": "https://media.discordapp.net/c.png", "content_type": "image/png"});
+        let forward = crate::automod::more_tests::msg(json!({"message_snapshots": [{"message": {
+            "attachments": [file], "content": "", "embeds": [], "mentions": [], "mention_roles": [],
+            "type": 0, "timestamp": "2026-01-01T00:00:00.000000+00:00", "edited_timestamp": null,
+        }}]}));
+        assert_eq!(image_urls(&forward, false).len(), 1);
+    }
 
     #[test]
     fn bundled_model_is_the_pinned_one_and_scores_a_plain_image_neutral() {
@@ -631,8 +917,13 @@ mod tests {
     }
 
     fn job(at_ms: i64, n: u64) -> Job {
+        by(at_ms, n, 2, 0)
+    }
+
+    /// Job `n` by member `author` with `images` image urls.
+    fn by(at_ms: i64, n: u64, author: u64, images: usize) -> Job {
         let m: Message = serde_json::from_value(serde_json::json!({
-            "id": n.to_string(), "channel_id": "1", "author": {"id": "2", "username": "u", "discriminator": "0", "avatar": null},
+            "id": n.to_string(), "channel_id": "1", "author": {"id": author.to_string(), "username": "u", "discriminator": "0", "avatar": null},
             "content": "", "timestamp": "2026-01-01T00:00:00+00:00", "edited_timestamp": null, "tts": false,
             "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": [], "embeds": [],
             "pinned": false, "type": 0
@@ -640,9 +931,56 @@ mod tests {
         .unwrap();
         Job {
             msg: Box::new(m),
-            urls: vec![],
+            urls: vec![String::new(); images],
             at_ms,
         }
+    }
+
+    #[test]
+    fn one_member_has_at_most_four_images_in_the_live_lane() {
+        let s = Scanner::default();
+        s.push(by(0, 1, 2, 3), false);
+        s.push(by(0, 2, 2, 1), false);
+        s.push(by(0, 3, 2, 1), false); // a fifth image: backlog
+        s.push(by(0, 4, 5, 4), false); // another member still goes live
+        let l = s.lanes.lock().unwrap();
+        let ids = |q: &VecDeque<Job>| q.iter().map(|j| j.msg.id.get()).collect::<Vec<_>>();
+        assert_eq!((ids(&l.0), ids(&l.1)), (vec![1, 2, 4], vec![3]));
+    }
+
+    /// Through `enqueue`, as the message handler calls it: a member posting many image messages in a
+    /// burst keeps 4 images in the live lane and the rest go to the backlog; other members stay live.
+    #[test]
+    fn a_burst_by_one_member_fills_only_four_live_slots() {
+        let msg = |n: u64, author: u64, images: usize| -> Message {
+            let files: Vec<_> = (0..images)
+                .map(|i| {
+                    serde_json::json!({"id": format!("{n}{i}"), "filename": "a.png", "size": 10,
+                    "url": format!("https://cdn.discordapp.com/a/{n}{i}.png"),
+                    "proxy_url": format!("https://media.discordapp.net/a/{n}{i}.png"),
+                    "content_type": "image/png"})
+                })
+                .collect();
+            serde_json::from_value(serde_json::json!({
+                "id": n.to_string(), "channel_id": "1", "guild_id": "9",
+                "author": {"id": author.to_string(), "username": "u", "discriminator": "0", "avatar": null},
+                "content": "", "timestamp": "2026-01-01T00:00:00+00:00", "edited_timestamp": null, "tts": false,
+                "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": files, "embeds": [],
+                "pinned": false, "type": 0
+            }))
+            .unwrap()
+        };
+        let s = Scanner::default();
+        for n in 1..=50 {
+            s.enqueue(&msg(n, 2, 1), false, false);
+        }
+        s.enqueue(&msg(100, 3, 4), false, false);
+        s.enqueue(&msg(101, 3, 1), false, false);
+        let l = s.lanes.lock().unwrap();
+        let ids = |q: &VecDeque<Job>| q.iter().map(|j| j.msg.id.get()).collect::<Vec<_>>();
+        assert_eq!(ids(&l.0), vec![1, 2, 3, 4, 100]);
+        assert_eq!(l.1.len(), 47);
+        assert_eq!(l.1.back().map(|j| j.msg.id.get()), Some(101));
     }
 
     #[test]
@@ -661,6 +999,77 @@ mod tests {
             .collect();
         // Fresh live first, then the backlog newest first (the stale live job went to its end).
         assert_eq!(order, [4, 3, 2, 1]);
+    }
+
+    /// Job `n` in guild `g`.
+    fn in_guild(n: u64, g: u64) -> Job {
+        let mut j = job(0, n);
+        j.msg.guild_id = Some(Id::new(g));
+        j
+    }
+
+    /// A flood from one server does not hold up the next server's job, in either lane, and a full
+    /// lane drops the flooding server's job.
+    #[test]
+    fn servers_take_turns() {
+        let s = Scanner::default();
+        {
+            let mut l = s.lanes.lock().unwrap();
+            for n in 1..=3 {
+                l.0.push_back(in_guild(n, 10));
+            }
+            l.0.push_back(in_guild(4, 20));
+            l.0.push_back(in_guild(5, 30));
+        }
+        let order: Vec<u64> = std::iter::from_fn(|| s.take(0))
+            .map(|j| j.msg.id.get())
+            .collect();
+        assert_eq!(order, [1, 4, 5, 2, 3]);
+        {
+            let mut l = s.lanes.lock().unwrap();
+            for n in 6..=8 {
+                l.1.push_back(in_guild(n, 10));
+            }
+            l.1.push_front(in_guild(9, 20));
+        }
+        let order: Vec<u64> = std::iter::from_fn(|| s.take(0))
+            .map(|j| j.msg.id.get())
+            .collect();
+        // Guild 10 was served last above, so guild 20 goes first; then newest first.
+        assert_eq!(order, [9, 8, 7, 6]);
+        let mut q = VecDeque::new();
+        push_capped(&mut q, in_guild(1, 20), 3);
+        push_capped(&mut q, in_guild(2, 10), 3);
+        push_capped(&mut q, in_guild(3, 10), 3);
+        push_capped(&mut q, in_guild(4, 10), 3);
+        let ids: Vec<u64> = q.iter().map(|j| j.msg.id.get()).collect();
+        assert_eq!(ids, [1, 3, 4]);
+    }
+
+    /// A full live lane moves the flooding server's oldest job to the backlog, not the other
+    /// server's older one.
+    #[test]
+    fn a_full_live_lane_moves_the_flooder_s_job() {
+        let s = Scanner::default();
+        let mut first = in_guild(1, 20);
+        first.msg.author.id = Id::new(99);
+        s.push(first, false);
+        for n in 0..LIVE_CAP as u64 {
+            let mut j = in_guild(100 + n, 10);
+            j.msg.author.id = Id::new(1_000 + n); // one image each: under the member cap
+            j.urls = vec![String::new()];
+            s.push(j, false);
+        }
+        let l = s.lanes.lock().unwrap();
+        assert_eq!(
+            l.0.front().map(|j| j.msg.id.get()),
+            Some(1),
+            "guild 20 stays live"
+        );
+        assert_eq!(
+            l.1.iter().map(|j| j.msg.id.get()).collect::<Vec<_>>(),
+            [100]
+        );
     }
 
     #[test]

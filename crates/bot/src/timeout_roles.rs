@@ -33,7 +33,9 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
         }
         // Queued first, so a restart halfway never loses the roles for good.
         let roles: Vec<u64> = held.iter().map(|r| r.get()).collect();
-        let job = json!({"user": m.user.id.get(), "roles": roles});
+        // joined_at: a rejoin (Discord keeps the timeout) must not get them back unverified.
+        let joined = m.joined_at.map(|t| t.as_micros());
+        let job = json!({"user": m.user.id.get(), "roles": roles, "joined_at": joined});
         jobs::enqueue(&app.pool, g, KIND, job, until).await?;
         for r in &held {
             app.http
@@ -62,16 +64,16 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     Ok(())
 }
 
-/// Gives the removed roles back, or waits again if the timeout was extended. Nothing for a
-/// quarantined member (the quarantine holds their roles), nor for a sticky roles job whose
-/// membership (`joined_at`, µs) is over.
+/// Gives the removed roles back, or waits again if the timeout was extended. A quarantined member's
+/// roles go into the quarantine's saved list, so the release gives them back. Nothing for a member
+/// who left or is held for verification, nor for a job whose membership (`joined_at`, µs) is over.
 pub async fn restore(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
     let user = Id::new(p["user"].as_u64().context("job payload has no user")?);
-    let member = app.http.guild_member(gid, user).await?.model().await?;
+    let Some(member) = crate::http_err::member(&app.http, gid, user).await? else {
+        return Ok(());
+    };
     let joined = member.joined_at.map(|t| t.as_micros());
-    if p["joined_at"].as_i64().is_some_and(|j| Some(j) != joined)
-        || crate::antinuke::quarantined(app, gid, user).await?
-    {
+    if p["joined_at"].as_i64().is_some_and(|j| Some(j) != joined) {
         return Ok(());
     }
     if let Some(t) = active(member.communication_disabled_until) {
@@ -79,10 +81,30 @@ pub async fn restore(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
             .await
             .map(drop);
     }
-    for r in p["roles"].as_array().into_iter().flatten() {
-        let Some(r) = r.as_u64() else { continue };
+    let roles: Vec<i64> = p["roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .collect();
+    let (g, u) = (gid.get() as i64, user.get() as i64);
+    let quarantined = sqlx::query(
+        "UPDATE quarantines SET saved_roles = ARRAY(SELECT DISTINCT unnest(saved_roles || $3))
+         WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(g)
+    .bind(u)
+    .bind(&roles)
+    .execute(&app.pool)
+    .await?
+    .rows_affected()
+        > 0;
+    if quarantined || crate::sticky::pending(&app.pool, g, u).await? {
+        return Ok(());
+    }
+    for r in roles {
         app.http
-            .add_guild_member_role(gid, user, Id::new(r))
+            .add_guild_member_role(gid, user, Id::new(r as u64))
             .reason("Timeout ended: main roles restored")
             .await?;
     }

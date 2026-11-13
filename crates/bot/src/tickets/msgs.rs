@@ -72,7 +72,15 @@ pub(crate) fn from_staff(
 }
 
 /// The first message in a new ticket, telling staff how to reply.
-pub(crate) fn intro(pfx: &str, command_only: bool, u: &User, roles: &[Id<RoleMarker>]) -> Embed {
+/// `quarantined`: the member is quarantined there; their ticket is still opened, so they can
+/// reach staff (D27).
+pub(crate) fn intro(
+    pfx: &str,
+    command_only: bool,
+    u: &User,
+    roles: &[Id<RoleMarker>],
+    quarantined: bool,
+) -> Embed {
     let how = if command_only {
         format!("Type `{pfx}reply <message>` in this channel to reply. All other messages are ignored, and can be used for staff discussion. Use the command `{pfx}close [reason]` to close this ticket. (Command only mode enabled)")
     } else {
@@ -87,6 +95,11 @@ pub(crate) fn intro(pfx: &str, command_only: bool, u: &User, roles: &[Id<RoleMar
     let e = stamp(emb(&format!("{TICKET_NEW} New Ticket"), &how, BLUE))
         .field(EmbedFieldBuilder::new("User", format!("<@{}> ({})", u.id, u.id)).inline())
         .field(EmbedFieldBuilder::new("Roles", role_list).inline());
+    let e = if quarantined {
+        e.field(EmbedFieldBuilder::new("Status", "Quarantined").inline())
+    } else {
+        e
+    };
     user_footer(e, u).build()
 }
 

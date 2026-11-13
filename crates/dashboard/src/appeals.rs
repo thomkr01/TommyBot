@@ -392,7 +392,9 @@ async fn decide(
         .bind(id).bind(guild).fetch_optional(&mut *tx).await?.ok_or(ApiError::NotFound)?;
     let accept = b.accept && !b.dismiss;
     if accept {
-        accept_appeal(&st, &s, guild, user, &kind, &mut tx).await?;
+        accept_appeal(&st, &s, guild, (id, &kind), &b.reply, &mut tx).await?;
+        tx.commit().await?;
+        return Ok(Json(json!({"queued": true})));
     }
     let status = match (b.dismiss, b.accept) {
         (true, _) => "dismissed",
@@ -435,20 +437,6 @@ async fn decide(
         }
     }
     Ok(Json(json!({"ok": true})))
-}
-
-/// Runs a Discord call that lifts a punishment; a 404 means it was already lifted by hand.
-async fn lift(
-    st: &AppState,
-    method: Method,
-    path: String,
-    body: Option<Value>,
-) -> Result<(), ApiError> {
-    match st.discord.call(method, &path, body).await {
-        Ok(_) => Ok(()),
-        Err(e) if not_found(&e) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
 }
 
 /// Closes the Discord log of an appeal decided elsewhere: buttons off, a Decision field added.
@@ -494,69 +482,66 @@ fn add_decision(embeds: &mut Value, decision: &str) {
     }
 }
 
-/// Lifts the ban or timeout and logs it with its undo.
+/// Queues the accept for the bot (job `appeal_accept`), so the lift goes through the bot's permit
+/// check, panic lock and command rate limit like the log button (D24). The bot lifts, logs the
+/// undo, marks the appeal and sends the verdict; the checks here only answer early.
 async fn accept_appeal(
     st: &AppState,
     s: &Sess,
     guild: i64,
-    user: i64,
-    kind: &str,
+    (id, kind): (i64, &str),
+    reply: &str,
     tx: &mut sqlx::PgConnection,
 ) -> Result<(), ApiError> {
     // Lifting a punishment takes its permit ("ban" or "timeout"), not just Review Appeals (spec 2).
-    if api::level_of(st, s, guild).await? < Level::Admin && !has_perm(st, s, guild, kind).await? {
+    let level = api::level_of(st, s, guild).await?;
+    if level < Level::Admin && !has_perm(st, s, guild, kind).await? {
         return Err(ApiError::Forbidden(
             "accepting needs the ban or timeout permit",
         ));
     }
-    let inverse = if kind == "ban" {
-        lift(
-            st,
-            Method::DELETE,
-            format!("/guilds/{guild}/bans/{user}"),
-            None,
-        )
-        .await?;
-        Some(json!({"op": "ban", "user": user}))
-    } else {
-        let path = format!("/guilds/{guild}/members/{user}");
-        let until = match st.discord.call(Method::GET, &path, None).await {
-            Ok(m) => m["communication_disabled_until"]
-                .as_str()
-                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                .map(|t| t.timestamp()),
-            Err(e) if not_found(&e) => None,
-            Err(e) => return Err(e.into()),
-        };
-        lift(
-            st,
-            Method::PATCH,
-            path,
-            Some(json!({"communication_disabled_until": null})),
-        )
-        .await?;
-        until.map(|until| json!({"op": "timeout", "user": user, "until": until}))
-    };
-    sqlx::query("insert into action_log (guild_id, actor_id, action, target_id, inverse) values ($1,$2,$3,$4,$5)")
-        .bind(guild).bind(s.user_id).bind(if kind == "ban" { "unban" } else { "untimeout" }).bind(user).bind(inverse).execute(&mut *tx).await?;
-    tommybot_core::cases::record(
-        tx,
-        tommybot_core::cases::ModAction {
-            guild_id: guild,
-            mod_id: s.user_id,
-            kind: if kind == "ban" { "unban" } else { "untimeout" },
-            source: "appeal",
-            target_id: Some(user),
-            case_no: None,
-            audit_id: None,
-        },
+    // Panic mode's mod command lock holds here too: only owners, Extra Owners and Trusted Admins may lift.
+    if level < Level::Admin && mod_lock(&mut *tx, guild).await? {
+        return Err(ApiError::Forbidden(
+            "panic mode has locked mod commands; only owners and Trusted Admins can accept now",
+        ));
+    }
+    // The appeal row is locked (`for update`), so two clicks cannot queue two accepts.
+    let queued: bool = sqlx::query_scalar(
+        "select exists(select 1 from scheduled_jobs where guild_id = $1 and kind = 'appeal_accept'
+         and (payload->>'id')::bigint = $2)",
+    )
+    .bind(guild)
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if queued {
+        return Err(ApiError::BadRequest(
+            "this appeal is already being accepted".into(),
+        ));
+    }
+    let reply: String = reply.trim().chars().take(1000).collect();
+    let p = json!({"id": id, "by": s.user_id, "reply": reply});
+    tommybot_core::jobs::enqueue(
+        &mut *tx,
+        guild,
+        "appeal_accept",
+        p,
+        chrono::Utc::now().timestamp(),
     )
     .await?;
-    // The dashboard unbans as the bot, so the bot cannot tell staff lifted a Raider List ban.
-    if kind == "ban" {
-        tommybot_core::raiders::allow(&mut *tx, guild, user, s.user_id).await?;
-    }
     Ok(())
+}
+
+/// Whether a running panic mode locked mod commands (its pending `panic_end` job says so).
+async fn mod_lock(c: &mut sqlx::PgConnection, guild: i64) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        "select exists(select 1 from scheduled_jobs where guild_id = $1 and kind = 'panic_end'
+         and (payload->>'lock_mod_commands')::boolean)",
+    )
+    .bind(guild)
+    .fetch_one(c)
+    .await?)
 }
 
 async fn add_blacklist(
@@ -629,6 +614,37 @@ async fn blacklist_purge(State(st): State<AppState>, s: Sess, Path(guild): Path<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn mod_lock_follows_the_panic_end_job() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_850_000_000 + std::process::id() as i64;
+        let mut c = db.acquire().await.unwrap();
+        assert!(!mod_lock(&mut c, g).await.unwrap());
+        for (lock, want) in [(false, false), (true, true)] {
+            sqlx::query("delete from scheduled_jobs where guild_id = $1")
+                .bind(g)
+                .execute(&mut *c)
+                .await
+                .unwrap();
+            sqlx::query("insert into scheduled_jobs (guild_id, kind, payload, run_at) values ($1, 'panic_end', $2, now())")
+                .bind(g)
+                .bind(serde_json::json!({"lock_mod_commands": lock, "unlock": true}))
+                .execute(&mut *c)
+                .await
+                .unwrap();
+            assert_eq!(mod_lock(&mut c, g).await.unwrap(), want);
+        }
+        sqlx::query("delete from scheduled_jobs where guild_id = $1")
+            .bind(g)
+            .execute(&mut *c)
+            .await
+            .unwrap();
+    }
 
     fn field(options: &[&str], multi: bool, required: bool) -> AppealField {
         AppealField {

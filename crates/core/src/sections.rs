@@ -1,5 +1,6 @@
 //! Typed per-guild config sections shared by the bot (reads them) and the dashboard (validates writes).
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use tommybot_antinuke::{Action as NukeAction, Limit};
 use tommybot_automod::{
@@ -16,7 +17,9 @@ use twilight_model::id::{
 pub struct AntinukeCfg {
     /// Master switch; off until a saved config turns it on.
     pub enabled: bool,
-    /// Per action; actions left out use [`NukeAction::default_limit`].
+    /// Per action; actions left out use [`NukeAction::default_limit`]. An action this version
+    /// does not know is skipped, not the whole section (D48).
+    #[serde(deserialize_with = "tommybot_logging::lenient::map")]
     pub limits: HashMap<NukeAction, LimitCfg>,
     /// Quarantined members are moved to this role (none: all roles removed).
     pub quarantine_role: Option<Id<RoleMarker>>,
@@ -26,7 +29,7 @@ pub struct AntinukeCfg {
     pub quarantine_hold: bool,
     /// Quarantine whoever changes the vanity URL and put the old code back.
     pub vanity_guard: bool,
-    /// Off: a reached limit is only logged and reverted.
+    /// Off: a reached limit is only logged, reverted and counted towards panic mode.
     pub auto_quarantine: bool,
     /// Punish giving dangerous permissions to any role.
     pub strict_mode: bool,
@@ -38,7 +41,8 @@ pub struct AntinukeCfg {
     pub monitor_channel_perms: bool,
     /// May change a quarantined member's roles.
     pub quarantine_whitelist: Vec<Id<UserMarker>>,
-    /// Channels created or deleted in these categories never count (ticket bots).
+    /// Channels a bot creates or deletes in these categories never count (ticket bots), unless the
+    /// channel moved in from elsewhere in the last hour.
     pub ticket_categories: Vec<Id<ChannelMarker>>,
 }
 
@@ -496,6 +500,75 @@ impl WhitelistList {
     }
 }
 
+/// The first entry in `v` that the bot's lenient readers would skip (an unknown key or enum
+/// value, or a bad value under a known key, D48), as `path: entry`, unless `old` (the stored
+/// section) holds it unchanged. Writes refuse it, so only data a newer version wrote is skipped,
+/// and an older version can still save a section that holds such data (R-h3 2).
+pub fn unreadable_entry(section: &str, v: &Value, old: &Value) -> Option<String> {
+    use serde::de::DeserializeOwned;
+    use tommybot_automod::discord_api::BotAction;
+    use tommybot_logging::{LogEvent, LogKind};
+    fn bad<T: DeserializeOwned>(x: &Value) -> bool {
+        serde_json::from_value::<T>(x.clone()).is_err()
+    }
+    fn items(a: &Value) -> Vec<Value> {
+        a.as_array().cloned().unwrap_or_default()
+    }
+    /// A map entry whose key or value does not parse and is not stored as it is.
+    fn entry<K: DeserializeOwned, V: DeserializeOwned>(
+        path: &str,
+        m: &Value,
+        old: &Value,
+    ) -> Option<String> {
+        m.as_object()?
+            .iter()
+            .find(|(k, x)| {
+                (bad::<K>(&Value::String((*k).clone())) || bad::<V>(x))
+                    && old.get(k.as_str()) != Some(x)
+            })
+            .map(|(k, x)| format!("{path}: {k} = {x}"))
+    }
+    /// A list item that does not parse and is not in the stored list.
+    fn item<T: DeserializeOwned>(path: &str, l: &Value, old: &Value) -> Option<String> {
+        let old = items(old);
+        items(l)
+            .into_iter()
+            .find(|x| bad::<T>(x) && !old.contains(x))
+            .map(|x| format!("{path}: {x}"))
+    }
+    match section {
+        "antinuke" => entry::<NukeAction, LimitCfg>("limits", &v["limits"], &old["limits"]),
+        "logging" => {
+            let old_custom = Value::Array(
+                items(&old["custom"])
+                    .iter()
+                    .flat_map(|c| items(&c["events"]))
+                    .collect(),
+            );
+            entry::<LogKind, Id<ChannelMarker>>("routes", &v["routes"], &old["routes"])
+                .or_else(|| {
+                    entry::<LogEvent, Id<ChannelMarker>>("events", &v["events"], &old["events"])
+                })
+                .or_else(|| {
+                    items(&v["custom"])
+                        .iter()
+                        .find_map(|c| item::<LogEvent>("custom events", &c["events"], &old_custom))
+                })
+        }
+        "raider_list" => item::<RaiderCategory>("categories", &v["categories"], &old["categories"]),
+        "discord_automod" => v["actions"].as_object().and_then(|m| {
+            m.iter().find_map(|(rule, a)| {
+                let was = &old["actions"][rule];
+                if !a.is_array() {
+                    return (was != a).then(|| format!("actions: {rule} = {a}"));
+                }
+                item::<BotAction>(&format!("actions of {rule}"), a, was)
+            })
+        }),
+        _ => None,
+    }
+}
+
 pub const MAX_APPEAL_FIELDS: usize = 6;
 
 /// Sections the dashboard saves only after a TOTP step-up, so prefix panels may not edit them.
@@ -503,6 +576,7 @@ pub const SENSITIVE: &[&str] = &[
     "antinuke",
     "whitelist",
     "panic",
+    "backups",
     "catch",
     "ban_sync",
     "raider_list",
@@ -648,7 +722,8 @@ pub struct MiscCfg {
     pub show_reason_on_auto: bool,
     /// Delete the member's last 100 messages when automod punishes them.
     pub purge_last_100: bool,
-    /// Only owners, trusted admins and permit holders count as staff.
+    /// No effect: staff are only ever owners, Extra Owners, Trusted Admins and permit holders,
+    /// never a role's Discord permissions. Still read so old configs parse; not shown anywhere.
     pub staff_only_permitted: bool,
     pub warn_base_points: i32,
     /// Apply `warn_actions` once a member's warn points reach them.
@@ -717,6 +792,19 @@ pub struct LockdownCfg {
     pub main_roles: Vec<Id<RoleMarker>>,
 }
 
+/// The whole `verification` section as the bot reads it; the dashboard validates saves with it too.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct VerificationCfg {
+    pub enabled: bool,
+    /// Where `verifysetup` posts the button.
+    pub channel: Option<Id<ChannelMarker>>,
+    /// Roles handed out on a pass.
+    pub roles: Vec<Id<RoleMarker>>,
+    #[serde(flatten)]
+    pub verify: tommybot_automod::join::VerifyCfg,
+}
+
 /// Panic mode: trips when `executors` distinct accounts are quarantined within `window_secs`.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -757,9 +845,7 @@ impl Default for PanicCfg {
     }
 }
 
-/// Quarantine role overwrite in every channel: denies View Channel, Send Messages, Add Reactions,
-/// Connect, Create Invite, Send Messages in Threads and Create Public/Private Threads.
-pub const QUARANTINE_DENY: u64 = 377_958_173_761;
+pub use tommybot_antinuke::{verification_shape, QUARANTINE_DENY, VERIFY_ALLOW, VERIFY_DENY};
 
 /// Server backups: off until a guild turns on `enabled`; then the 3-hour auto backup runs. The rest are the
 /// restore filters (`anr`), used by anti-nuke reverts and panic mode, never by `/backup load`.
@@ -872,6 +958,7 @@ pub enum BanSyncReceive {
 pub struct RaiderListCfg {
     pub enabled: bool,
     pub action: RaiderAction,
+    #[serde(deserialize_with = "tommybot_logging::lenient::list")]
     pub categories: Vec<RaiderCategory>,
     /// What to do for listed users already in the server: only alert, or nothing.
     pub scan_members: bool,
@@ -917,9 +1004,160 @@ impl RaiderCategory {
     pub const ALL: [RaiderCategory; 4] = [Self::Nuke, Self::Raid, Self::Scam, Self::Spam];
 }
 
+/// Live ids a backup restore must never delete: what the bot made or set up and a nuke does not
+/// make (N2): the quarantine role, the log channels, the ticket category, log channel and open
+/// tickets' channels, anti-nuke's ticket categories, the verification channel and roles, and the
+/// permit roles (Auto Setup's roles among them). They can be newer than the backup. A fixed list:
+/// any other config field (most are Editor level) must not shield a nuker's role or channel.
+/// Shared by the bot's restore and the dashboard's preview.
+pub async fn restore_keep(
+    pool: &sqlx::PgPool,
+    guild: i64,
+    config: &serde_json::Value,
+) -> sqlx::Result<std::collections::HashSet<u64>> {
+    let mut keep = config_ids(config);
+    let open: Vec<i64> = sqlx::query_scalar(
+        "SELECT channel_id FROM tickets WHERE guild_id = $1 AND closed_at IS NULL AND channel_id IS NOT NULL",
+    )
+    .bind(guild)
+    .fetch_all(pool)
+    .await?;
+    let permits = crate::permits::permit_roles(pool, guild).await?;
+    keep.extend(open.into_iter().chain(permits).map(|i| i as u64));
+    Ok(keep)
+}
+
+/// The config fields `restore_keep` keeps: an id, a list of ids, or a map's values.
+const KEEP_FIELDS: [&str; 10] = [
+    "/antinuke/quarantine_role",
+    "/antinuke/ticket_categories",
+    "/logging/fallback",
+    "/logging/routes",
+    "/logging/events",
+    "/logging/custom",
+    "/tickets/category",
+    "/tickets/log_channel",
+    "/verification/channel",
+    "/verification/roles",
+];
+
+fn config_ids(config: &serde_json::Value) -> std::collections::HashSet<u64> {
+    use serde_json::Value as V;
+    let id = |v: &V| v.as_str().and_then(|s| s.parse::<u64>().ok());
+    let mut out = std::collections::HashSet::new();
+    for f in KEEP_FIELDS {
+        match config.pointer(f) {
+            Some(V::Array(a)) => out.extend(a.iter().filter_map(|v| {
+                // A custom log is an object with its channel.
+                id(v).or_else(|| v.get("channel").and_then(id))
+            })),
+            Some(V::Object(o)) => out.extend(o.values().filter_map(id)),
+            Some(v) => out.extend(id(v)),
+            None => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod unreadable_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn writes_see_what_reads_skip() {
+        let none = Value::Null;
+        let an = json!({"limits": {"Ban": {}, "Future": {}}});
+        assert_eq!(
+            unreadable_entry("antinuke", &an, &none).as_deref(),
+            Some("limits: Future = {}")
+        );
+        // R-h3 5: a bad value under a known key is refused too, not dropped.
+        let an = json!({"limits": {"Ban": {"enabled": "no"}}});
+        assert!(unreadable_entry("antinuke", &an, &none).is_some());
+        let log = json!({"routes": {"panic": "not an id"}});
+        assert_eq!(
+            unreadable_entry("logging", &log, &none).as_deref(),
+            Some("routes: panic = \"not an id\"")
+        );
+        let log =
+            json!({"routes": {"panic": "1"}, "custom": [{"events": ["nope"], "channel": "2"}]});
+        assert_eq!(
+            unreadable_entry("logging", &log, &none).as_deref(),
+            Some("custom events: \"nope\"")
+        );
+        assert!(unreadable_entry("raider_list", &json!({"categories": ["nuke"]}), &none).is_none());
+        let da = json!({"actions": {"1": ["zap"]}});
+        assert!(unreadable_entry("discord_automod", &da, &none).is_some());
+        assert!(
+            unreadable_entry("discord_automod", &json!({"actions": {"1": 5}}), &none).is_some()
+        );
+        // The lenient read keeps the rest of the section.
+        let a: AntinukeCfg =
+            serde_json::from_value(json!({"enabled": true, "limits": {"Future": {}}})).unwrap();
+        assert!(a.enabled && a.limits.is_empty());
+        // S-h3 5: one unknown Discord AutoMod action drops only itself, not its rule's Ban.
+        let d: tommybot_automod::discord_api::DiscordAutomodCfg =
+            serde_json::from_value(json!({"actions": {"1": ["zap", "ban"], "2": "x"}})).unwrap();
+        assert_eq!(d.actions.len(), 1);
+        assert_eq!(
+            d.actions["1"],
+            [tommybot_automod::discord_api::BotAction::Ban]
+        );
+    }
+
+    /// R-h3 2: after a downgrade the stored newer entry does not block a save of the rest.
+    #[test]
+    fn a_stored_newer_entry_does_not_block_a_save() {
+        let old = json!({"limits": {"Future": {"x": 1}}});
+        let new = json!({"enabled": true, "limits": {"Future": {"x": 1}, "Ban": {}}});
+        assert!(unreadable_entry("antinuke", &new, &old).is_none());
+        let changed = json!({"limits": {"Future": {"x": 2}}});
+        assert!(
+            unreadable_entry("antinuke", &changed, &old).is_some(),
+            "changed, so refused"
+        );
+        let old = json!({"custom": [{"events": ["new_event"], "channel": "2"}], "routes": {"later": "3"}});
+        let new = json!({"custom": [{"events": ["new_event", "message_delete"], "channel": "2"}], "routes": {"later": "3"}});
+        assert!(unreadable_entry("logging", &new, &old).is_none());
+        let old = json!({"categories": ["nuke", "future"]});
+        assert!(
+            unreadable_entry("raider_list", &json!({"categories": ["future"]}), &old).is_none()
+        );
+        assert!(unreadable_entry("raider_list", &json!({"categories": ["other"]}), &old).is_some());
+        let old = json!({"actions": {"1": ["zap"]}});
+        assert!(unreadable_entry(
+            "discord_automod",
+            &json!({"actions": {"1": ["zap", "ban"]}}),
+            &old
+        )
+        .is_none());
+        assert!(
+            unreadable_entry("discord_automod", &json!({"actions": {"2": ["zap"]}}), &old)
+                .is_some()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restore_keeps_only_the_named_config_ids() {
+        let keep = config_ids(&json!({
+            "antinuke": {"quarantine_role": "11", "ticket_categories": ["12"]},
+            "logging": {"fallback": "13", "routes": {"mod_command": "14"}, "events": {"message_delete": "15"},
+                        "custom": [{"channel": "16", "events": []}]},
+            "tickets": {"category": "17", "log_channel": "18"},
+            "verification": {"channel": "19", "roles": ["20"]},
+            // Any other field, even an id list, shields nothing.
+            "automod": {"exempt_roles": ["1570002257523511317"]},
+            "sticky": {"roles": ["21"]},
+            "misc": {"timeout": "600"}
+        }));
+        assert_eq!(keep, (11..=20).collect());
+    }
     use serde_json::{json, Value};
 
     #[test]
@@ -1187,6 +1425,7 @@ mod tests {
             NukeAction::GuildUpdate,
             NukeAction::VoiceDisconnect,
             NukeAction::VoiceMove,
+            NukeAction::ThreadDelete,
         ] {
             assert!(c.limit(a).is_none(), "{a:?}");
             let on: AntinukeCfg =

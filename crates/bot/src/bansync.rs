@@ -215,9 +215,92 @@ fn ours(reason: Option<&str>, src: Id<GuildMarker>) -> bool {
 }
 
 /// The current ban there is a copy from `src`.
-async fn banned_by_us(app: &App, (to, user, src): Key) -> Result<bool> {
+async fn banned_by_us(app: &App, key: Key) -> Result<bool> {
+    let (to, user, _) = key;
     let ban = http_err::ban(&app.http, to, user).await?;
-    Ok(ours(ban.as_ref().and_then(|b| b.reason.as_deref()), src))
+    let Some(row) = load(app, key).await? else {
+        return Ok(false);
+    };
+    owned(app, key, &row, ban.as_ref().map(|b| b.reason.as_deref())).await
+}
+
+/// `ban` (None: no ban; Some(reason)) is the copy from `src`: our reason, or a copy laid over a
+/// local temp ban, which keeps that ban's reason (Discord ignores a second ban). The row remembers
+/// that reason, and the copy's ban dropped the temp ban's unban job, so that job still pending
+/// means the copy's ban never happened.
+async fn owned(
+    app: &App,
+    (to, user, src): Key,
+    row: &Row,
+    ban: Option<Option<&str>>,
+) -> Result<bool> {
+    let Some(reason) = ban else {
+        return Ok(false);
+    };
+    // A second ban keeps the first ban's reason, so a staff ban over a done copy (a TommyBot
+    // ban or tempban case by someone else since) leaves the reason as it was: it is theirs now.
+    if row.state == "banned" && hand_ban_since(app, (to, user, src)).await? {
+        return Ok(false);
+    }
+    if ours(reason, src) {
+        return Ok(true);
+    }
+    if row.over_reason.as_deref() != Some(reason.unwrap_or("")) {
+        return Ok(false);
+    }
+    Ok(temp_end(app, to, user).await? != row.temp_end)
+}
+
+/// A ban or tempban case for the user in the receiving server, by someone other than the bot,
+/// newer than the copy (its `done_at`). The copy's own case is the bot's, or a Ban here click's,
+/// which is written before the row becomes banned.
+async fn hand_ban_since(app: &App, (to, user, src): Key) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM ban_sync_links l JOIN cases c
+             ON c.guild_id = l.guild_id AND c.user_id = l.user_id
+         WHERE l.guild_id = $1 AND l.user_id = $2 AND l.source_guild = $3
+           AND c.kind IN ('ban', 'tempban') AND c.mod_id <> $4 AND c.created_at > l.done_at)",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .bind(app.me.get() as i64)
+    .fetch_one(&app.pool)
+    .await?)
+}
+
+/// Deletes the unban job of the local temp ban a copy was laid over, with `?`: the ban's own
+/// `forget_jobs` is best effort, and a job left behind would make `owned` disown the copy and
+/// then lift it at the old end. A failure leaves the row pending for the retry.
+async fn drop_temp_job(app: &App, (to, user, src): Key) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM scheduled_jobs j USING ban_sync_links l
+         WHERE l.guild_id = $1 AND l.user_id = $2 AND l.source_guild = $3
+           AND j.guild_id = $1 AND j.kind = 'unban' AND j.payload->>'user' = $2::text
+           AND extract(epoch FROM j.run_at)::bigint = extract(epoch FROM l.temp_end)::bigint",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .execute(&app.pool)
+    .await?;
+    Ok(())
+}
+
+/// Remembers the local temp ban a copy is about to be laid over (`owned`).
+async fn over_temp(app: &App, (to, user, src): Key, reason: &str, end: Option<i64>) -> Result<()> {
+    sqlx::query(
+        "UPDATE ban_sync_links SET over_reason = $4, temp_end = to_timestamp($5::float8)
+         WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3 AND state = 'pending'",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .bind(reason)
+    .bind(end.map(|e| e as f64))
+    .execute(&app.pool)
+    .await?;
+    Ok(())
 }
 
 /// Audit `MemberBanAdd`, any actor: queues the share after the hold.
@@ -352,13 +435,35 @@ async fn origin(
     })
 }
 
-/// The end of a TommyBot temp ban: its pending unban job.
+/// A copy ending at `copy` (None: never) outlasts a local ban ending at `local` (None: never).
+fn outlasts(copy: Option<i64>, local: Option<i64>) -> bool {
+    local.is_some_and(|l| copy.is_none_or(|c| c > l))
+}
+
+/// The end of a TommyBot temp ban: its pending unban job, also while a failed try holds its lease
+/// (`owned` must not read a leased job as gone).
 async fn temp_end(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<Option<i64>> {
-    Ok(
-        jobs::of_user(&app.pool, gid.get() as i64, "unban", user.get())
-            .await?
-            .map(|j| j.1),
+    Ok(sqlx::query_scalar(
+        "SELECT extract(epoch FROM run_at)::bigint FROM scheduled_jobs
+         WHERE guild_id = $1 AND kind = 'unban' AND payload->>'user' = $2 ORDER BY run_at LIMIT 1",
     )
+    .bind(gid.get() as i64)
+    .bind(user.get().to_string())
+    .fetch_optional(&app.pool)
+    .await?)
+}
+
+/// A temp ban's unban job is due or held by a running try.
+async fn temp_ending(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM scheduled_jobs
+         WHERE guild_id = $1 AND kind = 'unban' AND payload->>'user' = $2
+           AND (run_at <= now() OR locked_until > now()))",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get().to_string())
+    .fetch_one(&app.pool)
+    .await?)
 }
 
 /// The owner from Discord, not the 5-minute cache; None when the bot cannot see the server.
@@ -400,12 +505,14 @@ async fn same_owner(
     a: Id<GuildMarker>,
     b: Id<GuildMarker>,
 ) -> Result<bool> {
-    let stored: Vec<i64> =
-        sqlx::query_scalar("SELECT owner_id FROM guild_owners WHERE guild_id = ANY($1)")
-            .bind([a.get() as i64, b.get() as i64].as_slice())
-            .fetch_all(&app.pool)
-            .await?;
-    // A server the bot left has no row any more: no Discord call for it.
+    let stored: Vec<i64> = sqlx::query_scalar(
+        "SELECT owner_id FROM guild_owners WHERE guild_id = ANY($1)
+             AND guild_id NOT IN (SELECT guild_id FROM guild_left)",
+    )
+    .bind([a.get() as i64, b.get() as i64].as_slice())
+    .fetch_all(&app.pool)
+    .await?;
+    // A server the bot left is in guild_left: no Discord call for it.
     if stored.len() != 2 || stored[0] != stored[1] {
         return Ok(false);
     }
@@ -432,7 +539,8 @@ async fn grouped(
 async fn group(app: &App, gid: Id<GuildMarker>) -> Result<Vec<Id<GuildMarker>>> {
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT o.guild_id FROM guild_owners o JOIN guild_owners s ON s.owner_id = o.owner_id
-         WHERE s.guild_id = $1 AND o.guild_id <> $1 ORDER BY o.guild_id",
+         WHERE s.guild_id = $1 AND o.guild_id <> $1
+           AND o.guild_id NOT IN (SELECT guild_id FROM guild_left) ORDER BY o.guild_id",
     )
     .bind(gid.get() as i64)
     .fetch_all(&app.pool)
@@ -484,7 +592,7 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy) -> Result<(bool, bool)
              source_case = excluded.source_case, origin = excluded.origin, reason = excluded.reason,
              expires_at = excluded.expires_at, state = excluded.state, skip_reason = excluded.skip_reason,
              actor_id = excluded.actor_id, mod_id = excluded.mod_id, banned_at = excluded.banned_at,
-             case_no = NULL, created_at = now(), done_at = NULL
+             case_no = NULL, created_at = now(), done_at = NULL, over_reason = NULL, temp_end = NULL
          WHERE ban_sync_links.state IN ('lifted', 'cancelled', 'skipped', 'alerted')",
     )
     .bind(to.get() as i64)
@@ -615,8 +723,12 @@ pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()>
 }
 
 /// Moves a row on from one of `from`; false when another run already did.
-async fn mark(
-    app: &App,
+async fn mark(app: &App, key: Key, from: &[&str], state: &str, why: Option<&str>) -> Result<bool> {
+    mark_in(&app.pool, key, from, state, why).await
+}
+
+async fn mark_in<'e>(
+    db: impl sqlx::PgExecutor<'e>,
     (to, user, src): Key,
     from: &[&str],
     state: &str,
@@ -632,7 +744,7 @@ async fn mark(
     .bind(from)
     .bind(state)
     .bind(why)
-    .execute(&app.pool)
+    .execute(db)
     .await?
     .rows_affected()
         == 1)
@@ -674,6 +786,8 @@ struct Row {
     actor_id: Option<i64>,
     mod_id: Option<i64>,
     banned_at: Option<i64>,
+    over_reason: Option<String>,
+    temp_end: Option<i64>,
 }
 
 impl Row {
@@ -685,7 +799,8 @@ impl Row {
 async fn load(app: &App, (to, user, src): Key) -> Result<Option<Row>> {
     Ok(sqlx::query_as(
         "SELECT state, reason, extract(epoch FROM expires_at)::bigint AS expires, source_case, case_no,
-                actor_id, mod_id, extract(epoch FROM banned_at)::bigint AS banned_at
+                actor_id, mod_id, extract(epoch FROM banned_at)::bigint AS banned_at, over_reason,
+                extract(epoch FROM temp_end)::bigint AS temp_end
          FROM ban_sync_links WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3",
     )
     .bind(to.get() as i64)
@@ -726,7 +841,8 @@ async fn copy(app: &App, key: Key) -> Result<()> {
     }
     // A ban made by a try or a Ban here click that stopped before the row was updated.
     let ban = http_err::ban(&app.http, to, user).await?;
-    let mine = ours(ban.as_ref().and_then(|b| b.reason.as_deref()), src);
+    let reason = ban.as_ref().map(|b| b.reason.as_deref());
+    let mine = owned(app, key, &row, reason).await?;
     let owners = Owners::default();
     match blocked(app, &owners, key, &row).await? {
         // The source no longer wants the ban: lifted while the row is still pending, so a failed
@@ -749,9 +865,19 @@ async fn copy(app: &App, key: Key) -> Result<()> {
         None => {}
     }
     let skip = |why: &'static str| mark(app, key, &["pending"], "skipped", Some(why));
-    // So a later unban there never lifts a ban this server made itself.
-    if ban.is_some() {
-        return skip("already banned").await.map(drop);
+    // So a later unban there never lifts a ban this server made itself. A TommyBot temp ban here
+    // that ends before the copy would is not a reason to skip: the copy outlasts it (its ban
+    // drops the temp ban's unban job), and the row remembers it so a lift can put it back.
+    if let Some(reason) = reason {
+        let local = temp_end(app, to, user).await?;
+        // A temp ban whose end is due or whose unban runs now may be gone in a second: retry later.
+        if local.is_some() && temp_ending(app, to, user).await? {
+            anyhow::bail!("ban sync: the local temp ban is ending, retrying later");
+        }
+        if !outlasts(row.expires, local) {
+            return skip("already banned").await.map(drop);
+        }
+        over_temp(app, key, reason.unwrap_or(""), local).await?;
     }
     let duration = match remaining(row.expires) {
         Ok(d) => d,
@@ -866,6 +992,7 @@ async fn ban_copy(
 /// The ban is made: the row becomes banned, then it gets its case if it has none yet.
 async fn finish_ban(app: &App, key: Key, case: Option<i32>, why: &str) -> Result<()> {
     let (to, user, src) = key;
+    drop_temp_job(app, key).await?;
     let Some(None) = claim_banned(app, key, case).await? else {
         return Ok(());
     };
@@ -998,15 +1125,39 @@ pub async fn lift_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()> 
 /// The rows `lift` acts on: copies, and a pending row whose ban was made by a try that stopped.
 const LIVE: &[&str] = &["pending", "banned"];
 
-/// Unbans a copy with an unban case, unless staff banned again by hand since.
+/// Unbans a copy with an unban case, unless staff banned again by hand since. A copy laid over a
+/// local temp ban that has not ended yet gives that temp ban back instead: the ban stays, with
+/// its unban job at the old end.
 async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
     let (to, user, src) = key;
     let Some(ban) = http_err::ban(&app.http, to, user).await? else {
         return mark(app, key, LIVE, "lifted", None).await.map(drop);
     };
-    if !ours(ban.reason.as_deref(), src) {
+    let Some(row) = load(app, key).await? else {
+        return Ok(());
+    };
+    if !owned(app, key, &row, Some(ban.reason.as_deref())).await? {
         let why = Some("banned again by hand");
         return mark(app, key, LIVE, "skipped", why).await.map(drop);
+    }
+    if let Some(end) = row.temp_end.filter(|e| *e > now_secs()) {
+        // One transaction: the old end's job, the copy's own unban job gone, and the row lifted.
+        let mut tx = app.pool.begin().await?;
+        let g = to.get() as i64;
+        let job = jobs::enqueue(&mut *tx, g, "unban", json!({"user": user.get()}), end).await?;
+        jobs::cancel_user(&mut *tx, g, &["unban"], user.get(), Some(job)).await?;
+        if mark_in(
+            &mut *tx,
+            key,
+            LIVE,
+            "lifted",
+            Some("the local temp ban runs on"),
+        )
+        .await?
+        {
+            tx.commit().await?;
+        }
+        return Ok(());
     }
     let why = format!("Ban Sync: lifted in {} ({src})", md(name));
     let audit = commands::audit_reason(Some(&why), app.me);
@@ -1014,6 +1165,8 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
         Err(e) if !http_err::gone(&e) => return Err(e.into()),
         _ => {}
     }
+    // A temp copy's unban job must not lift a ban staff make later.
+    crate::scheduler::forget_jobs(app, to, user.get(), &["unban"], None).await;
     let case_no = new_case(app, (to, user), "unban", &why, None).await?;
     mark(app, key, LIVE, "lifted", None).await?;
     commands::mod_log(
@@ -1028,50 +1181,250 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// [`on_owner`] from a gateway event. A failure queues `owner_check`, which runs it again (each
+/// failed try waits for the job lease, up to `jobs::MAX_ATTEMPTS`), so the reset is not left to the
+/// next guild event (R-h3 round 2, 3). Meanwhile the dashboard keeps the owner-only writes closed.
+pub async fn owner_seen(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) -> Result<()> {
+    if let Err(e) = on_owner(app, gid, owner).await {
+        tracing::warn!(?e, %gid, "owner change not processed, retrying as a job");
+        sqlx::query(
+            "INSERT INTO scheduled_jobs (guild_id, kind, payload, run_at)
+             SELECT $1, 'owner_check', '{}', now() + interval '30 seconds'
+             WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'owner_check')",
+        )
+        .bind(gid.get() as i64)
+        .execute(&app.pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Job `owner_check`: reads the owner from Discord now (not the cache) and runs [`on_owner`].
+pub async fn owner_check_job(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+    let owner = app.http.guild(gid).await?.model().await?.owner_id;
+    on_owner(app, gid, owner).await
+}
+
 /// Keeps `guild_owners` current (GuildCreate, GuildUpdate). A new owner takes the server out of
 /// its old group at once: its pending copies are cancelled and both owners hear about it.
+/// The server's sync becomes the new owner's own (D47): Ban Sync is switched off, so it is in no
+/// group until they turn it on again with 2FA, and the Extra Owners and Trusted Admins the previous
+/// owner set are removed, with the roles of their owner, full immunity and dashboard-edit permits.
+/// What was removed is kept in `owner_handovers`, so the new owner can keep
+/// it from the dashboard's Overview; keeping it never turns Ban Sync on.
 pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) -> Result<()> {
+    // One transaction under the config lock: a crash cannot record the new owner without the reset.
+    let (mut tx, version, mut doc) = crate::settings::locked(app, gid).await?;
+    let g = gid.get() as i64;
     let old: Option<i64> = sqlx::query_scalar(
         "WITH old AS (SELECT owner_id FROM guild_owners WHERE guild_id = $1)
          INSERT INTO guild_owners (guild_id, owner_id) VALUES ($1, $2)
          ON CONFLICT (guild_id) DO UPDATE SET owner_id = $2, seen_at = now()
          RETURNING (SELECT owner_id FROM old)",
     )
-    .bind(gid.get() as i64)
+    .bind(g)
     .bind(owner.get() as i64)
-    .fetch_one(&app.pool)
+    .fetch_one(&mut *tx)
     .await?;
     let Some(old) = old.map(|o| Id::new(o as u64)).filter(|o| *o != owner) else {
+        tx.commit().await?;
         return Ok(());
     };
+    let sync_on = doc["ban_sync"]["enabled"] == true;
+    if sync_on {
+        doc["ban_sync"]["enabled"] = json!(false);
+    }
+    let eo: Vec<i64> =
+        sqlx::query_scalar("DELETE FROM extra_owners WHERE guild_id = $1 RETURNING user_id")
+            .bind(g)
+            .fetch_all(&mut *tx)
+            .await?;
+    let ta: Vec<i64> =
+        sqlx::query_scalar("DELETE FROM trusted_admins WHERE guild_id = $1 RETURNING user_id")
+            .bind(g)
+            .fetch_all(&mut *tx)
+            .await?;
+    // Guarded permits (owner-like, dashboard edit, any immunity flag but the filter ones) are
+    // paused too; weaker ones stay on and are only listed.
+    let all: Vec<(i64, Vec<String>, Vec<String>)> =
+        sqlx::query_as("SELECT id, perms, whitelist FROM permits WHERE guild_id = $1")
+            .bind(g)
+            .fetch_all(&mut *tx)
+            .await?;
+    let strong: Vec<i64> = all
+        .into_iter()
+        .filter(|(_, p, w)| tommybot_core::permits::guarded(p, w))
+        .map(|(id, ..)| id)
+        .collect();
+    let paused: Vec<(String, i64)> = sqlx::query_as(
+        "DELETE FROM permit_roles r USING permits p WHERE r.permit_id = p.id AND p.id = ANY($1)
+         RETURNING p.name, r.role_id",
+    )
+    .bind(&strong)
+    .fetch_all(&mut *tx)
+    .await?;
+    // The quarantine whitelist exempts by user id, the same kind of trust as EO/TA.
+    let qw: Vec<i64> = doc["antinuke"]["quarantine_whitelist"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| {
+            u.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| u.as_i64())
+        })
+        .collect();
+    if !qw.is_empty() {
+        doc["antinuke"]["quarantine_whitelist"] = json!([]);
+    }
+    let other: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM permits p WHERE guild_id = $1
+           AND EXISTS (SELECT 1 FROM permit_roles r WHERE r.permit_id = p.id)
+         ORDER BY rank DESC, name",
+    )
+    .bind(g)
+    .fetch_all(&mut *tx)
+    .await?;
+    let paused_json: Vec<Value> = paused
+        .iter()
+        .map(|(permit, role)| json!({"permit": permit, "role": role.to_string()}))
+        .collect();
+    // Recorded on every change, even with nothing to reset: the dashboard refuses the previous
+    // owner by it, and a rollback to before it keeps what the change paused.
+    sqlx::query(
+        "INSERT INTO owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins,
+           ban_sync_was_on, paused_roles, other_permits, quarantine_whitelist)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (guild_id) DO UPDATE SET old_owner = $2, new_owner = $3, extra_owners = $4,
+           trusted_admins = $5, ban_sync_was_on = $6, paused_roles = $7, other_permits = $8,
+           quarantine_whitelist = $9, at = now(), kept_at = NULL",
+    )
+    .bind(g)
+    .bind(old.get() as i64)
+    .bind(owner.get() as i64)
+    .bind(&eo)
+    .bind(&ta)
+    .bind(sync_on)
+    .bind(json!(paused_json))
+    .bind(&other)
+    .bind(&qw)
+    .execute(&mut *tx)
+    .await?;
+    // In the transaction: a failure after the commit would leave the old group's pending copies,
+    // and the retry would find the owner already recorded and do nothing (R-h3 round 3, 2).
+    cancel(&mut *tx, gid, "owner changed").await?;
+    // A config version of its own, so History shows it and a rollback sees the removal.
+    crate::settings::append(app, tx, gid, version, &mut doc, app.me.get()).await?;
+    // From here on nothing can fail: only cache drops and best-effort DMs.
+    app.forget_cfg(gid.get());
     app.invalidate_guild(gid);
-    cancel(app, gid, "owner changed").await?;
-    if app.cfg(gid.get()).await?.ban_sync.enabled {
-        let name = md(&verify::guild_name(app, gid).await);
-        let text = format!("**{name}** has a new owner, so it left its Ban Sync group: bans are no longer copied between it and the other servers of its old owner. Copies already made stay as normal bans.");
+    let name = md(&verify::guild_name(app, gid).await);
+    if sync_on {
+        let text = format!("**{name}** has a new owner, so it left your Ban Sync group: bans are no longer copied between it and your other servers. Copies already made stay as normal bans.");
         reply::dm(app, old, &text).await;
+    }
+    let paused: Vec<String> = paused.into_iter().map(|p| p.0).collect();
+    let h = Handover {
+        sync_on,
+        eo: &eo,
+        ta: &ta,
+        paused: &paused,
+        other: &other,
+        qw: &qw,
+    };
+    if let Some(text) = handover_text(&name, &h, gid) {
         reply::dm(app, owner, &text).await;
     }
     Ok(())
 }
 
-/// The bot left the server: it is out of the group, and its pending copies are cancelled.
-pub async fn on_removed(app: &App, gid: Id<GuildMarker>) -> Result<()> {
-    sqlx::query("DELETE FROM guild_owners WHERE guild_id = $1")
-        .bind(gid.get() as i64)
-        .execute(&app.pool)
-        .await?;
-    cancel(app, gid, "bot removed").await
+/// What [`on_owner`] did at an ownership change, for the new owner's DM.
+struct Handover<'a> {
+    sync_on: bool,
+    eo: &'a [i64],
+    ta: &'a [i64],
+    /// Names of the permits whose roles were paused, once per role.
+    paused: &'a [String],
+    /// Weaker permits that stayed on.
+    other: &'a [String],
+    /// Users removed from the quarantine whitelist.
+    qw: &'a [i64],
 }
 
-async fn cancel(app: &App, gid: Id<GuildMarker>, why: &str) -> Result<()> {
+/// The new owner's DM after [`on_owner`], or None when it changed nothing worth telling.
+fn handover_text(name: &str, h: &Handover, gid: Id<GuildMarker>) -> Option<String> {
+    let mentions = |ids: &[i64]| {
+        ids.iter()
+            .map(|u| format!("<@{u}>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut names: Vec<&str> = h.paused.iter().map(String::as_str).collect();
+    names.sort();
+    names.dedup();
+    let mut done = vec![];
+    if h.sync_on {
+        done.push(
+            "switched Ban Sync off, so no bans are shared with the previous owner's servers"
+                .to_string(),
+        );
+    }
+    if !h.eo.is_empty() {
+        done.push(format!("removed the Extra Owner(s) {}", mentions(h.eo)));
+    }
+    if !h.ta.is_empty() {
+        done.push(format!("removed the Trusted Admin(s) {}", mentions(h.ta)));
+    }
+    if !h.qw.is_empty() {
+        done.push(format!(
+            "removed {} from the quarantine whitelist",
+            mentions(h.qw)
+        ));
+    }
+    if !names.is_empty() {
+        done.push(format!(
+            "paused the roles of the permit(s) {} (owner, dashboard edit, or an anti-nuke or quarantine exemption)",
+            names.join(", ")
+        ));
+    }
+    if done.is_empty() && h.other.is_empty() {
+        return None;
+    }
+    let link = crate::settings::dashboard_link(gid.get());
+    let mut text = format!("You are the new owner of **{name}**.");
+    if !done.is_empty() {
+        text.push_str(&format!(" To protect you, TommyBot {}.", done.join("; ")));
+    }
+    if !(h.eo.is_empty() && h.ta.is_empty() && h.qw.is_empty() && names.is_empty()) {
+        text.push_str(&format!(" The previous owner set them. Keep only the ones you trust, one by one, on the Overview of the {link}."));
+    }
+    if !h.other.is_empty() {
+        text.push_str(&format!(
+            " These permits from the previous owner stay on: {}. Check who holds their roles.",
+            h.other.join(", ")
+        ));
+    }
+    if h.sync_on {
+        text.push_str(" Ban Sync can be switched on again on its dashboard page (it needs 2FA); it then syncs only with your own servers.");
+    }
+    Some(text)
+}
+
+/// The bot left the server: it is out of the group, and its pending copies are cancelled.
+/// Its `guild_owners` row stays (groups skip servers in `guild_left`), so an owner change while
+/// the bot was out is still caught when it comes back.
+pub async fn on_removed(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+    cancel(&app.pool, gid, "bot removed").await
+}
+
+async fn cancel<'e>(db: impl sqlx::PgExecutor<'e>, gid: Id<GuildMarker>, why: &str) -> Result<()> {
     sqlx::query(
         "UPDATE ban_sync_links SET state = 'cancelled', skip_reason = $2, done_at = now()
          WHERE state IN ('pending', 'alerted') AND (guild_id = $1 OR source_guild = $1)",
     )
     .bind(gid.get() as i64)
     .bind(why)
-    .execute(&app.pool)
+    .execute(db)
     .await?;
     Ok(())
 }

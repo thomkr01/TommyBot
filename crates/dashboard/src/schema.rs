@@ -228,6 +228,7 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("RoleDelete", "Role deletions"),
     ("ChannelCreate", "Channel creations"),
     ("ChannelDelete", "Channel deletions"),
+    ("ThreadDelete", "Thread & forum post deletions"),
     ("WebhookCreate", "Webhook creations"),
     ("WebhookDelete", "Webhook deletions"),
     ("Timeout", "Member timeouts"),
@@ -402,7 +403,7 @@ pub fn schema() -> Vec<Value> {
         ),
         hp(
             ti(fg("Ticket categories", "ticket_categories", "categories"), "Ticket categories"),
-            "Channels a ticket bot creates or deletes in these categories never count.",
+            "Channels a bot (a ticket bot) creates or deletes in these categories never count. Members always count, and so does a channel moved in from elsewhere in the last hour.",
         ),
     ];
     for (a, title) in NUKE_CARDS {
@@ -472,7 +473,10 @@ pub fn schema() -> Vec<Value> {
         ),
         sx(
             "joinraid",
-            ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
+            hp(
+                ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
+                "Needs Use the auto lockdown module above to be on.",
+            ),
         ),
         hp(
             ti(fg("Auto slowmode", "auto_slowmode.enabled", "bool"), "Use the auto slowmode"),
@@ -863,7 +867,11 @@ pub fn schema() -> Vec<Value> {
             ),
             "Ban",
         ),
-        choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+        // D63: joingate only locks while Auto Mod's Auto lockdown switch is on.
+        hp(
+            choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+            "Only works while Auto lockdown is on under Auto Mod (Use the auto lockdown module). With it off, a join raid does not lock.",
+        ),
         fg("Response", "warned_roles", "roles"),
         hp(
             ti(fg("Voice Raid", "voice.enabled", "bool"), "Use the voice raid trigger"),
@@ -881,7 +889,8 @@ pub fn schema() -> Vec<Value> {
     let panic = vec![
         ti(
             pg(dv(fg("Trigger", "executors", "int"), 0), "nuke"),
-            "Quarantined accounts to trip",
+            // D70: 0 switches anti-nuke's Panic Mode trigger off on purpose; say so on the field.
+            "Quarantined accounts to trip (0 = off)",
         ),
         ti(
             pg(fg("Trigger", "heat_algorithm", "bool"), "heat"),
@@ -1027,7 +1036,6 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Moderation commands", "remove_main_roles_on_timeout", "bool"), true), "Remove the main roles from the target on timeout"),
         ti(dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true), "Display the reason behind the auto punishment in the message TommyBot sends"),
         ti(fg("Auto moderation", "purge_last_100", "bool"), "Always purge the messages sent by the punished member found in the recent 100 messages"),
-        ti(fg("Auto moderation", "staff_only_permitted", "bool"), "Consider only owners, trusted admins and any member with the flags (IMMUNITY|AUTOMOD IMMUNITY) to be considered staff members. Punish anyone else triggering the auto mod"),
         ti(dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true), "Issue an action once a member reaches certain points"),
         ti(dv(fg("Auto warn actions", "warn_base_points", "int"), 5), "Base points"),
         ti(fg("Auto warn actions", "warn_actions", "warn_actions"), "Custom actions"),
@@ -1523,6 +1531,35 @@ mod tests {
         }
     }
 
+    /// D70. Every number the form fills in by default (what the wizard and an emptied field save)
+    /// passes the save check, so the new ranges never refuse the dashboard's own values.
+    #[test]
+    fn every_default_passes_the_range_check() {
+        let mut bad = vec![];
+        for sec in schema() {
+            for fd in sec["fields"].as_array().unwrap() {
+                let (Some(path), d) = (fd["path"].as_str(), &fd["default"]) else {
+                    continue;
+                };
+                if !d.is_number() {
+                    continue;
+                }
+                let name = fd["section"].as_str().or(sec["name"].as_str()).unwrap();
+                let mut doc = json!({});
+                let parts: Vec<_> = path.split('.').collect();
+                let mut cur = &mut doc;
+                for p in &parts[..parts.len() - 1] {
+                    cur = &mut cur[*p];
+                }
+                cur[parts[parts.len() - 1]] = d.clone();
+                if let Err(e) = limits::check(name, &doc, &Value::Null) {
+                    bad.push(format!("{name}.{path}={d}: {e}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
     #[test]
     fn every_schema_path_deserializes() {
         let mut objs: std::collections::BTreeMap<String, Value> = Default::default();
@@ -1539,7 +1576,7 @@ mod tests {
             }
         }
         for (name, obj) in objs {
-            api::validate(&name, &obj)
+            api::validate(&name, &obj, &Value::Null)
                 .unwrap_or_else(|e| panic!("{name} schema does not deserialize: {e:?}"));
         }
     }
@@ -1564,7 +1601,7 @@ mod tests {
                     cur = &mut cur[*p];
                 }
                 cur[parts[parts.len() - 1]] = Value::Null;
-                if let Err(e) = api::validate(name, &obj) {
+                if let Err(e) = api::validate(name, &obj, &Value::Null) {
                     bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
                 }
             }
@@ -1591,7 +1628,7 @@ mod tests {
                     cur = &mut cur[*p];
                 }
                 cur[parts[parts.len() - 1]] = sample(fd);
-                if let Err(e) = api::validate(name, &obj) {
+                if let Err(e) = api::validate(name, &obj, &Value::Null) {
                     bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
                 }
             }

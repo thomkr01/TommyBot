@@ -215,10 +215,13 @@ pub async fn report(pool: &PgPool, r: &Report<'_>) -> Result<Result<(), String>>
 
 /// Staff lifted what the list did in this server (unban, unquarantine, Allow): the list never
 /// acts on the user here again, and its action row goes, so a later removal lifts nothing staff
-/// redid. False when the list had done nothing here.
+/// redid. A pending raid punishment retry (`raid_punish`) goes too, whether or not the list acted.
+/// False when the list had done nothing here.
 pub async fn allow(db: impl sqlx::PgExecutor<'_>, guild: i64, user: i64, by: i64) -> Result<bool> {
     Ok(sqlx::query(
-        "WITH a AS (DELETE FROM raider_actions WHERE guild_id = $1 AND user_id = $2 RETURNING 1)
+        "WITH j AS (DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'raid_punish'
+                      AND payload->>'user' = $2::text),
+         a AS (DELETE FROM raider_actions WHERE guild_id = $1 AND user_id = $2 RETURNING 1)
          INSERT INTO raider_allow (guild_id, user_id, by) SELECT $1, $2, $3 FROM a
          ON CONFLICT (guild_id, user_id) DO UPDATE SET by = excluded.by, at = now()",
     )
@@ -255,7 +258,7 @@ mod tests {
             return;
         };
         let pool = crate::db::connect(&url).await.unwrap();
-        let g = 3_311_000_000_000 + std::process::id() as i64 * 10;
+        let g = 3_250_000_000_000 + std::process::id() as i64 * 10; // below the bot T harness band (3.3e12..)
         let (owner, user) = (g + 1, g * 10);
         let users = (user, user + 9);
         let clean = |pool: PgPool| async move {

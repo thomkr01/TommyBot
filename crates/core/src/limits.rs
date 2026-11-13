@@ -39,6 +39,43 @@ pub const RAIDER_MIN_MEMBERS: u64 = 100;
 /// Raider List: days a scam listing lasts after its last evidence.
 pub const RAIDER_SCAM_DAYS: i64 = 14;
 
+/// Discord's longest timeout, in ms.
+const TIMEOUT_MAX_MS: i64 = 28 * 86_400_000;
+pub const STRIKE_CAP: (i64, i64) = (1, 100);
+pub const STRIKE_MULTIPLIER: (i64, i64) = (100, 1_000);
+pub const PANIC_HEAT_EXECUTORS: (i64, i64) = (1, 50);
+pub const MENTION_COUNT: (i64, i64) = (1, 1_000);
+pub const RAID_COUNT: (i64, i64) = (2, 500);
+pub const BAN_PURGE_DAYS: (i64, i64) = (0, 7);
+pub const WARN_POINTS: (i64, i64) = (1, 1_000);
+
+/// Numbers at a fixed path whose 0 or out-of-range value would quietly switch their feature off:
+/// (section, path, range). `panic.executors` is left out on purpose: 0 turns panic mode off.
+const FIXED: [(&str, &str, (i64, i64)); 13] = [
+    ("automod", "strike.cap", STRIKE_CAP),
+    ("automod", "strike.multiplier_pct", STRIKE_MULTIPLIER),
+    (
+        "automod",
+        "strike.strike_timeout_ms",
+        (1_000, TIMEOUT_MAX_MS),
+    ),
+    ("automod", "strike.cap_timeout_ms", (1_000, TIMEOUT_MAX_MS)),
+    ("automod", "auto_lockdown.mention_count", MENTION_COUNT),
+    (
+        "automod",
+        "auto_lockdown.mention_window_ms",
+        (1_000, 3_600_000),
+    ),
+    // 0 is allowed: any mention then trips the filter.
+    ("automod", "filters.mention_hour_cap", (0, 1_000)),
+    ("panic", "window_secs", (1, 86_400)),
+    ("panic", "heat_executors", PANIC_HEAT_EXECUTORS),
+    ("joinraid", "count", RAID_COUNT),
+    ("joinraid", "span_ms", (1_000, 86_400_000)),
+    ("joinraid", "id_flag_min", RAID_COUNT),
+    ("misc", "ban_purge_days", BAN_PURGE_DAYS),
+];
+
 /// The range of the number at `path` (below the section, e.g. `limits.Ban.per_hour`), if it has one.
 pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
     match (section, path.split('.').collect::<Vec<_>>().as_slice()) {
@@ -49,7 +86,11 @@ pub fn for_path(section: &str, path: &str) -> Option<(i64, i64)> {
         ("automod", ["filters", "nsfw_threshold"]) => Some(NSFW_THRESHOLD),
         ("automod", ["auto_slowmode", k]) => SLOWMODE.iter().find(|s| s.0 == *k).map(|s| s.1),
         ("joinraid", ["voice", k]) => VOICE.iter().find(|s| s.0 == *k).map(|s| s.1),
-        _ => None,
+        ("misc", ["warn_actions", _, "points"]) => Some(WARN_POINTS),
+        _ => FIXED
+            .iter()
+            .find(|f| f.0 == section && f.1 == path)
+            .map(|f| f.2),
     }
 }
 
@@ -62,59 +103,147 @@ pub fn float_for_path(section: &str, path: &str) -> Option<(f64, f64)> {
     }
 }
 
-/// Rejects a section document with a set number outside its range. Unset (null) values are fine, and
-/// so is a value equal to the one in `old` (saved before the limits; the bot reads it inside them),
-/// so an old value never blocks saving an unrelated change.
-pub fn check(section: &str, doc: &Value, old: &Value) -> Result<(), String> {
-    let mut found = vec![];
+/// The paths (below the section) of every number in `doc` that has a range.
+fn ranged_paths(section: &str, doc: &Value) -> Vec<String> {
+    let mut found: Vec<String> = vec![];
     match section {
         "antinuke" => {
-            for (card, c) in doc["limits"].as_object().into_iter().flatten() {
+            for card in doc["limits"].as_object().into_iter().flatten().map(|c| c.0) {
                 for k in ["per_minute", "per_hour", "heat"] {
-                    found.push((format!("limits.{card}.{k}"), &c[k]));
+                    found.push(format!("limits.{card}.{k}"));
                 }
             }
         }
-        "joingate" => found.push(("min_age_override_ms".into(), &doc["min_age_override_ms"])),
+        "joingate" => found.push("min_age_override_ms".into()),
         "automod" => {
-            for (k, _) in SLOWMODE {
-                found.push((format!("auto_slowmode.{k}"), &doc["auto_slowmode"][k]));
-            }
-            for k in ["max", "decay_per_sec"] {
-                found.push((format!("heat.{k}"), &doc["heat"][k]));
-            }
+            found.extend(SLOWMODE.iter().map(|(k, _)| format!("auto_slowmode.{k}")));
+            found.extend(["heat.max", "heat.decay_per_sec"].map(String::from));
         }
-        "panic" => found.push(("heat_decay".into(), &doc["heat_decay"])),
-        "joinraid" => {
-            for (k, _) in VOICE {
-                found.push((format!("voice.{k}"), &doc["voice"][k]));
-            }
+        "panic" => found.push("heat_decay".into()),
+        "joinraid" => found.extend(VOICE.iter().map(|(k, _)| format!("voice.{k}"))),
+        "misc" => {
+            let n = doc["warn_actions"].as_array().map_or(0, Vec::len);
+            found.extend((0..n).map(|i| format!("warn_actions.{i}.points")));
         }
         _ => {}
     }
-    for (path, v) in found {
-        let kept = old.pointer(&format!("/{}", path.replace('.', "/"))) == Some(v);
-        if v.is_null() || kept {
+    found.extend(
+        FIXED
+            .iter()
+            .filter(|f| f.0 == section)
+            .map(|f| f.1.to_string()),
+    );
+    found
+}
+
+fn pointer(path: &str) -> String {
+    format!("/{}", path.replace('.', "/"))
+}
+
+/// Set numbers in `doc` that are outside their range and differ from `old`, as (path, range text).
+fn outside<'a>(section: &str, doc: &'a Value, old: &Value) -> Vec<(String, &'a Value, String)> {
+    let mut out = vec![];
+    for path in ranged_paths(section, doc) {
+        let v = doc.pointer(&pointer(&path)).unwrap_or(&Value::Null);
+        if v.is_null() || old.pointer(&pointer(&path)) == Some(v) {
             continue;
         }
-        let out = match (for_path(section, &path), float_for_path(section, &path)) {
+        let bad = match (for_path(section, &path), float_for_path(section, &path)) {
             (Some((lo, hi)), _) => (!v.as_i64().is_some_and(|n| (lo..=hi).contains(&n)))
                 .then(|| format!("{lo} and {hi}")),
             (_, Some((lo, hi))) => (!v.as_f64().is_some_and(|n| (lo..=hi).contains(&n)))
                 .then(|| format!("{lo} and {hi}")),
             _ => None,
         };
-        if let Some(range) = out {
-            return Err(format!("{path} must be between {range}"));
+        if let Some(range) = bad {
+            out.push((path, v, range));
         }
     }
-    Ok(())
+    out
+}
+
+/// Rejects a section document with a set number outside its range. Unset (null) values are fine, and
+/// so is a value equal to the one in `old` (saved before the limits; the bot reads it inside them),
+/// so an old value never blocks saving an unrelated change.
+pub fn check(section: &str, doc: &Value, old: &Value) -> Result<(), String> {
+    match outside(section, doc, old).first() {
+        Some((path, _, range)) => Err(format!("{path} must be between {range}")),
+        None => Ok(()),
+    }
+}
+
+/// Every stored number outside its range, as `section.path = value` (D70b): saved before the
+/// limits, so the save never refused it. A 0 window or count there switches its feature off.
+pub fn stored_outside(config: &Value) -> Vec<String> {
+    let sections = [
+        "antinuke", "joingate", "automod", "panic", "joinraid", "misc",
+    ];
+    sections
+        .iter()
+        .flat_map(|s| {
+            outside(s, &config[*s], &Value::Null)
+                .into_iter()
+                .map(move |(p, v, _)| format!("{s}.{p} = {v}"))
+        })
+        .collect()
+}
+
+/// [`check`] that moves an out-of-range number to the nearest end of its range instead of refusing
+/// (a rollback to a version saved before the limits, D69b). Returns `path: old -> new` per change;
+/// a value that is not a number is left for [`check`] to refuse.
+pub fn clamp(section: &str, doc: &mut Value, old: &Value) -> Vec<String> {
+    let bad: Vec<(String, Value)> = outside(section, doc, old)
+        .into_iter()
+        .map(|(p, v, _)| (p, v.clone()))
+        .collect();
+    let mut done = vec![];
+    for (path, v) in bad {
+        let to = match (
+            for_path(section, &path),
+            float_for_path(section, &path),
+            v.as_f64(),
+        ) {
+            (Some((lo, hi)), _, Some(n)) => Value::from((n.round() as i64).clamp(lo, hi)),
+            (_, Some((lo, hi)), Some(n)) => Value::from(n.clamp(lo, hi)),
+            _ => continue,
+        };
+        if let Some(slot) = doc.pointer_mut(&pointer(&path)) {
+            done.push(format!("{section}.{path}: {v} -> {to}"));
+            *slot = to;
+        }
+    }
+    done
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stored_values_outside_their_range_are_listed() {
+        let c = json!({"panic": {"window_secs": 0, "executors": 0}, "joinraid": {"count": 10}});
+        assert_eq!(stored_outside(&c), ["panic.window_secs = 0"]);
+        assert!(stored_outside(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn clamp_pulls_numbers_into_range_and_says_which() {
+        let mut d = json!({"count": 800, "span_ms": 5_000, "voice": {}});
+        let done = clamp("joinraid", &mut d, &Value::Null);
+        assert_eq!(done, ["joinraid.count: 800 -> 500"]);
+        assert_eq!(d["count"], json!(500));
+        assert!(check("joinraid", &d, &Value::Null).is_ok());
+        let mut d = json!({"limits": {"Ban": {"per_hour": "x", "heat": 0}}});
+        assert_eq!(
+            clamp("antinuke", &mut d, &Value::Null),
+            ["antinuke.limits.Ban.heat: 0 -> 1"]
+        );
+        assert!(
+            check("antinuke", &d, &Value::Null).is_err(),
+            "a non-number is still refused"
+        );
+    }
 
     #[test]
     fn ranges_by_path() {
@@ -168,8 +297,33 @@ mod tests {
         assert!(check("joinraid", &voice("span_ms", 300_000), &Value::Null).is_ok());
         assert!(check("joinraid", &voice("active_ms", 59_999), &Value::Null).is_err());
         assert!(check("joinraid", &voice("active_ms", 3_600_001), &Value::Null).is_err());
-        assert!(check("joinraid", &json!({"count": 1000}), &Value::Null).is_ok());
-        assert_eq!(for_path("joinraid", "count"), None);
+        assert!(check("joinraid", &json!({"count": 1000}), &Value::Null).is_err());
+        assert_eq!(for_path("joinraid", "count"), Some(RAID_COUNT));
+        let at = |s: &str, p: &str, v: i64| {
+            let mut doc = json!({});
+            let keys: Vec<&str> = p.split('.').collect();
+            let mut cur = &mut doc;
+            for k in &keys[..keys.len() - 1] {
+                cur = cur.as_object_mut().unwrap().entry(*k).or_insert(json!({}));
+            }
+            cur[keys[keys.len() - 1]] = json!(v);
+            check(s, &doc, &Value::Null)
+        };
+        for (s, p, (lo, hi)) in FIXED {
+            assert!(at(s, p, lo).is_ok() && at(s, p, hi).is_ok(), "{s}.{p}");
+            assert!(
+                at(s, p, lo - 1).is_err() && at(s, p, hi + 1).is_err(),
+                "{s}.{p}"
+            );
+        }
+        assert!(at("automod", "strike.strike_timeout_ms", 0).is_err());
+        assert!(
+            at("panic", "executors", 0).is_ok(),
+            "0 turns panic mode off"
+        );
+        let warn = |p: i64| json!({"warn_actions": [{"points": 3}, {"points": p}]});
+        assert!(check("misc", &warn(1000), &Value::Null).is_ok());
+        assert!(check("misc", &warn(0), &Value::Null).is_err());
         // A value saved before the limits may stay; changing it must fit.
         let old = nuke("heat", json!(0));
         assert!(check("antinuke", &nuke("heat", json!(0)), &old).is_ok());

@@ -2,7 +2,7 @@
 use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::join::{Action, GateFilter, RaidCfg};
 use tommybot_logging::{embed::{self, NO}, LogKind};
-use tommybot_core::limits::{NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, NSFW_THRESHOLD, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, VOICE_COUNT};
+use tommybot_core::limits::{BAN_PURGE_DAYS, MENTION_COUNT, NUKE_HEAT, NUKE_HOUR, NUKE_MINUTE, NSFW_THRESHOLD, PANIC_HEAT_EXECUTORS, RAID_COUNT, SLOW_CALM, SLOW_ON, SLOW_PCT, SLOW_SECS, STRIKE_CAP, STRIKE_MULTIPLIER, VOICE_COUNT, WARN_POINTS};
 use tommybot_core::warn::Action as WarnAction;
 use twilight_model::id::{marker::RoleMarker, Id};
 
@@ -149,22 +149,22 @@ pub(super) static HEAT: Module = Module {
         r!("2", "Spam Filters", "automod.anti_spam", Kind::Bool, |c| on(c.automod.anti_spam)),
         r!("3", "Max Heat Percentage", "automod.heat.max", Kind::Num(1.0), |c| pct(c.automod.heat.max)),
         r!("4", "Heat Degradation", "automod.heat.decay_per_sec", Kind::Num(0.01), |c| format!("{} per second", pct(c.automod.heat.decay_per_sec * 100.0))),
-        r!("5", "Strikes CAP", "automod.strike.cap", Kind::Int(1, 100), |c| c.automod.strike.cap.to_string()),
+        r!("5", "Strikes CAP", "automod.strike.cap", Kind::Int(STRIKE_CAP.0, STRIKE_CAP.1), |c| c.automod.strike.cap.to_string()),
         r!("6", "Webhook Coverage", "automod.monitor_webhooks", Kind::Bool, |c| on(c.automod.monitor_webhooks)),
         group!("7", "Auto Timeouts"),
         r!("7a", "Status", "automod.strike.enabled", Kind::Bool, |c| on(c.automod.strike.enabled)),
         r!("7b", "Regular Strike Duration", "automod.strike.strike_timeout_ms", Kind::Ms, |c| ms(c.automod.strike.strike_timeout_ms)),
         r!("7c", "CAP Strike Duration", "automod.strike.cap_timeout_ms", Kind::Ms, |c| ms(c.automod.strike.cap_timeout_ms)),
         r!("7d", "Multiplier Status", "automod.strike.multiply", Kind::Bool, |c| on(c.automod.strike.multiply)),
-        r!("7e", "Multiplier Percentage", "automod.strike.multiplier_pct", Kind::Int(100, 1000), |c| format!("{}%", c.automod.strike.multiplier_pct)),
+        r!("7e", "Multiplier Percentage", "automod.strike.multiplier_pct", Kind::Int(STRIKE_MULTIPLIER.0, STRIKE_MULTIPLIER.1), |c| format!("{}%", c.automod.strike.multiplier_pct)),
         r!("8", "Reset Heat On Timeout", "automod.strike.reset_heat_on_timeout", Kind::Bool, |c| on(c.automod.strike.reset_heat_on_timeout)),
         group!("9", "Heat Panic Mode"),
         r!("9a", "Status", "panic.heat_algorithm", Kind::Bool, |c| on(c.panic.heat_algorithm)),
-        r!("9b", "Trigger", "panic.heat_executors", Kind::Int(1, 50), |c| format!("{} Raiders", c.panic.heat_executors)),
+        r!("9b", "Trigger", "panic.heat_executors", Kind::Int(PANIC_HEAT_EXECUTORS.0, PANIC_HEAT_EXECUTORS.1), |c| format!("{} Raiders", c.panic.heat_executors)),
         r!("9c", "Panic Duration", "panic.duration_secs", Kind::Secs, |c| embed::duration(c.panic.duration_secs as i64)),
         group!("10", "Auto Server Lockdown"),
         r!("10a", "Status", "automod.auto_lockdown.enabled", Kind::Bool, |c| on(c.automod.auto_lockdown.enabled)),
-        r!("10b", "Mentions", "automod.auto_lockdown.mention_count", Kind::Int(1, 1000), |c| c.automod.auto_lockdown.mention_count.to_string()),
+        r!("10b", "Mentions", "automod.auto_lockdown.mention_count", Kind::Int(MENTION_COUNT.0, MENTION_COUNT.1), |c| c.automod.auto_lockdown.mention_count.to_string()),
         r!("10c", "Under", "automod.auto_lockdown.mention_window_ms", Kind::Ms, |c| ms(c.automod.auto_lockdown.mention_window_ms)),
         group!("11", "Auto Slowmode"),
         r!("11a", "Status", "automod.auto_slowmode.enabled", Kind::Bool, |c| on(c.automod.auto_slowmode.enabled)),
@@ -331,7 +331,7 @@ pub(super) static JOINRAID: Module = Module {
         r!("2", "Action", "joinraid.action", Kind::Choice(ACTIONS), |c| act(raid(c).action)),
         r!("3", "Warned Roles", "joinraid.warned_roles", Kind::Roles, |c| mentions(raid(c).warned_roles.iter().filter_map(|r| r.parse().ok()), "@&")),
         group!("4", "Static Flags"),
-        r!("4a", "Minimum Trigger", "joinraid.count", Kind::Int(2, 500), |c| format!("{} accounts.", raid(c).count)),
+        r!("4a", "Minimum Trigger", "joinraid.count", Kind::Int(RAID_COUNT.0, RAID_COUNT.1), |c| format!("{} accounts.", raid(c).count)),
         r!("4b", "Join History", "joinraid.span_ms", Kind::Ms, |c| format!("Past {}", ms(raid(c).span_ms))),
         r!("4c", "Trigger Duration", "joinraid.active_ms", Kind::Ms, |c| ms(raid(c).active_ms)),
         r!("4d", "Accounts Type", "joinraid.suspicious_only", Kind::Choice(&[("all", "false"), ("suspicious", "true")]), |c| if raid(c).suspicious_only { "Suspicious" } else { "All" }.into()),
@@ -344,7 +344,7 @@ pub(super) static JOINRAID: Module = Module {
         r!("8a", "Status", "joinraid.id_flag_min", Kind::Switch("4", "null"), |c| on(raid(c).id_flag_min.is_some())),
         r!("8b", "Granularity", "joinraid.id_granularity", Kind::Choice(&[("adapt", "\"Adaptive\""), ("h", "\"Hour\""), ("d", "\"Day\""), ("m", "\"Month\"")]), |c| format!("{:?}", raid(c).id_granularity)),
         r!("8c", "Margin", "joinraid.id_margin_ms", Kind::Ms, |c| ms(raid(c).id_margin_ms)),
-        r!("8d", "Minimum Matches", "joinraid.id_flag_min", Kind::Int(2, 500), |c| raid(c).id_flag_min.map_or(NO.into(), |n| n.to_string())),
+        r!("8d", "Minimum Matches", "joinraid.id_flag_min", Kind::Int(RAID_COUNT.0, RAID_COUNT.1), |c| raid(c).id_flag_min.map_or(NO.into(), |n| n.to_string())),
         r!("9", "Spammer Flag", "joinraid.flag_spammer", Kind::Bool, |c| on(raid(c).flag_spammer)),
         group!("10", "Voice Raid"),
         r!("10a", "Status", "joinraid.voice.enabled", Kind::Bool, |c| on(raid(c).voice.enabled)),
@@ -385,7 +385,7 @@ pub(super) static MISC: Module = Module {
         r!("1", "Prefix", "misc.prefix", Kind::Text, |c| c.misc.prefix.clone()),
         group!("2", "Moderation"),
         r!("2a", "Confirm Actions", "misc.confirm", Kind::Bool, |c| on(c.misc.confirm)),
-        r!("2b", "Days Purged On Bans", "misc.ban_purge_days", Kind::Int(0, 7), |c| c.misc.ban_purge_days.to_string()),
+        r!("2b", "Days Purged On Bans", "misc.ban_purge_days", Kind::Int(BAN_PURGE_DAYS.0, BAN_PURGE_DAYS.1), |c| c.misc.ban_purge_days.to_string()),
         r!("2c", "Default Timeout Duration", "misc.default_timeout_secs", Kind::Secs, |c| embed::duration(c.misc.timeout_secs() as i64)),
         r!("2d", "Anonymous Mod", "misc.hide_staff_in_dms", Kind::Bool, |c| on(c.misc.hide_staff_in_dms)),
         r!("2e", "DM Targets", "misc.always_dm", Kind::Bool, |c| on(c.misc.always_dm)),
@@ -397,7 +397,7 @@ pub(super) static MISC: Module = Module {
         r!("3a", "Status", "misc.auto_warn_actions", Kind::Bool, |c| on(c.misc.auto_warn_actions)),
         // The panel has one warn action; ours is a list, so the prefix edits its first entry.
         r!("3b", "Warn Action", "misc.warn_actions.0.action", Kind::Choice(&[("timeout", "\"timeout\""), ("kick", "\"kick\""), ("ban", "\"ban\"")]), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| match t.action { WarnAction::Timeout { .. } => "Timeout".into(), a => format!("{a:?}") })),
-        r!("3c", "Max Warns", "misc.warn_actions.0.points", Kind::Int(1, 1000), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| t.points.to_string())),
+        r!("3c", "Max Warns", "misc.warn_actions.0.points", Kind::Int(WARN_POINTS.0, WARN_POINTS.1), |c| c.misc.warn_actions.first().map_or(NO.into(), |t| t.points.to_string())),
         r!("4", "Compact Outputs", "misc.compact_replies", Kind::Bool, |c| on(c.misc.compact_replies)),
         r!("5", "Informing Messages", "misc.delete_replies_secs", Kind::Switch("5", "null"), |c| on(c.misc.delete_replies_secs.is_some())),
         r!("6", "Enforce Quarantine Perms", "misc.enforce_quarantine_perms", Kind::Bool, |c| on(c.misc.enforce_quarantine_perms)),

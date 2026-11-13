@@ -318,6 +318,18 @@ pub const CATALOG: &[PermSection] = &[
     },
 ];
 
+/// Perms that make a permit's holders owners or dashboard editors.
+pub const HANDOVER_PERMS: &[&str] = &["owner", "dashboard_edit"];
+
+/// Whether a permit is guarded: an ownership change pauses its roles, and a rollback never makes
+/// a role guarded again (D47). Strong by default, so a new flag is covered without a change here.
+pub fn guarded<S: AsRef<str>>(perms: &[S], whitelist: &[S]) -> bool {
+    perms.iter().any(|p| HANDOVER_PERMS.contains(&p.as_ref()))
+        || whitelist
+            .iter()
+            .any(|w| !WEAK_WHITELIST.contains(&w.as_ref()))
+}
+
 /// Keys older setups may already hold; saving them stays allowed.
 const LEGACY: &[&str] = &["lockdown", "antinuke"];
 
@@ -386,6 +398,25 @@ impl RateLimiter {
     }
 }
 
+impl RateLimiter {
+    /// Puts back a use from before a restart (N3). Call oldest first.
+    pub fn seed(&mut self, actor: UserId, action: &str, at: Instant) {
+        self.hits
+            .entry((actor, action.to_owned()))
+            .or_default()
+            .push_back(at);
+    }
+}
+
+/// The limit a command use counts against: the permit's own for `action`, else `fallback`
+/// (anti-nuke's limit for the same action, D5). None: unlimited (no permit, or immune).
+pub fn command_limit(level: &Level, action: &str, fallback: Option<Limit>) -> Option<Limit> {
+    match level {
+        Level::Custom { limits, .. } => limits.get(action).copied().or(fallback),
+        _ => None,
+    }
+}
+
 /// Whether `actor` may run `action` now; `false` means the caller quarantines the actor.
 pub fn command_allowed(
     rl: &mut RateLimiter,
@@ -394,12 +425,45 @@ pub fn command_allowed(
     action: &str,
     now: Instant,
 ) -> bool {
-    match level {
-        Level::Custom { limits, .. } => limits
-            .get(action)
-            .is_none_or(|l| rl.allow(actor, action, *l, now)),
-        _ => true,
+    command_limit(level, action, None).is_none_or(|l| rl.allow(actor, action, l, now))
+}
+
+/// The live EO/TA lists and custom permits as one document: the `permits` copy in each config version.
+pub async fn snapshot(c: &mut sqlx::PgConnection, guild: i64) -> sqlx::Result<serde_json::Value> {
+    let users = |table: &str| {
+        format!("select user_id::text from {table} where guild_id = $1 order by user_id")
+    };
+    let eo: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(users("extra_owners")))
+        .bind(guild)
+        .fetch_all(&mut *c)
+        .await?;
+    let ta: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(users("trusted_admins")))
+        .bind(guild)
+        .fetch_all(&mut *c)
+        .await?;
+    type Row = (
+        i64,
+        String,
+        i32,
+        Vec<String>,
+        serde_json::Value,
+        Vec<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as("select id, name, rank, perms, limits, whitelist from permits where guild_id = $1 order by rank desc, name")
+        .bind(guild)
+        .fetch_all(&mut *c)
+        .await?;
+    let mut custom = vec![];
+    for (id, name, rank, perms, limits, whitelist) in rows {
+        let roles: Vec<String> = sqlx::query_scalar(
+            "select role_id::text from permit_roles where permit_id = $1 order by role_id",
+        )
+        .bind(id)
+        .fetch_all(&mut *c)
+        .await?;
+        custom.push(serde_json::json!({"name": name, "rank": rank, "perms": perms, "limits": limits, "whitelist": whitelist, "roles": roles}));
     }
+    Ok(serde_json::json!({"eo": eo, "ta": ta, "custom": custom}))
 }
 
 /// Every role tied to one of the guild's permits; never handed out by verification or sticky roles.
@@ -412,6 +476,21 @@ pub async fn permit_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Ve
     .await
 }
 
+/// The permits whose role anyone may hand out (D16): they give no moderation, dashboard,
+/// lockdown, backup, revert or anti-nuke rights. Every other permit's role is guarded: handing it
+/// out takes the role back and quarantines the actor unless they are Owner, Extra Owner or
+/// Trusted Admin. A permit key not listed here (a new one too) is guarded.
+pub const WEAK_PERMS: &[&str] = &[
+    "cases",
+    "mod_stats",
+    "reports",
+    "notes_view",
+    "notes_manage",
+    "tickets",
+];
+/// Whitelist flags of the same kind. Not `automod`: an automod-immune role lets raid accounts skip spam heat and slowmode (Thomas).
+pub const WEAK_WHITELIST: &[&str] = &["words", "links", "reports"];
+
 /// Roles of the guild's permits that hold `perm` (staff for tickets).
 pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx::Result<Vec<i64>> {
     sqlx::query_scalar(
@@ -421,6 +500,24 @@ pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx:
     .bind(guild_id)
     .bind(perm)
     .fetch_all(pool)
+    .await
+}
+
+/// The member's permit: the highest-ranked one among `roles` (ties: the oldest), as
+/// (rank, perms, whitelist, limits). Only that permit counts, never a union of several; the bot
+/// and the dashboard both read it here (D72).
+pub async fn top_permit(
+    pool: &sqlx::PgPool,
+    guild_id: i64,
+    roles: &[i64],
+) -> sqlx::Result<Option<(i32, Vec<String>, Vec<String>, serde_json::Value)>> {
+    sqlx::query_as(
+        "SELECT p.rank, p.perms, p.whitelist, p.limits FROM permits p JOIN permit_roles r ON r.permit_id = p.id
+         WHERE p.guild_id = $1 AND r.role_id = ANY($2) ORDER BY p.rank DESC, p.id LIMIT 1",
+    )
+    .bind(guild_id)
+    .bind(roles)
+    .fetch_optional(pool)
     .await
 }
 
@@ -455,15 +552,7 @@ pub async fn resolve(
     if ta {
         return Ok(Level::TrustedAdmin);
     }
-    // Highest-ranked permit among the member's roles; perms are the union of that permit only.
-    let row: Option<(i32, Vec<String>, Vec<String>, serde_json::Value)> = sqlx::query_as(
-        "SELECT p.rank, p.perms, p.whitelist, p.limits FROM permits p JOIN permit_roles r ON r.permit_id = p.id
-         WHERE p.guild_id = $1 AND r.role_id = ANY($2) ORDER BY p.rank DESC LIMIT 1",
-    )
-    .bind(guild_id)
-    .bind(roles)
-    .fetch_optional(pool)
-    .await?;
+    let row = top_permit(pool, guild_id, roles).await?;
     Ok(row.map_or(Level::None, |(rank, perms, whitelist, limits)| {
         // Malformed entries are dropped one by one so a bad action does not void the rest.
         let limits = limits
@@ -491,6 +580,32 @@ mod tests {
             assert_eq!(known(d.key, d.flag), d.key != "owner");
         }
         assert!(known("antinuke", true) && !known("made_up", false) && !known("ban", true));
+    }
+
+    #[test]
+    fn only_filter_flags_are_weak() {
+        let g = |p: &[&str], w: &[&str]| guarded(p, w);
+        assert!(g(&["dashboard_edit"], &[]) && g(&["owner"], &[]));
+        for f in [
+            "all",
+            "antinuke",
+            "quarantine",
+            "wl_role_delete",
+            "automod",
+            "a_flag_from_later",
+        ] {
+            assert!(g(&[], &[f]), "{f}");
+        }
+        assert!(!g(&["ban", "warn"], &["words", "links", "reports"]));
+        // Every catalog flag that is not listed weak is guarded.
+        for d in CATALOG.iter().flat_map(|s| s.items).filter(|d| d.flag) {
+            assert_eq!(
+                g(&[], &[d.key]),
+                !WEAK_WHITELIST.contains(&d.key),
+                "{}",
+                d.key
+            );
+        }
     }
 
     #[test]
@@ -633,6 +748,18 @@ mod tests {
         assert!(!command_allowed(&mut rl, 1, &lvl, "ban", t));
         assert!(command_allowed(&mut rl, 1, &lvl, "kick", t)); // no limit configured
         assert!(command_allowed(&mut rl, 1, &Level::TrustedAdmin, "ban", t));
+        // Without its own limit, a permit takes the fallback (anti-nuke's); immune never.
+        let nuke = Limit {
+            per_min: 4,
+            per_hour: 14,
+        };
+        assert_eq!(command_limit(&lvl, "kick", Some(nuke)), Some(nuke));
+        assert_eq!(command_limit(&lvl, "ban", Some(nuke)).unwrap().per_min, 1);
+        assert_eq!(command_limit(&Level::Owner, "ban", Some(nuke)), None);
+        // A use from before a restart still counts.
+        let mut rl = RateLimiter::default();
+        rl.seed(1, "ban", t);
+        assert!(!command_allowed(&mut rl, 1, &lvl, "ban", t));
     }
 
     #[tokio::test]

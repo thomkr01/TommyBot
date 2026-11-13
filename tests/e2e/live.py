@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|panic|verify_delete|dm_timing|purge|emojis|edit|restart|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke, panic, verify_delete and dm_timing also need
+Usage: live.py spam|lock|mention_lock|nuke|panic|verify_delete|dm_timing|purge|emojis|edit|restart|g2b_*|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke, panic, verify_delete and dm_timing also need
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import functools
@@ -20,6 +20,9 @@ def call(method, path, token=None, body=None, auth=True, soft=False):
     headers = {"Content-Type": "application/json", "User-Agent": "DiscordBot (tommybot-e2e, 1)"}
     if auth:
         headers["Authorization"] = f"Bot {token or os.environ['DISCORD_TOKEN']}"
+    # Discord refuses some body-less DELETEs that carry a JSON Content-Type (400, 50109); `{}` works live.
+    if body is None and method == "DELETE":
+        body = {}
     data = json.dumps(body).encode() if body is not None else None
     while True:
         req = urllib.request.Request(API + path, data, headers, method=method)
@@ -274,7 +277,8 @@ def panic():
     since = snowflake_now()
     try:
         attack_channels(4, attacker)
-        locked = wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n > 0)
+        # Under the bot's rate limits (it shares the token with this script) the lock can take ~55 s.
+        locked = wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n > 0, tries=60)
         time.sleep(3)
         anti = titled("anti_nuke", since, "Anti Nuke Report:")
         trig = titled("panic", since, "Panic Mode Triggered! [Anti Nuke]")
@@ -449,7 +453,7 @@ def restart():
     time.sleep(15)  # the unlock comes due while the bot is down
     held = int(sql(locks))
     log = open("target/live-bot.log", "a")
-    bot = subprocess.Popen(["./target/release/tommybot"], stdout=log, stderr=log)
+    bot = subprocess.Popen([os.environ.get("TOMMYBOT_BIN", "./target/release/tommybot")], stdout=log, stderr=log)
     open(pid_file, "w").write(str(bot.pid))
     unlocked = wait_for(locks, lambda n: n == 0, 30)
     back = can_send(chan)
@@ -556,13 +560,765 @@ def edit():
                  f"edit: clean message kept={first}, deleted after masked-invite edit={gone}, automod logged")
 
 
+
+# g2b: automod reads app embeds, link buttons, forwards and thread renames (live/g2b.md).
+G2B_WORD = "zqxbadword"
+
+
+def png():
+    """A plain 64x64 grey PNG, made here so no image is downloaded."""
+    import struct
+    import zlib
+    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+    raw = b"".join(b"\0" + b"\x80" * 64 * 3 for _ in range(64))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def hook_file(method, path, body):
+    """A webhook post or edit carrying png() as files[0] (multipart); the path holds the hook token."""
+    b = "e2eg2bboundary"
+    body = {**body, "attachments": [{"id": 0, "filename": "e2e.png"}]}
+    data = (f"--{b}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{json.dumps(body)}\r\n"
+            f"--{b}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"e2e.png\"\r\n"
+            f"Content-Type: image/png\r\n\r\n").encode() + png() + f"\r\n--{b}--\r\n".encode()
+    req = urllib.request.Request(API + path, data, method=method, headers={
+        "Content-Type": f"multipart/form-data; boundary={b}", "User-Agent": "DiscordBot (tommybot-e2e, 1)"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"{method} /webhooks/...: HTTP {e.code} {e.read()[:200]!r}")
+
+
+def attacker_hook(name):
+    """(webhook, base path with token) in #general, made by the attacker so it is not exempt."""
+    hook = call("POST", f"/channels/{text_channel('general')}/webhooks", os.environ["ATTACKER_TOKEN"], {"name": name})
+    return hook, f"/webhooks/{hook['id']}/{hook['token']}"
+
+
+def gone_within(chan, msg, tries=10):
+    for _ in range(tries):
+        time.sleep(2)
+        if call("GET", f"/channels/{chan}/messages/{msg}", soft=True) is None:
+            return True
+    return False
+
+
+def scans(msg):
+    return f"select count(*) from nsfw_scans where guild_id = {GUILD} and message_id = {msg}"
+
+
+def automod_back():
+    set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True})
+
+
+def g2b_hook_app_text(kind):
+    """D78: an invite only in a webhook's embed (kind "embed") or link button ("button") is deleted."""
+    set_config("automod", {"enabled": True, "monitor_webhooks": True, "filters": {"invites": {"enabled": True}}})
+    since = snowflake_now()
+    chan = text_channel("general")
+    hook, base = attacker_hook(f"e2e-g2b-{kind}")
+    body = {"content": f"e2e g2b {kind}: nothing to see"}
+    if kind == "embed":
+        body["embeds"] = [{"title": "e2e", "description": "join https://discord.gg/e2etest"}]
+    else:
+        body["components"] = [{"type": 1, "components": [
+            {"type": 2, "style": 5, "label": "Join", "url": "https://discord.gg/e2etest"}]}]
+    sent = call("POST", base + "?wait=true&with_components=true", body=body, auth=False)
+    shown = bool(sent.get("embeds") if kind == "embed" else sent.get("components"))
+    gone = gone_within(chan, sent["id"])
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+    automod_back()
+    print(f"cleaned: webhook e2e-g2b-{kind} and its message")
+    # A verified owner only spares the hook from spam()'s webhook delete (delete_new_webhooks);
+    # its messages are filtered like any hook's (webhook_exempt checks the antinuke whitelist).
+    return check(shown and gone and logged("auto_mod", since),
+                 f"g2b_hook_{kind}: {kind} posted={shown}, deleted={gone}, automod logged")
+
+
+def g2b_thread_rename():
+    """D40: a thread renamed to a blacklisted word stays and is logged; a lookalike-letter name goes on create."""
+    set_config("automod", {"enabled": True, "filters": {"words": {"filter": {"enabled": True}, "strict": [G2B_WORD]}}})
+    since = snowflake_now()
+    chan = text_channel("general")
+    tok = os.environ["ATTACKER_TOKEN"]
+    exists = lambda t: call("GET", f"/channels/{t}", soft=True) is not None
+    clean = call("POST", f"/channels/{chan}/threads", tok, {"name": "e2e g2b clean", "type": 11})
+    time.sleep(3)
+    kept = exists(clean["id"])
+    call("PATCH", f"/channels/{clean['id']}", tok, {"name": f"e2e g2b {G2B_WORD}"}, soft=True)
+    flagged = False
+    for _ in range(6):
+        time.sleep(2)
+        if logged("auto_mod", since, "Thread name flagged"):
+            flagged = True
+            break
+    # A ThreadUpdate names no actor, so a rename is only logged.
+    renamed_kept = exists(clean["id"])
+    wide = "".join(chr(ord(c) + 0xFEE0) for c in G2B_WORD)  # fullwidth letters
+    look = call("POST", f"/channels/{chan}/threads", tok, {"name": f"e2e g2b {wide}", "type": 11})
+    time.sleep(4)
+    look_gone = not exists(look["id"])
+    for t in (clean["id"], look["id"]):
+        call("DELETE", f"/channels/{t}", soft=True)
+    automod_back()
+    print("cleaned: both e2e g2b threads")
+    return check(kept and flagged and renamed_kept and look_gone and logged("auto_mod", since, "Thread deleted"),
+                 f"g2b_thread_rename: clean kept={kept}, rename logged={flagged}, renamed kept={renamed_kept}, "
+                 f"lookalike deleted={look_gone}")
+
+
+def g2b_nsfw_hook_off(monitor=False):
+    """Follow-up: with Monitor Webhooks off a webhook's link preview image is not scanned (no row)."""
+    set_config("automod", {"enabled": True, "monitor_webhooks": monitor,
+                           "filters": {"nsfw_images": {"enabled": True}}})
+    chan = text_channel("general")
+    app = call("GET", "/applications/@me")["id"]
+    emojis = call("GET", f"/applications/{app}/emojis")["items"]
+    # A test bot with no uploaded emojis falls back to Discord's plain default avatar.
+    image = (f"https://cdn.discordapp.com/emojis/{emojis[0]['id']}.png?size=64" if emojis
+             else "https://cdn.discordapp.com/embed/avatars/0.png?size=64")
+    hook, base = attacker_hook("e2e-g2b-nsfw")
+    # Discord adds the preview in a MessageUpdate without edited_timestamp: the path main scanned.
+    sent = call("POST", base + "?wait=true", body={"content": image},
+                auth=False)
+    preview = False
+    for _ in range(10):
+        time.sleep(2)
+        m = call("GET", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+        if m and m["embeds"]:
+            preview = True
+            print(f"g2b_nsfw_hook: preview message edited_timestamp={m.get('edited_timestamp')!r}")
+            break
+    time.sleep(8)  # the scan queue
+    rows = int(sql(scans(sent["id"])))
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+    sql(f"delete from nsfw_scans where guild_id = {GUILD} and message_id = {sent['id']}")
+    automod_back()
+    print("cleaned: webhook e2e-g2b-nsfw, its message and scan rows")
+    want = (lambda n: n > 0) if monitor else (lambda n: n == 0)
+    return check(preview and want(rows),
+                 f"g2b_nsfw_hook_{'on' if monitor else 'off'}: preview arrived={preview}, scan rows={rows}")
+
+
+def g2b_hook_edit_file():
+    """Follow-up: a webhook edit that adds a file has the file scanned."""
+    set_config("automod", {"enabled": True, "monitor_webhooks": True, "filters": {"nsfw_images": {"enabled": True}}})
+    chan = text_channel("general")
+    hook, base = attacker_hook("e2e-g2b-editfile")
+    sent = call("POST", base + "?wait=true", body={"content": "e2e g2b edit file"}, auth=False)
+    time.sleep(2)
+    edited = hook_file("PATCH", f"{base}/messages/{sent['id']}", {"content": "e2e g2b edit file"})
+    # Payload question: does an edit that adds a file carry edited_timestamp (REST and the stored message)?
+    stored = call("GET", f"/channels/{chan}/messages/{sent['id']}", soft=True) or {}
+    print(f"g2b_hook_edit_file: edited_timestamp in PATCH reply={edited.get('edited_timestamp')!r}, "
+          f"in GET={stored.get('edited_timestamp')!r}")
+    rows = wait_for(scans(sent["id"]), lambda n: n > 0, 8)
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+    sql(f"delete from nsfw_scans where guild_id = {GUILD} and message_id = {sent['id']}")
+    automod_back()
+    print("cleaned: webhook e2e-g2b-editfile, its message and scan rows")
+    return check(bool(edited.get("attachments")) and rows > 0,
+                 f"g2b_hook_edit_file: file added={bool(edited.get('attachments'))}, scan rows={rows}")
+
+
+def g2b_forward():
+    """D33 (manual): the owner forwards a message with an image into #general; the forward is scanned."""
+    set_config("automod", {"enabled": True, "filters": {"nsfw_images": {"enabled": True}}})
+    chan = text_channel("general")
+    owner = call("GET", f"/guilds/{GUILD}")["owner_id"]
+    hook, base = attacker_hook("e2e-g2b-source")
+    src = hook_file("POST", base + "?wait=true", {"content": "e2e g2b: forward this message into #general"})
+    print(f"MANUAL: the owner forwards message {src['id']} (with the grey image) into #general within 120 s")
+    fwd = None
+    for _ in range(60):
+        time.sleep(2)
+        fwd = next((m for m in call("GET", f"/channels/{chan}/messages?after={src['id']}&limit=20")
+                    if m["author"]["id"] == owner and m.get("message_snapshots")), None)
+        if fwd:
+            break
+    rows = wait_for(scans(fwd["id"]), lambda n: n > 0, 8) if fwd else 0
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    for m in (src, fwd):
+        if m:
+            call("DELETE", f"/channels/{chan}/messages/{m['id']}", soft=True)
+            sql(f"delete from nsfw_scans where guild_id = {GUILD} and message_id = {m['id']}")
+    automod_back()
+    print("cleaned: webhook e2e-g2b-source, both messages and scan rows")
+    return check(bool(fwd) and rows > 0, f"g2b_forward: forward seen={bool(fwd)}, scan rows={rows}")
+
+def section(name):
+    """The newest saved config section, or None when the config has no such key."""
+    raw = sql(f"select config->'{name}' from guild_config where guild_id = {GUILD} order by version desc limit 1")
+    return json.loads(raw) if raw else None
+
+
+def restore_section(name, old):
+    """Puts a section back as `section` read it: the old value, or no key at all."""
+    if old is not None:
+        return set_config(name, old)
+    sql(f"""insert into guild_config (guild_id, version, config)
+            select {GUILD}, max(version) + 1,
+                   (select config from guild_config where guild_id = {GUILD} order by version desc limit 1) - '{name}'
+            from guild_config where guild_id = {GUILD};
+            select pg_notify('config_changed', '{GUILD}');""")
+    time.sleep(2)
+
+
+def incidents():
+    return int(sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}"))
+
+
+def wait_report(since, tries=20):
+    for _ in range(tries):
+        report = [e for _, e in titled("anti_nuke", since, "Anti Nuke Report:")]
+        if report:
+            return report
+        time.sleep(3)
+    return []
+
+
+def attacker_setup():
+    attacker = os.environ["ATTACKER_TOKEN"]
+    user = attacker_id()
+    role = bot_role_of(user)
+    if role is None:
+        raise SystemExit("the attacker bot is not on the test server: invite it again")
+    return attacker, user, role, int(role["permissions"]) or 8
+
+
+def g1_stale():
+    """D1: a nuker released by hand with its quarantines row left behind is contained again."""
+    attacker, user, role, perms = attacker_setup()
+    antinuke_on()
+    try:
+        before = incidents()
+        since = snowflake_now()
+        attack_channels(6, attacker)
+        first = wait_for(f"select count(*) from nuke_incidents where guild_id = {GUILD}",
+                         lambda n: n > before, tries=30)
+        held = contained(user)
+        # Its report lands after the incident row; the control must not count it.
+        first_report = bool(wait_report(since))
+        clean_nuke_channels()
+        # Control: still held, so its calls fail and nothing new is written.
+        since = snowflake_now()
+        attack_channels(6, attacker)
+        time.sleep(20)
+        control = not wait_report(since, tries=1)
+        clean_nuke_channels()
+        # Released by hand, row kept (not free_attacker).
+        call("PATCH", f"/guilds/{GUILD}/roles/{role['id']}", body={"permissions": str(perms)})
+        call("DELETE", f"/guilds/{GUILD}/members/{user}/roles/{quarantine_role()}", soft=True)
+        time.sleep(2)
+        rows = int(sql(f"select count(*) from quarantines where guild_id = {GUILD} and user_id = {user}"))
+        released = contained(user)
+        since = snowflake_now()
+        attack_channels(6, attacker)
+        # Within 10 minutes the bot extends the same nuke case (record_nuke, NUKE_GAP), so the
+        # incident row count stays; a second Anti Nuke Report is the full contain.
+        report = wait_report(since, tries=30)
+        again = contained(user)
+        second = incidents()
+    finally:
+        clean_nuke_channels()
+        free_attacker(user, perms)
+    print(f"g1_stale: first contain {held}, control no-op={control}, row kept={rows}, released {released}, "
+          f"incidents {before} -> {first} -> {second}, contained again {again}, second report="
+          f"{[e.get('description', '')[:40] for e in report]}")
+    return check(first > before and all(held) and first_report and control and rows == 1
+                 and released == (True, False, False) and all(again) and bool(report),
+                 "g1_stale: a hand-released nuker with a leftover row is contained and reported again")
+
+
+def quarantine_overwrite_of(chan):
+    q = quarantine_role()
+    o = next((o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == q), None)
+    return o and (int(o["allow"]), int(o["deny"]))
+
+
+def sanitized_channel(chan, since):
+    """An overwrite create (13) or update (14) audit entry on `chan` with the sanitize reason."""
+    for t in (13, 14):
+        for e in call("GET", f"/guilds/{GUILD}/audit-logs?action_type={t}&limit=50")["audit_log_entries"]:
+            if (int(e["id"]) > int(since) and e.get("target_id") == chan
+                    and "Sanitizing the channel" in (e.get("reason") or "")):
+                return True
+    return False
+
+
+def g1_verify_channel():
+    """D55: enforce_quarantine keeps the verification channel's readable overwrite on a ChannelUpdate."""
+    old_misc, old_ver, old_anti = section("misc"), section("verification"), section("antinuke")
+    antinuke_on()
+    q = quarantine_role()
+    made = []
+    try:
+        chan = call("POST", f"/guilds/{GUILD}/channels", body={
+            "name": "g1-verify", "permission_overwrites": [{"id": q, "type": 0, "allow": "66560", "deny": "2048"}]})
+        made.append(chan["id"])
+        set_config("verification", {**(old_ver or {}), "enabled": True, "mode": "Button", "channel": chan["id"]})
+        set_config("misc", {**(old_misc or {}), "enforce_quarantine_perms": True})
+        start = quarantine_overwrite_of(chan["id"])
+        since = snowflake_now()
+        call("PATCH", f"/channels/{chan['id']}", body={"name": "g1-verify-2"})
+        time.sleep(4)
+        after = quarantine_overwrite_of(chan["id"])
+        hit = sanitized_channel(chan["id"], since)
+        since2 = snowflake_now()
+        other = call("POST", f"/guilds/{GUILD}/channels", body={"name": "g1-other"})
+        made.append(other["id"])
+        time.sleep(4)
+        other_ow = quarantine_overwrite_of(other["id"])
+        other_hit = sanitized_channel(other["id"], since2)
+    finally:
+        # Verification off first, so deleting its channel does not make a new one.
+        restore_section("verification", old_ver)
+        restore_section("misc", old_misc)
+        restore_section("antinuke", old_anti)
+        for c in made:
+            call("DELETE", f"/channels/{c}", soft=True)
+        print(f"cleaned: {len(made)} g1 channels, verification/misc/antinuke sections restored")
+    print(f"g1_verify_channel: verify overwrite {start} -> {after} (sanitize audit={hit}); "
+          f"g1-other overwrite {other_ow} (sanitize audit={other_hit})")
+    # Verification rewrites the plan's 66560/2048 to its own shape (VERIFY_ALLOW, VERIFY_DENY) when
+    # it is turned on; what matters is that View stays allowed after the ChannelUpdate.
+    return check(after == start and after[0] == 66560 and after[1] & 1024 == 0 and not hit and other_ow is not None and other_ow[1] != 0 and other_hit,
+                 "g1_verify_channel: verification overwrite kept, other channel sanitized")
+
+
+def g1_deleted_role():
+    """D6: with the Quarantine role deleted in Discord, a nuking bot is still stripped and not kicked."""
+    attacker, user, role, perms = attacker_setup()
+    old_anti = section("antinuke")
+    gone = call("POST", f"/guilds/{GUILD}/roles", body={"name": "Quarantine-g1", "permissions": "0"})
+    antinuke_on(quarantine_role=gone["id"])
+    call("DELETE", f"/guilds/{GUILD}/roles/{gone['id']}")
+    time.sleep(2)
+    try:
+        since = snowflake_now()
+        before = incidents()
+        attack_channels(6, attacker)
+        after = wait_for(f"select count(*) from nuke_incidents where guild_id = {GUILD}",
+                         lambda n: n > before, tries=30)
+        member = call("GET", f"/guilds/{GUILD}/members/{user}", soft=True)
+        brole = bot_role_of(user)
+        report = wait_report(since)
+        logs = json.dumps([e for m in log_messages("anti_nuke", since) for e in m["embeds"]])
+        saved = sql(f"select saved_roles from quarantines where guild_id = {GUILD} and user_id = {user}")
+    finally:
+        restore_section("antinuke", old_anti)
+        antinuke_on()
+        clean_nuke_channels()
+        if call("GET", f"/guilds/{GUILD}/members/{user}", soft=True) is None:
+            print("ATTENTION: the attacker bot was kicked and must be invited again")
+        else:
+            free_attacker(user, perms)
+    roles = member["roles"] if member else None
+    text = json.dumps(report)
+    print(f"g1_deleted_role: incidents {before} -> {after}, member={member is not None}, roles={roles}, "
+          f"bot role perms={brole and brole['permissions']}, saved roles={saved!r}, "
+          f"'Quarantine role missing' logged={'Quarantine role missing' in logs}, report kicked={'kick' in text.lower()}")
+    print(f"g1_deleted_role: report {text[:600]}")
+    return check(after > before and member is not None and roles == [role["id"]] and brole
+                 and int(brole["permissions"]) == 0 and "Quarantine role missing" in logs,
+                 "g1_deleted_role: contained without a Quarantine role, not kicked")
+
+
+def g2a_panic_lock():
+    """D8: panic mode's end does not lift a lock staff made before panic."""
+    attacker, user, role, perms = attacker_setup()
+    general = text_channel("general")
+    old = {s: section(s) for s in ("backups", "panic", "antinuke")}
+    locks = f"select count(*) from lock_snapshots where guild_id = {GUILD}"
+    antinuke_on()
+    set_config("backups", {"enabled": False})
+    set_config("panic", {"executors": 1, "window_secs": 600, "duration_secs": 60,
+                         "lock_on_trigger": True, "unlock_when_ending": True})
+    since = snowflake_now()
+    # A role lock strips role permissions, it puts no overwrite on #general.
+    role_perms = lambda: {r["name"]: r["permissions"] for r in call("GET", f"/guilds/{GUILD}/roles") if not r.get("managed")}
+    base = role_perms()
+    try:
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'lock', '{{"kind": "role"}}', now())""")
+        wait_for(locks, lambda n: n > 0)
+        time.sleep(3)
+        kinds = sql(f"select string_agg(kind::text, ',') from lock_snapshots where guild_id = {GUILD}")
+        attack_channels(4, attacker)
+        end = ""
+        for _ in range(15):
+            end = sql(f"select payload from scheduled_jobs where guild_id = {GUILD} and kind = 'panic_end'")
+            if end:
+                break
+            time.sleep(2)
+        ended, waited = [], 0
+        while not ended and waited < 150:
+            time.sleep(5)
+            waited += 5
+            ended = titled("panic", since, "Panic Mode Ended")
+        time.sleep(3)
+        left = int(sql(locks))
+        held = {n: p for n, p in role_perms().items() if base.get(n) != p}
+    finally:
+        sql(f"insert into scheduled_jobs (guild_id, kind, run_at) values ({GUILD}, 'unlock', now())")
+        unlocked = wait_for(locks, lambda n: n == 0) == 0
+        for s, v in old.items():
+            restore_section(s, v)
+        clean_nuke_channels()
+        free_attacker(user, perms)
+        time.sleep(2)
+        print(f"cleaned: unlocked={unlocked}, role perms as before={role_perms() == base}, panic/backups/antinuke restored")
+    print(f"g2a_panic_lock: manual lock kinds [{kinds}], panic_end payload {end}, ended={bool(ended)}, "
+          f"snapshots after end={left}, roles still locked={sorted(held)}")
+    return check(bool(ended) and '"locked": false' in end and left == 1 and bool(held),
+                 "g2a_panic_lock: the manual lock outlived panic mode's end")
+
+
+def g2a_timer():
+    """D8: a timed lock lifted early takes its timer with it, so a later lock stays."""
+    chan = text_channel("general")
+    locks = f"select count(*) from lock_snapshots where guild_id = {GUILD}"
+    timer = f"select payload->'lock' from scheduled_jobs where guild_id = {GUILD} and kind = 'unlock'"
+    start = time.monotonic()
+    try:
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'lock', '{{"kind": "channel", "channel": {chan}, "duration_s": 40}}', now())""")
+        wait_for(locks, lambda n: n > 0)
+        lock = ""
+        for _ in range(10):
+            lock = sql(timer)
+            if lock:
+                break
+            time.sleep(1)
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'unlock', '{{"lock": {lock}}}', now())""")
+        lifted = wait_for(locks, lambda n: n == 0) == 0
+        time.sleep(2)
+        timers = int(sql(f"select count(*) from scheduled_jobs where guild_id = {GUILD} and kind = 'unlock'"))
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'lock', '{{"kind": "channel", "channel": {chan}}}', now())""")
+        relocked = wait_for(locks, lambda n: n > 0) > 0
+        time.sleep(max(0, 45 - (time.monotonic() - start)))
+        left = int(sql(locks))
+        sends = can_send(chan)
+    finally:
+        sql(f"insert into scheduled_jobs (guild_id, kind, run_at) values ({GUILD}, 'unlock', now())")
+        ok = wait_for(locks, lambda n: n == 0) == 0
+        print(f"cleaned: #general unlocked={ok and can_send(chan)}")
+    print(f"g2a_timer: timer payload {lock}, lifted early={lifted}, unlock jobs left={timers}, "
+          f"relocked={relocked}, at 45 s snapshots={left} can send={sends}")
+    return check(lifted and timers == 0 and relocked and left == 1 and not sends,
+                 "g2a_timer: the first lock's timer did not lift the later lock")
+
+
+# A real Discord user that is never a member of the test server (Discord's system account).
+OUTSIDER = "643945264868098049"
+
+
+def g2a_renew_404():
+    """D26: a timeout renewal for a user who is not a member retries hourly instead of being dropped."""
+    renew = f"from scheduled_jobs where guild_id = {GUILD} and kind = 'timeout_renew' and payload->>'user' = '{OUTSIDER}'"
+    until = int(time.time()) + 30 * 86400
+    try:
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'timeout_renew', '{{"user": {OUTSIDER}, "until_secs": {until}}}', now())""")
+        rows = ""
+        for _ in range(15):
+            time.sleep(2)
+            rows = sql(f"select attempts, round(extract(epoch from run_at - now())) {renew}")
+            if rows and int(rows.split("|")[1]) > 600:
+                break
+            if not rows:
+                break
+    finally:
+        sql(f"delete {renew}")
+        print("cleaned: timeout_renew rows for the outsider")
+    print(f"g2a_renew_404: row after the run (attempts|secs to run_at): {rows!r}")
+    secs = int(rows.split("|")[1]) if rows else 0
+    return check(3000 < secs <= 3600, "g2a_renew_404: renewal for a non-member re-queued about 1 h out")
+
+
+def g2a_reban_reason():
+    """Ban Sync `outlasts`: does a second PUT ban on an already banned user replace its reason in
+    real Discord (the mock does)? `ours` reads that reason to tell a copy from a local ban."""
+    path = f"/guilds/{GUILD}/bans/{OUTSIDER}"
+    if call("GET", path, soft=True) is not None:
+        raise SystemExit("the outsider is already banned on the test server")
+    def ban(why):
+        # The ban reason is the audit log reason header, as twilight sends it.
+        req = urllib.request.Request(API + path, b"{}", {
+            "Content-Type": "application/json", "User-Agent": "DiscordBot (tommybot-e2e, 1)",
+            "Authorization": f"Bot {os.environ['DISCORD_TOKEN']}", "X-Audit-Log-Reason": why}, method="PUT")
+        urllib.request.urlopen(req).read()
+        return call("GET", path).get("reason")
+    try:
+        first = ban("e2e local temp ban")
+        second = ban("Ban Sync: copied from e2e (1): later copy")
+    finally:
+        # Without a JSON body Discord refuses this DELETE (50109) under the JSON content type.
+        call("DELETE", path, body={})
+        print("cleaned: outsider unbanned")
+    print(f"g2a_reban_reason: reason after first ban {first!r}, after the second PUT {second!r}")
+    # Informational: Ban Sync's `ours` and `outlasts` paths depend on which one Discord does.
+    return check(True, f"g2a_reban_reason: second PUT {'replaced' if second != first else 'kept'} the reason")
+
+
+
+def role_id(name):
+    return next(r["id"] for r in call("GET", f"/guilds/{GUILD}/roles") if r["name"] == name)
+
+
+def member_roles(user):
+    m = call("GET", f"/guilds/{GUILD}/members/{user}", soft=True)
+    return m["roles"] if m else None
+
+
+def give(token, user, role):
+    """`token`'s bot gives `user` the role; True when the member holds it right after."""
+    call("PUT", f"/guilds/{GUILD}/members/{user}/roles/{role}", token, body={}, soft=True)
+    return role in (member_roles(user) or [])
+
+
+def all_log_text(since):
+    return json.dumps([m["embeds"] for c in bot_log_channels().values()
+                       for m in call("GET", f"/channels/{c}/messages?after={since}&limit=50", soft=True) or []])
+
+
+def held_role_until_gone(user, role, secs=30):
+    """Seconds until `user` no longer holds `role`, or None."""
+    t = time.monotonic()
+    while time.monotonic() - t < secs:
+        if role not in (member_roles(user) or []):
+            return round(time.monotonic() - t)
+        time.sleep(2)
+    return None
+
+
+def h_d58():
+    """D58: with TommyBot verification on, another bot giving an unverified member the
+    verification role, or a role that opens a gated channel, gets it taken back, unpunished, logged."""
+    attacker, user, role, perms = attacker_setup()
+    owner = call("GET", f"/guilds/{GUILD}")["owner_id"]
+    old_ver, old_anti = section("verification"), section("antinuke")
+    member = role_id("Member")
+    chans, roles, out = [], [], {}
+    antinuke_on()
+    since = snowflake_now()
+    try:
+        vch = call("POST", f"/guilds/{GUILD}/channels", body={"name": "h-verify"})["id"]
+        chans.append(vch)
+        opener = call("POST", f"/guilds/{GUILD}/roles", body={"name": "h-open", "permissions": "0"})["id"]
+        roles.append(opener)
+        gated = call("POST", f"/guilds/{GUILD}/channels", body={"name": "h-gated", "permission_overwrites": [
+            {"id": GUILD, "type": 0, "allow": "0", "deny": "1024"},
+            {"id": member, "type": 0, "allow": "1024", "deny": "0"},
+            {"id": opener, "type": 0, "allow": "1024", "deny": "0"}]})["id"]
+        chans.append(gated)
+        set_config("verification", {**(old_ver or {}), "enabled": True, "channel": vch, "roles": [member]})
+        time.sleep(3)
+        for name, rid in (("verification role", member), ("gated-channel role", opener)):
+            given = give(attacker, owner, rid)
+            out[name] = (given, held_role_until_gone(owner, rid) if given else None)
+        time.sleep(3)
+        text = all_log_text(since)
+        logged = text.count("was taken back")
+        punished = contained(user)
+        owner_roles = member_roles(owner)
+    finally:
+        restore_section("verification", old_ver)
+        restore_section("antinuke", old_anti)
+        for r in (member, *roles):
+            call("DELETE", f"/guilds/{GUILD}/members/{owner}/roles/{r}", soft=True)
+        for c in chans:
+            call("DELETE", f"/channels/{c}", soft=True)
+        for r in roles:
+            call("DELETE", f"/guilds/{GUILD}/roles/{r}", soft=True)
+        free_attacker(user, perms)
+        print("cleaned: h-verify, h-gated, h-open, owner roles, verification/antinuke sections")
+    print(f"h_d58: (given, taken back after s) {out}, 'taken back' logs={logged}, "
+          f"attacker contained={punished}, owner roles after={owner_roles}")
+    return check(all(g and t is not None for g, t in out.values()) and logged >= 2
+                 and punished == (True, False, False) and owner_roles == [],
+                 "h_d58: both roles taken back, attacker not punished, logged")
+
+
+def h_d16():
+    """D16: a role carrying a strong permit (only wl_channel_delete) given by a non-immune bot is
+    taken back and the bot quarantined; one carrying only `links` is logged only."""
+    attacker, user, role, perms = attacker_setup()
+    old_anti = section("antinuke")
+    antinuke_on()
+    made = {}
+    for name in ("h-wl", "h-link"):
+        made[name] = call("POST", f"/guilds/{GUILD}/roles", body={"name": name, "permissions": "0"})["id"]
+    for name, flag in (("h-wl", "wl_channel_delete"), ("h-link", "links")):
+        sql(f"""with p as (insert into permits (guild_id, name, whitelist) values ({GUILD}, 'e2e-{name}', '{{{flag}}}')
+                returning id) insert into permit_roles (permit_id, guild_id, role_id) select id, {GUILD}, {made[name]} from p""")
+    since = snowflake_now()
+    quar = f"select count(*) from quarantines where guild_id = {GUILD} and user_id = {user}"
+    try:
+        link_given = give(attacker, user, made["h-link"])
+        time.sleep(10)
+        link_kept = made["h-link"] in (member_roles(user) or [])
+        after_link = contained(user)
+        link_log = "logged only" in all_log_text(since)
+        wl_given = give(attacker, user, made["h-wl"])
+        q = wait_for(quar, lambda n: n == 1, tries=30)
+        time.sleep(3)
+        wl_gone = made["h-wl"] not in (member_roles(user) or [])
+        after_wl = contained(user)
+        report = wait_report(since)
+    finally:
+        sql(f"delete from permits where guild_id = {GUILD} and name in ('e2e-h-wl', 'e2e-h-link')")
+        for r in made.values():
+            call("DELETE", f"/guilds/{GUILD}/roles/{r}", soft=True)
+        restore_section("antinuke", old_anti)
+        clean_nuke_channels()
+        free_attacker(user, perms)
+        print("cleaned: h-wl, h-link, their permits, antinuke section, attacker freed")
+    print(f"h_d16: links role given={link_given} kept={link_kept} logged only={link_log} attacker after={after_link}; "
+          f"wl_channel_delete role given={wl_given} taken back={wl_gone} quarantine rows={q} attacker after={after_wl} "
+          f"report={[e.get('description', '')[:120] for e in report]}")
+    return check(link_given and link_kept and link_log and after_link == (True, False, False)
+                 and wl_given and wl_gone and q == 1 and all(after_wl),
+                 "h_d16: strong permit role taken back and giver quarantined; weak one logged only")
+
+
+def h_d20():
+    """D20: deletes made while the bot is down are counted at their real time by the restart's
+    audit catch-up: the attacker is quarantined and the channels come back."""
+    attacker, user, role, perms = attacker_setup()
+    old_anti, old_backups = section("antinuke"), section("backups")
+    antinuke_on()
+    made = [call("POST", f"/guilds/{GUILD}/channels", body={"name": f"h-d20-{i}"})["id"] for i in range(4)]
+    # Deleted channels come back only from the latest backup, so take one that holds them.
+    first_backup = int(sql(f"select coalesce(max(id), 0) from backups where guild_id = {GUILD}"))
+    set_config("backups", {**(old_backups or {}), "enabled": True})
+    sql(f"insert into scheduled_jobs (guild_id, kind, payload, run_at) values ({GUILD}, 'backup_create', '{{}}', now())")
+    backed = wait_for(f"select count(*) from backups where guild_id = {GUILD} and id > {first_backup}",
+                      lambda n: n > 0, tries=30) > 0
+    time.sleep(3)
+    pid_file = os.environ["BOT_PID_FILE"]
+    pid = int(open(pid_file).read())
+    os.kill(pid, 15)  # a clean stop, so the handled audit id is saved
+    for _ in range(30):
+        try:
+            os.kill(pid, 0)
+            time.sleep(1)
+        except ProcessLookupError:
+            break
+    since = snowflake_now()
+    t0 = time.time()
+    deleted = sum(call("DELETE", f"/channels/{c}", attacker, soft=True) is not None for c in made)
+    took = round(time.time() - t0, 1)
+    time.sleep(5)
+    log = open("target/live-bot.log", "a")
+    bot = subprocess.Popen([os.environ.get("TOMMYBOT_BIN", "./target/release/tommybot")], stdout=log, stderr=log)
+    open(pid_file, "w").write(str(bot.pid))
+    try:
+        q = wait_for(f"select count(*) from quarantines where guild_id = {GUILD} and user_id = {user}",
+                     lambda n: n == 1, tries=45)
+        report = wait_report(since, tries=30)
+        held = contained(user)
+        back = [c["name"] for c in call("GET", f"/guilds/{GUILD}/channels") if c["name"].startswith("h-d20-")]
+    finally:
+        for c in call("GET", f"/guilds/{GUILD}/channels"):
+            if c["name"].startswith("h-d20-"):
+                call("DELETE", f"/channels/{c['id']}", soft=True)
+        restore_section("antinuke", old_anti)
+        restore_section("backups", old_backups)
+        sql(f"delete from backups where guild_id = {GUILD} and id > {first_backup}")
+        free_attacker(user, perms)
+        print("cleaned: h-d20-* channels, the backup it took, antinuke/backups sections, attacker freed")
+    print(f"h_d20: backup taken={backed}; attacker deleted {deleted}/4 in {took} s while the bot was down; after restart quarantine rows={q}, "
+          f"contained={held}, channels back={sorted(back)}, report={[e.get('description', '')[:300] for e in report]}")
+    return check(deleted >= 3 and q == 1 and all(held) and len(back) >= 3 and bool(report),
+                 "h_d20: catch-up after a restart quarantined the attacker and reverted")
+
+
+def everyone_ow(chan):
+    c = call("GET", f"/channels/{chan}")
+    o = next((o for o in c["permission_overwrites"] if o["id"] == GUILD), None)
+    return (int(o["allow"]), int(o["deny"])) if o else None
+
+
+def h_panic_cat():
+    """Side note: during panic, can @everyone send in a channel inside a whitelisted category? Reports only."""
+    attacker, user, role, perms = attacker_setup()
+    old = {s: section(s) for s in ("backups", "panic", "antinuke")}
+    everyone_perms = lambda: int(next(r for r in call("GET", f"/guilds/{GUILD}/roles") if r["id"] == GUILD)["permissions"])
+    cat = call("POST", f"/guilds/{GUILD}/channels", body={"name": "h-cat", "type": 4})["id"]
+    child = call("POST", f"/guilds/{GUILD}/channels", body={"name": "h-cat-child", "parent_id": cat})["id"]
+    general = text_channel("general")
+    send = 1 << 11
+    def view(chan):
+        base = everyone_perms()
+        ow = everyone_ow(chan) or (0, 0)
+        return {"overwrite": ow, "can_send": bool(((base & ~ow[1]) | ow[0]) & send)}
+    before = {"cat": view(cat), "child": view(child), "general": view(general), "everyone": everyone_perms()}
+    antinuke_on()
+    set_config("backups", {"enabled": False})
+    set_config("panic", {"executors": 1, "window_secs": 600, "duration_secs": 60, "lock_on_trigger": True,
+                         "unlock_when_ending": True, "whitelisted_categories": [cat]})
+    since = snowflake_now()
+    during, after, ended, end = {}, {}, [], ""
+    try:
+        attack_channels(4, attacker)
+        for _ in range(60):
+            end = sql(f"select payload from scheduled_jobs where guild_id = {GUILD} and kind = 'panic_end'")
+            if end and '"exempt": [{' in end and int(sql(f"select count(*) from lock_snapshots where guild_id = {GUILD}")):
+                break
+            time.sleep(2)
+        time.sleep(5)
+        during = {"cat": view(cat), "child": view(child), "general": view(general), "everyone": everyone_perms()}
+        waited = 0
+        while not ended and waited < 150:
+            time.sleep(5)
+            waited += 5
+            ended = titled("panic", since, "Panic Mode Ended")
+        time.sleep(3)
+        after = {"cat": view(cat), "child": view(child), "general": view(general), "everyone": everyone_perms()}
+    finally:
+        if int(sql(f"select count(*) from lock_snapshots where guild_id = {GUILD}")):
+            sql(f"insert into scheduled_jobs (guild_id, kind, run_at) values ({GUILD}, 'unlock', now())")
+            wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n == 0)
+        for s_, v in old.items():
+            restore_section(s_, v)
+        for c in (child, cat):
+            call("DELETE", f"/channels/{c}", soft=True)
+        clean_nuke_channels()
+        free_attacker(user, perms)
+        print("cleaned: h-cat, h-cat-child, panic/backups/antinuke sections, attacker freed")
+    print(f"h_panic_cat: panic_end payload {end}")
+    print(f"h_panic_cat: before {before}")
+    print(f"h_panic_cat: during {during}")
+    print(f"h_panic_cat: after  {after} (ended={bool(ended)})")
+    return check(True, f"h_panic_cat: child channel can send during panic={during.get('child', {}).get('can_send')}, "
+                       f"category overwrite during={during.get('cat', {}).get('overwrite')}")
+
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
              "purge": purge, "emojis": emojis, "edit": edit, "restart": restart, "panic": panic,
-             "verify_delete": verify_delete, "dm_timing": dm_timing}
+             "verify_delete": verify_delete, "dm_timing": dm_timing,
+             "g2b_hook_embed": lambda: g2b_hook_app_text("embed"),
+             "g2b_hook_button": lambda: g2b_hook_app_text("button"),
+             "g2b_thread_rename": g2b_thread_rename, "g2b_nsfw_hook_off": g2b_nsfw_hook_off,
+             "g2b_nsfw_hook_on": lambda: g2b_nsfw_hook_off(True), "g2b_hook_edit_file": g2b_hook_edit_file,
+             "g2b_forward": g2b_forward,
+             "g1_stale": g1_stale, "g1_verify_channel": g1_verify_channel, "g1_deleted_role": g1_deleted_role,
+             "g2a_panic_lock": g2a_panic_lock, "g2a_timer": g2a_timer, "g2a_renew_404": g2a_renew_404,
+             "g2a_reban_reason": g2a_reban_reason,
+             "h_d58": h_d58, "h_d16": h_d16, "h_d20": h_d20, "h_panic_cat": h_panic_cat}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
-    names = list(SCENARIOS) if picked == ["all"] else picked
+    # g2b_forward waits for the owner, so "all" leaves it out.
+    names = [n for n in SCENARIOS if n != "g2b_forward"] if picked == ["all"] else picked
     use_bot_log_channels()
     results = [SCENARIOS[n]() for n in names]
     sys.exit(0 if all(results) else 1)

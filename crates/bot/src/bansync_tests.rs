@@ -43,6 +43,14 @@ fn every_exemption_is_named() {
 }
 
 #[test]
+fn a_copy_replaces_only_a_local_temp_ban_it_outlasts() {
+    assert!(outlasts(None, Some(100)) && outlasts(Some(200), Some(100)));
+    assert!(!outlasts(Some(100), Some(100)) && !outlasts(Some(50), Some(100)));
+    // A permanent ban here (no unban job) is never replaced.
+    assert!(!outlasts(None, None) && !outlasts(Some(200), None));
+}
+
+#[test]
 fn automatic_bans_follow_their_switches() {
     let c = BanSyncCfg::default();
     for (o, on) in [
@@ -113,6 +121,37 @@ pub(crate) struct Mock {
     /// User ids that are bot accounts.
     pub(crate) bots: Vec<u64>,
     pub(crate) fail_user: bool,
+    /// Roles by guild: (id, managed, permissions, position). A member role list naming a role
+    /// missing here is refused, as Discord does, once the guild has any.
+    pub(crate) roles: HashMap<u64, Vec<(u64, bool, u64, i64)>>,
+    /// Channels whose messages fail (a log channel the bot cannot see).
+    pub(crate) fail_channels: Vec<u64>,
+    /// Role permission edits fail (the role is above the bot).
+    pub(crate) fail_role_edit: bool,
+    /// Members by (guild, user) timed out until this ISO time.
+    pub(crate) timeouts: HashMap<(u64, u64), String>,
+    /// Managed role -> the bot it belongs to (its tags.bot_id).
+    pub(crate) bot_roles: HashMap<u64, u64>,
+    /// Log and DM messages fail with 403.
+    pub(crate) fail_message: bool,
+    /// Log and DM messages fail with 502.
+    pub(crate) fail_message_5xx: bool,
+    /// Channel deletes fail with 500.
+    pub(crate) fail_delete_channel: bool,
+    /// Audit log entries any audit log lookup returns.
+    pub(crate) audit: Vec<Value>,
+    /// The next this many audit log lookups fail with 500.
+    pub(crate) fail_audit: u32,
+    /// Permission overwrites by channel, as a channel lookup returns them.
+    pub(crate) overwrites: HashMap<u64, Vec<Value>>,
+    /// Channels the mock can GET: id -> (guild, whether @everyone may view it).
+    pub(crate) text_channels: HashMap<u64, (u64, bool)>,
+    /// Member role-list edits fail with 500.
+    pub(crate) fail_member_edit: bool,
+    /// Channels by guild, as Discord's JSON array; `[]` when not set.
+    pub(crate) channels: HashMap<u64, Value>,
+    /// Audit log entries by guild, newest first; `audit` when not set.
+    pub(crate) audit_by_guild: HashMap<u64, Vec<Value>>,
     pub(crate) log: Vec<String>,
 }
 
@@ -149,6 +188,12 @@ fn guild(id: &str, owner: u64, members: u64) -> Value {
     })
 }
 
+fn role((id, managed, perms, position): (u64, bool, u64, i64), bot: Option<&u64>) -> Value {
+    let tags = bot.map(|b| json!({"bot_id": b.to_string()}));
+    json!({"tags": tags, "id": id.to_string(), "name": format!("r{id}"), "color": 0, "colors": {"primary_color": 0}, "hoist": false, "managed": managed,
+           "mentionable": false, "permissions": perms.to_string(), "position": position, "flags": 0})
+}
+
 fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -> (u16, String) {
     m.log.push(format!("{method} {target} {body}"));
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -162,10 +207,15 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
     let user = |id: &str| json!({"id": id, "username": "u", "discriminator": "0", "avatar": null});
     let err = |s: u16, code: u64| (s, json!({"code": code, "message": "x"}).to_string());
     let n = |s: &str| s.parse::<u64>().unwrap();
-    let member = |u: &str, roles: &[u64]| {
+    let bot = m.bots.clone();
+    let timeouts = m.timeouts.clone();
+    let member = |g: &str, u: &str, roles: &[u64]| {
         let roles: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
-        json!({"user": user(u), "roles": roles, "joined_at": "2020-01-01T00:00:00.000000+00:00",
-               "deaf": false, "mute": false, "flags": 0})
+        let mut usr = user(u);
+        usr["bot"] = json!(bot.iter().any(|b| b.to_string() == u));
+        let until = timeouts.get(&(n(g), n(u)));
+        json!({"user": usr, "roles": roles, "joined_at": "2020-01-01T00:00:00.000000+00:00",
+               "deaf": false, "mute": false, "flags": 0, "communication_disabled_until": until})
     };
     match (method, parts.as_slice()) {
         ("GET", ["guilds", _, "bans", _]) if m.fail_get => err(500, 0),
@@ -186,8 +236,9 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         }
         ("PUT", ["guilds", _, "bans", _]) if m.fail_put => err(403, 50013),
         ("PUT", ["guilds", _, "bans", _]) if m.fail_put_5xx => err(502, 0),
+        // Discord keeps the first ban's reason when a banned user is banned again (live 11-13).
         ("PUT", ["guilds", g, "bans", u]) => {
-            m.bans.insert((n(g), n(u)), reason);
+            m.bans.entry((n(g), n(u))).or_insert(reason);
             (204, String::new())
         }
         ("DELETE", ["guilds", g, "bans", u]) => match m.bans.remove(&(n(g), n(u))) {
@@ -197,11 +248,11 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         ("GET", ["guilds", _, "members", _]) if m.fail_member => err(500, 0),
         ("GET", ["guilds", g, "members", u]) => match m.members.get(&(n(g), n(u))) {
             Some(r) if n(u) == ME && m.new_bot.contains(&n(g)) => {
-                let mut j = member(u, r);
+                let mut j = member(g, u, r);
                 j["joined_at"] = json!("2099-01-01T00:00:00.000000+00:00");
                 (200, j.to_string())
             }
-            Some(r) => (200, member(u, r).to_string()),
+            Some(r) => (200, member(g, u, r).to_string()),
             None => err(404, 10007),
         },
         ("GET", ["guilds", g, "members"]) => {
@@ -211,14 +262,51 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 .into_iter()
                 .filter(|x| x.0 .1 > q("after").unwrap_or(0))
                 .take(q("limit").unwrap_or(1) as usize)
-                .map(|x| member(&x.0 .1.to_string(), x.1))
+                .map(|x| member(g, &x.0 .1.to_string(), x.1))
                 .collect();
             (200, json!(page).to_string())
+        }
+        ("PATCH", ["guilds", g, "members", u])
+            if m.members.contains_key(&(n(g), n(u)))
+                && body.contains("communication_disabled_until") =>
+        {
+            let b: Value = serde_json::from_str(body).unwrap_or_default();
+            match b["communication_disabled_until"].as_str() {
+                Some(t) => m.timeouts.insert((n(g), n(u)), t.into()),
+                None => m.timeouts.remove(&(n(g), n(u))),
+            };
+            let roles = m.members[&(n(g), n(u))].clone();
+            let mut j = member(g, u, &roles);
+            j["communication_disabled_until"] = b["communication_disabled_until"].clone();
+            (200, j.to_string())
+        }
+        ("DELETE", ["channels", _]) if m.fail_delete_channel => err(500, 0),
+        ("GET", ["guilds", _, "audit-logs"]) if m.fail_audit > 0 => {
+            m.fail_audit -= 1;
+            err(500, 0)
+        }
+        ("GET", ["guilds", g, "audit-logs"]) => {
+            let entries = m
+                .audit_by_guild
+                .get(&n(g))
+                .cloned()
+                .unwrap_or_else(|| m.audit.clone());
+            let log = json!({"audit_log_entries": entries, "users": [], "webhooks": [],
+                "integrations": [], "threads": [], "application_commands": [],
+                "auto_moderation_rules": [], "guild_scheduled_events": []});
+            (200, log.to_string())
         }
         ("DELETE", ["guilds", g, "members", u]) => match m.members.remove(&(n(g), n(u))) {
             Some(_) => (204, String::new()),
             None => err(404, 10007),
         },
+        ("GET", ["channels", c]) if m.text_channels.contains_key(&n(c)) => {
+            let (g, open) = m.text_channels[&n(c)];
+            let (allow, deny) = if open { ("1024", "0") } else { ("0", "1024") };
+            let ch = json!({"id": c, "type": 0, "guild_id": g.to_string(), "name": "log", "position": 0,
+                "permission_overwrites": [{"id": g.to_string(), "type": 0, "allow": allow, "deny": deny}]});
+            (200, ch.to_string())
+        }
         ("GET", ["guilds", g]) => match m.owners.get(&n(g)) {
             Some(o) => {
                 let size = m.sizes.get(&n(g)).copied().unwrap_or(500);
@@ -232,8 +320,101 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             j["bot"] = json!(m.bots.iter().any(|b| b.to_string() == *u));
             (200, j.to_string())
         }
+        ("GET", ["guilds", g, "roles"]) => {
+            let all = m.roles.get(&n(g)).cloned().unwrap_or_default();
+            let all: Vec<Value> = all
+                .iter()
+                .map(|r| role(*r, m.bot_roles.get(&r.0)))
+                .collect();
+            (200, json!(all).to_string())
+        }
+        ("GET", ["guilds", g, "channels"]) => match m.channels.get(&n(g)) {
+            Some(c) => (200, c.to_string()),
+            None => (200, "[]".into()),
+        },
+        // Only channels a test gave overwrites; others answer 404 as before.
+        ("GET", ["channels", c]) if m.overwrites.contains_key(&n(c)) => {
+            let ows = m.overwrites[&n(c)].clone();
+            (
+                200,
+                json!({"id": c, "type": 0, "permission_overwrites": ows}).to_string(),
+            )
+        }
+        ("PATCH", ["guilds", _, "roles", _]) if m.fail_role_edit => err(403, 50013),
+        ("PATCH", ["guilds", g, "roles", r]) => {
+            let perms = serde_json::from_str::<Value>(body).unwrap_or_default()["permissions"]
+                .as_str()
+                .and_then(|p| p.parse().ok());
+            let bot = m.bot_roles.get(&n(r)).copied();
+            let all = m.roles.entry(n(g)).or_default();
+            match all.iter_mut().find(|x| x.0 == n(r)) {
+                Some(x) => {
+                    x.2 = perms.unwrap_or(x.2);
+                    (200, role(*x, bot.as_ref()).to_string())
+                }
+                None => err(404, 10011),
+            }
+        }
+        ("PATCH", ["guilds", _, "members", _]) if m.fail_member_edit => err(500, 0),
+        ("PATCH", ["guilds", g, "members", u]) => {
+            let ids: Option<Vec<u64>> = serde_json::from_str::<Value>(body).unwrap_or_default()
+                ["roles"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|r| r.as_str()?.parse().ok()).collect());
+            let known = m.roles.get(&n(g)).cloned().unwrap_or_default();
+            let Some(have) = m.members.get_mut(&(n(g), n(u))) else {
+                return err(404, 10007);
+            };
+            if let Some(ids) = ids {
+                if !known.is_empty() && ids.iter().any(|r| !known.iter().any(|k| k.0 == *r)) {
+                    return err(400, 10011);
+                }
+                *have = ids;
+            }
+            let have = have.clone();
+            (200, member(g, u, &have).to_string())
+        }
+        ("PUT", ["guilds", g, "members", u, "roles", r]) => {
+            match m.members.get_mut(&(n(g), n(u))) {
+                Some(have) => {
+                    if !have.contains(&n(r)) {
+                        have.push(n(r));
+                    }
+                    (204, String::new())
+                }
+                None => err(404, 10007),
+            }
+        }
+        ("DELETE", ["guilds", g, "members", u, "roles", r]) => {
+            let managed = m
+                .roles
+                .get(&n(g))
+                .is_some_and(|all| all.iter().any(|x| x.0 == n(r) && x.1));
+            match m.members.get_mut(&(n(g), n(u))) {
+                _ if managed => err(403, 50013),
+                Some(have) => {
+                    have.retain(|x| *x != n(r));
+                    (204, String::new())
+                }
+                None => err(404, 10007),
+            }
+        }
+        ("PUT" | "DELETE", ["channels", _, "permissions", _]) => (204, String::new()),
+        ("POST", ["guilds", g, "channels"]) => {
+            let ch = json!({"id": "610", "type": 0, "guild_id": g, "name": "ticket"});
+            (200, ch.to_string())
+        }
+        ("POST", ["channels", c, "messages"]) if m.fail_channels.contains(&n(c)) => err(403, 50001),
+        ("POST", ["channels", _, "messages"]) if m.fail_message => err(403, 50013),
+        ("POST", ["channels", _, "messages"]) if m.fail_message_5xx => err(502, 0),
         ("POST", ["users", "@me", "channels"]) => (200, json!({"id": "77", "type": 1}).to_string()),
-        ("POST", ["channels", _, "messages"]) => (200, "{}".into()),
+        ("POST", ["channels", c, "messages"]) => {
+            let msg = json!({"id": "1", "channel_id": c, "author": user("1"), "content": "",
+                "timestamp": "2026-01-01T00:00:00.000000+00:00", "edited_timestamp": null, "tts": false,
+                "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": [],
+                "embeds": [], "components": [], "pinned": false, "type": 0});
+            (200, msg.to_string())
+        }
         _ => err(404, 10004),
     }
 }
@@ -290,7 +471,12 @@ pub(crate) struct T {
 }
 
 impl T {
+    /// `n` (below 1000) picks this test's guild ids, so it must be unique across every test file using `T`.
     pub(crate) async fn new(n: u64) -> Option<T> {
+        assert!(
+            n < 1000,
+            "test number {n} would leave this process's guild ids"
+        );
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let mock = Arc::new(StdMutex::new(Mock::default()));
@@ -320,7 +506,9 @@ impl T {
         let t = T {
             app,
             mock,
-            base: 3_300_000_000_000 + std::process::id() as u64 * 1000 + n * 10,
+            // Ten guild ids per test number; n < 1000 stays inside this process's 10_000 ids, so
+            // test binaries running side by side never share a guild.
+            base: 3_300_000_000_000 + std::process::id() as u64 * 10_000 + n * 10,
         };
         t.cleanup().await;
         Some(t)
@@ -493,6 +681,8 @@ impl T {
             "DELETE FROM dash_session WHERE user_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_actions WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_allow WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM guild_left WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9",
         ] {
             self.exec(sql).await;
         }
@@ -743,6 +933,8 @@ async fn another_owner_a_transfer_or_a_left_server_gets_no_copy() {
         "cache dropped"
     );
     // The bot left server 3 (no row) and cannot see server 4 any more (403/404): both are skipped.
+    t.exec("INSERT INTO guild_left (guild_id) VALUES ($1 + 3)")
+        .await;
     on_removed(&t.app, t.g(3)).await.unwrap();
     t.set(|m| {
         m.owners.remove(&t.g(4).get());
@@ -757,6 +949,188 @@ async fn another_owner_a_transfer_or_a_left_server_gets_no_copy() {
         t.calls(&format!("GET /guilds/{} ", t.g(3))),
         0,
         "no call for a left server"
+    );
+    t.cleanup().await;
+}
+
+/// D47: a transferred server leaves every group (Ban Sync off), loses the old owner's EO/TA, and
+/// keeps what was removed for the new owner; a later change of nothing does nothing.
+#[tokio::test]
+async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
+    let Some(t) = T::new(202).await else { return };
+    let (o, new) = (t.owner(), t.base + 8);
+    t.server(0, o, "ban").await;
+    t.server(1, o, "ban").await;
+    t.exec("INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, $1 + 1)")
+        .await;
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $1 + 2)")
+        .await;
+    for (name, perms, wl, role) in [
+        ("Admins", "{dashboard_edit}", "{}", 3),
+        ("Immune", "{}", "{all}", 4),
+        ("Mods", "{ban}", "{links}", 5),
+        ("Nukers", "{}", "{wl_role_delete}", 6),
+    ] {
+        sqlx::query(
+            "WITH p AS (INSERT INTO permits (guild_id, name, perms, whitelist) VALUES ($1, $2, $3::text[], $4::text[]) RETURNING id)
+             INSERT INTO permit_roles (permit_id, guild_id, role_id) SELECT id, $1, $1 + $5 FROM p",
+        )
+        .bind(t.base as i64)
+        .bind(name)
+        .bind(perms)
+        .bind(wl)
+        .bind(role as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    }
+    t.exec("UPDATE guild_config SET config = jsonb_set(config, '{antinuke}', jsonb_build_object('quarantine_whitelist', jsonb_build_array(($1 + 7)::text))) WHERE guild_id = $1").await;
+    t.set(|m| {
+        m.owners.insert(t.g(0).get(), new);
+    });
+    on_owner(&t.app, t.g(0), Id::new(new)).await.unwrap();
+    let cfg: Value = sqlx::query_scalar(
+        "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(t.g(0).get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(cfg["ban_sync"]["enabled"], json!(false));
+    assert_eq!(cfg["ban_sync"]["receive"], json!("ban"), "the rest stays");
+    assert_eq!(cfg["antinuke"]["quarantine_whitelist"], json!([]));
+    assert_eq!(
+        cfg["permits"]["eo"],
+        json!([]),
+        "the version records the removal"
+    );
+    let staff = t
+        .count("SELECT count(*) FROM extra_owners WHERE guild_id = $1")
+        .await
+        + t.count("SELECT count(*) FROM trusted_admins WHERE guild_id = $1")
+            .await;
+    assert_eq!(staff, 0);
+    let (eo, ta, was_on): (Vec<i64>, Vec<i64>, bool) = sqlx::query_as(
+        "SELECT extra_owners, trusted_admins, ban_sync_was_on FROM owner_handovers WHERE guild_id = $1",
+    )
+    .bind(t.g(0).get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    let b = t.base as i64;
+    assert_eq!((eo, ta, was_on), (vec![b + 1], vec![b + 2], true));
+    let (mut paused, other): (Value, Vec<String>) = sqlx::query_as(
+        "SELECT paused_roles, other_permits FROM owner_handovers WHERE guild_id = $1",
+    )
+    .bind(b)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    paused
+        .as_array_mut()
+        .unwrap()
+        .sort_by_key(|p| p["role"].to_string());
+    assert_eq!(
+        paused,
+        json!([{"permit": "Admins", "role": (b + 3).to_string()}, {"permit": "Immune", "role": (b + 4).to_string()},
+               {"permit": "Nukers", "role": (b + 6).to_string()}])
+    );
+    let qw: Vec<i64> =
+        sqlx::query_scalar("SELECT quarantine_whitelist FROM owner_handovers WHERE guild_id = $1")
+            .bind(b)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(qw, [b + 7]);
+    assert_eq!(other, ["Mods"], "a weaker permit stays on");
+    assert_eq!(
+        t.count("SELECT count(*) FROM permit_roles WHERE guild_id = $1")
+            .await,
+        1
+    );
+    // The new owner's server is in no group: a ban in the old owner's server is not sent there.
+    t.ban(1, 508, "raiding");
+    share_job(&t.app, t.g(1), &t.share(508, None))
+        .await
+        .unwrap();
+    assert!(t.rows(508).await.is_empty());
+    // Seeing the same owner again changes nothing.
+    on_owner(&t.app, t.g(0), Id::new(new)).await.unwrap();
+    assert_eq!(
+        t.count("SELECT count(*) FROM owner_handovers WHERE guild_id = $1")
+            .await,
+        1
+    );
+    t.exec("DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+#[test]
+fn the_handover_dm_says_what_was_done() {
+    let g = Id::new(5);
+    let p = ["Admins".to_string(), "Admins".to_string()];
+    let other = ["Mods".to_string()];
+    let h = Handover {
+        sync_on: true,
+        eo: &[11],
+        ta: &[12, 13],
+        paused: &p,
+        other: &other,
+        qw: &[14],
+    };
+    let t = handover_text("S", &h, g).unwrap();
+    assert!(t.contains("switched Ban Sync off") && t.contains("Extra Owner(s) <@11>"));
+    assert!(t.contains("Trusted Admin(s) <@12>, <@13>") && t.contains("permit(s) Admins ("));
+    assert!(t.contains("one by one") && t.contains("stay on: Mods"));
+    assert!(t.contains("removed <@14> from the quarantine whitelist"));
+    assert!(t.contains("syncs only with your own servers"));
+    let h = Handover {
+        sync_on: false,
+        eo: &[],
+        ta: &[1],
+        paused: &[],
+        other: &[],
+        qw: &[],
+    };
+    assert!(!handover_text("S", &h, g).unwrap().contains("Ban Sync"));
+    let h = Handover {
+        sync_on: false,
+        eo: &[],
+        ta: &[],
+        paused: &[],
+        other: &[],
+        qw: &[],
+    };
+    assert!(handover_text("S", &h, g).is_none(), "nothing to say");
+}
+
+/// D47: an owner change while the bot was out of the server is caught when it is added back.
+#[tokio::test]
+async fn an_owner_change_while_the_bot_was_out_is_caught_on_return() {
+    let Some(t) = T::new(204).await else { return };
+    let (o, new) = (t.owner(), t.base + 8);
+    t.server(0, o, "ban").await;
+    t.exec("INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, $1 + 1)")
+        .await;
+    t.exec("INSERT INTO guild_left (guild_id) VALUES ($1)")
+        .await;
+    on_removed(&t.app, t.g(0)).await.unwrap();
+    t.exec("DELETE FROM guild_left WHERE guild_id = $1").await;
+    t.set(|m| {
+        m.owners.insert(t.g(0).get(), new);
+    });
+    on_owner(&t.app, t.g(0), Id::new(new)).await.unwrap();
+    assert_eq!(
+        t.count("SELECT count(*) FROM extra_owners WHERE guild_id = $1")
+            .await,
+        0
+    );
+    assert_eq!(
+        t.count("SELECT count(*) FROM owner_handovers WHERE guild_id = $1 AND old_owner = $1 + 9")
+            .await,
+        1,
+        "the kept guild_owners row named the previous owner"
     );
     t.cleanup().await;
 }
@@ -1280,5 +1654,414 @@ async fn a_discord_outage_on_the_ban_retries_instead_of_skipping() {
     t.set(|m| m.fail_put_5xx = false);
     copy_job(&t.app, t.g(1), &copy).await.unwrap();
     assert_eq!(t.rows(620).await, [T::row(1, "banned", None)]);
+    t.cleanup().await;
+}
+
+/// D59: the unauthorized-bot filter reads who added a bot once more after 1.5 s, and a lookup
+/// that fails or finds nothing twice blocks the bot.
+#[tokio::test]
+async fn a_bot_adder_is_read_twice_then_the_bot_is_blocked() {
+    let Some(t) = T::new(100).await else {
+        return;
+    };
+    let (g, bot) = (t.g(0), Id::new(77));
+    let entry =
+        json!({"id": "5", "action_type": 28, "target_id": "77", "user_id": "9", "changes": []});
+    let app = &t.app;
+    let adder = |_: &T| crate::welcome::bot_adder_retry(app, g, bot);
+    t.set(|m| m.audit = vec![entry.clone()]);
+    assert_eq!(adder(&t).await.unwrap(), Id::new(9));
+    t.set(|m| m.fail_audit = 1);
+    assert_eq!(adder(&t).await.unwrap(), Id::new(9), "the retry reads it");
+    t.set(|m| m.fail_audit = 2);
+    assert!(adder(&t).await.is_err(), "failed twice");
+    t.set(|m| m.audit.clear());
+    assert!(adder(&t).await.is_err(), "no entry after the retry");
+    t.cleanup().await;
+}
+
+/// D20: the last audit entry handled survives a restart, and the first `Ready` reads the entries
+/// after it, oldest first, each once even when the live event brings it too.
+#[tokio::test]
+async fn a_restart_reads_the_audit_entries_it_missed() {
+    let Some(t) = T::new(101).await else {
+        return;
+    };
+    let g = t.g(0);
+    crate::welcome::done_audit(&t.app, g.get(), 5);
+    crate::welcome::done_audit(&t.app, g.get(), 4); // never goes back
+    crate::welcome::flush_audit(&t.app).await;
+    // A second app over the same database stands for the restart.
+    let fresh = T::new(102).await.unwrap();
+    crate::welcome::load_audit_seen(&fresh.app).await.unwrap();
+    let last = |t: &T| t.app.last_audit.lock().unwrap().get(&g.get()).copied();
+    assert_eq!(last(&fresh), Some(5));
+    let e = |id: u64| json!({"id": id.to_string(), "action_type": 22, "target_id": "8", "user_id": "9", "changes": []});
+    fresh.set(|m| m.audit = vec![e(9), e(3), e(7)]);
+    // The live event for 7 came first: the catch-up skips it, and handles 9 once.
+    let live = crate::welcome::saw_audit(&fresh.app, g.get(), 7);
+    assert!(live.is_some());
+    drop(live);
+    crate::welcome::catch_up_audit(&fresh.app, g, 5)
+        .await
+        .unwrap();
+    assert_eq!(last(&fresh), Some(9));
+    assert_eq!(fresh.calls("audit-logs"), 1, "a short page is the end");
+    assert!(
+        crate::welcome::saw_audit(&fresh.app, g.get(), 9).is_none(),
+        "a live 9 is skipped"
+    );
+    assert_eq!(fresh.app.audit_done.lock().unwrap().get(&g.get()), Some(&9));
+    // Full pages are read back until the cap.
+    fresh.set(|m| m.audit = (1000..1100).map(e).collect());
+    crate::welcome::catch_up_audit(&fresh.app, g, 5)
+        .await
+        .unwrap();
+    assert_eq!(fresh.calls("audit-logs"), 11);
+    assert_eq!(last(&fresh), Some(1099));
+    sqlx::query("DELETE FROM audit_handled WHERE guild_id = $1")
+        .bind(g.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM audit_seen WHERE guild_id = $1")
+        .bind(g.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+}
+
+/// D14: a managed role's overwrite that gives more access in a channel is denied to the really
+/// quarantined members who hold that role, with their own overwrite saved for unquarantine.
+#[tokio::test]
+async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
+    let Some(t) = T::new(103).await else {
+        return;
+    };
+    let g = t.g(0);
+    t.app.guilds.lock().unwrap().insert(
+        g,
+        Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(2),
+            roles: Default::default(),
+            role_perms: Default::default(),
+            managed: [Id::new(6)].into(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: std::time::Instant::now(),
+        }),
+    );
+    for (u, on_join) in [(50, false), (51, true)] {
+        sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, '{6, 7}', $3)")
+            .bind(g.get() as i64)
+            .bind(u)
+            .bind(on_join)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+    }
+    let own = json!({"id": "50", "type": 1, "allow": "0", "deny": "2"});
+    t.set(|m| {
+        m.overwrites.insert(30, vec![own]);
+    });
+    let entry = |role: &str| -> AuditLogEntry {
+        serde_json::from_value(json!({
+            "action_type": 13, "id": "1", "user_id": "9", "target_id": "30", "guild_id": g.to_string(),
+            "options": {"id": role, "type": "0"},
+            "changes": [{"key": "allow", "new_value": "1024"}]
+        }))
+        .unwrap()
+    };
+    crate::antinuke::hold_overwrite(&t.app, &entry("7"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions"),
+        0,
+        "not a managed role"
+    );
+    crate::antinuke::hold_overwrite(&t.app, &entry("6"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 1);
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/51"),
+        0,
+        "a join quarantine"
+    );
+    assert!(
+        t.calls(r#""deny":"1026""#) == 1,
+        "their deny and the new bits"
+    );
+    let saved: (bool, i64, i64) = sqlx::query_as(
+        "SELECT had, allow, deny FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = 50",
+    )
+    .bind(g.get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(saved, (true, 0, 2));
+    // Taking that deny away again is a grant too: a managed role's deny removed, or the member
+    // overwrite the quarantine put there deleted (type 15), gets the deny back.
+    let lift = |kind: u8, id: &str, of: &str| -> AuditLogEntry {
+        serde_json::from_value(json!({
+            "action_type": kind, "id": "2", "user_id": "9", "target_id": "30", "guild_id": g.to_string(),
+            "options": {"id": id, "type": of},
+            "changes": [{"key": "deny", "old_value": "1026"}, {"key": "allow", "old_value": "0"}]
+        }))
+        .unwrap()
+    };
+    crate::antinuke::hold_overwrite(&t.app, &lift(15, "6", "0"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/50"),
+        2,
+        "role deny deleted"
+    );
+    t.set(|m| {
+        m.overwrites.insert(30, vec![]);
+    });
+    let _ = crate::antinuke::hold_overwrite(&t.app, &lift(15, "50", "1"), Id::new(9)).await;
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/50"),
+        3,
+        "member deny deleted"
+    );
+    assert_eq!(t.calls(r#""deny":"1026""#), 3, "put back as it was");
+    // The actor's permits cannot be read: undone all the same, nobody quarantined (D12b).
+    t.set(|m| m.fail_member = true);
+    crate::antinuke::hold_overwrite(&t.app, &lift(15, "50", "1"), Id::new(10))
+        .await
+        .unwrap();
+    t.set(|m| m.fail_member = false);
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 4);
+    let held: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM quarantines WHERE guild_id = $1 AND user_id = 10")
+            .bind(g.get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(held, 0);
+    // A deny the quarantine did not put there is not the hold's matter.
+    let _ = crate::antinuke::hold_overwrite(&t.app, &lift(14, "52", "1"), Id::new(9)).await;
+    assert_eq!(t.calls("PUT /channels/30/permissions/52"), 0);
+    for q in [
+        "DELETE FROM quarantines WHERE guild_id = $1",
+        "DELETE FROM quarantine_overwrites WHERE guild_id = $1",
+    ] {
+        sqlx::query(q)
+            .bind(g.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// Staff come from TommyBot's permits only: a role with Administrator, live or saved by a Role
+/// lock, makes nobody exempt from slowmode or automod; the owner still is.
+#[tokio::test]
+async fn discord_permissions_make_nobody_staff() {
+    let Some(t) = T::new(104).await else {
+        return;
+    };
+    let g = t.g(0);
+    t.app.guilds.lock().unwrap().insert(
+        g,
+        Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(2),
+            roles: Default::default(),
+            role_perms: [(Id::new(5), 8)].into(),
+            managed: Default::default(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: std::time::Instant::now(),
+        }),
+    );
+    t.set(|m| {
+        m.members.insert((g.get(), 60), vec![5]);
+        m.members.insert((g.get(), 2), vec![]);
+    });
+    assert!(
+        !crate::slowmode::exempt(&t.app, g, Id::new(60)).await,
+        "an Administrator role"
+    );
+    assert!(
+        crate::slowmode::exempt(&t.app, g, Id::new(2)).await,
+        "the owner"
+    );
+}
+
+/// D20: the saved last audit id never passes an older entry still being handled, nor a gap whose
+/// catch-up has not succeeded; a second `Ready` keeps the first gap's start.
+#[tokio::test]
+async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
+    let Some(t) = T::new(105).await else {
+        return;
+    };
+    let (g, h) = (t.g(0).get(), t.g(1).get());
+    let saved = |guild: u64| {
+        let pool = t.app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT last_id FROM audit_seen WHERE guild_id = $1")
+                .bind(guild as i64)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let app = &t.app;
+    let e20 = crate::welcome::saw_audit(app, g, 20).unwrap();
+    drop(crate::welcome::saw_audit(app, g, 21).unwrap());
+    crate::welcome::done_audit(app, g, 21);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(19), "20 is still being handled");
+    drop(e20); // its handling ended (or its task panicked)
+    crate::welcome::done_audit(app, g, 20);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(21));
+    // A leaked id stops holding the saved id after the safety expiry.
+    let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(1801);
+    app.audit_inflight
+        .lock()
+        .unwrap()
+        .entry(g)
+        .or_default()
+        .insert(22, long_ago);
+    t.server_config(0, t.owner(), json!({"antinuke": {"enabled": true}}))
+        .await;
+    let e23: AuditLogEntry = serde_json::from_value(
+        json!({"id": "23", "action_type": 22, "user_id": "9", "target_id": "8", "changes": []}),
+    )
+    .unwrap();
+    crate::welcome::handled_audit(app, g, &e23).await;
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(23));
+    let handled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_handled WHERE guild_id = $1 AND audit_id = 23",
+    )
+    .bind(g as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(handled, 1, "recorded, so no catch-up runs it again");
+    // Anti-nuke off there: nothing to record.
+    crate::welcome::handled_audit(app, h, &e23).await;
+    let off: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_handled WHERE guild_id = $1")
+        .bind(h as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(off, 0);
+    // Two Readies before the catch-up: the floor stays at the first gap, and so does the save.
+    app.last_audit.lock().unwrap().insert(h, 50);
+    crate::welcome::note_ready(app);
+    app.last_audit.lock().unwrap().insert(h, 80);
+    crate::welcome::note_ready(app);
+    assert_eq!(app.audit_floor.lock().unwrap().get(&h), Some(&50));
+    drop(crate::welcome::saw_audit(app, h, 90).unwrap());
+    crate::welcome::done_audit(app, h, 90);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(h).await, Some(50), "the gap is not read yet");
+    t.set(|m| m.audit = vec![]);
+    crate::welcome::catch_up_audit(app, Id::new(h), 50)
+        .await
+        .unwrap();
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(h).await, Some(90));
+    sqlx::query("DELETE FROM audit_handled WHERE guild_id = ANY($1)")
+        .bind(vec![g as i64, h as i64])
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM audit_seen WHERE guild_id = ANY($1)")
+        .bind(vec![g as i64, h as i64])
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+}
+
+/// D48 (S-h3 6): a section the bot cannot read is also posted to the log, not only DMed.
+#[tokio::test]
+async fn a_section_on_defaults_is_posted_to_the_log() {
+    let Some(t) = T::new(205).await else { return };
+    let log = t.base + 5;
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"antinuke": {"enabled": "yes"}, "logging": {"config_changes": log.to_string()}}),
+    )
+    .await;
+    t.set(|m| {
+        m.text_channels.insert(log, (t.g(0).get(), false));
+    });
+    let cfg = t.app.cfg(t.g(0).get()).await.unwrap();
+    assert_eq!(cfg.fallbacks, ["antinuke"]);
+    assert_eq!(t.calls(&format!("POST /channels/{log}/messages")), 1);
+    // R-h3 round 2, 4: never to a channel @everyone can read.
+    let open = t.base + 6;
+    t.server_config(
+        1,
+        t.owner(),
+        json!({"antinuke": {"enabled": "yes"}, "logging": {"config_changes": open.to_string()}}),
+    )
+    .await;
+    t.set(|m| {
+        m.text_channels.insert(open, (t.g(1).get(), true));
+    });
+    let _ = t.app.cfg(t.g(1).get()).await.unwrap();
+    assert_eq!(t.calls(&format!("POST /channels/{open}/messages")), 0);
+    // R-h3 round 3, 1: not when the main roles are unknown, nor to another server's channel.
+    for (i, cfg, ch, home) in [
+        (
+            2,
+            json!({"antinuke": {"enabled": "yes"}, "lockdown": {"main_roles": "x"}}),
+            t.base + 7,
+            2,
+        ),
+        (3, json!({"antinuke": {"enabled": "yes"}}), t.base + 8, 4),
+    ] {
+        let mut cfg = cfg;
+        cfg["logging"] = json!({"config_changes": ch.to_string()});
+        t.server_config(i, t.owner(), cfg).await;
+        t.set(|m| {
+            m.text_channels.insert(ch, (t.g(home).get(), false));
+        });
+        let _ = t.app.cfg(t.g(i).get()).await.unwrap();
+        assert_eq!(
+            t.calls(&format!("POST /channels/{ch}/messages")),
+            0,
+            "server {i}"
+        );
+    }
+    t.cleanup().await;
+}
+
+/// R-h3 round 2, 3: the retry job reads the owner from Discord and runs the reset.
+#[tokio::test]
+async fn the_owner_check_job_runs_the_reset_with_the_live_owner() {
+    let Some(t) = T::new(206).await else { return };
+    let (o, new) = (t.owner(), t.base + 8);
+    t.server(0, o, "ban").await;
+    t.exec("INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, $1 + 1)")
+        .await;
+    t.set(|m| {
+        m.owners.insert(t.g(0).get(), new);
+    });
+    owner_check_job(&t.app, t.g(0)).await.unwrap();
+    assert_eq!(
+        t.count("SELECT count(*) FROM extra_owners WHERE guild_id = $1")
+            .await,
+        0
+    );
+    assert_eq!(
+        t.count("SELECT count(*) FROM guild_owners WHERE guild_id = $1 AND owner_id = $1 + 8")
+            .await,
+        1
+    );
     t.cleanup().await;
 }

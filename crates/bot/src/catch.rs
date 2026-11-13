@@ -20,6 +20,7 @@ use crate::{
 const REASON: &str = "Wrote in the catch channel";
 
 /// True when the message was in the catch channel by someone it punishes; nothing else should run.
+/// Log mode punishes nobody, so automod still runs.
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     let Some(gid) = m.guild_id else {
         return Ok(false);
@@ -46,10 +47,11 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     if c.users.contains(&uid) || roles.iter().any(|r| c.roles.contains(r)) {
         return Ok(false);
     }
-    let owner = app.guild_info(gid).await?.owner;
-    if app.level(gid, owner, uid).await? != Level::None {
+    // Only Owner, Extra Owners and Trusted Admins: a hacked mod with a permit is caught too.
+    if app.is_immune(gid, uid).await? {
         return Ok(false);
     }
+    let owner = app.guild_info(gid).await?.owner;
     let (kind, soft) = match c.action {
         CatchAction::Ban => (ModKind::Ban, false),
         CatchAction::Softban => (ModKind::Ban, true),
@@ -59,8 +61,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
             let log = Log::new("Catch channel (test mode)", RED)
                 .user("Member", uid.get())
                 .line("Action", "None, test mode only logs");
-            send_log(app, gid.get(), LogKind::AutoMod, log).await?;
-            return Ok(true);
+            if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+                tracing::warn!(?e, "catch channel test log failed");
+            }
+            return Ok(false);
         }
     };
     crate::http_err::best_effort(
@@ -97,7 +101,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     let log = Log::new("Catch channel action failed", RED)
         .user("Member", uid.get())
         .line("Error", &text);
-    send_log(app, gid.get(), LogKind::AutoMod, log).await?;
+    // The member was caught: a failed log must not hand the message on as uncaught.
+    if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+        tracing::warn!(?e, "catch channel failure log failed");
+    }
     Ok(true)
 }
 

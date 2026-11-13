@@ -81,12 +81,36 @@ pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: b
         raiders.len(),
         embed::duration(cfg.duration_secs as i64)
     ));
+    let ids: Vec<i64> = raiders.iter().map(|r| *r as i64).collect();
     app.heat_raiders
         .lock()
         .unwrap()
         .insert(gid.get(), (raiders, until));
-    send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await?;
+    // Kept for a restart (N3, `seed_windows`); a lost row ends heat panic early on one.
+    let kept = sqlx::query(
+        "INSERT INTO heat_panic (guild_id, raiders, until) VALUES ($1, $2, $3)
+         ON CONFLICT (guild_id) DO UPDATE SET raiders = $2, until = $3",
+    )
+    .bind(gid.get() as i64)
+    .bind(&ids)
+    .bind(until)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "saving heat panic failed");
+    }
+    // Heat panic is on already: a failed log must not fail the caller's punishment.
+    if let Err(e) = send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await {
+        tracing::warn!(?e, "heat panic log failed");
+    }
     Ok(())
+}
+
+/// [`note`] for a heat trip. Its failure is only logged: the caller's punishment still runs.
+pub(crate) async fn note_heat(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) {
+    if let Err(e) = note(app, gid, user, true).await {
+        tracing::warn!(?e, "counting towards heat panic failed");
+    }
 }
 
 async fn put_everyone(
@@ -102,6 +126,7 @@ async fn put_everyone(
         allow: Some(allow),
         deny: Some(deny),
     };
+    crate::verify::given::mark_own(gid, channel.get());
     app.http.update_channel_permission(channel, &o).await?;
     Ok(())
 }
@@ -133,6 +158,47 @@ async fn exempt(app: &App, gid: Id<GuildMarker>, category: Id<ChannelMarker>) ->
     }))
 }
 
+/// `channels` with panic's Send exemptions undone as [`unexempt`] would: the @everyone overwrite
+/// each whitelisted category had before (or none), from the pending `panic_end` job.
+/// shortcut: only the category itself; a child channel synced to it is read live.
+pub(crate) async fn unexempted(
+    app: &App,
+    gid: Id<GuildMarker>,
+    channels: &mut [twilight_model::channel::Channel],
+) -> Result<()> {
+    let ends: Vec<Value> = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    for saved in ends
+        .iter()
+        .flat_map(|p| p["exempt"].as_array().into_iter().flatten())
+    {
+        let Some(c) = saved["channel"]
+            .as_u64()
+            .and_then(|id| channels.iter_mut().find(|c| c.id.get() == id))
+        else {
+            continue;
+        };
+        let all = c.permission_overwrites.get_or_insert_with(Vec::new);
+        all.retain(|o| o.id.get() != gid.get());
+        if saved["had"].as_bool().unwrap_or(false) {
+            let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
+            all.push(
+                twilight_model::channel::permission_overwrite::PermissionOverwrite {
+                    id: gid.cast(),
+                    kind: ModelOverwriteType::Role,
+                    allow: bits("allow"),
+                    deny: bits("deny"),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> {
     let channel = Id::new(
         saved["channel"]
@@ -140,15 +206,37 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
             .context("saved overwrite has no channel")?,
     );
     if saved["had"].as_bool().unwrap_or(false) {
-        let bits = |k: &str| Permissions::from_bits_truncate(saved[k].as_u64().unwrap_or(0));
+        let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
         put_everyone(app, gid, channel, bits("allow"), bits("deny")).await
     } else {
+        crate::verify::given::mark_own(gid, channel.get());
         app.http
             .delete_channel_permission(channel)
             .role(Id::new(gid.get()))
             .await?;
         Ok(())
     }
+}
+
+/// While `start` still runs, its `panic_end` job stays at least this far ahead, so a panic shorter than
+/// the category calls cannot end in the middle of the start and leave its lockdown without an end job.
+const START_MARGIN_SECS: i64 = 60;
+
+/// Rewrites the pending `panic_end` job's payload in place (one statement, so it is never missing),
+/// and moves it to at least [`START_MARGIN_SECS`] from now.
+async fn end_payload(app: &App, gid: Id<GuildMarker>, payload: Value) -> Result<()> {
+    let n = sqlx::query(
+        "UPDATE scheduled_jobs SET payload = $2, run_at = greatest(run_at, now() + make_interval(secs => $3))
+         WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .bind(payload)
+    .bind(START_MARGIN_SECS as f64)
+    .execute(&app.pool)
+    .await?
+    .rows_affected();
+    anyhow::ensure!(n == 1, "panic_end job missing");
+    Ok(())
 }
 
 pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()> {
@@ -166,25 +254,56 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     {
         return Ok(());
     }
+    let ends = crate::app::now_secs() + cfg.duration_secs as i64;
+    // The dashboard reads the mod command lock from this job, so it exists before the category calls.
+    // No unlock until the end: nothing is locked before the full payload is saved.
+    let payload = |exempted: &[Value], unlock: bool| json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": unlock, "exempt": exempted, "locked": false});
+    if let Err(e) = jobs::replace(
+        &app.pool,
+        gid.get() as i64,
+        "panic_end",
+        payload(&[], false),
+        ends.max(crate::app::now_secs() + START_MARGIN_SECS),
+    )
+    .await
+    {
+        app.panic_runs.lock().unwrap().remove(&gid.get());
+        return Err(e);
+    }
     let mut exempted = vec![];
+    let mut saved = Ok(());
     for &c in &cfg.whitelisted_categories {
         match exempt(app, gid, c).await {
-            Ok(saved) => exempted.push(saved),
+            Ok(one) => {
+                exempted.push(one);
+                // After each one, so a crash leaves a job that closes every category opened so far.
+                saved = end_payload(app, gid, payload(&exempted, false)).await;
+                if saved.is_err() {
+                    break;
+                }
+            }
             Err(e) => tracing::warn!(?e, channel = c.get(), "panic: exempting category failed"),
         }
     }
-    let ends = crate::app::now_secs() + cfg.duration_secs as i64;
-    let payload = json!({
-        "lock_mod_commands": cfg.lock_mod_commands, "unlock": cfg.unlock_when_ending,
-        "exempt": &exempted
-    });
-    if let Err(e) = jobs::replace(&app.pool, gid.get() as i64, "panic_end", payload, ends).await {
+    if saved.is_ok() {
+        saved = end_payload(app, gid, payload(&exempted, cfg.unlock_when_ending)).await;
+    }
+    if let Err(e) = saved {
         // Without its end job panic mode would never end: mod commands stay locked and the
-        // categories open. Undo the start so the next trip can try again.
-        for saved in &exempted {
-            if let Err(e) = unexempt(app, gid, saved).await {
+        // categories open. Undo the start so the next trip can try again, and drop the job, or the
+        // dashboard and a restart would still read mod commands as locked.
+        for one in &exempted {
+            if let Err(e) = unexempt(app, gid, one).await {
                 tracing::warn!(?e, "panic: putting a category back failed");
             }
+        }
+        let drop_job =
+            sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'")
+                .bind(gid.get() as i64)
+                .execute(&app.pool)
+                .await;
+        if let Err(e) = drop_job {
+            tracing::warn!(?e, "panic: removing the panic_end job failed");
         }
         app.panic_runs.lock().unwrap().remove(&gid.get());
         return Err(e);
@@ -193,9 +312,16 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
             // A failed step is logged, so the report below is still sent.
+            // Panic's end lifts only a lock this call saved, also one an error left half applied;
+            // a lock from before panic, or one staff make after a failed lock, stays.
             PanicStep::LockServer => {
-                if let Err(e) = lockdown::lock(app, gid, LockKind::Role).await {
+                let mut saved = false;
+                let r = lockdown::lock_saving(app, gid, LockKind::Role, None, &mut saved).await;
+                if let Err(e) = r {
                     tracing::warn!(?e, "panic: locking the server failed");
+                }
+                if saved {
+                    own_lock(app, gid, true).await;
                 }
             }
             PanicStep::PingWarnedRoles => {
@@ -233,25 +359,26 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
                 .fetch_optional(&app.pool)
                 .await
                 .unwrap_or_default();
-                send_log(
+                let sent = send_log(
                     app,
                     gid.get(),
                     LogKind::Panic,
                     report(case.as_ref(), &backup),
-                )
-                .await?;
+                );
+                if let Err(e) = sent.await {
+                    tracing::warn!(?e, "panic report log failed");
+                }
             }
             PanicStep::UnlockServer => {}
         }
     }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::Panic,
-        Log::new("Panic Mode Lockdown", ALERT)
-            .text(&format!("{YES} **The server has been locked down.**")),
-    )
-    .await
+    let log = Log::new("Panic Mode Lockdown", ALERT)
+        .text(&format!("{YES} **The server has been locked down.**"));
+    // Panic mode runs: a failed log must not end the nuke run that started it.
+    if let Err(e) = send_log(app, gid.get(), LogKind::Panic, log).await {
+        tracing::warn!(?e, "panic lockdown log failed");
+    }
+    Ok(())
 }
 
 /// What panic mode's backup step did.
@@ -332,6 +459,22 @@ pub(crate) fn report(case: Option<&(String, Value)>, b: &Backup) -> Log {
     )
 }
 
+/// Records in the `panic_end` job whether the server lock is panic's own, so its end lifts only
+/// that one. Only logged on failure.
+pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, locked: bool) {
+    let r = sqlx::query(
+        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object('locked', $2::bool)
+         WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .bind(locked)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(?e, "panic: saving whose lock it is failed");
+    }
+}
+
 /// Ends panic mode for a guild; runs from the `panic_end` job, whose payload says what to put back.
 pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()> {
     app.panic_runs.lock().unwrap().remove(&gid.get());
@@ -340,18 +483,26 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
             tracing::warn!(?e, "panic: restoring category overwrite failed");
         }
     }
-    for step in panic_end_plan(payload["unlock"].as_bool().unwrap_or(false)) {
+    // Jobs from before `locked` existed unlock as they did.
+    let ours = payload["locked"].as_bool().unwrap_or(true);
+    for step in panic_end_plan(ours && payload["unlock"].as_bool().unwrap_or(false)) {
         if step == PanicStep::UnlockServer {
             lockdown::unlock(app, gid, Some(&LockKind::Role)).await?;
         }
     }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::Panic,
-        Log::new("Panic Mode Ended", DONE).text(&format!("{YES} **Panic mode has ended.**")),
-    )
-    .await
+    send_log(app, gid.get(), LogKind::Panic, end_log(payload)).await
+}
+
+/// Names who ended panic early from the dashboard (D74); a timed end has nobody.
+fn end_log(payload: &Value) -> Log {
+    let log = Log::new("Panic Mode Ended", DONE).text(&format!("{YES} **Panic mode has ended.**"));
+    match payload["ended_by"]
+        .as_str()
+        .and_then(|u| u.parse::<u64>().ok())
+    {
+        Some(u) => log.user("Ended by", u),
+        None => log,
+    }
 }
 
 /// Re-arms panic mode and join raids after a restart: the pending `panic_end` and `raid_end` jobs
@@ -382,6 +533,75 @@ pub async fn restore(app: &App) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_early_end_names_who_ended_it() {
+        let by = format!("{:?}", end_log(&json!({"ended_by": "42"})).build());
+        assert!(by.contains("<@42>"), "{by}");
+        let timed = format!("{:?}", end_log(&json!({})).build());
+        assert!(!timed.contains("Ended by"), "{timed}");
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. The per-category re-save changes the
+    /// one pending job in place, and refuses when there is none (start then undoes itself).
+    #[tokio::test]
+    async fn end_payload_rewrites_the_pending_job_in_place() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(9_890_000_000 + std::process::id() as u64);
+        let g = gid.get() as i64;
+        assert!(end_payload(&app, gid, json!({})).await.is_err());
+        jobs::replace(
+            &app.pool,
+            g,
+            "panic_end",
+            json!({"exempt": []}),
+            crate::app::now_secs() + 3600,
+        )
+        .await
+        .unwrap();
+        let one = json!({"unlock": false, "exempt": [{"channel": 5, "had": false}]});
+        end_payload(&app, gid, one.clone()).await.unwrap();
+        assert_eq!(
+            jobs::pending(&app.pool, "panic_end")
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|(id, _)| *id == g)
+                .map(|(_, p)| p)
+                .collect::<Vec<_>>(),
+            [one]
+        );
+        // A job already due (a panic shorter than the start) moves out of the scheduler's reach.
+        sqlx::query("UPDATE scheduled_jobs SET run_at = now() WHERE guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        end_payload(&app, gid, json!({})).await.unwrap();
+        let ahead: f64 = sqlx::query_scalar(
+            "SELECT extract(epoch from run_at - now())::float8 FROM scheduled_jobs WHERE guild_id = $1",
+        )
+        .bind(g)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        assert!(ahead > 55.0, "{ahead}");
+        sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
 
     fn text(l: Log) -> String {
         serde_json::to_string(&l.build()).unwrap()

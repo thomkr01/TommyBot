@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tommybot_antinuke::{
     describe, map_overwrites, plan, Action, Change, ChannelImg, Image, OverwriteImg, Plan, RoleImg,
-    Settings, WebhookImg, CATEGORY,
+    Settings, WebhookImg, CATEGORY, DANGEROUS_PERMS,
 };
 use twilight_http::Client;
 use twilight_model::{
@@ -182,23 +182,17 @@ pub async fn latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<Image>> {
     Ok(row.map(|(Json(i),)| i))
 }
 
-/// Live ids a restore must never delete: the quarantine role and the log channels.
+/// Live ids a restore must never delete (`sections::restore_keep`, N2).
 async fn keep_set(app: &App, gid: Id<GuildMarker>) -> Result<HashSet<u64>> {
-    let cfg = app.cfg(gid.get()).await?;
-    let mut keep: HashSet<u64> = cfg
-        .antinuke
-        .quarantine_role
-        .iter()
-        .map(|r| r.get())
-        .collect();
-    keep.extend(
-        cfg.logging
-            .fallback
-            .iter()
-            .chain(cfg.logging.routes.values())
-            .map(|c| c.get()),
-    );
-    Ok(keep)
+    let g = gid.get() as i64;
+    let cfg: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(g)
+    .fetch_optional(&app.pool)
+    .await?;
+    let cfg = cfg.map(|c| c.0).unwrap_or_default();
+    Ok(tommybot_core::sections::restore_keep(&app.pool, g, &cfg).await?)
 }
 
 /// Panic-mode restore: sync to the latest image and keep the server lock. `None` means there is
@@ -287,6 +281,13 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> R
     };
     let keep = keep_set(app, gid).await?;
     if confirm {
+        // A restore during a lock or panic would undo the locked permissions (D11).
+        if locked_or_panic(app, gid).await? {
+            return Ok(
+                "Cannot load a backup while the server is locked or in panic mode. End it first."
+                    .into(),
+            );
+        }
         let n = restore(app, gid, &image, &keep, None).await?.total();
         return Ok(format!("Restored backup #{id} ({n} changes)"));
     }
@@ -309,16 +310,23 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> R
     Ok(text)
 }
 
-/// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker) from
-/// the latest image, plus children re-parented to a recreated category. Nothing else is touched.
+/// Anti-nuke: recreates the roles and channels with these backup ids (deleted by a nuker), each
+/// from the newest image that has it, plus children re-parented to a recreated category. Nothing
+/// else is touched.
 pub async fn recreate(
     app: &App,
     gid: Id<GuildMarker>,
     ids: &HashSet<u64>,
     filters: Option<&BackupsCfg>,
-) -> Result<usize> {
-    let Some(image) = latest(app, gid).await? else {
-        return Ok(0);
+) -> Result<Recreated> {
+    let images: Vec<(Json<Image>,)> = sqlx::query_as(
+        "SELECT image FROM backups WHERE guild_id = $1 ORDER BY created_at DESC, id DESC",
+    )
+    .bind(gid.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    let Some((image, stripped)) = newest_with(images.into_iter().map(|(Json(i),)| i), ids) else {
+        return Ok(Recreated::default());
     };
     let live = snapshot(&app.restore_http, gid).await?;
     let keep: HashSet<u64> = live
@@ -339,7 +347,57 @@ pub async fn recreate(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    Ok(execute(app, gid, (&image, &live), p, true).await.total())
+    let (sum, id_map) = execute(app, gid, (&image, &live), p, true).await;
+    crate::relink::relink(app, gid, &id_map, &image).await;
+    let back: HashSet<u64> = ids
+        .iter()
+        .copied()
+        .filter(|i| id_map.contains_key(i))
+        .collect();
+    Ok(Recreated {
+        changes: sum.total(),
+        stripped: stripped.intersection(&back).count(),
+        back,
+    })
+}
+
+/// What [`recreate`] did.
+#[derive(Debug, Default)]
+pub struct Recreated {
+    pub changes: usize,
+    /// Which of the ids exist again (recreated, or matched to a live object).
+    pub back: HashSet<u64>,
+    /// Roles that came back from an older image, without their dangerous permissions.
+    pub stripped: usize,
+}
+
+/// The newest image (first), plus each of `ids` it lacks from the newest older image that has it:
+/// a backup taken after the delete (or mid-nuke) must not make the object unrecoverable. A role
+/// from an older image loses its dangerous permissions (it may predate staff taking them away);
+/// their ids are the second value.
+fn newest_with(
+    mut images: impl Iterator<Item = Image>,
+    ids: &HashSet<u64>,
+) -> Option<(Image, HashSet<u64>)> {
+    let mut image = images.next()?;
+    let mut stripped = HashSet::new();
+    for old in images {
+        for mut r in old.roles {
+            if ids.contains(&r.id) && !image.roles.iter().any(|x| x.id == r.id) {
+                if r.permissions & DANGEROUS_PERMS != 0 {
+                    r.permissions &= !DANGEROUS_PERMS;
+                    stripped.insert(r.id);
+                }
+                image.roles.push(r);
+            }
+        }
+        for c in old.channels {
+            if ids.contains(&c.id) && !image.channels.iter().any(|x| x.id == c.id) {
+                image.channels.push(c);
+            }
+        }
+    }
+    Some((image, stripped))
 }
 
 fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
@@ -351,8 +409,8 @@ fn overwrites(list: &[OverwriteImg]) -> Vec<PermissionOverwrite> {
             } else {
                 PermissionOverwriteType::Member
             },
-            allow: Permissions::from_bits_truncate(o.allow),
-            deny: Permissions::from_bits_truncate(o.deny),
+            allow: Permissions::from_bits_retain(o.allow),
+            deny: Permissions::from_bits_retain(o.deny),
         })
         .collect()
 }
@@ -402,7 +460,8 @@ pub async fn restore(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    let mut sum = execute(app, gid, (image, &live), p, respect_lock).await;
+    let (mut sum, id_map) = execute(app, gid, (image, &live), p, respect_lock).await;
+    crate::relink::relink(app, gid, &id_map, image).await;
     // Webhooks that did not exist in the image were made since (old images have no list).
     if let (Some(f), Some(old)) = (filters, &image.webhooks) {
         if f.restore && f.delete_webhooks {
@@ -428,7 +487,7 @@ async fn execute(
     (image, live): (&Image, &Image),
     mut p: Plan,
     respect_lock: bool,
-) -> Summary {
+) -> (Summary, HashMap<u64, u64>) {
     let http = &app.restore_http;
     let mut done = Summary::default();
     let live_cats: HashSet<u64> = live
@@ -447,7 +506,7 @@ async fn execute(
                         .create_role(gid)
                         .name(&r.name)
                         .color(r.color)
-                        .permissions(Permissions::from_bits_truncate(r.permissions))
+                        .permissions(Permissions::from_bits_retain(r.permissions))
                         .hoist(r.hoist)
                         .mentionable(r.mentionable)
                         .await?
@@ -459,7 +518,7 @@ async fn execute(
                     http.update_role(gid, Id::new(*live))
                         .name(Some(&to.name))
                         .color(Some(to.color))
-                        .permissions(Permissions::from_bits_truncate(to.permissions))
+                        .permissions(Permissions::from_bits_retain(to.permissions))
                         .hoist(to.hoist)
                         .mentionable(to.mentionable)
                         .await?;
@@ -571,7 +630,7 @@ async fn execute(
             tracing::warn!(?e, "restoring role positions failed");
         }
     }
-    done
+    (done, id_map)
 }
 
 fn count(r: Result<()>, what: &str) -> bool {
@@ -630,7 +689,7 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
                     let Ok(cfg) = app.cfg(g.id.get()).await else {
                         continue;
                     };
-                    if !cfg.backups.auto || !cfg.backups.enabled {
+                    if !cfg.backups.auto || !cfg.backups.enabled || under_attack(&app, g.id.get()) {
                         continue;
                     }
                     match due(&app, g.id, cfg.backups.interval_hours).await {
@@ -649,6 +708,20 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
             Err(e) => tracing::warn!(?e, "listing guilds for backup failed"),
         }
     }
+}
+
+/// The server is in panic mode or has a lock on: a restore or a backup delete waits until it ends.
+pub(crate) async fn locked_or_panic(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
+    Ok(app.panic_runs.lock().unwrap().contains_key(&gid.get())
+        || !tommybot_automod::store::locks(&app.pool, gid.get())
+            .await?
+            .is_empty())
+}
+
+/// A nuke run or panic mode is on: a backup now would save the damage as the newest image.
+fn under_attack(app: &App, gid: u64) -> bool {
+    app.panic_runs.lock().unwrap().contains_key(&gid)
+        || app.nuke_runs.lock().unwrap().keys().any(|k| k.0 == gid)
 }
 
 /// True when the newest backup is older than `hours` (or there is none).
@@ -700,6 +773,43 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_object_comes_from_the_newest_image_that_has_it() {
+        // Administrator (1 << 3) and Send Messages (1 << 11).
+        let role = |id, name: &str| RoleImg {
+            id,
+            name: name.into(),
+            color: 0,
+            permissions: (1 << 3) | if id == 2 { 1 << 11 } else { 0 },
+            position: 1,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+        };
+        let img = |roles| Image {
+            roles,
+            ..Default::default()
+        };
+        // Newest first: role 1 is in the newest image, role 2 only in the older ones.
+        let images = vec![
+            img(vec![role(1, "new")]),
+            img(vec![role(1, "old"), role(2, "mid")]),
+            img(vec![role(2, "oldest"), role(3, "not asked")]),
+        ];
+        let (got, stripped) = newest_with(images.into_iter(), &HashSet::from([1, 2])).unwrap();
+        let names: Vec<_> = got.roles.iter().map(|r| (r.id, r.name.as_str())).collect();
+        assert_eq!(names, [(1, "new"), (2, "mid")]);
+        // Role 2 came from an older image: Administrator is gone, Send Messages stays.
+        assert_eq!(got.roles[1].permissions, 1 << 11);
+        assert_eq!(stripped, HashSet::from([2]));
+        assert_eq!(
+            got.roles[0].permissions,
+            1 << 3,
+            "the newest image keeps its perms"
+        );
+        assert!(newest_with(std::iter::empty(), &HashSet::from([1])).is_none());
+    }
+
+    #[test]
     fn info_counts_categories_apart() {
         let ch = |id, kind| ChannelImg {
             id,
@@ -721,5 +831,74 @@ mod tests {
         assert!(
             t.contains("Roles: 0 · Channels: 2 · Categories: 1 · Webhooks: 0 · Server settings: ")
         );
+    }
+
+    /// D10/D11: load and clear need owner level plus a fresh 2FA, and load is refused in panic.
+    #[tokio::test]
+    async fn load_and_clear_need_an_owner_with_2fa_and_no_panic() {
+        use crate::{bansync::tests::T, commands::backup_cmd, slash::BackupCmd};
+        use tommybot_core::permits::Level;
+        let Some(t) = T::new(200).await else { return };
+        let (g, user) = (t.g(0), Id::new(t.base + 1));
+        t.server_config(
+            0,
+            t.owner(),
+            serde_json::json!({"backups": {"enabled": true}}),
+        )
+        .await;
+        t.exec("DELETE FROM backups WHERE guild_id = $1").await;
+        t.exec(r#"INSERT INTO backups (guild_id, image, code) VALUES ($1, '{"guild": 0, "name": "x", "roles": [], "channels": []}', 'h3load')"#).await;
+        let custom = Level::Custom {
+            rank: 1,
+            perms: vec!["backups".into()],
+            whitelist: vec![],
+            limits: Default::default(),
+        };
+        let clear = || BackupCmd::Clear;
+        let load = |confirm| BackupCmd::Load {
+            id: "h3load".into(),
+            confirm,
+        };
+        let run = |l: Level, c| {
+            let app = &t.app;
+            async move { backup_cmd(app, g, (user, &l), c).await.unwrap() }
+        };
+        assert!(run(custom.clone(), clear())
+            .await
+            .starts_with("Only the owner"));
+        assert!(run(custom.clone(), load(true))
+            .await
+            .starts_with("Only the owner"));
+        assert!(run(Level::ExtraOwner, clear()).await.contains("needs 2FA"));
+        t.exec("INSERT INTO dash_session (id, user_id, username, access_token, csrf, step_up_until, expires_at) VALUES ('h3-' || $1::text, $1 + 1, 'o', 'x', 'x', now() + interval '5 minutes', now() + interval '1 day')").await;
+        t.app.panic_runs.lock().unwrap().insert(
+            g.get(),
+            crate::app::PanicRun {
+                lock_mod_commands: false,
+            },
+        );
+        assert!(run(Level::ExtraOwner, load(true))
+            .await
+            .starts_with("Cannot load a backup while"));
+        // A backup delete is a clear one at a time (S-h3 2): the same bar.
+        let delete = || BackupCmd::Delete {
+            id: "h3load".into(),
+        };
+        assert!(run(Level::ExtraOwner, delete())
+            .await
+            .starts_with("Cannot delete backups while"));
+        assert!(run(Level::ExtraOwner, clear())
+            .await
+            .starts_with("Cannot delete backups while"));
+        t.app.panic_runs.lock().unwrap().clear();
+        assert!(run(custom.clone(), delete())
+            .await
+            .starts_with("Only the owner"));
+        t.exec("UPDATE dash_session SET step_up_until = now() - interval '1 minute' WHERE id = 'h3-' || $1::text").await;
+        assert!(run(Level::Owner, delete()).await.contains("needs 2FA"));
+        t.exec("UPDATE dash_session SET step_up_until = now() + interval '5 minutes' WHERE id = 'h3-' || $1::text").await;
+        assert_eq!(run(Level::Owner, delete()).await, "Deleted backup `h3load`");
+        assert_eq!(run(Level::Owner, clear()).await, "Deleted all backups");
+        t.exec("DELETE FROM backups WHERE guild_id = $1").await;
     }
 }

@@ -2,15 +2,16 @@
 //! Web mode hands the member to the dashboard's /verify page, which queues a `verify_grant` job.
 
 pub mod deleted;
+pub mod given;
 
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
-use serde::Deserialize;
 use std::collections::HashMap;
 use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
 };
 use tommybot_core::jobs;
+use tommybot_core::sections::{VERIFY_ALLOW, VERIFY_DENY};
 use tommybot_logging::emoji::ARROW;
 use tommybot_logging::{
     embed::{ALERT, DONE, GREEN, NO, RED, YES},
@@ -43,17 +44,7 @@ use crate::{
     events::send_log,
 };
 
-#[derive(Default, Deserialize)]
-#[serde(default)]
-pub struct VerificationCfg {
-    pub enabled: bool,
-    /// Where `verifysetup` posts the button.
-    pub channel: Option<Id<ChannelMarker>>,
-    /// Roles handed out on a pass.
-    pub roles: Vec<Id<RoleMarker>>,
-    #[serde(flatten)]
-    pub verify: VerifyCfg,
-}
+pub use tommybot_core::sections::VerificationCfg;
 
 use tommybot_logging::embed::{verify_panel, VERIFY_HELP as HELP, VERIFY_START as START};
 // The enter and code ids end in the guild id: a DM interaction has no guild of its own.
@@ -262,7 +253,9 @@ pub async fn on_join(
         }
     }
     if v.verify.quarantine_on_join {
-        if let Err(e) = crate::antinuke::quarantine(app, gid, user).await {
+        if let Err(e) =
+            crate::antinuke::quarantine_as(app, gid, user, None, crate::antinuke::Kind::Join).await
+        {
             tracing::warn!(?e, "quarantining an unverified joiner failed");
         }
     }
@@ -337,7 +330,18 @@ pub async fn on_member_update(app: &App, m: &MemberUpdate) -> Result<()> {
     Ok(())
 }
 
-pub(super) static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Held while the bot makes and saves a verification channel.
+pub(crate) static CHANNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The quarantine role's overwrite in a verification channel (`verification_shape`).
+pub(super) fn quarantine_shape(q: Id<RoleMarker>) -> PermissionOverwrite {
+    PermissionOverwrite {
+        id: q.cast(),
+        kind: PermissionOverwriteType::Role,
+        allow: Permissions::from_bits_truncate(VERIFY_ALLOW),
+        deny: Permissions::from_bits_truncate(VERIFY_DENY),
+    }
+}
 
 /// First join after setup with no verification channel (`s 12`): create one that unverified
 /// members can read but verified ones do not see, save it and post the button.
@@ -356,11 +360,7 @@ async fn ensure_channel(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     let none = Permissions::empty();
     let read = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
     let mut overwrites = vec![role(gid.cast(), read, Permissions::SEND_MESSAGES)];
-    overwrites.extend(
-        cfg.antinuke
-            .quarantine_role
-            .map(|q| role(q, read, Permissions::SEND_MESSAGES)),
-    );
+    overwrites.extend(cfg.antinuke.quarantine_role.map(quarantine_shape));
     overwrites.extend(
         cfg.verification
             .roles
@@ -451,23 +451,17 @@ pub async fn web_blocked(
     send_log(app, gid.get(), LogKind::Verification, log).await
 }
 
-/// [`grant`] for a member verifying themselves. Someone quarantined after they had roles (anti-nuke,
-/// a rate limit, staff) must not get out by passing verification; only a join quarantine saves none.
+/// [`grant`] for a member verifying themselves. Someone in a real quarantine (anti-nuke, a rate
+/// limit, staff, the Raider List) must not get out by passing verification; only a join one lifts.
 async fn self_grant(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
     v: &VerificationCfg,
 ) -> Result<()> {
-    let saved: Option<Vec<i64>> = sqlx::query_scalar(
-        "SELECT saved_roles FROM quarantines WHERE guild_id = $1 AND user_id = $2",
-    )
-    .bind(gid.get() as i64)
-    .bind(user.get() as i64)
-    .fetch_optional(&app.pool)
-    .await?;
+    let on_join = crate::antinuke::quarantine_kind(app, gid, user).await?;
     anyhow::ensure!(
-        saved.is_none_or(|r| r.is_empty()),
+        on_join != Some(false),
         "quarantined member tried to verify out of quarantine"
     );
     grant(app, gid, user, v).await
@@ -524,25 +518,24 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
                 Some(r) => ban.reason(r).await?,
                 None => ban.await?,
             };
+            crate::scheduler::forget_jobs(app, gid, user.get(), crate::scheduler::BANNED, None)
+                .await;
         }
         FailAction::Quarantine => {
-            crate::antinuke::quarantine_because(app, gid, user, reason).await?
+            let kind = crate::antinuke::Kind::Deadline;
+            crate::antinuke::quarantine_as(app, gid, user, reason, kind).await?
         }
     }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::Verification,
-        result_log(
-            &member.user,
-            ALERT,
-            &format!(
-                "{NO} `{}` did not verify in time: **{:?}**",
-                member.user.name, v.verify.on_fail
-            ),
-        ),
-    )
-    .await
+    let text = format!(
+        "{NO} `{}` did not verify in time: **{:?}**",
+        member.user.name, v.verify.on_fail
+    );
+    let log = result_log(&member.user, ALERT, &text);
+    // The punishment is done: a failed log must not fail the job, which would punish again.
+    if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
+        tracing::warn!(?e, "verification deadline log failed");
+    }
+    Ok(())
 }
 
 pub(crate) fn ephemeral(
@@ -611,7 +604,7 @@ pub(crate) async fn grant(
 ) -> Result<()> {
     // Verifying is open to anyone, so it never hands out a permit role or one with kick/ban/admin-like rights,
     // whoever put that role in the config.
-    let info = app.guild_info(gid).await?;
+    let info = crate::lockdown::unlocked_info(app, gid).await?;
     let permit_roles = tommybot_core::permits::permit_roles(&app.pool, gid.get() as i64).await?;
     let roles: Vec<_> = v
         .roles
@@ -633,7 +626,22 @@ pub(crate) async fn grant(
             safe
         })
         .collect();
-    if v.verify.replace_roles || v.verify.quarantine_on_join {
+    // Before the roles land: the other-bot check must not take back what TommyBot gives.
+    given::note_verified(gid, user);
+    // A join quarantine ends whatever "quarantine on join" says now: it may have been switched
+    // off since they joined.
+    let join = crate::antinuke::quarantine_kind(app, gid, user).await? == Some(true);
+    if v.verify.replace_roles || v.verify.quarantine_on_join || join {
+        // Discord refuses a role list that drops a managed (booster, integration) role.
+        let member = app.http.guild_member(gid, user).await?.model().await?;
+        let mut roles = roles;
+        let managed: Vec<_> = member
+            .roles
+            .iter()
+            .copied()
+            .filter(|r| info.managed.contains(r) && !roles.contains(r))
+            .collect();
+        roles.extend(managed);
         app.http
             .update_guild_member(gid, user)
             .roles(&roles)
@@ -643,8 +651,8 @@ pub(crate) async fn grant(
             app.http.add_guild_member_role(gid, user, *r).await?;
         }
     }
-    if v.verify.quarantine_on_join {
-        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2")
+    if join {
+        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1 AND user_id = $2 AND on_join")
             .bind(gid.get() as i64)
             .bind(user.get() as i64)
             .execute(&app.pool)

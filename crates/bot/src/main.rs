@@ -29,7 +29,10 @@ mod prefix;
 mod previews;
 mod purge;
 mod qr;
+#[cfg(test)]
+mod quarantine_tests;
 mod raiders;
+mod relink;
 mod reply;
 mod reports;
 mod scheduler;
@@ -121,6 +124,16 @@ async fn main() -> Result<()> {
         }
     });
 
+    if let Err(e) = welcome::load_audit_seen(&app).await {
+        tracing::warn!(?e, "loading the last audit entries failed");
+    }
+    tokio::spawn(welcome::flush_audit_loop(app.clone()));
+    if let Err(e) = antinuke::seed_windows(&app).await {
+        tracing::warn!(
+            ?e,
+            "restoring the anti-nuke and command limit windows failed"
+        );
+    }
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
     }
@@ -138,15 +151,19 @@ async fn main() -> Result<()> {
             }
         }
     });
+    metrics::load_seen(&app.pool).await;
+    tokio::spawn(metrics::keep_seen(app.pool.clone()));
     metrics::STARTED.store(app::now_secs() as u64, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(scheduler::run(app.clone()));
     tokio::spawn(metrics::heartbeat());
     tokio::spawn({
         let app = app.clone();
         async move {
+            let mut failures = 0;
             loop {
-                app.sites.refresh().await;
-                tokio::time::sleep(tommybot_automod::sites::REFRESH).await;
+                let loaded = app.sites.refresh().await;
+                let wait = tommybot_automod::sites::next_refresh(loaded, &mut failures);
+                tokio::time::sleep(wait).await;
             }
         }
     });
@@ -183,6 +200,7 @@ async fn main() -> Result<()> {
         | Intents::GUILD_MEMBERS
         | Intents::GUILD_MODERATION
         | Intents::AUTO_MODERATION_EXECUTION
+        | Intents::AUTO_MODERATION_CONFIGURATION
         | Intents::GUILD_MESSAGES
         | Intents::MESSAGE_CONTENT
         | Intents::GUILD_VOICE_STATES
@@ -206,6 +224,9 @@ async fn main() -> Result<()> {
                 if let Some(d) = shard.latency().average() {
                     metrics::LATENCY_MS
                         .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                if matches!(event, Event::Ready(_)) {
+                    welcome::note_ready(&app);
                 }
                 tokio::spawn(events::handle(app.clone(), event, extra));
             }

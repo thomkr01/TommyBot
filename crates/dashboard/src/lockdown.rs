@@ -252,6 +252,7 @@ pub(crate) async fn audit(
         st,
         guild,
         &c,
+        None,
         format!(
             "{} (<@{}>) {what} from the dashboard",
             s.username, s.user_id
@@ -289,21 +290,27 @@ async fn problems(st: &AppState, guild: i64) -> Result<Vec<Problem>, ApiError> {
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
         .await?;
     let num = |v: &Value| v.as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let bot = st.discord.bot_id().await?;
+    let me = bot.as_str();
+    let tickets = c["tickets"]["category"].as_str().filter(|t| !t.is_empty());
     let overwrites: Vec<Overwrite> = channels
         .as_array()
         .into_iter()
         .flatten()
         .flat_map(|c| {
+            // A ticket's member and the bot itself are let in on purpose.
+            let ticket = tickets.is_some() && c["parent_id"].as_str() == tickets;
             c["permission_overwrites"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|o| o["type"] == 0)
+                .filter(move |o| o["type"] == 0 || (o["type"] == 1 && !ticket && o["id"] != me))
                 .map(|o| Overwrite {
                     channel: num(&c["id"]),
                     role: num(&o["id"]),
                     allow: num(&o["allow"]),
                     deny: num(&o["deny"]),
+                    member: o["type"] == 1,
                 })
         })
         .collect();
@@ -315,12 +322,27 @@ async fn check(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     Ok(Json(json!(problems(&st, guild).await?)))
 }
 
-/// Single Apply Fix button: applies every automatic fix the check found.
-async fn fix(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+#[derive(Deserialize, Default)]
+struct FixPick {
+    /// Ids of opt-in problems (an @everyone allow) the user ticked.
+    #[serde(default)]
+    picked: Vec<String>,
+}
+
+/// Single Apply Fix button: applies every automatic fix the check found, and the opt-in ones
+/// the user ticked (D76b).
+async fn fix(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    b: Option<Json<FixPick>>,
+) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
+    let picked = b.map(|b| b.0.picked).unwrap_or_default();
     let fixes: Vec<Fix> = problems(&st, guild)
         .await?
         .iter()
+        .filter(|p| !p.opt_in || picked.contains(&p.id))
         .filter_map(|p| p.fix)
         .collect();
     for f in &fixes {
@@ -431,7 +453,9 @@ async fn set_bot_actions(
     rule: &str,
     spec: &RuleSpec,
 ) -> Result<(), ApiError> {
-    let (version, mut config) = crate::store::current(&st.db, guild).await?;
+    // Under the config lock: the Discord rule already exists, so a save in between must not 409 this away.
+    let mut tx = st.db.begin().await?;
+    let (version, mut config) = crate::store::locked(&mut tx, guild).await?;
     // Mention scopes live next to the bot actions; Discord's own scope is on the rule.
     let scope = (spec.trigger == "mention" && matches!(spec.scope.as_str(), "user" | "server"))
         .then(|| MentionScope {
@@ -465,11 +489,9 @@ async fn set_bot_actions(
             None => changed |= slot.as_object_mut().and_then(|m| m.remove(rule)).is_some(),
         }
     }
-    if !changed {
-        return Ok(());
+    if changed {
+        crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
     }
-    let mut tx = st.db.begin().await?;
-    crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -504,55 +526,13 @@ async fn update_rule(
     Ok(Json(json!({"ok": true})))
 }
 
-/// "Migrate words to Discord's AutoMod": one copy of the local word blacklist into a new
-/// keyword rule, then the local lists are cleared. Regex patterns stay local (rules have no regex here).
+/// "Migrate words to Discord's AutoMod": turns "Use Discord AutoMod" on, so the bot's sync (run on
+/// this save) creates or updates its one keyword rule. The local lists stay: thread and reaction
+/// names still read them, and messages read only what the rule does not block.
 async fn migrate_words(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
     let (version, mut config) = crate::store::current(&st.db, guild).await?;
-    let w = &mut config["automod"]["filters"]["words"];
-    let list =
-        |k: &str| -> Vec<String> { serde_json::from_value(w[k].clone()).unwrap_or_default() };
-    let flag = |k: &str| w[k] == true;
-    let keywords: Vec<String> = list("strict")
-        .into_iter()
-        .chain(list("wildcard").into_iter().map(|x| format!("*{x}*")))
-        .chain(tommybot_automod::filters::premade_words(
-            flag("premade_profane"),
-            flag("premade_vulgar"),
-            flag("premade_racist"),
-        ))
-        .collect();
-    if keywords.is_empty() {
-        return Err(ApiError::BadRequest("There are no words to migrate".into()));
-    }
-    if keywords.len() > 1000 || keywords.iter().any(|k| k.chars().count() > 60) {
-        return Err(ApiError::BadRequest(
-            "Discord allows at most 1000 words of up to 60 characters per rule".into(),
-        ));
-    }
-    let spec = RuleSpec {
-        name: "TommyBot migrated words".into(),
-        enabled: true,
-        trigger: "keyword".into(),
-        keywords,
-        block_message: true,
-        ..Default::default()
-    };
-    st.discord
-        .call(
-            Method::POST,
-            &format!("/guilds/{guild}/auto-moderation/rules"),
-            Some(body(&spec)?),
-        )
-        .await?;
-    for k in ["strict", "wildcard"] {
-        w[k] = json!([]);
-    }
-    for k in ["premade_profane", "premade_vulgar", "premade_racist"] {
-        w[k] = json!(false);
-    }
-    // The rule is a one-time copy, so the keep-in-sync toggle must not overwrite it later.
-    w["use_discord_automod"] = json!(false);
+    let n = migrate_plan(&mut config["automod"]["filters"]["words"])?;
     let mut tx = st.db.begin().await?;
     crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
     tx.commit().await?;
@@ -560,13 +540,35 @@ async fn migrate_words(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
         &st,
         &s,
         guild,
-        format!(
-            "migrated {} word(s) to Discord AutoMod",
-            spec.keywords.len()
-        ),
+        format!("migrated {n} word(s) to Discord AutoMod"),
     )
     .await?;
-    Ok(Json(json!({"ok": true, "migrated": spec.keywords.len()})))
+    Ok(Json(json!({"ok": true, "migrated": n})))
+}
+
+/// Switches the words config `w` to the sync; the number of words it hands to Discord.
+fn migrate_plan(w: &mut Value) -> Result<usize, ApiError> {
+    if w["use_discord_automod"] == true {
+        return Err(ApiError::BadRequest(
+            "The words are already kept in Discord's AutoMod".into(),
+        ));
+    }
+    let list =
+        |k: &str| -> Vec<String> { serde_json::from_value(w[k].clone()).unwrap_or_default() };
+    let flag = |k: &str| w[k] == true;
+    let n = list("strict").len()
+        + list("wildcard").len()
+        + tommybot_automod::filters::premade_words(
+            flag("premade_profane"),
+            flag("premade_vulgar"),
+            flag("premade_racist"),
+        )
+        .len();
+    if n == 0 {
+        return Err(ApiError::BadRequest("There are no words to migrate".into()));
+    }
+    w["use_discord_automod"] = json!(true);
+    Ok(n)
 }
 
 #[derive(Deserialize)]
@@ -622,6 +624,80 @@ async fn delete_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Bot actions are saved after the
+    /// Discord rule exists, so saves running at the same time must all land, none refused with 409.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bot_actions_of_parallel_rules_all_land() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_860_000_000 + std::process::id() as i64;
+        let st = AppState {
+            db: db.clone(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::new(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api: String::new(),
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        let s = Sess {
+            id: String::new(),
+            user_id: 7,
+            username: "t".into(),
+            access_token: String::new(),
+            stepped_up: true,
+            csrf: String::new(),
+        };
+        let mut runs = tokio::task::JoinSet::new();
+        for rule in 1..=8 {
+            let (st, s) = (st.clone(), s.clone());
+            runs.spawn(async move {
+                let spec = RuleSpec {
+                    bot_actions: vec![BotAction::Warn],
+                    ..Default::default()
+                };
+                set_bot_actions(&st, &s, g, &rule.to_string(), &spec).await
+            });
+        }
+        for r in runs.join_all().await {
+            r.unwrap();
+        }
+        let (v, c) = crate::store::current(&db, g).await.unwrap();
+        assert_eq!(v, 8);
+        assert_eq!(
+            c["discord_automod"]["actions"].as_object().unwrap().len(),
+            8
+        );
+        sqlx::query("delete from guild_config where guild_id = $1")
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    /// Migrating only turns the sync on and keeps the local lists (thread and reaction names read
+    /// them); the sync makes the one rule. A second migrate is refused.
+    #[test]
+    fn migrate_keeps_the_local_lists() {
+        let mut w = json!({"strict": ["darn"], "wildcard": ["heck"], "premade_vulgar": false});
+        assert_eq!(migrate_plan(&mut w).unwrap(), 2);
+        assert_eq!(w["strict"], json!(["darn"]));
+        assert_eq!(w["wildcard"], json!(["heck"]));
+        assert_eq!(w["use_discord_automod"], true);
+        assert!(migrate_plan(&mut w).is_err());
+        assert!(migrate_plan(&mut json!({})).is_err(), "no words");
+    }
 
     #[test]
     fn rule_ids_must_be_snowflakes() {

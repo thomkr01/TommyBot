@@ -407,9 +407,9 @@ mod tests {
                     apply(&mut doc, &p, Edit::Add(vec![json!("5")]));
                 }
             }
-            check_section("whitelist", &doc["whitelist"]).unwrap();
+            check_section("whitelist", &doc["whitelist"], &serde_json::Value::Null).unwrap();
             if kind == 'u' {
-                check_section("antinuke", &doc["antinuke"]).unwrap();
+                check_section("antinuke", &doc["antinuke"], &serde_json::Value::Null).unwrap();
             }
             let got = current(&GuildCfg::parse(&doc), kind, 5);
             assert_eq!(got, vec![true, true, true, kind == 'u', true], "{kind}");

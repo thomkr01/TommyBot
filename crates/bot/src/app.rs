@@ -49,14 +49,23 @@ pub struct GuildCfg {
     pub catch: CatchCfg,
     pub ban_sync: BanSyncCfg,
     pub raider_list: RaiderListCfg,
+    /// Sections that failed to parse and run on their defaults; the owner is told (D48).
+    pub fallbacks: Vec<&'static str>,
 }
 
-/// One dashboard section; a section that fails to parse falls back to its default.
-fn section<T: DeserializeOwned + Default>(cfg: &Value, name: &str) -> T {
+/// One dashboard section; a section that fails to parse falls back to its default and is noted.
+fn section<T: DeserializeOwned + Default>(
+    cfg: &Value,
+    name: &'static str,
+    fallbacks: &mut Vec<&'static str>,
+) -> T {
     match cfg.get(name).cloned().map(serde_json::from_value) {
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             tracing::warn!(section = name, %e, "bad config section, using defaults");
+            if !fallbacks.contains(&name) {
+                fallbacks.push(name);
+            }
             T::default()
         }
         None => T::default(),
@@ -64,9 +73,13 @@ fn section<T: DeserializeOwned + Default>(cfg: &Value, name: &str) -> T {
 }
 
 /// Strict parse of one section for writes from Discord: a bad value is refused, not defaulted.
-pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
+/// `old` is the stored section: an entry the bot skips is refused only when it changed.
+pub fn check_section(name: &str, v: &Value, old: &Value) -> Result<(), String> {
     fn t<T: DeserializeOwned>(v: &Value) -> Result<(), String> {
         T::deserialize(v).map(drop).map_err(|e| e.to_string())
+    }
+    if let Some(e) = tommybot_core::sections::unreadable_entry(name, v, old) {
+        return Err(format!("unknown entry {e}"));
     }
     match name {
         "logging" => t::<LogConfig>(v),
@@ -89,32 +102,36 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
 
 impl GuildCfg {
     pub(crate) fn parse(cfg: &Value) -> Self {
-        let lockdown: LockdownCfg = section(cfg, "lockdown");
-        let mut verification: VerificationCfg = section(cfg, "verification");
+        let mut f = vec![];
+        let lockdown: LockdownCfg = section(cfg, "lockdown", &mut f);
+        let mut verification: VerificationCfg = section(cfg, "verification", &mut f);
         // Verified members get the Statics main roles unless verification names its own.
         if verification.roles.is_empty() {
             verification.roles = lockdown.main_roles.clone();
         }
-        Self {
-            logging: section(cfg, "logging"),
-            antinuke: section(cfg, "antinuke"),
-            automod: section(cfg, "automod"),
-            joingate: section(cfg, "joingate"),
-            joinraid: section(cfg, "joinraid"),
+        let mut c = Self {
+            logging: section(cfg, "logging", &mut f),
+            antinuke: section(cfg, "antinuke", &mut f),
+            automod: section(cfg, "automod", &mut f),
+            joingate: section(cfg, "joingate", &mut f),
+            joinraid: section(cfg, "joinraid", &mut f),
             lockdown,
-            lockdown_prefs: section(cfg, "lockdown"),
-            discord_automod: section(cfg, "discord_automod"),
-            panic: section(cfg, "panic"),
-            backups: section(cfg, "backups"),
-            misc: section(cfg, "misc"),
-            appeals: section(cfg, "appeals"),
-            whitelist: section(cfg, "whitelist"),
+            lockdown_prefs: section(cfg, "lockdown", &mut f),
+            discord_automod: section(cfg, "discord_automod", &mut f),
+            panic: section(cfg, "panic", &mut f),
+            backups: section(cfg, "backups", &mut f),
+            misc: section(cfg, "misc", &mut f),
+            appeals: section(cfg, "appeals", &mut f),
+            whitelist: section(cfg, "whitelist", &mut f),
             verification,
-            tickets: section(cfg, "tickets"),
-            catch: section(cfg, "catch"),
-            ban_sync: section(cfg, "ban_sync"),
-            raider_list: section(cfg, "raider_list"),
-        }
+            tickets: section(cfg, "tickets", &mut f),
+            catch: section(cfg, "catch", &mut f),
+            ban_sync: section(cfg, "ban_sync", &mut f),
+            raider_list: section(cfg, "raider_list", &mut f),
+            fallbacks: vec![],
+        };
+        c.fallbacks = f;
+        c
     }
 }
 
@@ -127,7 +144,7 @@ pub struct App {
     pub me: Id<UserMarker>,
     /// The bot application's owner (the team owner for a team app); Ban Sync never acts on them.
     pub bot_owner: Option<Id<UserMarker>>,
-    cfgs: RwLock<HashMap<u64, Arc<GuildCfg>>>,
+    cfgs: RwLock<CfgCache>,
     pub logger: Mutex<Logger>,
     /// Whether @everyone can read a log channel, and when that was checked.
     pub log_public:
@@ -168,11 +185,27 @@ pub struct App {
     pub panic: Mutex<PanicTracker>,
     pub panic_heat: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
-    /// Heat panic: accounts that tripped it and when it ends (unix secs). Lost on restart, it is short.
+    /// Heat panic: accounts that tripped it and when it ends (unix secs). Saved in `heat_panic`.
     pub heat_raiders: Mutex<HashMap<u64, (HashSet<u64>, i64)>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
     /// Category (None: no category) of each channel created or deleted, until its audit entry arrives.
     pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
+    /// Permit levels [`App::whitelisted`] read in the last [`LEVEL_TTL`].
+    pub(crate) levels: Mutex<LevelCache>,
+    /// Newest audit entry id seen per guild, so a new gateway session can fetch what it missed (D20).
+    pub last_audit: Mutex<HashMap<u64, u64>>,
+    /// The last 1000 audit entry ids seen per guild: live and catch-up handle each once (D20).
+    pub audit_recent: Mutex<HashMap<u64, std::collections::VecDeque<u64>>>,
+    /// Newest handled audit id per guild not yet written to `audit_seen` (`welcome::flush_audit`).
+    pub audit_done: Mutex<HashMap<u64, u64>>,
+    /// `last_audit` as it stood when `Ready` came in: where the catch-up starts (D20).
+    pub audit_floor: Mutex<HashMap<u64, u64>>,
+    /// Audit ids being handled now: `flush_audit` saves nothing past the oldest (D20).
+    pub audit_inflight: Mutex<HashMap<u64, std::collections::BTreeMap<u64, Instant>>>,
+    /// Start of a gap whose catch-up has not succeeded: saved and re-read until it does (D20).
+    pub audit_pinned: Mutex<HashMap<u64, u64>>,
+    /// Each channel's category as last seen, and when it last moved to another (D4).
+    pub category_moves: Mutex<HashMap<u64, (Option<u64>, crate::hierarchy::CategoryMove)>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
     pub nuke_runs: Mutex<crate::antinuke::NukeRuns>,
@@ -191,6 +224,41 @@ pub struct App {
     pub voice_raids: Mutex<HashMap<u64, tommybot_automod::voice::VoiceRaidDetector>>,
     /// NSFW image scan queue, model and score cache.
     pub nsfw: crate::nsfw::Scanner,
+}
+
+/// How long a whitelist lookup is reused (D77). Short: a role change clears it anyway.
+const LEVEL_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+pub(crate) struct LevelCache {
+    map: HashMap<(u64, u64), (Level, Instant)>,
+    /// Moves on every forget, so a lookup started before it is not cached.
+    generation: u64,
+}
+
+/// Parsed configs per guild. A load that read the database before a newer save was announced must not
+/// cache what it read, so every forget moves `generation` and a load only caches under the one it started with.
+#[derive(Default)]
+struct CfgCache {
+    map: HashMap<u64, Arc<GuildCfg>>,
+    generation: u64,
+}
+
+impl CfgCache {
+    fn insert(&mut self, guild: u64, generation: u64, cfg: Arc<GuildCfg>) {
+        if generation == self.generation {
+            self.map.insert(guild, cfg);
+        }
+    }
+
+    /// One guild, or all with None.
+    fn forget(&mut self, guild: Option<u64>) {
+        self.generation += 1;
+        match guild {
+            Some(g) => drop(self.map.remove(&g)),
+            None => self.map.clear(),
+        }
+    }
 }
 
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
@@ -253,6 +321,14 @@ impl App {
             heat_raiders: Default::default(),
             guilds: Default::default(),
             channel_parents: Default::default(),
+            category_moves: Default::default(),
+            last_audit: Default::default(),
+            audit_recent: Default::default(),
+            audit_done: Default::default(),
+            audit_floor: Default::default(),
+            audit_inflight: Default::default(),
+            audit_pinned: Default::default(),
+            levels: Default::default(),
             nuke_runs: Default::default(),
             lock_ops: Default::default(),
             thread_parents: Default::default(),
@@ -299,32 +375,55 @@ impl App {
         Ok(self.level(guild, owner, user).await?.immune())
     }
 
-    /// Exempt from one system via the permit whitelist (immune levels are exempt from all).
+    /// Exempt from one system via the permit whitelist (immune levels are exempt from all). A nuke
+    /// asks this for every audit entry, so the level is kept for [`LEVEL_TTL`] (D77): a member
+    /// update clears it, and a read that raced that clear is not kept.
     pub async fn whitelisted(
         &self,
         guild: Id<GuildMarker>,
         user: Id<UserMarker>,
         flag: &str,
     ) -> Result<bool> {
-        let owner = self.guild_info(guild).await?.owner;
-        Ok(self.level(guild, owner, user).await?.whitelisted(flag))
+        let key = (guild.get(), user.get());
+        let (hit, generation) = {
+            let c = self.levels.lock().unwrap();
+            let hit = c.map.get(&key).filter(|e| e.1.elapsed() < LEVEL_TTL);
+            (hit.map(|e| e.0.clone()), c.generation)
+        };
+        let level = match hit {
+            Some(l) => l,
+            None => {
+                let owner = self.guild_info(guild).await?.owner;
+                let l = self.level(guild, owner, user).await?;
+                let mut c = self.levels.lock().unwrap();
+                if c.generation == generation {
+                    // shortcut: cleared whole past the cap, it only costs lookups.
+                    if c.map.len() > 10_000 {
+                        c.map.clear();
+                    }
+                    c.map.insert(key, (l.clone(), Instant::now()));
+                }
+                l
+            }
+        };
+        Ok(level.whitelisted(flag))
     }
 
-    /// Records a command use against the permit's limit; `false` means the actor breached it.
-    pub fn command_allowed(&self, actor: Id<UserMarker>, level: &Level, action: &str) -> bool {
-        permits::command_allowed(
-            &mut self.rate_limiter.lock().unwrap(),
-            actor.get() as i64,
-            level,
-            action,
-            std::time::Instant::now(),
-        )
+    /// A member's roles (and so their level) changed: drop the cached level.
+    pub fn forget_level(&self, guild: u64, user: u64) {
+        let mut c = self.levels.lock().unwrap();
+        c.generation += 1;
+        c.map.remove(&(guild, user));
     }
 
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {
-        if let Some(c) = self.cfgs.read().unwrap().get(&guild) {
-            return Ok(c.clone());
-        }
+        let generation = {
+            let c = self.cfgs.read().unwrap();
+            if let Some(cfg) = c.map.get(&guild) {
+                return Ok(cfg.clone());
+            }
+            c.generation
+        };
         let row: Option<(Value,)> = sqlx::query_as(
             "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
         )
@@ -332,13 +431,26 @@ impl App {
         .fetch_optional(&self.pool)
         .await?;
         let cfg = Arc::new(row.map_or_else(GuildCfg::default, |(v,)| GuildCfg::parse(&v)));
-        self.cfgs.write().unwrap().insert(guild, cfg.clone());
+        self.cfgs
+            .write()
+            .unwrap()
+            .insert(guild, generation, cfg.clone());
+        // After the insert, so the alert's own config reads hit the cache.
+        if !cfg.fallbacks.is_empty() {
+            let alert = crate::reply::fallback_alert(
+                self,
+                Id::new(guild),
+                &cfg.fallbacks,
+                &cfg.lockdown.main_roles,
+            );
+            let _ = tokio::time::timeout(crate::reply::DM_WAIT, alert).await;
+        }
         Ok(cfg)
     }
 
     /// Drops a guild's cached config after a write from Discord, before the NOTIFY round trip.
     pub fn forget_cfg(&self, guild: u64) {
-        self.cfgs.write().unwrap().remove(&guild);
+        self.cfgs.write().unwrap().forget(Some(guild));
     }
 
     /// Reloads configs when the dashboard saves. Reconnects by itself; a gap only delays a reload.
@@ -346,7 +458,7 @@ impl App {
         let mut l = PgListener::connect_with(&self.pool).await?;
         l.listen("config_changed").await?;
         // A restarted listener missed what was saved while it was down.
-        self.cfgs.write().unwrap().clear();
+        self.cfgs.write().unwrap().forget(None);
         loop {
             match l.try_recv().await? {
                 Some(n) => {
@@ -356,8 +468,11 @@ impl App {
                         None => (n.payload(), None),
                     };
                     if let Ok(g) = g.parse::<u64>() {
-                        self.cfgs.write().unwrap().remove(&g);
-                        tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
+                        self.cfgs.write().unwrap().forget(Some(g));
+                        let app = self.clone();
+                        tokio::spawn(
+                            async move { crate::automod::sync_discord_rule(&app, g).await },
+                        );
                         if let Some(gid) = Id::new_checked(g) {
                             tokio::spawn(on_saved(self.clone(), gid, version));
                         }
@@ -365,7 +480,7 @@ impl App {
                 }
                 // The connection dropped and reconnects on the next call: changes saved meanwhile
                 // were never announced, so every cached config is read again.
-                None => self.cfgs.write().unwrap().clear(),
+                None => self.cfgs.write().unwrap().forget(None),
             }
         }
     }
@@ -412,6 +527,144 @@ mod tests {
         assert_eq!(c.logging.fallback, Some(Id::new(42)));
         assert_eq!(c.lockdown.main_roles, vec![Id::new(9)]);
         assert!(!GuildCfg::parse(&json!({})).automod.enabled);
+        assert_eq!(c.fallbacks, ["joingate"]);
+    }
+
+    /// D48: a key a newer version wrote drops only that entry; a broken section is noted.
+    #[test]
+    fn an_unknown_key_keeps_the_section_on() {
+        let c = GuildCfg::parse(&json!({
+            "antinuke": {"enabled": true, "limits": {"Ban": {"per_minute": 2}, "SoundboardNuke": {"per_minute": 1}}},
+            "logging": {"routes": {"anti_nuke": "5", "future_kind": "6"}},
+            "raider_list": {"enabled": true, "categories": ["nuke", "future"]},
+        }));
+        assert!(c.antinuke.enabled);
+        assert_eq!(c.antinuke.limit(NukeAction::Ban).unwrap().0.per_minute, 2);
+        assert_eq!(c.logging.routes.len(), 1);
+        assert!(c.raider_list.enabled && c.raider_list.categories.len() == 1);
+        assert!(c.fallbacks.is_empty());
+        let bad = GuildCfg::parse(&json!({"antinuke": {"enabled": "yes"}}));
+        assert!(!bad.antinuke.enabled);
+        assert_eq!(bad.fallbacks, ["antinuke"]);
+    }
+
+    /// D70. The bot's own defaults (what an empty section means) sit inside every new range.
+    #[test]
+    fn defaults_fit_the_ranges() {
+        use tommybot_core::limits::for_path;
+        let c = GuildCfg::parse(&json!({}));
+        let r = RaidCfg::default();
+        let a = &c.automod;
+        let vals: Vec<(&str, &str, i64)> = vec![
+            ("automod", "strike.cap", a.strike.cap as i64),
+            (
+                "automod",
+                "strike.multiplier_pct",
+                a.strike.multiplier_pct as i64,
+            ),
+            (
+                "automod",
+                "strike.strike_timeout_ms",
+                a.strike.strike_timeout_ms,
+            ),
+            ("automod", "strike.cap_timeout_ms", a.strike.cap_timeout_ms),
+            (
+                "automod",
+                "auto_lockdown.mention_count",
+                a.auto_lockdown.mention_count as i64,
+            ),
+            (
+                "automod",
+                "auto_lockdown.mention_window_ms",
+                a.auto_lockdown.mention_window_ms,
+            ),
+            (
+                "automod",
+                "filters.mention_hour_cap",
+                a.filters.mention_hour_cap as i64,
+            ),
+            ("panic", "window_secs", c.panic.window_secs as i64),
+            ("panic", "heat_executors", c.panic.heat_executors as i64),
+            ("joinraid", "count", r.count as i64),
+            ("joinraid", "span_ms", r.span_ms),
+            ("joinraid", "id_flag_min", r.id_flag_min.unwrap() as i64),
+            ("misc", "ban_purge_days", c.misc.ban_purge_days as i64),
+        ];
+        for (s, p, v) in vals {
+            let (lo, hi) = for_path(s, p).unwrap_or_else(|| panic!("{s}.{p} has no range"));
+            assert!(
+                (lo..=hi).contains(&v),
+                "{s}.{p} default {v} outside {lo}..={hi}"
+            );
+        }
+        for t in &c.misc.warn_actions {
+            let (lo, hi) = for_path("misc", "warn_actions.0.points").unwrap();
+            assert!((lo..=hi).contains(&(t.points as i64)));
+        }
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Loads race saves (insert, then
+    /// forget as after a NOTIFY); once both settle, the config served must be the newest saved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_load_racing_a_save_never_caches_the_older_version() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = Arc::new(App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        ));
+        let g = 9_870_000_000 + std::process::id() as i64;
+        let mut stale = 0;
+        for v in 1..=100 {
+            let a = app.clone();
+            app.forget_cfg(g as u64); // nothing cached: the loads below read the database
+                                      // Several loads in flight, so one reads the old version while the save commits.
+            let loads: Vec<_> = (0..8)
+                .map(|_| {
+                    let a = a.clone();
+                    tokio::spawn(async move { a.cfg(g as u64).await.unwrap() })
+                })
+                .collect();
+            tokio::task::yield_now().await;
+            sqlx::query(// Padded on the server: a load reading a version is slow, writing one is quick.
+                "insert into guild_config (guild_id, version, config) values ($1, $2, $3 || jsonb_build_object('pad', repeat('x', 4000000)))")
+                .bind(g)
+                .bind(v)
+                .bind(json!({"misc": {"prefix": format!("p{v}")}}))
+                .execute(&app.pool)
+                .await
+                .unwrap();
+            app.forget_cfg(g as u64);
+            for l in loads {
+                l.await.unwrap();
+            }
+            if app.cfg(g as u64).await.unwrap().misc.prefix != format!("p{v}") {
+                stale += 1;
+                app.forget_cfg(g as u64);
+            }
+        }
+        sqlx::query("delete from guild_config where guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        assert_eq!(stale, 0, "an older version stayed cached after a save");
+    }
+
+    #[test]
+    fn a_load_started_before_a_forget_is_not_cached() {
+        let mut c = CfgCache::default();
+        let started = c.generation;
+        c.forget(Some(2)); // a NOTIFY for another save lands while the load awaits the database
+        c.insert(1, started, Default::default());
+        assert!(c.map.is_empty());
+        c.insert(1, c.generation, Default::default());
+        assert!(c.map.contains_key(&1));
     }
 }
 
