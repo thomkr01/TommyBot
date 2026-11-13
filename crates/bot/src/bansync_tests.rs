@@ -1605,6 +1605,19 @@ async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
         "member deny deleted"
     );
     assert_eq!(t.calls(r#""deny":"1026""#), 3, "put back as it was");
+    // The actor's permits cannot be read: undone all the same, nobody quarantined (D12b).
+    t.set(|m| m.fail_member = true);
+    crate::antinuke::hold_overwrite(&t.app, &lift(15, "50", "1"), Id::new(10))
+        .await
+        .unwrap();
+    t.set(|m| m.fail_member = false);
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 4);
+    let held: i64 = sqlx::query_scalar("SELECT count(*) FROM quarantines WHERE guild_id = $1 AND user_id = 10")
+        .bind(g.get() as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(held, 0);
     // A deny the quarantine did not put there is not the hold's matter.
     let _ = crate::antinuke::hold_overwrite(&t.app, &lift(14, "52", "1"), Id::new(9)).await;
     assert_eq!(t.calls("PUT /channels/30/permissions/52"), 0);

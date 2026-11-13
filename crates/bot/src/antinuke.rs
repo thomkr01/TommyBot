@@ -2335,8 +2335,7 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         return Ok(());
     };
     let cfg = app.cfg(gid.get()).await?;
-    let whitelisted = cfg.antinuke.quarantine_whitelist.contains(&actor)
-        || app.whitelisted(gid, actor, "quarantine").await?;
+    let (whitelisted, unsure) = hold_whitelisted(app, &cfg, gid, actor).await;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
         return Ok(());
     }
@@ -2351,6 +2350,12 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     // Switched off, nobody is punished for touching a quarantined member (Thomas, 11-12).
     if !cfg.antinuke.quarantine_hold {
         return Ok(());
+    }
+    if unsure {
+        if e.action_type == A::MemberRoleUpdate {
+            back_to_quarantine(app, &cfg, gid, target).await?;
+        }
+        return hold_unsure_log(app, gid, actor, target, "touched a quarantined member").await;
     }
     if e.action_type != A::MemberRoleUpdate {
         return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
@@ -2408,8 +2413,7 @@ pub(crate) async fn hold_overwrite(
         return Ok(());
     };
     let cfg = app.cfg(gid.get()).await?;
-    let whitelisted = cfg.antinuke.quarantine_whitelist.contains(&actor)
-        || app.whitelisted(gid, actor, "quarantine").await?;
+    let (whitelisted, unsure) = hold_whitelisted(app, &cfg, gid, actor).await;
     if !hold_violation(actor.get(), user.get(), true, whitelisted) {
         return Ok(());
     }
@@ -2442,7 +2446,47 @@ pub(crate) async fn hold_overwrite(
     if on_join || !cfg.antinuke.quarantine_hold {
         return Ok(());
     }
+    if unsure {
+        let what = "gave a quarantined member channel access";
+        return hold_unsure_log(app, gid, actor, user, what).await;
+    }
     quarantine_and_revert(app, gid, actor, "gave a quarantined member channel access").await
+}
+
+/// Whether the hold spares `actor` (quarantine whitelist), and whether that could not be read.
+/// Unread, the hold undoes but punishes nobody: a lookup error must not quarantine staff (#97),
+/// nor leave the quarantined member what they were given (Thomas, D12b: undo, not punish).
+async fn hold_whitelisted(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+) -> (bool, bool) {
+    if cfg.antinuke.quarantine_whitelist.contains(&actor) {
+        return (true, false);
+    }
+    match app.whitelisted(gid, actor, "quarantine").await {
+        Ok(w) => (w, false),
+        Err(e) => {
+            tracing::warn!(?e, "quarantine whitelist lookup failed, undoing without punishment");
+            (false, true)
+        }
+    }
+}
+
+async fn hold_unsure_log(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    target: Id<UserMarker>,
+    what: &str,
+) -> Result<()> {
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Responsible", actor.get())
+        .user("Member", target.get())
+        .text(&format!("**{what}**"))
+        .line("Action", "undone where it can be; not quarantined: their permits could not be read");
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await
 }
 
 /// Whether the quarantine put a deny on `user`'s overwrite in `channel` (`hide_channels`).
