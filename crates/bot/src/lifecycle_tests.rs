@@ -320,7 +320,7 @@ async fn a_staff_ban_over_a_copy_is_not_lifted_and_a_leased_temp_job_counts() {
     let left = pending(&t, 1, "unban").await;
     assert_eq!(left.len(), 1, "{left:?}");
     assert!(left[0].1 > 7 * 86_400 - 10, "staff's own end: {left:?}");
-    // A retry while the temp ban's unban job is leased (a failed try) did not ban yet: it bans.
+    // A retry while the temp ban's unban job is leased did not ban yet: not ours, it waits.
     t.ban(1, 725, "temp ban");
     t.ban(0, 725, "raiding");
     enqueue(&t, 1, "unban", json!({"user": 725}), 3600).await;
@@ -330,13 +330,39 @@ async fn a_staff_ban_over_a_copy_is_not_lifted_and_a_leased_temp_job_counts() {
     t.exec("UPDATE ban_sync_links SET over_reason = 'temp ban', temp_end = (SELECT run_at FROM scheduled_jobs WHERE guild_id = $1 + 1 AND payload->>'user' = '725') WHERE guild_id = $1 + 1 AND user_id = 725")
         .await;
     let copy = json!({"user": 725, "source": t.g(0).get()});
-    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
-    assert_eq!(t.rows(725).await, [T::row(1, "banned", None)]);
-    let left = pending(&t, 1, "unban").await;
-    assert!(
-        !left.iter().any(|j| j.0 == json!({"user": 725})),
-        "the copy's ban dropped the temp job: {left:?}"
+    assert!(bansync::copy_job(&t.app, t.g(1), &copy).await.is_err());
+    assert_eq!(
+        t.rows(725).await,
+        [T::row(1, "pending", None)],
+        "no phantom ban case"
     );
+    t.cleanup().await;
+}
+
+/// R-g4 round 2: a copy is not laid over a temp ban that is ending (its unban is due or running);
+/// the copy job fails and retries, and lays the copy once the temp unban is no longer running.
+#[tokio::test]
+async fn a_copy_waits_for_a_temp_ban_that_is_ending() {
+    let Some(t) = T::new(63).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    t.ban(1, 726, "temp ban");
+    t.ban(0, 726, "raiding");
+    enqueue(&t, 1, "unban", json!({"user": 726}), 3600).await;
+    t.exec("UPDATE scheduled_jobs SET locked_until = now() + interval '60 seconds' WHERE guild_id = $1 + 1 AND payload->>'user' = '726'")
+        .await;
+    t.link(1, 726, 0, "pending").await;
+    let copy = json!({"user": 726, "source": t.g(0).get()});
+    assert!(bansync::copy_job(&t.app, t.g(1), &copy).await.is_err());
+    assert_eq!(t.rows(726).await, [T::row(1, "pending", None)]);
+    assert_eq!(pending(&t, 1, "unban").await.len(), 1, "the temp job stays");
+    // The try failed and freed its lease: the copy goes over the temp ban.
+    t.exec("UPDATE scheduled_jobs SET locked_until = NULL WHERE guild_id = $1 + 1")
+        .await;
+    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
+    assert_eq!(t.rows(726).await, [T::row(1, "banned", None)]);
+    assert!(pending(&t, 1, "unban").await.is_empty());
     t.cleanup().await;
 }
 

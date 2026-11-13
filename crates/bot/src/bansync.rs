@@ -435,6 +435,19 @@ async fn temp_end(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Resu
     .await?)
 }
 
+/// A temp ban's unban job is due or held by a running try.
+async fn temp_ending(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM scheduled_jobs
+         WHERE guild_id = $1 AND kind = 'unban' AND payload->>'user' = $2
+           AND (run_at <= now() OR locked_until > now()))",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get().to_string())
+    .fetch_one(&app.pool)
+    .await?)
+}
+
 /// The owner from Discord, not the 5-minute cache; None when the bot cannot see the server.
 pub(crate) async fn live_owner(app: &App, gid: Id<GuildMarker>) -> Result<Option<Id<UserMarker>>> {
     match app.http.guild(gid).await {
@@ -836,6 +849,10 @@ async fn copy(app: &App, key: Key) -> Result<()> {
     // drops the temp ban's unban job), and the row remembers it so a lift can put it back.
     if let Some(reason) = reason {
         let local = temp_end(app, to, user).await?;
+        // A temp ban whose end is due or whose unban runs now may be gone in a second: retry later.
+        if local.is_some() && temp_ending(app, to, user).await? {
+            anyhow::bail!("ban sync: the local temp ban is ending, retrying later");
+        }
         if !outlasts(row.expires, local) {
             return skip("already banned").await.map(drop);
         }
