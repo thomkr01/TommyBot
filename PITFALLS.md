@@ -392,6 +392,8 @@ Strike cap, multiplier, strike durations, mention lock count and window, the men
 
 **The dashboard validated a section with a smaller type than the bot reads.** (D69, 11-12) `verification` was checked as `VerifyCfg`, but the bot parses `VerificationCfg` (also `channel`, `roles`), so a bad role id was saved and the bot read the whole section as default (off). *Avoid:* a section type both sides parse lives in `tommybot_core::sections` and the dashboard validates with that exact type.
 
+**A range check refused a whole rollback.** (D69b, 11-13) Rollback ran the save's `limits::check`, so one old value outside today's range (`joinraid.count` 800) blocked the rollback a cleanup after a hacked admin needs. *Avoid:* a rollback calls `limits::clamp` first, which moves a number to the nearest end of its range and returns `section.path: old -> new`; the rollback logs and returns those (`clamped`, shown in the toast). Saves and imports still refuse, so a user typing a value learns the range. A non-number is still refused.
+
 ## 5. Database and migrations
 
 **Two PRs used the same migration number.** (#64/#65)

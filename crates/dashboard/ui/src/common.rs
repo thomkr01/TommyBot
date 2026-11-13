@@ -284,7 +284,10 @@ pub fn run_save(
 ) {
     run_change(fut, msg, need, move |v| {
         version.set(v["version"].as_i64().unwrap_or(0));
-        msg.ok(format!("Saved as version {}", version.get_untracked()));
+        // A rollback names the numbers it moved into their range.
+        let clamped: Vec<&str> = v["clamped"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let moved = if clamped.is_empty() { String::new() } else { format!(". Moved into the allowed range: {}", clamped.join(", ")) };
+        msg.ok(format!("Saved as version {}{moved}", version.get_untracked()));
     });
 }
 

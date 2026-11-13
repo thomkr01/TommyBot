@@ -594,7 +594,7 @@ pub async fn rollback(
 ) -> Res {
     // Config may hold sensitive sections and permits, so a rollback needs the same bar as editing them.
     let level = require(&st, &s, guild, Level::Admin, true).await?;
-    let old = version(&st, guild, v).await?;
+    let mut old = version(&st, guild, v).await?;
     let (_, now) = store::current(&st.db, guild).await?;
     if level < rollback_bar(&old, &now) {
         return Err(ApiError::Forbidden(
@@ -603,8 +603,11 @@ pub async fn rollback(
     }
     discord_owner_for(&st, &s, guild, owner_only_changed(&old, &now)).await?;
     // The same checks as a save: an old version may hold a value the bot would now read as off.
+    // A number out of range is pulled into it and reported, so a cleanup is not blocked (D69b).
+    let mut clamped = vec![];
     for k in access::SECTIONS {
-        if let Some(v) = old.get(*k).filter(|v| Some(*v) != now.get(*k)) {
+        if let Some(v) = old.get_mut(*k).filter(|v| Some(&**v) != now.get(*k)) {
+            clamped.extend(limits::clamp(k, v, &now[*k]));
             validate(k, v)?;
             limits::check(k, v, &now[*k]).map_err(ApiError::BadRequest)?;
         }
@@ -632,12 +635,17 @@ pub async fn rollback(
         &old,
         Some(version),
         format!(
-            "{} (<@{}>) rolled config back to v{v} -> v{version}",
-            s.username, s.user_id
+            "{} (<@{}>) rolled config back to v{v} -> v{version}{}",
+            s.username,
+            s.user_id,
+            match clamped.is_empty() {
+                true => String::new(),
+                false => format!(", moved into range: {}", clamped.join(", ")),
+            }
         ),
     )
     .await;
-    Ok(Json(json!({"version": version})))
+    Ok(Json(json!({"version": version, "clamped": clamped})))
 }
 
 /// Deletes everything stored for the server (PRIVACY.md); the bot keeps running on defaults.
@@ -1426,21 +1434,31 @@ pub(crate) mod g3_handler_tests {
         .await;
         put_version(&st, g, 4, json!({"panic": {"window_secs": 600}})).await;
         put_version(&st, g, 5, json!({})).await;
-        for v in [1, 2, 3] {
-            let r = rollback(
-                State(st.clone()),
-                s.clone(),
-                Path((g, v)),
-                body(json!({"expected_version": 5})),
-            )
-            .await;
-            assert!(matches!(r, Err(ApiError::BadRequest(_))), "v{v}: {r:?}");
-        }
+        let r = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 1)),
+            body(json!({"expected_version": 5})),
+        )
+        .await;
+        assert!(matches!(r, Err(ApiError::BadRequest(_))), "{r:?}");
+        // D69b: an out-of-range number is clamped and named instead of refusing the rollback.
+        let r = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 2)),
+            body(json!({"expected_version": 5})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.0["clamped"], json!(["panic.window_secs: 0 -> 1"]));
+        let (v, c) = store::current(&st.db, g).await.unwrap();
+        assert_eq!((v, &c["panic"]["window_secs"]), (6, &json!(1)));
         let ok = rollback(
             State(st.clone()),
             s.clone(),
             Path((g, 4)),
-            body(json!({"expected_version": 5})),
+            body(json!({"expected_version": 6})),
         )
         .await;
         assert!(ok.is_ok(), "{ok:?}");
