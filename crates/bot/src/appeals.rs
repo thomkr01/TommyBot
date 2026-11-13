@@ -48,16 +48,24 @@ async fn decide(
 ) -> Result<std::result::Result<(String, u32), String>> {
     let owner = app.guild_info(gid).await?.owner;
     let actor = app.level(gid, owner, actor_id).await?;
-    let row: Option<(i64, String)> = sqlx::query_as(
-        "SELECT user_id, kind FROM appeals WHERE id=$1 AND guild_id=$2 AND status='open'",
+    type Row = (i64, String, String, Option<i64>, Option<String>, bool);
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT user_id, kind, status, decided_by, reply, verdict_sent_at IS NOT NULL FROM appeals
+         WHERE id=$1 AND guild_id=$2",
     )
     .bind(id)
     .bind(gid.get() as i64)
     .fetch_optional(&app.pool)
     .await?;
-    let Some((user, kind)) = row else {
+    let Some((user, kind, was, by, stored_reply, sent)) = row else {
         return Ok(Err("This appeal was already handled".into()));
     };
+    // A retry of this same accept after its writes committed (R-h3 4): only the DM and the log
+    // answer are left to do.
+    let resumed = act == "accept" && was == "accepted" && by == Some(actor_id.get() as i64);
+    if was != "open" && !resumed {
+        return Ok(Err("This appeal was already handled".into()));
+    }
     if !actor.has("appeals") || (act == "accept" && !actor.has(&kind)) {
         return Ok(Err(
             "You need the Review Appeals permit (and the ban or timeout permit to approve)".into(),
@@ -74,7 +82,7 @@ async fn decide(
     let user_id = Id::new(user as u64);
     // What the lift can be undone with, as in the dashboard's action log.
     let mut inverse = None;
-    if act == "accept" {
+    if act == "accept" && !resumed {
         // The real end, so a revert gives the same punishment back (D23b): a temp ban's pending
         // unban, a long timeout's renewal target (Discord shows at most 28 days).
         let end = |sql: &'static str| {
@@ -129,45 +137,65 @@ async fn decide(
                 return Err(e);
             }
         }
-        // A ban's `lifted` below drops a pending raid punishment retry; a timeout has none.
-        let jobs: &[&str] = if kind == "ban" {
-            &["unban"]
-        } else {
-            &["timeout_renew", "raid_punish"]
-        };
-        crate::scheduler::forget_jobs(app, gid, user as u64, jobs, None).await;
-        if kind == "ban" {
-            crate::raiders::lifted(app, gid, user_id, actor_id).await;
-        }
     }
     let status = match act {
         "accept" => "accepted",
         "dismiss" => "dismissed",
         _ => "denied",
     };
-    let reply = reply.trim().chars().take(1000).collect::<String>();
-    let done = sqlx::query(
-        "UPDATE appeals SET status=$2, decided_by=$3, reply=nullif($4,'') WHERE id=$1 AND status='open'",
-    )
-    .bind(id)
-    .bind(status)
-    .bind(actor_id.get() as i64)
-    .bind(&reply)
-    .execute(&app.pool)
-    .await?
-    .rows_affected();
-    if done == 0 {
-        return Ok(Err("This appeal was already handled".into()));
+    let reply = match resumed {
+        true => stored_reply.unwrap_or_default(),
+        false => reply.trim().chars().take(1000).collect::<String>(),
+    };
+    if !resumed {
+        // One transaction: a crash between them would drop the jobs that hold the real end, so a
+        // retry would record a permanent ban as the undo (R-h3 4).
+        let mut tx = app.pool.begin().await?;
+        let done = sqlx::query(
+            "UPDATE appeals SET status=$2, decided_by=$3, reply=nullif($4,'') WHERE id=$1 AND status='open'",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(actor_id.get() as i64)
+        .bind(&reply)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if done == 0 {
+            return Ok(Err("This appeal was already handled".into()));
+        }
+        if act == "accept" {
+            // A ban's `lifted` below drops a pending raid punishment retry; a timeout has none.
+            let jobs: &[&str] = if kind == "ban" {
+                &["unban"]
+            } else {
+                &["timeout_renew", "raid_punish"]
+            };
+            tommybot_core::jobs::cancel_user(&mut *tx, gid.get() as i64, jobs, user as u64, None)
+                .await?;
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+                .bind(gid.get() as i64)
+                .bind(actor_id.get() as i64)
+                .bind(if kind == "ban" { "unban" } else { "untimeout" })
+                .bind(user)
+                .bind(inverse)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if act == "blacklist" {
+            sqlx::query("INSERT INTO appeal_blacklist (guild_id, user_id, added_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+                .bind(gid.get() as i64)
+                .bind(user)
+                .bind(actor_id.get() as i64)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
     }
-    if act == "accept" {
-        sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
-            .bind(gid.get() as i64)
-            .bind(actor_id.get() as i64)
-            .bind(if kind == "ban" { "unban" } else { "untimeout" })
-            .bind(user)
-            .bind(inverse)
-            .execute(&app.pool)
-            .await?;
+    if act == "accept" && !resumed {
+        if kind == "ban" {
+            crate::raiders::lifted(app, gid, user_id, actor_id).await;
+        }
         // The appeal is already decided; a lost stats row must not report it as failed.
         let stat = async {
             tommybot_core::cases::record(
@@ -189,15 +217,7 @@ async fn decide(
             tracing::warn!(?e, "recording the appeal for mod stats failed");
         }
     }
-    if act == "blacklist" {
-        sqlx::query("INSERT INTO appeal_blacklist (guild_id, user_id, added_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
-            .bind(gid.get() as i64)
-            .bind(user)
-            .bind(actor_id.get() as i64)
-            .execute(&app.pool)
-            .await?;
-    }
-    if act != "dismiss" {
+    if act != "dismiss" && !sent {
         let verdict = if act == "accept" {
             "approved"
         } else {
@@ -217,8 +237,14 @@ async fn decide(
             app.http.create_message(ch.id).content(&text).await?;
             anyhow::Ok(())
         };
-        if let Err(e) = sent.await {
-            tracing::warn!(?e, "appeal verdict DM failed");
+        match sent.await {
+            Ok(()) => {
+                sqlx::query("UPDATE appeals SET verdict_sent_at = now() WHERE id = $1")
+                    .bind(id)
+                    .execute(&app.pool)
+                    .await?;
+            }
+            Err(e) => tracing::warn!(?e, "appeal verdict DM failed"),
         }
     }
     let (word, color) = match act {
@@ -439,6 +465,24 @@ mod tests {
         super::accept_job(&t.app, g, &p).await.unwrap();
         assert_eq!(status().await.unwrap(), "accepted");
         assert!(t.banned(0, user).is_none());
+        // R-h3 4: a retry after the writes committed but before the DM sends the DM, once, and
+        // writes nothing twice.
+        let dms = || t.calls("POST /users/@me/channels");
+        let before = dms();
+        sqlx::query("UPDATE appeals SET verdict_sent_at = NULL WHERE id = $1")
+            .bind(id)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        super::accept_job(&t.app, g, &p).await.unwrap();
+        super::accept_job(&t.app, g, &p).await.unwrap();
+        assert_eq!(dms(), before + 1, "the missed DM is sent once");
+        let logs: i64 = sqlx::query_scalar("SELECT count(*) FROM action_log WHERE guild_id = $1")
+            .bind(g.get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+        assert_eq!(logs, 1);
         let inv: serde_json::Value = sqlx::query_scalar(
             "SELECT inverse FROM action_log WHERE guild_id = $1 AND action = 'unban'",
         )
@@ -457,6 +501,17 @@ mod tests {
         let unbans = t.take("unban").await;
         assert_eq!(unbans.len(), 1);
         assert!((unbans[0].2 - 3_600).abs() < 30, "{unbans:?}");
+        // R-h3 3: a revert whose ban fails leaves no unban job that could lift a later ban.
+        t.set(|m| {
+            m.bans.clear();
+            m.fail_put_5xx = true;
+        });
+        assert!(crate::antinuke::run_inverse(&t.app, g, &inv).await.is_err());
+        assert!(
+            t.take("unban").await.is_empty(),
+            "the failed revert's job is dropped"
+        );
+        t.set(|m| m.fail_put_5xx = false);
         t.exec("DELETE FROM appeals WHERE guild_id BETWEEN $1 AND $1 + 9")
             .await;
     }
