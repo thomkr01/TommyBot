@@ -113,6 +113,21 @@ fn behind(me: Id<UserMarker>, actor: Option<u64>, moderator: Option<i64>) -> Beh
     }
 }
 
+/// Thomas 2026-11-13 21:23 (permits-only rule): a ban is copied as a ban only when TommyBot
+/// itself made it on its own, or the human behind it holds the ban permit here (Owner, Extra
+/// Owner and Trusted Admin do). Discord's Ban Members alone, another bot, an actor who left, or a
+/// merged audit entry with no actor give the other servers only an alert.
+async fn trusted(app: &App, src: Id<GuildMarker>, who: Behind) -> Result<bool> {
+    match who {
+        Behind::Bot => Ok(true),
+        Behind::Unknown => Ok(false),
+        Behind::Staff(u) => {
+            let owner = app.guild_info(src).await?.owner;
+            Ok(app.level(src, owner, u).await?.has("ban"))
+        }
+    }
+}
+
 /// The staff member stored with a row: the human behind the ban, if there was one.
 fn staff(b: Behind) -> Option<i64> {
     match b {
@@ -556,6 +571,8 @@ struct Copy {
     actor: Option<u64>,
     moderator: Option<i64>,
     banned_at: Option<i64>,
+    /// The receiver only gets an alert, whatever its receive setting (see [`trusted`]).
+    alert_only: bool,
 }
 
 /// Writes the row (pending, or skipped when the source shared [`BAN_SYNC_HOURLY`] other users in
@@ -586,13 +603,13 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy) -> Result<(bool, bool)
     };
     let written = sqlx::query(
         "INSERT INTO ban_sync_links (guild_id, user_id, source_guild, source_case, origin, reason,
-             expires_at, state, skip_reason, actor_id, mod_id, banned_at)
-         VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8), $8, $9, $10, $11, to_timestamp($12::float8))
+             expires_at, state, skip_reason, actor_id, mod_id, banned_at, alert_only)
+         VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7::float8), $8, $9, $10, $11, to_timestamp($12::float8), $13)
          ON CONFLICT (guild_id, user_id, source_guild) DO UPDATE SET
              source_case = excluded.source_case, origin = excluded.origin, reason = excluded.reason,
              expires_at = excluded.expires_at, state = excluded.state, skip_reason = excluded.skip_reason,
              actor_id = excluded.actor_id, mod_id = excluded.mod_id, banned_at = excluded.banned_at,
-             case_no = NULL, created_at = now(), done_at = NULL, over_reason = NULL, temp_end = NULL
+             alert_only = excluded.alert_only, case_no = NULL, created_at = now(), done_at = NULL, over_reason = NULL, temp_end = NULL
          WHERE ban_sync_links.state IN ('lifted', 'cancelled', 'skipped', 'alerted')",
     )
     .bind(to.get() as i64)
@@ -607,6 +624,7 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy) -> Result<(bool, bool)
     .bind(c.actor.map(|a| a as i64))
     .bind(c.moderator)
     .bind(c.banned_at.map(|t| t as f64))
+    .bind(c.alert_only)
     .execute(&mut *tx)
     .await?
     .rows_affected()
@@ -710,6 +728,7 @@ pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()>
             actor,
             moderator: staff(who),
             banned_at: Some(at),
+            alert_only: !trusted(app, src, who).await?,
         };
         let mut capped = false;
         for to in targets {
@@ -788,6 +807,7 @@ struct Row {
     banned_at: Option<i64>,
     over_reason: Option<String>,
     temp_end: Option<i64>,
+    alert_only: bool,
 }
 
 impl Row {
@@ -800,7 +820,7 @@ async fn load(app: &App, (to, user, src): Key) -> Result<Option<Row>> {
     Ok(sqlx::query_as(
         "SELECT state, reason, extract(epoch FROM expires_at)::bigint AS expires, source_case, case_no,
                 actor_id, mod_id, extract(epoch FROM banned_at)::bigint AS banned_at, over_reason,
-                extract(epoch FROM temp_end)::bigint AS temp_end
+                extract(epoch FROM temp_end)::bigint AS temp_end, alert_only
          FROM ban_sync_links WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3",
     )
     .bind(to.get() as i64)
@@ -883,7 +903,7 @@ async fn copy(app: &App, key: Key) -> Result<()> {
         Ok(d) => d,
         Err(why) => return skip(why).await.map(drop),
     };
-    if app.cfg(to.get()).await?.ban_sync.receive == BanSyncReceive::Alert {
+    if row.alert_only || app.cfg(to.get()).await?.ban_sync.receive == BanSyncReceive::Alert {
         if !mark(app, key, &["pending"], "alerted", None).await? {
             return Ok(());
         }
@@ -894,6 +914,7 @@ async fn copy(app: &App, key: Key) -> Result<()> {
             &row.reason,
             row.source_case,
             row.expires,
+            row.alert_only,
         );
         let ban_here = embed::button(
             "Ban here",
@@ -1055,6 +1076,7 @@ pub(crate) fn alert_log(
     reason: &str,
     case: Option<i32>,
     expires: Option<i64>,
+    alert_only: bool,
 ) -> Log {
     let mut log = Log::new("Banned in your other server", ORANGE)
         .user("Member", user)
@@ -1068,6 +1090,12 @@ pub(crate) fn alert_log(
     }
     if let Some(t) = expires {
         log = log.line("Duration", &format!("until <t:{t}:f>"));
+    }
+    if alert_only {
+        log = log.line(
+            "Only an alert",
+            "the ban was made by someone without TommyBot's ban permit there",
+        );
     }
     log.text("Press **Ban here** to ban them in this server too.")
 }

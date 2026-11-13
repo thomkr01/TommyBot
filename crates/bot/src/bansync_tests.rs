@@ -700,6 +700,9 @@ async fn a_ban_is_held_then_copied_once_and_never_shared_on() {
     t.server(0, o, "off").await;
     t.server(1, o, "ban").await;
     t.server(2, o, "alert").await;
+    // The moderator holds TommyBot's ban permit there (as a Trusted Admin), so it is copied as a ban.
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 77)")
+        .await;
     t.ban(0, 500, "raiding");
     on_ban(&t.app, &t.entry(0, 22, 500, Some(77)))
         .await
@@ -744,6 +747,42 @@ async fn a_ban_is_held_then_copied_once_and_never_shared_on() {
         .await
         .unwrap();
     assert!(t.take("ban_sync_share").await.is_empty());
+    t.cleanup().await;
+}
+
+/// Thomas 2026-11-13 21:23: a ban by someone without TommyBot's ban permit (Discord's Ban Members
+/// alone), or with no actor in the audit entry, reaches the other servers only as an alert, even
+/// where they receive as bans.
+#[tokio::test]
+async fn a_ban_without_a_ban_permit_is_only_an_alert() {
+    let Some(t) = T::new(207).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    for (user, actor) in [(530, Some(78)), (531, None)] {
+        t.ban(0, user, "raiding");
+        share_job(&t.app, t.g(0), &t.share(user, actor))
+            .await
+            .unwrap();
+        for (to, p, _) in t.take("ban_sync_copy").await {
+            copy_job(&t.app, t.g(to), &p).await.unwrap();
+        }
+        assert_eq!(
+            t.rows(user).await,
+            [T::row(1, "alerted", None)],
+            "user {user}"
+        );
+        assert_eq!(t.banned(1, user), None, "user {user}: alert only");
+    }
+    // The owner's own Discord ban is still copied as a ban.
+    t.ban(0, 532, "raiding");
+    share_job(&t.app, t.g(0), &t.share(532, Some(o)))
+        .await
+        .unwrap();
+    for (to, p, _) in t.take("ban_sync_copy").await {
+        copy_job(&t.app, t.g(to), &p).await.unwrap();
+    }
+    assert_eq!(t.rows(532).await, [T::row(1, "banned", None)]);
     t.cleanup().await;
 }
 
@@ -839,7 +878,7 @@ async fn over_the_hourly_cap_rows_wait_for_the_owner() {
         t.link(1, 10_000 + u, 0, "banned").await;
     }
     t.ban(0, 504, "raiding");
-    share_job(&t.app, t.g(0), &t.share(504, None))
+    share_job(&t.app, t.g(0), &t.share(504, Some(o)))
         .await
         .unwrap();
     assert_eq!(t.rows(504).await, [T::row(1, "skipped", Some("rate cap"))]);
@@ -885,6 +924,7 @@ async fn two_offers_at_once_cannot_both_pass_the_cap() {
         actor: None,
         moderator: None,
         banned_at: None,
+        alert_only: false,
     };
     // One slot is left. Another offer holds the cap lock and has written its row, not committed
     // yet: this offer waits for it instead of counting without it, then finds the cap reached.
@@ -1366,7 +1406,7 @@ async fn a_temp_ban_keeps_its_end_and_an_ended_one_is_skipped() {
         .await
         .unwrap();
     t.ban(0, 512, "raiding");
-    share_job(&t.app, t.g(0), &t.share(512, None))
+    share_job(&t.app, t.g(0), &t.share(512, Some(o)))
         .await
         .unwrap();
     t.run_copies().await;

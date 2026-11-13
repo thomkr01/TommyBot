@@ -4,7 +4,11 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+- Ban Sync: a ban made by someone without TommyBot's ban permit (Discord's Ban Members alone, another bot, or an unknown actor) is only an alert with **Ban here** in your other servers, never an automatic ban. Owner, Extra Owner, Trusted Admin and permit holders are copied as before. Migration 3924.
+
 ### Fixed
+- A mod command whose names matched nobody no longer answers "All members were warned!" with no one acted on.
 - Voice logs: members already in voice when the bot starts or reconnects are read from Discord's server snapshot, so their first move is logged as a move, not a join.
 - Join Raid: a raid that starts right after another one ends no longer drops the first raid's report.
 - Ticket attachment copies time out after 15 seconds instead of possibly holding the ticket reply forever.

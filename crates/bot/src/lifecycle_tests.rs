@@ -211,6 +211,9 @@ async fn a_synced_ban_replaces_a_shorter_local_temp_ban() {
     t.ban(1, 720, "temp ban");
     enqueue(&t, 1, "unban", json!({"user": 720}), 3600).await;
     t.ban(0, 720, "raiding");
+    // The moderator holds TommyBot's ban permit (as a Trusted Admin), so the share is a ban.
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 77) ON CONFLICT DO NOTHING")
+        .await;
     bansync::share_job(&t.app, t.g(0), &t.share(720, Some(77)))
         .await
         .unwrap();
@@ -245,6 +248,9 @@ async fn a_copy_over_a_temp_ban_is_ours_on_retry_and_lifted_after_its_end() {
     t.ban(1, 721, "temp ban");
     enqueue(&t, 1, "unban", json!({"user": 721}), 3600).await;
     t.ban(0, 721, "raiding");
+    // The moderator holds TommyBot's ban permit (as a Trusted Admin), so the share is a ban.
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 77) ON CONFLICT DO NOTHING")
+        .await;
     bansync::share_job(&t.app, t.g(0), &t.share(721, Some(77)))
         .await
         .unwrap();
@@ -300,6 +306,11 @@ async fn a_staff_ban_over_a_copy_is_not_lifted_and_a_leased_temp_job_counts() {
     // A plain copy, then a permanent ban by staff.
     for u in [723, 724] {
         t.ban(0, u, "raiding");
+        // The moderator holds TommyBot's ban permit (as a Trusted Admin), so the share is a ban.
+        t.exec(
+            "INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 77) ON CONFLICT DO NOTHING",
+        )
+        .await;
         bansync::share_job(&t.app, t.g(0), &t.share(u, Some(77)))
             .await
             .unwrap();

@@ -278,6 +278,8 @@ pub async fn import_job(app: &App, p: &Value) -> Result<()> {
                 actor: None,
                 moderator: case.map(|c| c.1).filter(|m| *m as u64 != app.me.get()),
                 banned_at: None,
+                // The owner chose to send these with a fresh 2FA.
+                alert_only: false,
             };
             capped |= offer(app, (to, user, src), &copy).await?.1;
         }

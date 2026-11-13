@@ -141,6 +141,8 @@ Ticket and modmail relays copied every attachment with `.bytes()` and then `to_v
 An autorole or reaction-role bot handing out the verification role verified members without TommyBot. The quarantine hold took such a role back only for a join quarantine and only with anti-nuke on (#170), so verification without "quarantine on join" had no check at all. Root cause: the rule lived in the anti-nuke hold, not in verification.
 *Avoid:* a rule about who may hand out a role sits with the feature that owns the role. `verify::given` takes back a verification role a bot (not TommyBot) gives a member who held none, logs it in the verification log and punishes nobody; staff giving it by hand is fine, and turning verification off lets another bot verify. A held member is left to the hold.
 
+**Ban Sync trusted Discord's Ban Members.** (live test 11-13) A ban by the attacker bot, with Administrator but no TommyBot permit, was copied as a ban to every server of the owner: origin `discord` always shared, against Thomas's 13:26 rule (trust only from our permits and Owner/EO/TA). *Avoid:* `bansync::trusted` judges the human behind a share once, in the source server: TommyBot on its own, or someone with the `ban` permit there, is copied as before; anyone else, another bot, a member who left or an audit entry with no actor is stored with `alert_only` (migration 3924) and the receivers only get the alert with Ban here (Thomas 21:23). An owner's "Send the rest" import stays a ban (fresh 2FA). Searched: the other Discord-permission trust checks were moved to permits in h2/h4 (slowmode, automod, verify `given`).
+
 ## 2. Concurrency and restarts
 
 **Unlock deleted its snapshot first.** (#97, #111)
@@ -506,6 +508,8 @@ Strike cap, multiplier, strike durations, mention lock count and window, the men
 **A lower limit makes old values look broken.** (#191, 11-13)
 Auto slowmode's maximum dropped from 6 hours to 2 minutes. A server with an older 21600 got the Overview warning "Settings outside their range", which says a 0 value switches the protection off, although the bot reads that card clamped and the value still works at 120.
 *Avoid:* `limits::stored_outside` marks values the bot clamps on read (`CLAMPED_ON_READ`) with `(used as N)`. When a card gets a `clamped()` on read, add its prefix there; when a range shrinks, check what Overview and the form say about older values.
+
+**A command with no target left reported success.** (live test 11-13) `t!warn @role test` found no member for `test` (a role mention is not a target), then ran with an empty target list and answered "All members were warned!". *Avoid:* `commands.rs` stops after the name errors when no target is left. Searched: `modcmds::run_prefix` already fails in `from_prefix` with no user; `whitelist.rs` and `general.rs` resolve one name and answer its error.
 
 ## 5. Database and migrations
 

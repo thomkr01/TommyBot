@@ -585,6 +585,11 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             Err(e) => say(app, msg, &e).await?,
         }
     }
+    // Every name failed and was answered: a run with no target would report "All members were
+    // warned!" (live 2026-11-13).
+    if targets.is_empty() && !p.names.is_empty() {
+        return Ok(());
+    }
     let unsure = p.unsure();
     let job = Pending::new(
         gid,
