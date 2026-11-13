@@ -594,6 +594,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             }
             drop(inflight);
             let allow = crate::raiders::on_unban(app, &e.0).await;
+            let rule = crate::native::on_rule_audit(app, &e.0).await;
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
             }
@@ -607,7 +608,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Err(err) = crate::modstats::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "recording a mod action failed");
             }
-            nuke.and(allow)?
+            nuke.and(allow).and(rule)?
         }
         // Voice raid first: the anti-nuke recheck can wait out its fetch gap.
         Event::VoiceStateUpdate(v) => {

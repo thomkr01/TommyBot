@@ -529,6 +529,7 @@ impl T {
             "DELETE FROM dash_session WHERE user_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_actions WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_allow WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM automod_rule_untrusted WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM guild_left WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9",
         ] {

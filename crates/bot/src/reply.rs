@@ -676,6 +676,51 @@ async fn delete_batch(
     Ok(())
 }
 
+/// User text for an embed line: one line, markdown and mentions shown as typed.
+pub(crate) fn md(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\r' => out.push(' '),
+            '\\' | '[' | ']' | '*' | '_' | '~' | '|' | '>' | '<' | '`' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Defers an ephemeral answer, runs the click, then sends its text. `None` from the click means
+/// the button does not work where it was pressed.
+pub(crate) async fn answer_click(
+    app: &App,
+    i: &twilight_model::application::interaction::Interaction,
+    clicked: impl std::future::Future<Output = Option<Result<String>>>,
+) -> Result<()> {
+    let client = app.http.interaction(Id::new(app.me.get()));
+    let defer = crate::verify::ephemeral(
+        twilight_model::http::interaction::InteractionResponseType::DeferredChannelMessageWithSource,
+        None,
+    );
+    client.create_response(i.id, &i.token, &defer).await?;
+    let done = (clicked.await).unwrap_or_else(|| Ok("This button does not work here.".into()));
+    let text = done.unwrap_or_else(|e| {
+        tracing::warn!(?e, "button failed");
+        format!("Something went wrong: {}", crate::http_err::why(&e))
+    });
+    client
+        .create_followup(&i.token)
+        .content(&text)
+        .flags(twilight_model::channel::message::MessageFlags::EPHEMERAL)
+        .allowed_mentions(Some(
+            &twilight_model::channel::message::AllowedMentions::default(),
+        ))
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1051,49 +1096,4 @@ mod tests {
         assert!(alert_due(&mut last, 2, 1599, 600));
         assert!(alert_due(&mut last, 1, 1600, 600));
     }
-}
-
-/// User text for an embed line: one line, markdown and mentions shown as typed.
-pub(crate) fn md(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\n' | '\r' => out.push(' '),
-            '\\' | '[' | ']' | '*' | '_' | '~' | '|' | '>' | '<' | '`' => {
-                out.push('\\');
-                out.push(c);
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Defers an ephemeral answer, runs the click, then sends its text. `None` from the click means
-/// the button does not work where it was pressed.
-pub(crate) async fn answer_click(
-    app: &App,
-    i: &twilight_model::application::interaction::Interaction,
-    clicked: impl std::future::Future<Output = Option<Result<String>>>,
-) -> Result<()> {
-    let client = app.http.interaction(Id::new(app.me.get()));
-    let defer = crate::verify::ephemeral(
-        twilight_model::http::interaction::InteractionResponseType::DeferredChannelMessageWithSource,
-        None,
-    );
-    client.create_response(i.id, &i.token, &defer).await?;
-    let done = (clicked.await).unwrap_or_else(|| Ok("This button does not work here.".into()));
-    let text = done.unwrap_or_else(|e| {
-        tracing::warn!(?e, "button failed");
-        format!("Something went wrong: {}", crate::http_err::why(&e))
-    });
-    client
-        .create_followup(&i.token)
-        .content(&text)
-        .flags(twilight_model::channel::message::MessageFlags::EPHEMERAL)
-        .allowed_mentions(Some(
-            &twilight_model::channel::message::AllowedMentions::default(),
-        ))
-        .await?;
-    Ok(())
 }

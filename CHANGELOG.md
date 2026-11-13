@@ -4,7 +4,13 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Removed
+- Ban Sync is removed from the bot, the dashboard, MCP and the security score (Thomas 11-13). Bans already copied stay as normal bans. Migration 3924 drops `ban_sync_links`, its MCP view, queued Ban Sync jobs and the handover's `ban_sync_was_on`. An old export that still has a `ban_sync` section imports without it. The Raider List and the owner-change protection (D47) stay.
+
 ### Fixed
+- With anti-nuke off, a permit role given by someone who is not an Owner, Extra Owner or Trusted Admin is still taken back; nobody is punished.
+- A mod command with no member target (for example a role mention) no longer replies "All members were warned!".
+- A Discord AutoMod rule created or changed by someone without a permit triggers no TommyBot action until an Owner, Extra Owner, Trusted Admin or a dashboard-edit permit changes it. The change is logged. Migration 3925.
 - Voice logs: members already in voice when the bot starts or reconnects are read from Discord's server snapshot, so their first move is logged as a move, not a join.
 - Join Raid: a raid that starts right after another one ends no longer drops the first raid's report.
 - Ticket attachment copies time out after 15 seconds instead of possibly holding the ticket reply forever.

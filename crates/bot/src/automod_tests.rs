@@ -388,6 +388,45 @@ async fn native_hits_of_whitelisted_members_do_not_fill_a_scope() {
     t.cleanup().await;
 }
 
+/// Thomas 2026-11-13: a Discord AutoMod rule changed by someone without a permit triggers no
+/// TommyBot action until a trusted change.
+#[tokio::test]
+async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change() {
+    let Some(t) = T::new(264).await else { return };
+    let gid = t.g(0);
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"]}}}),
+    )
+    .await;
+    let edit = |actor: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
+        serde_json::from_value(json!({
+            "id": "1", "action_type": 141, "guild_id": gid.to_string(), "target_id": "77",
+            "user_id": actor.to_string(), "reason": null, "changes": [],
+        }))
+        .unwrap()
+    };
+    let hit: twilight_model::gateway::payload::incoming::AutoModerationActionExecution =
+        serde_json::from_value(json!({
+            "guild_id": gid.to_string(), "action": {"type": 1}, "rule_id": "77",
+            "rule_trigger_type": 1, "user_id": (t.base + 6).to_string(), "content": "x",
+            "matched_keyword": null, "matched_content": null,
+        }))
+        .unwrap();
+    crate::native::on_rule_audit(&t.app, &edit(t.base + 5))
+        .await
+        .unwrap();
+    crate::native::on_native_hit(&t.app, &hit).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 0, "no action after an untrusted change");
+    crate::native::on_rule_audit(&t.app, &edit(t.owner()))
+        .await
+        .unwrap();
+    crate::native::on_native_hit(&t.app, &hit).await.unwrap();
+    assert!(t.calls("PATCH") >= 1, "acts again after the owner's change");
+    t.cleanup().await;
+}
+
 fn create(m: Message) -> MessageCreate {
     MessageCreate {
         channel_type: None,

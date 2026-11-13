@@ -351,10 +351,12 @@ pub async fn run_restore(app: Arc<App>) {
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
 
+/// An id in a job payload, as a number or a string.
 pub(crate) fn id_of(p: &Value, k: &str) -> Option<u64> {
     p[k].as_u64().or_else(|| p[k].as_str()?.parse().ok())
 }
 
+/// [`id_of`], or an error naming the missing key.
 pub(crate) fn need(p: &Value, k: &str) -> Result<u64> {
     id_of(p, k).with_context(|| format!("job payload has no {k}"))
 }

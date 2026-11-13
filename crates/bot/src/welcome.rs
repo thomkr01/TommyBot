@@ -355,6 +355,9 @@ pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -
         if let Err(err) = crate::antinuke::on_replayed(app, &e).await {
             tracing::warn!(?err, "anti-nuke on a missed audit entry failed");
         }
+        if let Err(err) = crate::native::on_rule_audit(app, &e).await {
+            tracing::warn!(?err, "AutoMod rule check on a missed audit entry failed");
+        }
         handled_audit(app, gid.get(), &e).await;
     }
     if stale > 0 {
