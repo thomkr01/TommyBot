@@ -138,6 +138,8 @@ pub(crate) struct Mock {
     pub(crate) fail_message_5xx: bool,
     /// Channel deletes fail with 500.
     pub(crate) fail_delete_channel: bool,
+    /// Channels the mock can GET: id -> (guild, whether @everyone may view it).
+    pub(crate) text_channels: HashMap<u64, (u64, bool)>,
     pub(crate) log: Vec<String>,
 }
 
@@ -271,6 +273,13 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             Some(_) => (204, String::new()),
             None => err(404, 10007),
         },
+        ("GET", ["channels", c]) if m.text_channels.contains_key(&n(c)) => {
+            let (g, open) = m.text_channels[&n(c)];
+            let (allow, deny) = if open { ("1024", "0") } else { ("0", "1024") };
+            let ch = json!({"id": c, "type": 0, "guild_id": g.to_string(), "name": "log", "position": 0,
+                "permission_overwrites": [{"id": g.to_string(), "type": 0, "allow": allow, "deny": deny}]});
+            (200, ch.to_string())
+        }
         ("GET", ["guilds", g]) => match m.owners.get(&n(g)) {
             Some(o) => {
                 let size = m.sizes.get(&n(g)).copied().unwrap_or(500);
@@ -1609,9 +1618,25 @@ async fn a_section_on_defaults_is_posted_to_the_log() {
         json!({"antinuke": {"enabled": "yes"}, "logging": {"config_changes": log.to_string()}}),
     )
     .await;
+    t.set(|m| {
+        m.text_channels.insert(log, (t.g(0).get(), false));
+    });
     let cfg = t.app.cfg(t.g(0).get()).await.unwrap();
     assert_eq!(cfg.fallbacks, ["antinuke"]);
     assert_eq!(t.calls(&format!("POST /channels/{log}/messages")), 1);
+    // R-h3 round 2, 4: never to a channel @everyone can read.
+    let open = t.base + 6;
+    t.server_config(
+        1,
+        t.owner(),
+        json!({"antinuke": {"enabled": "yes"}, "logging": {"config_changes": open.to_string()}}),
+    )
+    .await;
+    t.set(|m| {
+        m.text_channels.insert(open, (t.g(1).get(), true));
+    });
+    let _ = t.app.cfg(t.g(1).get()).await.unwrap();
+    assert_eq!(t.calls(&format!("POST /channels/{open}/messages")), 0);
     t.cleanup().await;
 }
 

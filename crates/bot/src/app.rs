@@ -384,7 +384,12 @@ impl App {
             .insert(guild, generation, cfg.clone());
         // After the insert, so the alert's own config reads hit the cache.
         if !cfg.fallbacks.is_empty() {
-            let alert = crate::reply::fallback_alert(self, Id::new(guild), &cfg.fallbacks);
+            let alert = crate::reply::fallback_alert(
+                self,
+                Id::new(guild),
+                &cfg.fallbacks,
+                &cfg.lockdown.main_roles,
+            );
             let _ = tokio::time::timeout(crate::reply::DM_WAIT, alert).await;
         }
         Ok(cfg)

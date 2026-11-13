@@ -417,7 +417,12 @@ pub async fn alert_owner(app: &App, gid: Id<GuildMarker>, what: &str) {
 
 /// Tells the owner that settings could not be read and run on their defaults (a newer version
 /// saved them, or they are damaged). Once a day per server.
-pub async fn fallback_alert(app: &App, gid: Id<GuildMarker>, sections: &[&str]) {
+pub async fn fallback_alert(
+    app: &App,
+    gid: Id<GuildMarker>,
+    sections: &[&str],
+    main_roles: &[Id<twilight_model::id::marker::RoleMarker>],
+) {
     static LAST: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
     if !alert_due(&mut LAST.lock().unwrap(), gid.get(), now_secs(), 86_400) {
         return;
@@ -457,7 +462,24 @@ pub async fn fallback_alert(app: &App, gid: Id<GuildMarker>, sections: &[&str]) 
         .time()
         .build();
     // Straight to Discord, not events::send: that reads the config, and this runs inside App::cfg.
-    // The embed names only section names, so the public-channel check is not needed.
+    // Only to a channel @everyone cannot see: "Anti-nuke is off" helps a raider (R-h3 round 2, 4).
+    let private = async {
+        let c = app.http.channel(ch).await?.model().await?;
+        crate::events::public_with(app, c, main_roles)
+            .await
+            .map(|p| !p)
+    };
+    match private.await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(%gid, "settings-not-read log skipped: @everyone can read the channel");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(?e, "settings-not-read log: visibility check failed");
+            return;
+        }
+    }
     if let Err(e) = app.http.create_message(ch).embeds(&[log]).await {
         tracing::warn!(?e, "settings-not-read log not sent");
     }
