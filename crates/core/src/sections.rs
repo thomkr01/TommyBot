@@ -503,6 +503,7 @@ pub const SENSITIVE: &[&str] = &[
     "antinuke",
     "whitelist",
     "panic",
+    "backups",
     "catch",
     "ban_sync",
     "raider_list",

@@ -287,6 +287,17 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> R
     };
     let keep = keep_set(app, gid).await?;
     if confirm {
+        // A restore during a lock or panic would undo the locked permissions (D11).
+        if app.panic_runs.lock().unwrap().contains_key(&gid.get())
+            || !tommybot_automod::store::locks(&app.pool, gid.get())
+                .await?
+                .is_empty()
+        {
+            return Ok(
+                "Cannot load a backup while the server is locked or in panic mode. End it first."
+                    .into(),
+            );
+        }
         let n = restore(app, gid, &image, &keep, None).await?.total();
         return Ok(format!("Restored backup #{id} ({n} changes)"));
     }
@@ -820,5 +831,57 @@ mod tests {
         assert!(
             t.contains("Roles: 0 · Channels: 2 · Categories: 1 · Webhooks: 0 · Server settings: ")
         );
+    }
+
+    /// D10/D11: load and clear need owner level plus a fresh 2FA, and load is refused in panic.
+    #[tokio::test]
+    async fn load_and_clear_need_an_owner_with_2fa_and_no_panic() {
+        use crate::{bansync::tests::T, commands::backup_cmd, slash::BackupCmd};
+        use tommybot_core::permits::Level;
+        let Some(t) = T::new(40).await else { return };
+        let (g, user) = (t.g(0), Id::new(t.base + 1));
+        t.server_config(
+            0,
+            t.owner(),
+            serde_json::json!({"backups": {"enabled": true}}),
+        )
+        .await;
+        t.exec("DELETE FROM backups WHERE guild_id = $1").await;
+        t.exec(r#"INSERT INTO backups (guild_id, image, code) VALUES ($1, '{"guild": 0, "name": "x", "roles": [], "channels": []}', 'h3load')"#).await;
+        let custom = Level::Custom {
+            rank: 1,
+            perms: vec!["backups".into()],
+            whitelist: vec![],
+            limits: Default::default(),
+        };
+        let clear = || BackupCmd::Clear;
+        let load = |confirm| BackupCmd::Load {
+            id: "h3load".into(),
+            confirm,
+        };
+        let run = |l: Level, c| {
+            let app = &t.app;
+            async move { backup_cmd(app, g, (user, &l), c).await.unwrap() }
+        };
+        assert!(run(custom.clone(), clear())
+            .await
+            .starts_with("Only the owner"));
+        assert!(run(custom.clone(), load(true))
+            .await
+            .starts_with("Only the owner"));
+        assert!(run(Level::ExtraOwner, clear()).await.contains("needs 2FA"));
+        t.exec("INSERT INTO dash_session (id, user_id, username, access_token, csrf, step_up_until, expires_at) VALUES ('h3-' || $1::text, $1 + 1, 'o', 'x', 'x', now() + interval '5 minutes', now() + interval '1 day')").await;
+        t.app.panic_runs.lock().unwrap().insert(
+            g.get(),
+            crate::app::PanicRun {
+                lock_mod_commands: false,
+            },
+        );
+        assert!(run(Level::ExtraOwner, load(true))
+            .await
+            .starts_with("Cannot load a backup while"));
+        t.app.panic_runs.lock().unwrap().clear();
+        assert_eq!(run(Level::Owner, clear()).await, "Deleted all backups");
+        t.exec("DELETE FROM backups WHERE guild_id = $1").await;
     }
 }

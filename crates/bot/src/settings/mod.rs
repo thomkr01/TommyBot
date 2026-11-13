@@ -820,6 +820,23 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         },
         _ => vec![],
     };
+    // Anti-nuke guards the main roles while a monitor is on, so they need its bar then (D67).
+    if row.path == "lockdown.main_roles" {
+        let an = &app.cfg(gid.get()).await?.antinuke;
+        let text = if !(an.monitor_public_roles || an.monitor_channel_perms) {
+            None
+        } else if !matches!(level, Level::Owner | Level::ExtraOwner) {
+            Some("Anti-nuke monitors the main roles, so only the owner and Extra Owners can change them".into())
+        } else if !fresh_2fa(app, msg.author.id.get()).await? {
+            Some(needs_2fa(gid.get()))
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            send(app, msg, &text, None, vec![]).await?;
+            return Ok(true);
+        }
+    }
     // The dashboard's rule too: a main role is never @everyone, managed or above the bot.
     if row.path == "lockdown.main_roles" && !matches!(op, Op::Remove(..)) {
         let info = app.guild_info(gid).await?;

@@ -212,8 +212,21 @@ async fn preview(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i
 }
 
 async fn load(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i64, i64)>) -> Res {
-    require(&st, &s, guild, Level::Admin, true).await?;
+    // Owner level as `t!backups load` (D10/D11); the bot refuses it again during a lock or panic.
+    require(&st, &s, guild, Level::Owner, true).await?;
     owned_image(&st, guild, id).await?;
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM lock_snapshots WHERE guild_id = $1 AND state <> 'unlocking') \
+         OR EXISTS(SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end')",
+    )
+    .bind(guild)
+    .fetch_one(&st.db)
+    .await?;
+    if busy {
+        return Err(ApiError::BadRequest(
+            "The server is locked or in panic mode. End it before loading a backup.".into(),
+        ));
+    }
     queue(&st, guild, "backup_load", json!({"id": id})).await?;
     announce(&st, &s, guild, &format!("loaded backup #{id}")).await?;
     Ok(Json(json!({"queued": true})))

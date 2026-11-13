@@ -8,7 +8,7 @@ use std::{
 use tommybot_automod::lockdown::kind_from;
 use tommybot_core::jobs::{self, Job};
 use tommybot_logging::{
-    embed::{DONE, RED, YES},
+    embed::{DONE, NO, RED, YES},
     Log, LogKind,
 };
 use twilight_model::id::{
@@ -132,9 +132,14 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
                 .as_i64()
                 .context("job payload has no id")?;
             let text = backup::load(app, gid, &id.to_string(), true).await?;
-            let log = Log::new("Backup Loaded", DONE)
+            // `load` answers a refusal (locked, panic, no such backup) as text.
+            let (title, color, mark) = match text.starts_with("Restored") {
+                true => ("Backup Loaded", DONE, YES),
+                false => ("Backup Not Loaded", RED, NO),
+            };
+            let log = Log::new(title, color)
                 .line("Id", &format!("`{id}`"))
-                .text(&format!("{YES} **{text}**"));
+                .text(&format!("{mark} **{text}**"));
             send_log(app, gid.get(), LogKind::Server, log).await?;
         }
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,

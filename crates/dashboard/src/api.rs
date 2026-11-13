@@ -393,6 +393,9 @@ pub async fn put_section(
     }
     validate(&section, &b.value)?;
     let (cur, mut config) = store::current(&st.db, guild).await?;
+    if section == "lockdown" && main_roles_guarded(&config, &b.value, &config["lockdown"]) {
+        require(&st, &s, guild, Level::Owner, true).await?;
+    }
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
     check_held_roles(&st, guild, &section, &b.value, &config[&section]).await?;
     limits::check(&section, &b.value, &config[&section]).map_err(ApiError::BadRequest)?;
@@ -654,8 +657,26 @@ pub async fn purge(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) 
     Ok(Json(json!({})))
 }
 
+/// Anti-nuke watches @everyone and the main roles while a monitor is on, so changing the main roles
+/// then needs anti-nuke's bar (D67). `config` is the whole config whose monitors count.
+fn main_roles_guarded(config: &Value, lockdown: &Value, was: &Value) -> bool {
+    let an = &config["antinuke"];
+    lockdown["main_roles"] != was["main_roles"]
+        && (an["monitor_public_roles"] == true || an["monitor_channel_perms"] == true)
+}
+
+/// Whether going from `now` to `new` changes the main roles while either has a monitor on.
+fn main_roles_bar(new: &Value, now: &Value) -> bool {
+    [new, now]
+        .iter()
+        .any(|c| main_roles_guarded(c, &new["lockdown"], &now["lockdown"]))
+}
+
 /// The highest level any section a rollback from `now` to `old` changes needs (permits are checked apart).
 fn rollback_bar(old: &Value, now: &Value) -> Level {
+    if main_roles_bar(old, now) {
+        return access::write_bar("antinuke").0;
+    }
     let keys = |v: &Value| {
         v.as_object()
             .into_iter()
@@ -756,7 +777,9 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
 /// Level and step-up an import needs: the bar of every section it changes, Admin + step-up for permits.
 fn import_bar(new: &Value, now: &Value) -> (Level, bool) {
     let permits = new.get("permits") != now.get("permits");
-    let step_up = permits || access::SENSITIVE.iter().any(|k| new.get(*k) != now.get(*k));
+    let step_up = permits
+        || main_roles_bar(new, now)
+        || access::SENSITIVE.iter().any(|k| new.get(*k) != now.get(*k));
     let floor = if permits { Level::Admin } else { Level::Editor };
     (rollback_bar(new, now).max(floor), step_up)
 }
@@ -1037,6 +1060,28 @@ mod logging_validate_tests {
             Level::Owner,
             "a dropped section counts"
         );
+    }
+
+    #[test]
+    fn main_roles_need_the_antinuke_bar_while_a_monitor_is_on() {
+        let now =
+            json!({"lockdown": {"main_roles": ["1"]}, "antinuke": {"monitor_public_roles": false}});
+        let mut new = now.clone();
+        new["lockdown"]["main_roles"] = json!(["2"]);
+        assert_eq!(rollback_bar(&new, &now), Level::Editor);
+        assert_eq!(import_bar(&new, &now), (Level::Editor, false));
+        let mut on = now.clone();
+        on["antinuke"]["monitor_channel_perms"] = json!(true);
+        let mut new_on = on.clone();
+        new_on["lockdown"]["main_roles"] = json!(["2"]);
+        assert_eq!(rollback_bar(&new_on, &on), Level::Owner);
+        assert_eq!(import_bar(&new_on, &on), (Level::Owner, true));
+        assert!(main_roles_guarded(
+            &on,
+            &new_on["lockdown"],
+            &on["lockdown"]
+        ));
+        assert!(!main_roles_guarded(&on, &on["lockdown"], &on["lockdown"]));
     }
 
     #[test]
