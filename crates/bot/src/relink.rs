@@ -30,25 +30,30 @@ async fn run(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>) -> Result
     let g = gid.get() as i64;
     let (mut tx, version, mut doc) = crate::settings::locked(app, gid).await?;
     let mut n = swap(&mut doc, map);
-    // A deleted log channel already left `logging` when it was deleted (`forget_log_channel`, a
-    // version by the bot): its routes come back from the version just before that one, never from
-    // an older one, so a route staff removed on purpose stays removed (R-h3 7).
-    let olds: Vec<String> = map.keys().map(u64::to_string).collect();
-    let before: Option<Value> = sqlx::query_scalar(
-        "SELECT p.config->'logging' FROM guild_config c
-         JOIN guild_config p ON p.guild_id = c.guild_id AND p.version = c.version - 1
-         WHERE c.guild_id = $1 AND c.changed_by = $3
-           AND EXISTS (SELECT 1 FROM unnest($2::text[]) o WHERE strpos((p.config->'logging')::text, '\"' || o || '\"') > 0)
-           AND NOT EXISTS (SELECT 1 FROM unnest($2::text[]) o WHERE strpos((c.config->'logging')::text, '\"' || o || '\"') > 0)
-         ORDER BY c.version DESC LIMIT 1",
-    )
-    .bind(g)
-    .bind(&olds)
-    .bind(app.me.get() as i64)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some(before) = before {
-        n += relink_logs(&mut doc, &before, map);
+    // A deleted log channel already left `logging` when it was deleted (`forget_log_channel`, one
+    // bot version per channel): each channel's routes come back from the version just before its
+    // own deletion version, never from an older one, so a route staff removed on purpose stays
+    // removed (R-h3 7), and a nuke that deleted several log channels gets all of them back.
+    for old in map.keys() {
+        let o = old.to_string();
+        let before: Option<Value> = sqlx::query_scalar(
+            "SELECT p.config->'logging' FROM guild_config c
+             JOIN guild_config p ON p.guild_id = c.guild_id AND p.version = c.version - 1
+             WHERE c.guild_id = $1 AND c.changed_by = $3
+               AND strpos((p.config->'logging')::text, '\"' || $2 || '\"') > 0
+               AND strpos(coalesce((c.config->'logging')::text, ''), '\"' || $2 || '\"') = 0
+             ORDER BY c.version DESC LIMIT 1",
+        )
+        .bind(g)
+        .bind(&o)
+        .bind(app.me.get() as i64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(before) = before {
+            // Only this channel's routes: the others come from their own deletion versions.
+            let one = HashMap::from([(*old, map[old])]);
+            n += relink_logs(&mut doc, &before, &one);
+        }
     }
     for (old, new) in map {
         n += sqlx::query(
@@ -313,6 +318,41 @@ mod tests {
             .unwrap();
             assert_eq!(c["logging"]["routes"], want, "server {i}");
         }
+        // R-h3 round 2, 1: a nuke deleted two log channels, one bot version each; both come back.
+        let (o2, n2) = (old + 10, new + 10);
+        let gi = t.g(3).get() as i64;
+        for (v, (r, by)) in [
+            (
+                json!({"anti_nuke": old.to_string(), "panic": o2.to_string()}),
+                None,
+            ),
+            (json!({"panic": o2.to_string()}), Some(t.app.me.get())),
+            (json!({}), Some(t.app.me.get())),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query("INSERT INTO guild_config (guild_id, version, config, changed_by) VALUES ($1, $2, $3, $4)")
+                .bind(gi)
+                .bind(v as i32 + 1)
+                .bind(routes(r))
+                .bind(by.map(|b| b as i64))
+                .execute(&t.app.pool)
+                .await
+                .unwrap();
+        }
+        relink(&t.app, t.g(3), &HashMap::from([(old, new), (o2, n2)])).await;
+        let c: Value = sqlx::query_scalar(
+            "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+        )
+        .bind(gi)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            c["logging"]["routes"],
+            json!({"anti_nuke": new.to_string(), "panic": n2.to_string()})
+        );
         t.cleanup().await;
     }
 }
