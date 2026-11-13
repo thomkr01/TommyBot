@@ -816,3 +816,81 @@ async fn verify_lifts_only_a_join_quarantine_and_admin_roles_need_staff() {
     assert_eq!(saved(&t, 0, real).await, None, "{text}");
     t.cleanup().await;
 }
+
+/// An audit entry: `actor` added `role` to `target`.
+fn role_added(t: &T, actor: u64, target: u64, role: u64) -> AuditLogEntry {
+    serde_json::from_value(json!({
+        "id": "2", "action_type": 25, "guild_id": t.g(0).to_string(), "target_id": target.to_string(),
+        "user_id": actor.to_string(), "reason": null,
+        "changes": [{"key": "$add", "new_value": [{"id": role.to_string(), "name": "r"}]}],
+    }))
+    .unwrap()
+}
+
+fn joined(t: &T, u: u64) -> MemberAdd {
+    serde_json::from_value(json!({
+        "guild_id": t.g(0).to_string(), "roles": [], "joined_at": "2026-01-01T00:00:00.000000+00:00",
+        "deaf": false, "mute": false, "flags": 0,
+        "user": {"id": u.to_string(), "username": "back", "discriminator": "0", "avatar": null},
+    }))
+    .unwrap()
+}
+
+/// D15: a quarantined member rejoins and an autorole bot gives them a role: the role goes, the
+/// bot is not quarantined. A human doing the same still is.
+#[tokio::test]
+async fn an_autorole_bot_after_a_rejoin_quarantine_is_undone_not_punished() {
+    let Some(t) = T::new(43).await else { return };
+    let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let (u, bot, human) = (t.base * 10 + 1, t.base * 10 + 2, t.base * 10 + 3);
+    row(&t, 0, u, &[ROLE as i64]).await;
+    t.set(|m| {
+        m.bots.push(bot);
+        m.members.insert((t.g(0).get(), u), vec![]);
+    });
+    crate::joingate::on_join(&t.app, &joined(&t, u), false)
+        .await
+        .unwrap();
+    assert_eq!(roles(&t, 0, u), Some(vec![Q]), "quarantined again");
+    for actor in [bot, human] {
+        t.set(|m| {
+            m.members.insert((t.g(0).get(), u), vec![Q, AUTOROLE]);
+            m.members.insert((t.g(0).get(), actor), vec![ROLE]);
+        });
+        let e = role_added(&t, actor, u, AUTOROLE);
+        crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+        assert_eq!(roles(&t, 0, u), Some(vec![Q]), "the role is taken back");
+    }
+    assert_eq!(saved(&t, 0, bot).await, None, "the autorole bot was punished");
+    assert!(saved(&t, 0, human).await.is_some(), "a human is still held to the rule");
+    t.cleanup().await;
+}
+
+/// D12b: an undo Discord refuses on a join-quarantined member punishes nobody, is tried once
+/// more and then shown to staff.
+#[tokio::test]
+async fn a_failed_undo_on_a_join_quarantine_is_retried_and_logged() {
+    let Some(t) = T::new(44).await else { return };
+    let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let (u, actor) = (t.base * 10 + 1, t.base * 10 + 2);
+    sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, '{}', true)")
+        .bind(t.g(0).get() as i64)
+        .bind(u as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.set(|m| {
+        m.fail_member_edit = true;
+        m.members.insert((t.g(0).get(), u), vec![Q, AUTOROLE]);
+        m.members.insert((t.g(0).get(), actor), vec![]);
+    });
+    let e = role_added(&t, actor, u, AUTOROLE);
+    crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+    let patch = format!("PATCH /guilds/{}/members/{u}", t.g(0));
+    assert_eq!(t.calls(&patch), 2, "tried twice");
+    assert_eq!(t.calls("Could not take back roles"), 1, "staff were told");
+    assert_eq!(saved(&t, 0, actor).await, None, "nobody is punished");
+    t.cleanup().await;
+}

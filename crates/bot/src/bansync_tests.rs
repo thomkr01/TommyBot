@@ -138,6 +138,8 @@ pub(crate) struct Mock {
     pub(crate) fail_message_5xx: bool,
     /// Channel deletes fail with 500.
     pub(crate) fail_delete_channel: bool,
+    /// Member role-list edits fail with 500.
+    pub(crate) fail_member_edit: bool,
     pub(crate) log: Vec<String>,
 }
 
@@ -308,6 +310,7 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 None => err(404, 10011),
             }
         }
+        ("PATCH", ["guilds", _, "members", _]) if m.fail_member_edit => err(500, 0),
         ("PATCH", ["guilds", g, "members", u]) => {
             let ids: Option<Vec<u64>> = serde_json::from_str::<Value>(body).unwrap_or_default()
                 ["roles"]
