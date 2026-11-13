@@ -9,10 +9,13 @@ export DATABASE_URL=${DATABASE_URL:-postgres://postgres:postgres@localhost:5432/
 pg_lsclusters | grep -q online || { pg_ctlcluster 16 main start; sleep 3; }
 su postgres -c "psql -qc \"alter user postgres password 'postgres'\""
 
-cargo build -q --release -p tommybot
+# TOMMYBOT_BIN: an already built binary (say a debug build in another target dir) instead of the release build.
+export TOMMYBOT_BIN=${TOMMYBOT_BIN:-./target/release/tommybot}
+[ "$TOMMYBOT_BIN" != ./target/release/tommybot ] || cargo build -q --release -p tommybot
+mkdir -p target
 # The restart scenario kills and starts the bot itself, so the pid lives in a file.
 export BOT_PID_FILE=target/live-bot.pid
-RUST_LOG=${RUST_LOG:-info} ./target/release/tommybot >> target/live-bot.log 2>&1 & echo $! > $BOT_PID_FILE
+RUST_LOG=${RUST_LOG:-info} "$TOMMYBOT_BIN" >> target/live-bot.log 2>&1 & echo $! > $BOT_PID_FILE
 trap 'kill $(cat $BOT_PID_FILE) 2>/dev/null' EXIT
 sleep 10  # gateway connect and guild cache
 kill -0 $(cat $BOT_PID_FILE) || { tail target/live-bot.log; exit 1; }
