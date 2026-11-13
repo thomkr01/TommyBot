@@ -782,7 +782,7 @@ pub(crate) async fn punish_or_retry(
 }
 
 /// Queues a `raid_punish` job in 30 s; it checks immunity and the Raider List's Allow again.
-async fn queue_retry(app: &App, gid: Id<GuildMarker>, user: u64, action: Action, why: &str) {
+pub(crate) async fn queue_retry(app: &App, gid: Id<GuildMarker>, user: u64, action: Action, why: &str) {
     let job = serde_json::json!({ "user": user, "action": action, "why": why });
     let at = now_secs() + 30;
     if let Err(e) = jobs::enqueue(&app.pool, gid.get() as i64, "raid_punish", job, at).await {

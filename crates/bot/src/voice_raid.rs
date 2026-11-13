@@ -98,6 +98,19 @@ pub async fn on_voice(app: &App, v: &VoiceState, old: Option<Id<ChannelMarker>>)
     // One member who already left or a refused step must not let the rest go.
     for (id, _) in out.flagged {
         let uid = Id::new(id);
+        // An earlier flagged member may have been made staff since; a failed lookup waits for
+        // the retry job, which checks again (D60b).
+        if uid != v.user_id {
+            match app.is_immune(gid, uid).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(?e, user = id, "voice raid: immunity check failed, retrying later");
+                    joingate::queue_retry(app, gid, id, raid.action(), "voice raid").await;
+                    continue;
+                }
+            }
+        }
         let left = app
             .http
             .update_guild_member(gid, uid)
