@@ -232,13 +232,13 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         tracing::warn!(?e, "whitelist lookup failed, counting the action");
         false
     }) || (action == Action::WebhookCreate
-            && e.target_id.is_some_and(|t| {
-                cfg.whitelist
-                    .spam
-                    .webhooks
-                    .iter()
-                    .any(|w| w.get() == t.get())
-            }));
+        && e.target_id.is_some_and(|t| {
+            cfg.whitelist
+                .spam
+                .webhooks
+                .iter()
+                .any(|w| w.get() == t.get())
+        }));
     let inv = inverse(action, e);
     if let (true, Some(t), Action::ChannelCreate | Action::RoleCreate) =
         (exempt, e.target_id, action)
@@ -391,7 +391,10 @@ pub(crate) async fn seed_windows(app: &App) -> Result<()> {
             .await?;
     let mut m = app.heat_raiders.lock().unwrap();
     for (g, raiders, until) in heat {
-        m.insert(g as u64, (raiders.into_iter().map(|r| r as u64).collect(), until));
+        m.insert(
+            g as u64,
+            (raiders.into_iter().map(|r| r as u64).collect(), until),
+        );
     }
     Ok(())
 }
@@ -617,13 +620,21 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
         let undo = app
             .http
             .remove_guild_member_role(gid, target.cast(), Id::new(r as u64))
-            .reason("Anti-nuke: a permit role is given only by an Owner, Extra Owner or Trusted Admin")
+            .reason(
+                "Anti-nuke: a permit role is given only by an Owner, Extra Owner or Trusted Admin",
+            )
             .await;
         if let Err(err) = undo {
             tracing::warn!(?err, "taking a permit role back failed");
         }
     }
-    quarantine_and_revert(app, gid, actor, "gave a member a role that carries a permit").await
+    quarantine_and_revert(
+        app,
+        gid,
+        actor,
+        "gave a member a role that carries a permit",
+    )
+    .await
 }
 
 /// Which of `roles` carry a permit in the guild.
@@ -653,7 +664,10 @@ enum Locked {
 }
 
 /// What `e` changed of the active locks' targets, if anything.
-fn lock_target(e: &AuditLogEntry, locks: &[tommybot_automod::lockdown::Snapshot]) -> Option<Locked> {
+fn lock_target(
+    e: &AuditLogEntry,
+    locks: &[tommybot_automod::lockdown::Snapshot],
+) -> Option<Locked> {
     let target = e.target_id?.get();
     match e.action_type {
         A::RoleUpdate => {
@@ -661,7 +675,9 @@ fn lock_target(e: &AuditLogEntry, locks: &[tommybot_automod::lockdown::Snapshot]
                 AuditLogChange::Permissions { old, .. } => *old,
                 _ => None,
             })?;
-            let held = locks.iter().any(|l| l.role_perms.iter().any(|(r, _)| *r == target));
+            let held = locks
+                .iter()
+                .any(|l| l.role_perms.iter().any(|(r, _)| *r == target));
             held.then_some(Locked::Role { id: target, old })
         }
         A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete => {
@@ -672,8 +688,12 @@ fn lock_target(e: &AuditLogEntry, locks: &[tommybot_automod::lockdown::Snapshot]
             });
             let find = |deny: bool| {
                 e.changes.iter().find_map(|c| match c {
-                    AuditLogChange::Allow { old, .. } if !deny => Some(old.unwrap_or(Permissions::empty())),
-                    AuditLogChange::Deny { old, .. } if deny => Some(old.unwrap_or(Permissions::empty())),
+                    AuditLogChange::Allow { old, .. } if !deny => {
+                        Some(old.unwrap_or(Permissions::empty()))
+                    }
+                    AuditLogChange::Deny { old, .. } if deny => {
+                        Some(old.unwrap_or(Permissions::empty()))
+                    }
                     _ => None,
                 })
             };
@@ -691,7 +711,12 @@ fn lock_target(e: &AuditLogEntry, locks: &[tommybot_automod::lockdown::Snapshot]
 
 /// During a lock, a change to a locked role or overwrite is set back (unless an Owner, Extra
 /// Owner or Trusted Admin made it), logged, and counted on the Channel or Role Updates card.
-async fn guard_lock(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+async fn guard_lock(
+    app: &App,
+    cfg: &GuildCfg,
+    e: &AuditLogEntry,
+    actor: Id<UserMarker>,
+) -> Result<()> {
     let Some(gid) = e.guild_id else {
         return Ok(());
     };
@@ -705,9 +730,18 @@ async fn guard_lock(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<User
         match &locked {
             _ if immune => {}
             Locked::Role { id, old } => {
-                app.http.update_role(gid, Id::new(*id)).permissions(*old).await?;
+                app.http
+                    .update_role(gid, Id::new(*id))
+                    .permissions(*old)
+                    .await?;
             }
-            Locked::Overwrite { channel, role, allow, deny, deleted } => {
+            Locked::Overwrite {
+                channel,
+                role,
+                allow,
+                deny,
+                deleted,
+            } => {
                 let live = if *deleted {
                     None
                 } else {
@@ -727,7 +761,9 @@ async fn guard_lock(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<User
                     allow: allow.or(live.as_ref().map(|o| o.allow)),
                     deny: deny.or(live.as_ref().map(|o| o.deny)),
                 };
-                app.http.update_channel_permission(Id::new(*channel), &o).await?;
+                app.http
+                    .update_channel_permission(Id::new(*channel), &o)
+                    .await?;
             }
         }
         Ok(())
@@ -746,7 +782,9 @@ async fn guard_lock(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<User
     };
     let log = Log::new("Anti Nuke", ALERT)
         .user("Responsible", actor.get())
-        .text(&format!("{NO} **Changed a locked target during a lockdown**"))
+        .text(&format!(
+            "{NO} **Changed a locked target during a lockdown**"
+        ))
         .line("Target", &what)
         .line("Change", &result);
     if let Err(err) = send_log(app, gid.get(), LogKind::AntiNuke, log).await {
@@ -756,7 +794,10 @@ async fn guard_lock(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<User
     if immune || watched(e) == Some(action) {
         return Ok(());
     }
-    let exempt = app.whitelisted(gid, actor, "antinuke").await.unwrap_or(false);
+    let exempt = app
+        .whitelisted(gid, actor, "antinuke")
+        .await
+        .unwrap_or(false);
     let target = e.target_id.map(|t| t.get());
     count(app, cfg, gid, actor, action, target, &[], exempt, 1).await
 }
@@ -1536,7 +1577,9 @@ fn channel_grant(
     let bits = ows
         .iter()
         .filter(|o| o.kind == K::Role && managed.contains(&o.id.get()))
-        .fold(own.map_or(Permissions::empty(), |o| o.0), |b, o| b | o.allow);
+        .fold(own.map_or(Permissions::empty(), |o| o.0), |b, o| {
+            b | o.allow
+        });
     (!bits.is_empty()).then_some((bits, own))
 }
 
@@ -1569,7 +1612,11 @@ async fn unhide_channels(app: &App, gid: Id<GuildMarker>, user: u64) -> Result<(
         };
         if let Err(e) = put.map_err(anyhow::Error::from) {
             if !crate::http_err::gone_any(&e) {
-                tracing::warn!(?e, channel, "restoring a quarantined member's overwrite failed");
+                tracing::warn!(
+                    ?e,
+                    channel,
+                    "restoring a quarantined member's overwrite failed"
+                );
                 continue;
             }
         }
@@ -2172,7 +2219,10 @@ async fn hold_overwrite(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> 
     let user = user.cast::<UserMarker>();
     let Some(old) = e.changes.iter().find_map(|c| match c {
         AuditLogChange::Allow { old, new } => {
-            let (old, new) = (old.unwrap_or(Permissions::empty()), new.unwrap_or(Permissions::empty()));
+            let (old, new) = (
+                old.unwrap_or(Permissions::empty()),
+                new.unwrap_or(Permissions::empty()),
+            );
             (!(new - old).is_empty()).then_some(old)
         }
         _ => None,
@@ -2202,7 +2252,9 @@ async fn hold_overwrite(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> 
             allow: Some(old),
             deny,
         };
-        app.http.update_channel_permission(channel.cast(), &o).await?;
+        app.http
+            .update_channel_permission(channel.cast(), &o)
+            .await?;
         anyhow::Ok(())
     };
     // A failed undo must not spare the actor.
@@ -2615,7 +2667,10 @@ mod tests {
         let gid = Id::new(6_470_000_000 + std::process::id() as u64);
         for (action, inv) in [
             ("quarantine", json!(Inverse::Unquarantine { user: 7 })),
-            ("bot_role_cleared", json!(Inverse::RolePerms { id: 8, perms: 8 })),
+            (
+                "bot_role_cleared",
+                json!(Inverse::RolePerms { id: 8, perms: 8 }),
+            ),
             ("Kick", json!(Inverse::Reinvite { user: 9 })),
         ] {
             sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,1,$2,7,$3)")
@@ -2664,13 +2719,15 @@ mod tests {
         let g = 6_480_000_000 + std::process::id() as i64;
         // A merged entry counted twice, a second inverse row of one entry, and a case row.
         for (action, n) in [("Ban", 2), ("Ban", 0), ("ban", 1)] {
-            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, counted) VALUES ($1,42,$2,$3)")
-                .bind(g)
-                .bind(action)
-                .bind(n)
-                .execute(&app.pool)
-                .await
-                .unwrap();
+            sqlx::query(
+                "INSERT INTO action_log (guild_id, actor_id, action, counted) VALUES ($1,42,$2,$3)",
+            )
+            .bind(g)
+            .bind(action)
+            .bind(n)
+            .execute(&app.pool)
+            .await
+            .unwrap();
         }
         sqlx::query("INSERT INTO command_uses (actor_id, action) VALUES ($1, 'ban')")
             .bind(g)
@@ -2693,7 +2750,10 @@ mod tests {
             an.limits = HashMap::from([(Action::Ban, limit)]);
             an.on_action(g as u64, 42, Action::Kick, false, Instant::now())
         };
-        assert!(matches!(v, Verdict::Quarantine(c) if c.minute == 3), "{v:?}");
+        assert!(
+            matches!(v, Verdict::Quarantine(c) if c.minute == 3),
+            "{v:?}"
+        );
         let one = permits::Limit {
             per_min: 1,
             per_hour: 5,
@@ -2704,13 +2764,19 @@ mod tests {
             .unwrap()
             .allow(g, "ban", one, Instant::now());
         assert!(!allowed, "the use before the restart counts");
-        assert!(crate::panic::is_raider(&app, Id::new(g as u64), Id::new(42)));
+        assert!(crate::panic::is_raider(
+            &app,
+            Id::new(g as u64),
+            Id::new(42)
+        ));
         for t in ["action_log", "heat_panic"] {
-            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {t} WHERE guild_id = $1")))
-                .bind(g)
-                .execute(&app.pool)
-                .await
-                .unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {t} WHERE guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
         }
         sqlx::query("DELETE FROM command_uses WHERE actor_id = $1")
             .bind(g)
@@ -2741,7 +2807,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(permit_roles_in(&pool, g, &[5, 7]).await.unwrap(), vec![7]);
-        assert!(permit_roles_in(&pool, g + 1, &[7]).await.unwrap().is_empty());
+        assert!(permit_roles_in(&pool, g + 1, &[7])
+            .await
+            .unwrap()
+            .is_empty());
         sqlx::query("DELETE FROM permits WHERE guild_id = $1")
             .bind(g)
             .execute(&pool)
@@ -2766,9 +2835,15 @@ mod tests {
         let perms = json!([{"key": "permissions", "old_value": "0", "new_value": "2048"}]);
         assert_eq!(
             lock_target(&entry(31, "5", perms.clone()), std::slice::from_ref(&lock)),
-            Some(Locked::Role { id: 5, old: Permissions::empty() })
+            Some(Locked::Role {
+                id: 5,
+                old: Permissions::empty()
+            })
         );
-        assert_eq!(lock_target(&entry(31, "6", perms), std::slice::from_ref(&lock)), None);
+        assert_eq!(
+            lock_target(&entry(31, "6", perms), std::slice::from_ref(&lock)),
+            None
+        );
         let deny = json!([{"key": "deny", "old_value": "2048", "new_value": "0"}]);
         assert_eq!(
             lock_target(&entry(14, "9", deny.clone()), std::slice::from_ref(&lock)),
@@ -2784,7 +2859,10 @@ mod tests {
             lock_target(&entry(15, "9", deny.clone()), std::slice::from_ref(&lock)),
             Some(Locked::Overwrite { deleted: true, .. })
         ));
-        assert_eq!(lock_target(&entry(14, "8", deny.clone()), std::slice::from_ref(&lock)), None);
+        assert_eq!(
+            lock_target(&entry(14, "8", deny.clone()), std::slice::from_ref(&lock)),
+            None
+        );
         assert_eq!(lock_target(&entry(14, "9", deny), &[]), None, "no lock");
     }
 
@@ -2801,7 +2879,11 @@ mod tests {
         };
         let p = Permissions::from_bits_retain;
         // Their own allow, a managed role's allow, and an unrelated role's.
-        let ows = [ow(7, K::Member, 1024, 2), ow(3, K::Role, 2048, 0), ow(4, K::Role, 8, 0)];
+        let ows = [
+            ow(7, K::Member, 1024, 2),
+            ow(3, K::Role, 2048, 0),
+            ow(4, K::Role, 8, 0),
+        ];
         assert_eq!(
             channel_grant(&ows, 7, &[3]),
             Some((p(1024 | 2048), Some((p(1024), p(2)))))

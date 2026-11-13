@@ -93,7 +93,14 @@ pub fn saw_audit(app: &App, guild: u64, id: u64) {
 
 /// Runs anti-nuke on the entries after `last`, oldest first (at most 100: a nuke trips far sooner).
 async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -> Result<()> {
-    let log = app.http.audit_log(gid).after(last).limit(100).await?.model().await?;
+    let log = app
+        .http
+        .audit_log(gid)
+        .after(last)
+        .limit(100)
+        .await?
+        .model()
+        .await?;
     for mut e in missed(log.entries, last) {
         e.guild_id = Some(gid);
         saw_audit(app, gid.get(), e.id.get());
@@ -319,8 +326,10 @@ mod tests {
     #[test]
     fn missed_entries_replay_oldest_first() {
         let e = |id: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
-            serde_json::from_value(serde_json::json!({"action_type": 22, "changes": [], "id": id.to_string()}))
-                .unwrap()
+            serde_json::from_value(
+                serde_json::json!({"action_type": 22, "changes": [], "id": id.to_string()}),
+            )
+            .unwrap()
         };
         let got: Vec<u64> = super::missed(vec![e(9), e(5), e(7), e(3)], 5)
             .iter()

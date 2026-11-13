@@ -723,7 +723,6 @@ async fn due(app: &App, gid: Id<GuildMarker>, hours: u64) -> Result<bool> {
 mod tests {
     use super::*;
 
-
     #[test]
     fn filters_drop_creates_and_deletes_only() {
         let role = RoleImg {

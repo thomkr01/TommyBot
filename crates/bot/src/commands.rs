@@ -3,8 +3,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_antinuke::Action as NukeAction;
+use tommybot_automod::lockdown::{kind_from, LockKind};
 use tommybot_core::{
     cases, jobs, permits,
     sections::{AntinukeCfg, MiscCfg},
@@ -979,13 +979,22 @@ mod tests {
 
     #[test]
     fn a_permit_without_limits_takes_the_anti_nuke_limit() {
-        let on = |v: serde_json::Value| -> super::AntinukeCfg { serde_json::from_value(v).unwrap() };
-        let an = on(serde_json::json!({"enabled": true, "limits": {"Ban": {"per_minute": 3, "per_hour": 9}}}));
+        let on =
+            |v: serde_json::Value| -> super::AntinukeCfg { serde_json::from_value(v).unwrap() };
+        let an = on(
+            serde_json::json!({"enabled": true, "limits": {"Ban": {"per_minute": 3, "per_hour": 9}}}),
+        );
         let l = super::nuke_fallback(&an, "kick").unwrap();
         assert_eq!((l.per_min, l.per_hour), (2, 8), "kicks share the ban card");
         assert!(super::nuke_fallback(&an, "purge").is_none());
-        assert!(super::nuke_fallback(&an, "timeout").is_none(), "opt-in card not set");
-        assert!(super::nuke_fallback(&on(serde_json::json!({})), "ban").is_none(), "anti-nuke off");
+        assert!(
+            super::nuke_fallback(&an, "timeout").is_none(),
+            "opt-in card not set"
+        );
+        assert!(
+            super::nuke_fallback(&on(serde_json::json!({})), "ban").is_none(),
+            "anti-nuke off"
+        );
     }
 
     #[test]

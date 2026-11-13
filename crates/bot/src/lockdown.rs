@@ -962,7 +962,10 @@ mod tests {
         assert_eq!(got.role_perms[&Id::new(5)], (1 << 10) | 8);
         assert_eq!(got.role_perms[&Id::new(6)], 0);
         assert!(!got.role_perms.contains_key(&Id::new(9)), "deleted since");
-        assert!(std::sync::Arc::ptr_eq(&with_saved(info.clone(), &[]), &info));
+        assert!(std::sync::Arc::ptr_eq(
+            &with_saved(info.clone(), &[]),
+            &info
+        ));
     }
 
     #[test]

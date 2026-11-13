@@ -212,17 +212,14 @@ impl AntiNuke {
 
     /// Puts back `n` actions counted `ago` before `now` in an earlier run (N3: `action_log`), so a
     /// restart does not reset the windows. Call oldest first, before live actions.
-    pub fn seed(
-        &mut self,
-        (guild, executor, action): Key,
-        ago: Duration,
-        n: u32,
-        now: Instant,
-    ) {
+    pub fn seed(&mut self, (guild, executor, action): Key, ago: Duration, n: u32, now: Instant) {
         let (Some(at), true) = (now.checked_sub(ago), ago < HOUR) else {
             return;
         };
-        let q = self.windows.entry((guild, executor, action.card())).or_default();
+        let q = self
+            .windows
+            .entry((guild, executor, action.card()))
+            .or_default();
         // The hour cap of any card is far below this; it only bounds a corrupt row.
         q.extend(std::iter::repeat_n(at, n.min(500) as usize));
     }

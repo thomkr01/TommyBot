@@ -382,7 +382,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             }
         }
         // Before any await too: the delete of a channel just moved must see the move (D4).
-        Event::ChannelCreate(c) => app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true),
+        Event::ChannelCreate(c) => {
+            app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true)
+        }
         Event::ChannelUpdate(c) => {
             app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), false)
         }

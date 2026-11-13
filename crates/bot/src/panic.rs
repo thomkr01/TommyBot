@@ -453,7 +453,10 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
 /// Names who ended panic early from the dashboard (D74); a timed end has nobody.
 fn end_log(payload: &Value) -> Log {
     let log = Log::new("Panic Mode Ended", DONE).text(&format!("{YES} **Panic mode has ended.**"));
-    match payload["ended_by"].as_str().and_then(|u| u.parse::<u64>().ok()) {
+    match payload["ended_by"]
+        .as_str()
+        .and_then(|u| u.parse::<u64>().ok())
+    {
         Some(u) => log.user("Ended by", u),
         None => log,
     }

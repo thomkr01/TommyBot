@@ -201,7 +201,8 @@ impl App {
             .get(&channel)
             .and_then(|e| e.1)
             .is_some_and(|(t, from)| {
-                t.elapsed() < MOVE_WINDOW && !from.is_some_and(|f| cats.iter().any(|c| c.get() == f))
+                t.elapsed() < MOVE_WINDOW
+                    && !from.is_some_and(|f| cats.iter().any(|c| c.get() == f))
             })
     }
 
@@ -249,15 +250,29 @@ mod tests {
     fn a_move_into_another_category_is_remembered() {
         let t = Instant::now();
         assert_eq!(moved(None, Some(5), true, t), None, "new channel");
-        assert_eq!(moved(Some(&(Some(4), None)), Some(5), false, t), Some((t, Some(4))));
-        assert_eq!(moved(Some(&(Some(5), None)), Some(5), false, t), None, "a rename");
-        assert_eq!(moved(None, Some(5), false, t), Some((t, None)), "no baseline");
+        assert_eq!(
+            moved(Some(&(Some(4), None)), Some(5), false, t),
+            Some((t, Some(4)))
+        );
+        assert_eq!(
+            moved(Some(&(Some(5), None)), Some(5), false, t),
+            None,
+            "a rename"
+        );
+        assert_eq!(
+            moved(None, Some(5), false, t),
+            Some((t, None)),
+            "no baseline"
+        );
         // Outside, then ticket category 4, then 5: the first move, from outside, still counts.
         let first = Some((t, Some(1)));
         let later = t + Duration::from_secs(5);
         assert_eq!(moved(Some(&(Some(4), first)), Some(5), false, later), first);
         let old = t + MOVE_WINDOW;
-        assert_eq!(moved(Some(&(Some(4), first)), Some(5), false, old), Some((old, Some(4))));
+        assert_eq!(
+            moved(Some(&(Some(4), first)), Some(5), false, old),
+            Some((old, Some(4)))
+        );
     }
 
     #[test]
