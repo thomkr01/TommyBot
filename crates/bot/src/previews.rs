@@ -60,7 +60,7 @@ fn tickets() -> Vec<(&'static str, Value)> {
     let answer = "Thanks, we are looking into it.";
     let (dm, copy) = tickets::from_staff(&s, &staff, &member, answer, false);
     let (dm_anon, copy_anon) = tickets::from_staff(&s, &staff, &member, answer, true);
-    let intro = |cmd| embed(tickets::intro("{prefix}", cmd, &member, &[]));
+    let intro = |cmd| embed(tickets::intro("{prefix}", cmd, &member, &[], false));
     let reason = "Solved, thanks for the report.";
     vec![
         (

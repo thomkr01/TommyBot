@@ -183,6 +183,7 @@ async fn enforce(
             if kicked {
                 ("kick", None)
             } else {
+                crate::reply::queue_quarantine_dm(app, gid, user).await;
                 ("quarantine", Some(json!({"op": "unquarantine", "user": u})))
             }
         }

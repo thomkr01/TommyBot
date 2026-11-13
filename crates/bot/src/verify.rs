@@ -2,6 +2,7 @@
 //! Web mode hands the member to the dashboard's /verify page, which queues a `verify_grant` job.
 
 pub mod deleted;
+pub mod given;
 
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
@@ -625,6 +626,8 @@ pub(crate) async fn grant(
             safe
         })
         .collect();
+    // Before the roles land: the other-bot check must not take back what TommyBot gives.
+    given::note_verified(gid, user);
     // A join quarantine ends whatever "quarantine on join" says now: it may have been switched
     // off since they joined.
     let join = crate::antinuke::quarantine_kind(app, gid, user).await? == Some(true);

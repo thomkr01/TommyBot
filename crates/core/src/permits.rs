@@ -325,7 +325,9 @@ pub const HANDOVER_PERMS: &[&str] = &["owner", "dashboard_edit"];
 /// a role guarded again (D47). Strong by default, so a new flag is covered without a change here.
 pub fn guarded<S: AsRef<str>>(perms: &[S], whitelist: &[S]) -> bool {
     perms.iter().any(|p| HANDOVER_PERMS.contains(&p.as_ref()))
-        || whitelist.iter().any(|w| !WEAK_WHITELIST.contains(&w.as_ref()))
+        || whitelist
+            .iter()
+            .any(|w| !WEAK_WHITELIST.contains(&w.as_ref()))
 }
 
 /// Keys older setups may already hold; saving them stays allowed.
@@ -594,13 +596,15 @@ mod tests {
         ] {
             assert!(g(&[], &[f]), "{f}");
         }
-        assert!(!g(
-            &["ban", "warn"],
-            &["words", "links", "reports"]
-        ));
+        assert!(!g(&["ban", "warn"], &["words", "links", "reports"]));
         // Every catalog flag that is not listed weak is guarded.
         for d in CATALOG.iter().flat_map(|s| s.items).filter(|d| d.flag) {
-            assert_eq!(g(&[], &[d.key]), !WEAK_WHITELIST.contains(&d.key), "{}", d.key);
+            assert_eq!(
+                g(&[], &[d.key]),
+                !WEAK_WHITELIST.contains(&d.key),
+                "{}",
+                d.key
+            );
         }
     }
 

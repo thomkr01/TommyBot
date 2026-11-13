@@ -147,6 +147,16 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "confirm_expire" => crate::confirm::run_expire(app, &job.payload).await?,
         "raid_punish" => crate::joingate::punish_job(app, gid, &job.payload).await?,
+        crate::reply::QUARANTINE_DM => {
+            crate::reply::quarantine_dm_job(app, gid, &job.payload).await?
+        }
+        crate::reply::QUARANTINE_DM_COOLDOWN => {}
+        crate::verify::given::CATCH_UP => {
+            crate::verify::given::catch_up(app, gid, Some(&job.payload)).await?
+        }
+        crate::joingate::MISSED_REJOINS => {
+            crate::joingate::requarantine_missed(app, gid, &[], false, Some(&job.payload)).await?
+        }
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_blocked" => {
             let list = job.payload["list"].as_str().unwrap_or("VPN");
@@ -226,7 +236,7 @@ const ONE_TARGET: [&str; 9] = [
 ];
 
 /// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
-async fn round(app: &App, heavy: bool) {
+async fn round(app: &Arc<App>, heavy: bool) {
     match jobs::claim_due(&app.pool, 50, heavy).await {
         Ok(due) => {
             for job in due {
@@ -237,6 +247,34 @@ async fn round(app: &App, heavy: bool) {
                         .as_u64()
                         .is_some_and(|a| crate::antinuke::nuke_running(app, job.guild_id as u64, a))
                 {
+                    continue;
+                }
+                // Startup catch-ups page members or the audit log for minutes: they run beside the
+                // worker, so they never hold back panic_start or nuke_revert. Each takes its own
+                // per-guild lock. The row is done only on Ok; on an error it stays leased, so the
+                // lease, the attempt limit and the give-up log apply as for any job.
+                if SPAWNED.contains(&job.kind.as_str()) {
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        match dispatch(&app, &job).await {
+                            Ok(()) => {
+                                metrics::JOBS_DONE.fetch_add(1, Relaxed);
+                                if let Err(e) = jobs::finish(&app.pool, job.id).await {
+                                    tracing::warn!(?e, id = job.id, "finishing job failed");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
+                                metrics::JOBS_FAILED.fetch_add(1, Relaxed);
+                                if job.attempts >= jobs::MAX_ATTEMPTS {
+                                    give_up_log(&app, &job, &e).await;
+                                    if let Err(e) = jobs::finish(&app.pool, job.id).await {
+                                        tracing::warn!(?e, id = job.id, "finishing job failed");
+                                    }
+                                }
+                            }
+                        }
+                    });
                     continue;
                 }
                 let done = match dispatch(app, &job).await {
@@ -277,6 +315,11 @@ async fn round(app: &App, heavy: bool) {
         Err(e) => tracing::warn!(?e, "claiming jobs failed"),
     }
 }
+
+const SPAWNED: [&str; 2] = [
+    crate::joingate::MISSED_REJOINS,
+    crate::verify::given::CATCH_UP,
+];
 
 /// A dropped job (a temp ban that never ends, a lock that stays) must be visible on Discord, not
 /// only in the container log.

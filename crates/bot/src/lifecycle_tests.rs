@@ -617,6 +617,183 @@ async fn a_raid_retry_skips_staff_and_allowed_users() {
     t.cleanup().await;
 }
 
+/// D60b: when the staff lookup for an earlier flagged joiner fails, the raid retries later
+/// instead of punishing now, and the retry checks immunity again.
+#[tokio::test]
+async fn a_failed_staff_lookup_in_a_raid_retries_instead_of_punishing() {
+    let Some(t) = T::new(170).await else { return };
+    t.server_config(0, t.owner(), raid_cfg()).await;
+    join(&t, 0, 401).await;
+    join(&t, 0, 402).await;
+    // Discord fails every member lookup: neither earlier joiner can be checked.
+    t.set(|m| m.fail_member = true);
+    join(&t, 0, 403).await;
+    assert_eq!((t.banned(0, 401), t.banned(0, 402)), (None, None));
+    assert!(t.banned(0, 403).is_some(), "the joiner itself is punished");
+    // D57: the raid punished the joiner before this join's invite lookup.
+    let at = |what: &str| {
+        t.mock
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .rposition(|l| l.contains(what))
+    };
+    let g = t.g(0);
+    assert!(at(&format!("PUT /guilds/{g}/bans/403")) < at(&format!("GET /guilds/{g}/invites")));
+    let retries = pending(&t, 0, "raid_punish").await;
+    assert_eq!(retries.len(), 2, "{retries:?}");
+    // Made a Trusted Admin meanwhile: the retry spares them.
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 401)")
+        .await;
+    t.set(|m| m.fail_member = false);
+    for (payload, _) in retries {
+        super::dispatch(&t.app, &raid_job(&t, payload))
+            .await
+            .unwrap();
+    }
+    assert_eq!(t.banned(0, 401), None, "staff was banned");
+    assert!(t.banned(0, 402).is_some());
+    t.cleanup().await;
+}
+
+/// D60b in voice: a voice raid checks earlier flagged members for staff again, and a failed
+/// lookup retries later instead of punishing.
+#[tokio::test]
+async fn a_voice_raid_rechecks_earlier_members_for_staff() {
+    let Some(t) = T::new(172).await else { return };
+    let cfg = json!({"joinraid": {"voice": {
+        "enabled": true, "count": 3, "span_ms": 60_000, "active_ms": 60_000, "action": "Ban"}}});
+    t.server_config(0, t.owner(), cfg).await;
+    let voice = |u: u64, member: bool| -> twilight_model::voice::VoiceState {
+        let m = json!({"user": {"id": u.to_string(), "username": "v", "discriminator": "0", "avatar": null},
+            "roles": [], "joined_at": "2026-01-01T00:00:00.000000+00:00", "deaf": false, "mute": false, "flags": 0});
+        serde_json::from_value(json!({"guild_id": t.g(0).to_string(), "channel_id": "620",
+            "user_id": u.to_string(), "session_id": "s", "deaf": false, "mute": false,
+            "self_deaf": false, "self_mute": false, "self_stream": false, "self_video": false,
+            "suppress": false, "request_to_speak_timestamp": null,
+            "member": if member { m } else { Value::Null }}))
+        .unwrap()
+    };
+    for u in [481, 482] {
+        t.set(|m| {
+            m.members.insert((t.g(0).get(), u), vec![]);
+        });
+        crate::voice_raid::on_voice(&t.app, &voice(u, false), None)
+            .await
+            .unwrap();
+    }
+    // 481 is made staff; then Discord fails every member read, so neither can be checked now.
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 481)")
+        .await;
+    t.set(|m| m.fail_member = true);
+    crate::voice_raid::on_voice(&t.app, &voice(483, true), None)
+        .await
+        .unwrap();
+    assert_eq!((t.banned(0, 481), t.banned(0, 482)), (None, None));
+    assert!(t.banned(0, 483).is_some(), "the member who joined now");
+    // Neither could be checked, but both are out of voice already; only the punishment waits.
+    let out = |u: u64| {
+        t.calls(&format!(
+            "PATCH /guilds/{}/members/{u} {{\"channel_id\":null}}",
+            t.g(0)
+        ))
+    };
+    assert_eq!(
+        (out(481), out(482)),
+        (1, 1),
+        "a failed check still disconnects"
+    );
+    let retries = pending(&t, 0, "raid_punish").await;
+    assert_eq!(retries.len(), 2, "{retries:?}");
+    t.set(|m| m.fail_member = false);
+    for (payload, _) in retries {
+        super::dispatch(&t.app, &raid_job(&t, payload))
+            .await
+            .unwrap();
+    }
+    assert_eq!(t.banned(0, 481), None, "staff was banned");
+    assert!(t.banned(0, 482).is_some());
+    t.cleanup().await;
+}
+
+/// R1: a raid that only kicks does not cancel a Join Gate ban of the same joiner.
+#[tokio::test]
+async fn a_raid_kick_does_not_cancel_a_join_gate_ban() {
+    let Some(t) = T::new(183).await else { return };
+    let mut cfg = raid_cfg();
+    cfg["joinraid"]["action"] = json!("Kick");
+    cfg["joingate"] = json!({"enabled": true, "no_avatar": {"enabled": true, "action": "Ban"}});
+    t.server_config(0, t.owner(), cfg).await;
+    for u in [831, 832, 833] {
+        join(&t, 0, u).await;
+    }
+    assert!(t.banned(0, 833).is_some(), "the gate's ban still applies");
+    t.cleanup().await;
+}
+
+/// D57 review: a raid kick or ban that failed leaves the joiner in, so they still get the
+/// verification quarantine.
+#[tokio::test]
+async fn a_failed_raid_ban_still_quarantines_for_verification() {
+    let Some(t) = T::new(184).await else { return };
+    let mut cfg = raid_cfg();
+    cfg["verification"] = json!({"enabled": true, "mode": "Web", "target": "Everyone",
+        "on_fail": "Nothing", "roles": ["503"], "channel": "700", "quarantine_on_join": true});
+    t.server_config(0, t.owner(), cfg).await;
+    join(&t, 0, 841).await;
+    join(&t, 0, 842).await;
+    t.set(|m| m.fail_put = true);
+    join(&t, 0, 843).await;
+    assert_eq!(t.banned(0, 843), None);
+    let kind = crate::antinuke::quarantine_kind(&t.app, t.g(0), Id::new(843))
+        .await
+        .unwrap();
+    assert_eq!(
+        kind,
+        Some(true),
+        "the joiner waits in verification's quarantine"
+    );
+    t.cleanup().await;
+}
+
+/// D56: a Raider List hit counts towards a Join Raid but is not punished a second time.
+#[tokio::test]
+async fn a_raider_list_hit_counts_in_a_raid_but_is_punished_once() {
+    let Some(t) = T::new(171).await else { return };
+    let mut cfg = raid_cfg();
+    cfg["raider_list"] = json!({"enabled": true, "action": "kick"});
+    t.server_config(0, t.owner(), cfg).await;
+    let listed = t.base * 10 + 1;
+    let add = "INSERT INTO raiders (user_id, status, category, reviewed_at, verified)
+               VALUES ($1, 'confirmed', 'raid', now(), true)";
+    sqlx::query(add)
+        .bind(listed as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    join(&t, 0, listed).await;
+    join(&t, 0, 412).await;
+    // The third join triggers only because the listed one counted.
+    join(&t, 0, 413).await;
+    assert!(t.banned(0, 412).is_some() && t.banned(0, 413).is_some());
+    assert_eq!(
+        t.banned(0, listed),
+        None,
+        "kicked by the list, not banned again"
+    );
+    assert_eq!(
+        t.calls(&format!("DELETE /guilds/{}/members/{listed}", t.g(0))),
+        1
+    );
+    sqlx::query("DELETE FROM raiders WHERE user_id = $1")
+        .bind(listed as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.cleanup().await;
+}
+
 /// D8 review: panic's end lifts only a lock its own lock call saved. A lock that failed before
 /// saving (here: the bot's member cannot be read) is not panic's, so a later staff lock stays.
 #[tokio::test]

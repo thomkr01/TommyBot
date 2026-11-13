@@ -490,7 +490,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
-            app.invalidate_guild(r.guild_id);
+            app.invalidate_object(r.guild_id, r.role.id.get());
             app.log_public.lock().unwrap().clear();
         }
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
@@ -503,7 +503,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::ChannelUpdate(c) => {
             app.log_public.lock().unwrap().remove(&c.id);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            c.guild_id
+                .into_iter()
+                .for_each(|g| app.invalidate_object(g, c.id.get()));
             if let Err(e) = crate::setup::enforce_quarantine(app, c).await {
                 tracing::warn!(?e, channel = %c.id, "quarantine overwrite failed");
             }
@@ -577,6 +579,8 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         // Anti-nuke first: the verification check can wait for the gateway delete.
         Event::GuildAuditLogEntryCreate(e) => {
+            // Before anything slow: a grant handled in parallel must not use the old gate.
+            verify::given::audit_changed(app, &e.0);
             // The catch-up after a reconnect may have handled this entry already (D20).
             let g = e.0.guild_id.map(|g| g.get());
             let inflight = g.and_then(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
@@ -595,6 +599,12 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             let allow = crate::raiders::on_unban(app, &e.0).await;
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
+            }
+            if let Err(err) = verify::given::on_audit(app, &e.0).await {
+                tracing::warn!(
+                    ?err,
+                    "taking back a verification role from another bot failed"
+                );
             }
             // Stats are a side effect: their failure never stops protection.
             if let Err(err) = crate::modstats::on_audit(app, &e.0).await {

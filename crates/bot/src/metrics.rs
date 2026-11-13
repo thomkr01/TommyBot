@@ -64,6 +64,36 @@ async fn snapshot(app: &App) -> String {
 }
 
 /// One log line every 10 minutes with the counters, so the log shows the bot is alive and how it is doing.
+/// When TommyBot was last up before this process (unix secs, 0 when unknown), read at startup.
+pub static LAST_UP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Reads [`LAST_UP`]; run before the gateway starts, so every GuildCreate sees it.
+pub async fn load_seen(pool: &sqlx::PgPool) {
+    match sqlx::query_scalar::<_, i64>("SELECT extract(epoch FROM at)::bigint FROM bot_seen")
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(at) => LAST_UP.store(at.unwrap_or(0), Relaxed),
+        Err(e) => tracing::warn!(?e, "reading when the bot was last up failed"),
+    }
+}
+
+/// Writes the time every minute (after [`load_seen`]).
+pub async fn keep_seen(pool: sqlx::PgPool) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        let r = sqlx::query(
+            "INSERT INTO bot_seen (at) VALUES (now()) ON CONFLICT (id) DO UPDATE SET at = now()",
+        )
+        .execute(&pool)
+        .await;
+        if let Err(e) = r {
+            tracing::warn!(?e, "writing when the bot was up failed");
+        }
+    }
+}
+
 pub async fn heartbeat() {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
     tick.tick().await; // the first tick is immediate; the startup line covers that moment

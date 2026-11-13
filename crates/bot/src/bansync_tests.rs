@@ -146,6 +146,12 @@ pub(crate) struct Mock {
     pub(crate) overwrites: HashMap<u64, Vec<Value>>,
     /// Channels the mock can GET: id -> (guild, whether @everyone may view it).
     pub(crate) text_channels: HashMap<u64, (u64, bool)>,
+    /// Member role-list edits fail with 500.
+    pub(crate) fail_member_edit: bool,
+    /// Channels by guild, as Discord's JSON array; `[]` when not set.
+    pub(crate) channels: HashMap<u64, Value>,
+    /// Audit log entries by guild, newest first; `audit` when not set.
+    pub(crate) audit_by_guild: HashMap<u64, Vec<Value>>,
     pub(crate) log: Vec<String>,
 }
 
@@ -279,8 +285,13 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             m.fail_audit -= 1;
             err(500, 0)
         }
-        ("GET", ["guilds", _, "audit-logs"]) => {
-            let log = json!({"audit_log_entries": m.audit, "users": [], "webhooks": [],
+        ("GET", ["guilds", g, "audit-logs"]) => {
+            let entries = m
+                .audit_by_guild
+                .get(&n(g))
+                .cloned()
+                .unwrap_or_else(|| m.audit.clone());
+            let log = json!({"audit_log_entries": entries, "users": [], "webhooks": [],
                 "integrations": [], "threads": [], "application_commands": [],
                 "auto_moderation_rules": [], "guild_scheduled_events": []});
             (200, log.to_string())
@@ -317,7 +328,10 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 .collect();
             (200, json!(all).to_string())
         }
-        ("GET", ["guilds", _, "channels"]) => (200, "[]".into()),
+        ("GET", ["guilds", g, "channels"]) => match m.channels.get(&n(g)) {
+            Some(c) => (200, c.to_string()),
+            None => (200, "[]".into()),
+        },
         // Only channels a test gave overwrites; others answer 404 as before.
         ("GET", ["channels", c]) if m.overwrites.contains_key(&n(c)) => {
             let ows = m.overwrites[&n(c)].clone();
@@ -341,6 +355,7 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 None => err(404, 10011),
             }
         }
+        ("PATCH", ["guilds", _, "members", _]) if m.fail_member_edit => err(500, 0),
         ("PATCH", ["guilds", g, "members", u]) => {
             let ids: Option<Vec<u64>> = serde_json::from_str::<Value>(body).unwrap_or_default()
                 ["roles"]
@@ -384,7 +399,11 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 None => err(404, 10007),
             }
         }
-        ("PUT", ["channels", _, "permissions", _]) => (204, String::new()),
+        ("PUT" | "DELETE", ["channels", _, "permissions", _]) => (204, String::new()),
+        ("POST", ["guilds", g, "channels"]) => {
+            let ch = json!({"id": "610", "type": 0, "guild_id": g, "name": "ticket"});
+            (200, ch.to_string())
+        }
         ("POST", ["channels", c, "messages"]) if m.fail_channels.contains(&n(c)) => err(403, 50001),
         ("POST", ["channels", _, "messages"]) if m.fail_message => err(403, 50013),
         ("POST", ["channels", _, "messages"]) if m.fail_message_5xx => err(502, 0),
@@ -452,6 +471,7 @@ pub(crate) struct T {
 }
 
 impl T {
+    /// `n` (below 1000) picks this test's guild ids, so it must be unique across every test file using `T`.
     pub(crate) async fn new(n: u64) -> Option<T> {
         assert!(
             n < 1000,
@@ -948,7 +968,7 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
     for (name, perms, wl, role) in [
         ("Admins", "{dashboard_edit}", "{}", 3),
         ("Immune", "{}", "{all}", 4),
-        ("Mods", "{ban}", "{automod}", 5),
+        ("Mods", "{ban}", "{links}", 5),
         ("Nukers", "{}", "{wl_role_delete}", 6),
     ] {
         sqlx::query(
@@ -1963,6 +1983,8 @@ async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
         .execute(&t.app.pool)
         .await
         .unwrap();
+}
+
 /// D48 (S-h3 6): a section the bot cannot read is also posted to the log, not only DMed.
 #[tokio::test]
 async fn a_section_on_defaults_is_posted_to_the_log() {

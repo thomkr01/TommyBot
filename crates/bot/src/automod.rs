@@ -851,7 +851,7 @@ const INVITE_PATHS: [&str; 7] = [
 ];
 
 /// An invite in the text (hidden characters ignored), or a shortener that lands on discord.gg.
-fn is_invite(text: &str, landed: &[String]) -> bool {
+pub(crate) fn is_invite(text: &str, landed: &[String]) -> bool {
     let lower = filters::strip_invisible(text).to_lowercase();
     INVITE_PATHS.iter().any(|p| lower.contains(p))
         || landed.iter().any(|h| h == "discord.gg" || h == "dsc.gg")

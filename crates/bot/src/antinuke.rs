@@ -330,15 +330,6 @@ async fn replayed_parent(app: &App, gid: Id<GuildMarker>, channel: u64) -> Optio
     image.channels.into_iter().find(|c| c.id == channel)?.parent
 }
 
-/// A failed lookup counts as not a bot, so the action is counted.
-async fn is_bot(app: &App, user: Id<UserMarker>) -> bool {
-    let read = async { anyhow::Ok(app.http.user(user).await?.model().await?.bot) };
-    read.await.unwrap_or_else(|e| {
-        tracing::warn!(?e, "reading a ticket category actor failed, counting it");
-        false
-    })
-}
-
 /// Logs, heats and counts `n` actions of one audit entry, and contains the actor at the limit.
 /// The voice path counts how much a merged entry grew (`voice_nuke`).
 #[allow(clippy::too_many_arguments)]
@@ -1295,6 +1286,9 @@ pub(crate) async fn quarantine_actor(
     why: &str,
 ) -> Result<Contained> {
     let done = contain(app, gid, actor, None, Kind::Real).await?;
+    if done.applied == Applied::Quarantined {
+        crate::reply::queue_quarantine_dm(app, gid, actor).await;
+    }
     let case = open_case(app, gid, actor, why).await?;
     let log = Log::new("Anti Nuke", ALERT)
         .line("CASE", &format!("`{case}`"))
@@ -1390,10 +1384,15 @@ pub(crate) async fn requarantine_rejoin(
             .await?;
         return Ok(Rejoin::Free);
     }
+    // Before the roles go: an autorole bot can act at once.
+    note_rejoin(gid, user);
     let done = contain(app, gid, user, None, Kind::Again(on_join)).await?;
     // Not verified yet is not an anti-nuke matter.
     if on_join {
         return Ok(Rejoin::Verifying);
+    }
+    if done.applied == Applied::Quarantined {
+        crate::reply::queue_quarantine_dm(app, gid, user).await;
     }
     let log = Log::new("Anti Nuke", ALERT)
         .user("Member", user.get())
@@ -2100,7 +2099,10 @@ pub(crate) async fn revert_and_report(
                             applied: Applied::Failed,
                             bot_role: None,
                         }
-                    })
+                    });
+                if done.applied == Applied::Quarantined {
+                    crate::reply::queue_quarantine_dm(app, gid, actor).await;
+                }
             }
             NukeStep::Revert => {
                 let r = revert_actor(app, gid, actor, since, Some(&cfg.backups)).await;
@@ -2419,7 +2421,7 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     // normal work, not a nuke (Thomas, 11-11).
     if on_join {
         if e.action_type == A::MemberRoleUpdate {
-            back_to_quarantine(app, &cfg, gid, target).await?;
+            undo_role_change(app, &cfg, gid, target).await;
         }
         return Ok(());
     }
@@ -2443,11 +2445,25 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     if e.action_type != A::MemberRoleUpdate {
         return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
     }
-    // A failed undo must not spare the actor.
-    if let Err(err) = back_to_quarantine(app, &cfg, gid, target).await {
-        tracing::warn!(?err, "undoing a quarantined member's role change failed");
+    // An autorole bot right after a rejoin's quarantine: undone, not punished (D15, as 11-11).
+    // Any number of bots and changes in the grace, but only plain roles: a dangerous or permit
+    // role is punished as before.
+    if rejoined_recently(gid, target)
+        && is_bot(app, actor).await
+        && plain_roles_added(app, gid, e).await
+    {
+        undo_role_change(app, &cfg, gid, target).await;
+        return Ok(());
     }
-    quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await
+    // A failed undo must not spare the actor, nor wait for its retry.
+    let undone = back_to_quarantine(app, &cfg, gid, target).await;
+    let r =
+        quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await;
+    if let Err(err) = undone {
+        tracing::warn!(?err, "undoing a quarantined member's role change failed");
+        undo_role_change(app, &cfg, gid, target).await;
+    }
+    r
 }
 
 /// A member overwrite that gives a quarantined member channel access is the hold's matter too
@@ -2660,6 +2676,95 @@ async fn back_to_quarantine(
         .roles(&roles)
         .await?;
     Ok(())
+}
+
+/// Undoes a role change on a held member without punishing anyone. Discord failing is tried once
+/// more after 2 s, then told to staff in the anti-nuke log (D12b).
+async fn undo_role_change(app: &App, cfg: &GuildCfg, gid: Id<GuildMarker>, user: Id<UserMarker>) {
+    let Err(e) = back_to_quarantine(app, cfg, gid, user).await else {
+        return;
+    };
+    tracing::warn!(
+        ?e,
+        "undoing a quarantined member's role change failed, trying again"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let Err(e) = back_to_quarantine(app, cfg, gid, user).await else {
+        return;
+    };
+    tracing::warn!(
+        ?e,
+        "undoing a quarantined member's role change failed twice"
+    );
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Member", user.get())
+        .text(&format!(
+            "{NO} **Could not take back roles given to a quarantined member**"
+        ))
+        .line("Error", &crate::http_err::why(&e))
+        .line(
+            "Effect",
+            "The member may hold roles again. Check them and quarantine again if needed.",
+        );
+    if let Err(e) = send_log(app, gid.get(), LogKind::AntiNuke, log).await {
+        tracing::warn!(?e, "failed undo log failed");
+    }
+}
+
+/// How long after a rejoin's quarantine a bot's role change counts as an autorole (D15).
+const REJOIN_GRACE: Duration = Duration::from_secs(60);
+
+type Rejoins = std::sync::Mutex<HashMap<(u64, u64), Instant>>;
+static REJOINED: std::sync::LazyLock<Rejoins> = std::sync::LazyLock::new(Default::default);
+
+/// Notes a quarantine put back on a rejoin. In memory: after a restart the grace is gone and the
+/// bot is quarantined as before, which fails safe.
+fn note_rejoin(gid: Id<GuildMarker>, user: Id<UserMarker>) {
+    let mut all = REJOINED.lock().unwrap_or_else(|p| p.into_inner());
+    all.retain(|_, at| at.elapsed() < REJOIN_GRACE);
+    all.insert((gid.get(), user.get()), Instant::now());
+}
+
+fn rejoined_recently(gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
+    let all = REJOINED.lock().unwrap_or_else(|p| p.into_inner());
+    all.get(&(gid.get(), user.get()))
+        .is_some_and(|at| at.elapsed() < REJOIN_GRACE)
+}
+
+/// The entry adds only roles an autorole gives: no dangerous permissions (as held before a role
+/// lock, read live) and no permit. A failed lookup or an unknown role counts as not plain.
+async fn plain_roles_added(app: &App, gid: Id<GuildMarker>, e: &AuditLogEntry) -> bool {
+    let added: Vec<Id<RoleMarker>> = e
+        .changes
+        .iter()
+        .filter_map(|c| match c {
+            AuditLogChange::RoleAdded { new, .. } => Some(new),
+            _ => None,
+        })
+        .flatten()
+        .map(|r| r.id)
+        .collect();
+    let check = async {
+        // Read live: a role created a moment ago is not in the cached guild info.
+        let live = app.http.roles(gid).await?.models().await?;
+        let live = live.iter().map(|r| (r.id, r.permissions.bits())).collect();
+        let perms = crate::lockdown::unlocked(app, gid, live).await?;
+        let permit = permits::permit_roles(&app.pool, gid.get() as i64).await?;
+        anyhow::Ok(added.iter().all(|r| {
+            !permit.contains(&(r.get() as i64))
+                && perms
+                    .get(r)
+                    .is_some_and(|p| p & tommybot_antinuke::DANGEROUS_PERMS == 0)
+        }))
+    };
+    check.await.unwrap_or(false)
+}
+
+/// A bot account; a failed lookup counts as no bot, so the hold punishes as before.
+pub(crate) async fn is_bot(app: &App, user: Id<UserMarker>) -> bool {
+    async { anyhow::Ok(app.http.user(user).await?.model().await?.bot) }
+        .await
+        .unwrap_or(false)
 }
 
 /// Whether anti-nuke quarantined `actor` or put them in a nuke case since `since` (unix secs), so

@@ -514,6 +514,8 @@ struct JoinRec {
     suspicious: bool,
     spammer: bool,
     invite: Option<String>,
+    /// The Raider List already acted on this joiner: counted, never punished by the raid.
+    listed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -566,6 +568,7 @@ impl RaidDetector {
             suspicious,
             spammer: j.spammer,
             invite: j.invite.map(Into::into),
+            listed: false,
         });
         let counted = self
             .joins
@@ -597,6 +600,22 @@ impl RaidDetector {
             .iter()
             .find(|r| r.id == id)
             .map(|r| r.name.as_str())
+    }
+
+    /// Notes what was learned about a joiner after detection: the Raider List acted on them
+    /// (`listed`), or the invite they used (looked up after detection, D57).
+    pub fn note(&mut self, id: u64, listed: bool, invite: Option<&str>) {
+        for r in self.joins.iter_mut().filter(|r| r.id == id) {
+            r.listed |= listed;
+            if let Some(i) = invite {
+                r.invite = Some(i.into());
+            }
+        }
+    }
+
+    /// True when the Raider List already acted on this joiner (D56).
+    pub fn listed(&self, id: u64) -> bool {
+        self.joins.iter().any(|r| r.id == id && r.listed)
     }
 
     /// The invite a joiner still in the window used.
@@ -1211,6 +1230,25 @@ mod tests {
         let out = d.on_join(&joiner(4, "d", false), false, &cfg, NOW + 4000);
         assert_eq!((out.triggered, out.flagged), (false, vec![4]));
         assert!(!d.active(NOW + 700_000));
+    }
+
+    #[test]
+    fn notes_mark_listed_joiners_and_late_invites() {
+        let cfg = RaidCfg {
+            flag_no_avatar: true,
+            ..raid_cfg()
+        };
+        let mut d = RaidDetector::default();
+        d.on_join(&joiner(1, "a", false), false, &cfg, NOW);
+        d.note(1, true, None);
+        d.note(1, false, Some("abc"));
+        assert!(d.listed(1) && !d.listed(2));
+        assert_eq!(d.invite_of(1), Some("abc"));
+        // A listed joiner still counts towards the trigger.
+        d.on_join(&joiner(2, "b", false), false, &cfg, NOW + 1);
+        let out = d.on_join(&joiner(3, "c", false), false, &cfg, NOW + 2);
+        assert!(out.triggered);
+        assert_eq!(out.flagged, vec![1, 2, 3]);
     }
 
     #[test]

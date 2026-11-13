@@ -102,6 +102,14 @@ impl App {
 
     pub fn invalidate_guild(&self, gid: Id<GuildMarker>) {
         self.guilds.lock().unwrap().remove(&gid);
+        crate::verify::given::invalidated(gid, None);
+    }
+
+    /// [`App::invalidate_guild`] for an event about one role or channel: TommyBot's own marked
+    /// edit of it only softens the verification gate.
+    pub fn invalidate_object(&self, gid: Id<GuildMarker>, object: u64) {
+        self.guilds.lock().unwrap().remove(&gid);
+        crate::verify::given::invalidated(gid, Some(object));
     }
 
     /// Tests: a cached server with this owner, so no Discord call is needed for it.

@@ -31,6 +31,7 @@ use twilight_model::channel::message::Embed;
 async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Result<Option<u64>> {
     match op {
         Op::SetRolePerms { role, perms } => {
+            crate::verify::given::mark_own(gid, *role);
             let perms = Permissions::from_bits_retain(*perms);
             app.http
                 .update_role(gid, Id::new(*role))
@@ -38,6 +39,7 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .await?;
         }
         Op::DenyChannelSend { channel, role } => {
+            crate::verify::given::mark_own(gid, *channel);
             // Other bits of an existing overwrite stay; unlock puts the old one back.
             let (allow, deny) = snap
                 .prior
@@ -332,7 +334,7 @@ pub(crate) async fn active_locks(app: &App, guild: u64) -> Result<std::sync::Arc
 }
 
 /// After any write to a guild's `lock_snapshots`.
-fn forget_locks(guild: u64) {
+pub(crate) fn forget_locks(guild: u64) {
     let mut c = LOCKS.lock().unwrap();
     c.0 += 1;
     c.1.remove(&guild);
@@ -353,6 +355,169 @@ fn with_saved(
         }
     }
     std::sync::Arc::new(i)
+}
+
+/// Role permissions with what the active locks saved put back ([`unlocked_info`]).
+pub async fn unlocked_role_perms(
+    app: &App,
+    gid: Id<GuildMarker>,
+) -> Result<std::collections::HashMap<Id<twilight_model::id::marker::RoleMarker>, u64>> {
+    Ok(unlocked_info(app, gid).await?.role_perms.clone())
+}
+
+/// `perms` (live role permissions) with what the active locks saved added, as [`unlocked_info`]
+/// does: a role a lock stripped counts with its saved bits.
+pub async fn unlocked(
+    app: &App,
+    gid: Id<GuildMarker>,
+    mut perms: std::collections::HashMap<Id<twilight_model::id::marker::RoleMarker>, u64>,
+) -> Result<std::collections::HashMap<Id<twilight_model::id::marker::RoleMarker>, u64>> {
+    for snap in active_locks(app, gid.get()).await?.iter() {
+        for &(r, p) in &snap.role_perms {
+            if let Some(live) = Id::new_checked(r).and_then(|r| perms.get_mut(&r)) {
+                *live |= p;
+            }
+        }
+    }
+    Ok(perms)
+}
+
+/// `channels` with the overwrites the active channel locks changed put back as they were (an
+/// overwrite a lock created is dropped), oldest lock first, like [`unlocked`] for roles.
+pub async fn unlocked_channels(
+    app: &App,
+    gid: Id<GuildMarker>,
+    channels: &mut [twilight_model::channel::Channel],
+) -> Result<()> {
+    let mut done = std::collections::HashSet::new();
+    for snap in active_locks(app, gid.get()).await?.iter() {
+        for &(channel, role) in &snap.channel_denies {
+            if !done.insert((channel, role)) {
+                continue;
+            }
+            let Some(c) = channels.iter_mut().find(|c| c.id.get() == channel) else {
+                continue;
+            };
+            let all = c.permission_overwrites.get_or_insert_with(Vec::new);
+            all.retain(|o| o.id.get() != role);
+            if let Some(&(_, _, allow, deny)) =
+                snap.prior.iter().find(|p| p.0 == channel && p.1 == role)
+            {
+                all.push(twilight_model::channel::permission_overwrite::PermissionOverwrite {
+                    id: Id::new(role),
+                    kind: twilight_model::channel::permission_overwrite::PermissionOverwriteType::Role,
+                    allow: Permissions::from_bits_retain(allow),
+                    deny: Permissions::from_bits_retain(deny),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A startup check that waits out a raid or lock (D17, D58): `kind` is one job per guild.
+pub struct Deferred {
+    pub kind: &'static str,
+    /// When the first wait began (unix secs), from the job or the pending one.
+    pub first: i64,
+    /// Failed runs so far; the check stops retrying after [`MAX_TRIES`].
+    pub tries: i64,
+}
+
+/// Longest a [`Deferred`] check waits before it runs anyway.
+const MAX_WAIT_SECS: i64 = 1800;
+/// Failed runs before a [`Deferred`] check gives up until the next GuildCreate.
+pub const MAX_TRIES: i64 = 5;
+
+impl Deferred {
+    /// `first` and `tries` from the job's payload, else from a pending job (a GuildCreate must
+    /// not restart the cap or the count).
+    pub async fn new(
+        app: &App,
+        gid: Id<GuildMarker>,
+        kind: &'static str,
+        job: Option<&serde_json::Value>,
+    ) -> Self {
+        let payload = match job {
+            Some(p) => Some(p.clone()),
+            None => sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = $2 LIMIT 1",
+            )
+            .bind(gid.get() as i64)
+            .bind(kind)
+            .fetch_optional(&app.pool)
+            .await
+            .ok()
+            .flatten(),
+        };
+        let field = |k: &str| payload.as_ref().and_then(|p| p[k].as_i64());
+        Deferred {
+            kind,
+            first: field("first").unwrap_or_else(now_secs),
+            tries: field("tries").unwrap_or(0),
+        }
+    }
+
+    /// True while a raid or lock is on and the 30 minutes are not up. A failed check runs.
+    pub async fn waits(&self, app: &App, gid: Id<GuildMarker>) -> bool {
+        match raid_or_lock(app, gid).await {
+            Ok(on) => on && now_secs() - self.first < MAX_WAIT_SECS,
+            Err(e) => {
+                tracing::warn!(?e, "raid or lock check failed, running anyway");
+                false
+            }
+        }
+    }
+
+    /// Runs the check again in 5 minutes, keeping `first`. `failed`: a failed run, counted; past
+    /// [`MAX_TRIES`] staff hear of it and nothing is queued (the next GuildCreate runs it again).
+    pub async fn later(&self, app: &App, gid: Id<GuildMarker>, failed: bool) -> Result<()> {
+        let tries = self.tries + i64::from(failed);
+        if tries >= MAX_TRIES {
+            tracing::warn!(
+                guild = gid.get(),
+                kind = self.kind,
+                tries,
+                "startup check gave up"
+            );
+            let log = Log::new("Scheduled Action Failed", RED)
+                .line("Action", &format!("`{}`", self.kind))
+                .text(&format!(
+                    "Gave up after {tries} failed tries. It runs again when TommyBot reconnects; check the bot log."
+                ));
+            if let Err(e) = send_log(app, gid.get(), LogKind::Server, log).await {
+                tracing::warn!(?e, "startup check give-up log failed");
+            }
+            // The claimed row goes too, so the scheduler does not retry it either.
+            sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = $2")
+                .bind(gid.get() as i64)
+                .bind(self.kind)
+                .execute(&app.pool)
+                .await?;
+            return Ok(());
+        }
+        let payload = serde_json::json!({ "first": self.first, "tries": tries });
+        tommybot_core::jobs::replace(
+            &app.pool,
+            gid.get() as i64,
+            self.kind,
+            payload,
+            now_secs() + 300,
+        )
+        .await
+    }
+}
+
+/// A join raid is running or a lock is on: member edits and new tickets wait.
+pub async fn raid_or_lock(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
+    let now = crate::automod::now_ms();
+    let raid = app
+        .raids
+        .lock()
+        .unwrap()
+        .get(&gid.get())
+        .is_some_and(|r| r.active(now));
+    Ok(raid || !active(app, gid).await?.is_empty())
 }
 
 /// Join lock of the guild's stored snapshot, if it has one.
@@ -450,6 +615,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             step(app.api.pause_invites(gid.get(), None).await);
         }
         for &(channel, role) in &snap.channel_denies {
+            crate::verify::given::mark_own(gid, channel);
             let r = match snap.prior.iter().find(|p| p.0 == channel && p.1 == role) {
                 Some(&(_, _, allow, deny)) => {
                     let o = PermissionOverwrite {
