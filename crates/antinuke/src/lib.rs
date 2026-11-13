@@ -271,10 +271,18 @@ impl AntiNuke {
         for _ in 0..n.min(limit.per_hour) {
             q.insert(i, at);
         }
+        // Every window holding `at` is judged again: live entries counted after it got their
+        // verdict before this one existed (a nuke split across a reconnect).
         let before = |w: Duration| {
             q.iter()
-                .filter(|t| **t <= at && at.duration_since(**t) < w)
-                .count() as u32
+                .filter(|end| **end >= at && end.duration_since(at) < w)
+                .map(|end| {
+                    q.iter()
+                        .filter(|t| *t <= end && end.duration_since(**t) < w)
+                        .count() as u32
+                })
+                .max()
+                .unwrap_or(0)
         };
         let c = Counts {
             minute: before(MINUTE),
@@ -663,6 +671,14 @@ mod tests {
             a.on_action(1, 2, Action::Ban, false, t0),
             Verdict::Quarantine(Counts { minute: 1, hour: 5 })
         );
+        // Split across a reconnect: two live, then two replayed before them, trip together.
+        let (mut b, s) = (engine(3, 50), Duration::from_secs);
+        assert!(matches!(b.on_actions_at(1, 2, Action::Ban, false, t0, s(0), 1), Verdict::Allow(_)));
+        assert!(matches!(b.on_actions_at(1, 2, Action::Ban, false, t0, s(0), 1), Verdict::Allow(_)));
+        assert!(matches!(
+            b.on_actions_at(1, 2, Action::Ban, false, t0, s(20), 1),
+            Verdict::Quarantine(c) if c.minute == 3
+        ));
         // Older than an hour: not counted at all.
         assert_eq!(
             a.on_actions_at(1, 4, Action::Ban, false, t0, at(61), 9),
