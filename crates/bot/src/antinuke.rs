@@ -1797,7 +1797,7 @@ fn rejoined_recently(gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
 }
 
 /// A bot account; a failed lookup counts as no bot, so the hold punishes as before.
-async fn is_bot(app: &App, user: Id<UserMarker>) -> bool {
+pub(crate) async fn is_bot(app: &App, user: Id<UserMarker>) -> bool {
     async { anyhow::Ok(app.http.user(user).await?.model().await?.bot) }
         .await
         .unwrap_or(false)

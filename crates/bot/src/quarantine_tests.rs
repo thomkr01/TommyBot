@@ -936,3 +936,25 @@ async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
     assert_eq!(saved(&t, 0, back).await, Some(vec![ROLE as i64]), "saved list kept");
     t.cleanup().await;
 }
+
+/// D58: with TommyBot's verification on, a verification role another bot gives an unverified
+/// member is taken back; nobody is punished, and a human giving it is left alone. With
+/// "quarantine on join" the hold already did this (#170); this covers verification without it.
+#[tokio::test]
+async fn a_verification_role_from_another_bot_is_taken_back() {
+    let Some(t) = T::new(46).await else { return };
+    server(&t, 0, json!({"verification": web_verification()})).await;
+    let (u, bot, human) = (t.base * 10 + 1, t.base * 10 + 2, t.base * 10 + 3);
+    t.set(|m| m.bots.push(bot));
+    for (actor, kept) in [(bot, vec![]), (human, vec![VERIFIED])] {
+        t.set(|m| {
+            m.members.insert((t.g(0).get(), u), vec![VERIFIED]);
+        });
+        let e = role_added(&t, actor, u, VERIFIED);
+        crate::verify::given::on_audit(&t.app, &e).await.unwrap();
+        assert_eq!(roles(&t, 0, u), Some(kept), "actor {actor}");
+    }
+    assert_eq!(saved(&t, 0, bot).await, None, "nobody is punished");
+    assert_eq!(t.calls("given by another bot was taken back"), 1);
+    t.cleanup().await;
+}

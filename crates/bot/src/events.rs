@@ -547,6 +547,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
             }
+            if let Err(err) = verify::given::on_audit(app, &e.0).await {
+                tracing::warn!(?err, "taking back a verification role from another bot failed");
+            }
             // Stats are a side effect: their failure never stops protection.
             if let Err(err) = crate::modstats::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "recording a mod action failed");

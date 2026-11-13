@@ -2,6 +2,7 @@
 //! Web mode hands the member to the dashboard's /verify page, which queues a `verify_grant` job.
 
 pub mod deleted;
+pub mod given;
 
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};

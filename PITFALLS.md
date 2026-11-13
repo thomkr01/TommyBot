@@ -136,6 +136,10 @@ Ticket and modmail relays copied every attachment with `.bytes()` and then `to_v
 `t!verify` ends a quarantine, but `ModCmd::target()` did not list it, so the release guard (staff saved in the quarantine go free only through an owner or TA), the hierarchy check and the self check never ran: the verify permit freed any quarantine, a nuking admin's too. The guard also looked only at permit roles, so a saved role with Administrator but no permit counted as a plain member. Root cause: the per-command checks hang off `target()`, and a new command that acts on a member must be added there by hand.
 *Avoid:* every command that acts on a member returns it from `target()`. `verify` ends only verification's join quarantine (`on_join`); any other needs the `quarantine` permit, and saved roles holding `DANGEROUS_PERMS` count as staff. Searched: the dashboard's revert skips Unquarantine, the Raider List releases only its own quarantines, verification's buttons lift only `on_join` (D2).
 
+**Another bot's role skipped verification.** (D58, 11-13)
+An autorole or reaction-role bot handing out the verification role verified members without TommyBot. The quarantine hold took such a role back only for a join quarantine and only with anti-nuke on (#170), so verification without "quarantine on join" had no check at all. Root cause: the rule lived in the anti-nuke hold, not in verification.
+*Avoid:* a rule about who may hand out a role sits with the feature that owns the role. `verify::given` takes back a verification role a bot (not TommyBot) gives a member who held none, logs it in the verification log and punishes nobody; staff giving it by hand is fine, and turning verification off lets another bot verify. A held member is left to the hold.
+
 ## 2. Concurrency and restarts
 
 **Unlock deleted its snapshot first.** (#97, #111)
