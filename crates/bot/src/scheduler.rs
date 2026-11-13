@@ -227,7 +227,7 @@ const ONE_TARGET: [&str; 9] = [
 ];
 
 /// Runs one claim round for the light or heavy kinds; failures are logged, never fatal.
-async fn round(app: &App, heavy: bool) {
+async fn round(app: &Arc<App>, heavy: bool) {
     match jobs::claim_due(&app.pool, 50, heavy).await {
         Ok(due) => {
             for job in due {
@@ -238,6 +238,21 @@ async fn round(app: &App, heavy: bool) {
                         .as_u64()
                         .is_some_and(|a| crate::antinuke::nuke_running(app, job.guild_id as u64, a))
                 {
+                    continue;
+                }
+                // Startup catch-ups page members or the audit log for minutes: they run beside the
+                // worker, so they never hold back panic_start or nuke_revert. Each takes its own
+                // per-guild lock and queues its own retry, so the job row is done here.
+                if SPAWNED.contains(&job.kind.as_str()) {
+                    if let Err(e) = jobs::finish(&app.pool, job.id).await {
+                        tracing::warn!(?e, id = job.id, "finishing job failed");
+                    }
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = dispatch(&app, &job).await {
+                            tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
+                        }
+                    });
                     continue;
                 }
                 let done = match dispatch(app, &job).await {
@@ -278,6 +293,8 @@ async fn round(app: &App, heavy: bool) {
         Err(e) => tracing::warn!(?e, "claiming jobs failed"),
     }
 }
+
+const SPAWNED: [&str; 2] = [crate::joingate::MISSED_REJOINS, crate::verify::given::CATCH_UP];
 
 /// A dropped job (a temp ban that never ends, a lock that stays) must be visible on Discord, not
 /// only in the container log.

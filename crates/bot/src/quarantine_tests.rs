@@ -1084,11 +1084,20 @@ async fn a_verification_role_from_another_bot_is_taken_back() {
         crate::verify::given::on_audit(&t.app, &e).await.unwrap();
         assert_eq!(roles(&t, 0, u), Some(kept), "actor {actor}");
     }
+    // The permit lookup fails (here the server read): the rule fails closed and staff are told.
+    t.set(|m| {
+        m.owners.remove(&t.g(0).get());
+        m.members.insert((t.g(0).get(), u), vec![VERIFIED]);
+    });
+    t.app.invalidate_guild(t.g(0));
+    crate::verify::given::on_audit(&t.app, &role_added(&t, staff, u, VERIFIED)).await.unwrap();
+    assert_eq!(roles(&t, 0, u), Some(vec![]));
+    assert_eq!(t.calls("could not be read"), 1);
     for x in [bot, human] {
         assert_eq!(saved(&t, 0, x).await, None, "nobody is punished");
     }
     assert_eq!(t.calls("given by another bot was taken back"), 1);
-    assert_eq!(t.calls("given without a verify permit was taken back"), 1);
+    assert_eq!(t.calls("given without a verify permit, was taken back"), 2);
     t.cleanup().await;
 }
 
@@ -1316,6 +1325,31 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     });
     given(give(0, vfd, MEMBER)).await;
     assert_eq!(roles(&t, 0, vfd), Some(vec![]), "checked again after the un-verify");
+    // A human without a permit: a role opening the channels goes from an unverified member and
+    // stays with a verified one.
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), human), vec![]);
+        m.members.insert((t.g(0).get(), u), vec![MEMBER]);
+        m.members.insert((t.g(0).get(), vfd), vec![VERIFIED, MEMBER]);
+    });
+    let by_human = |target: u64| {
+        let mut e = role_added(&t, human, target, MEMBER);
+        e.guild_id = Some(t.g(0));
+        e
+    };
+    given(by_human(u)).await;
+    given(by_human(vfd)).await;
+    assert_eq!((roles(&t, 0, u), roles(&t, 0, vfd)), (Some(vec![]), Some(vec![VERIFIED, MEMBER])));
+    // TommyBot's own slowmode keeps the gate; its own lock edits only shorten its life.
+    let own = |kind: u64| -> AuditLogEntry {
+        serde_json::from_value(json!({"id": "5", "action_type": kind, "guild_id": t.g(0).to_string(),
+            "target_id": "711", "user_id": ME.to_string(), "reason": null, "changes": []})).unwrap()
+    };
+    let before = crate::verify::given::cached_for(t.g(0));
+    given(own(11)).await;
+    assert_eq!(crate::verify::given::cached_for(t.g(0)), before, "slowmode");
+    given(own(14)).await;
+    assert!(crate::verify::given::cached_for(t.g(0)).is_some_and(|d| d < std::time::Duration::from_secs(60)), "lock edit");
     // A role edited to open the verified channels counts at once: the edit drops the cached gate.
     t.set(|m| {
         let g = t.g(0).get();
@@ -1385,6 +1419,17 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     assert_eq!(n, 1);
     crate::verify::given::catch_up(&t.app, t.g(2), None).await.unwrap();
     assert_eq!(reads(2, d), 0, "TommyBot took it back last: no member read");
+    // A member read that fails is retried by a job.
+    t.exec("DELETE FROM scheduled_jobs WHERE guild_id = $1 + 2").await;
+    t.set(|m| m.fail_member = true);
+    crate::verify::given::catch_up(&t.app, t.g(2), None).await.unwrap();
+    t.set(|m| m.fail_member = false);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'verify_catch_up'")
+        .bind(t.g(2).get() as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "a skipped member is checked again");
     assert_eq!(roles(&t, 2, a), Some(vec![]), "a bot verified them while TommyBot was down");
     assert_eq!(roles(&t, 2, b), Some(vec![VERIFIED]), "staff with a verify permit gave it");
     assert_eq!(roles(&t, 2, e), Some(vec![]), "a human without a permit gave it");

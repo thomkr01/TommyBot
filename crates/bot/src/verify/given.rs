@@ -42,7 +42,14 @@ static VERIFIED: LazyLock<Recent> = LazyLock::new(Default::default);
 static SEEN_VERIFIED: LazyLock<Recent> = LazyLock::new(Default::default);
 type Locks = Mutex<HashMap<(u64, u64), Arc<tokio::sync::Mutex<()>>>>;
 static MEMBER_LOCKS: LazyLock<Locks> = LazyLock::new(Default::default);
-static GATES: LazyLock<Mutex<HashMap<u64, Arc<Gate>>>> = LazyLock::new(Default::default);
+/// Per guild: the cached [`Gate`] with how long it stays fresh, and a generation that a hard
+/// forget bumps, so a gate read while a role or channel changed is never stored.
+#[derive(Default)]
+struct Slot {
+    gate: Option<(Arc<Gate>, Duration)>,
+    gen: u64,
+}
+static GATES: LazyLock<Mutex<HashMap<u64, Slot>>> = LazyLock::new(Default::default);
 /// Whether a user is a bot; it never changes, so it is kept.
 static BOTS: LazyLock<Mutex<HashMap<u64, bool>>> = LazyLock::new(Default::default);
 
@@ -51,6 +58,9 @@ const RECENT: Duration = Duration::from_secs(60);
 const SETTLE: Duration = Duration::from_millis(1500);
 const SEEN_FOR: Duration = Duration::from_secs(600);
 const GATE_FOR: Duration = Duration::from_secs(60);
+/// TommyBot's own role and overwrite edits (a lock applying to every channel) rebuild the gate
+/// at most this often.
+const GATE_COALESCE: Duration = Duration::from_secs(3);
 const VIEW: u64 = Permissions::VIEW_CHANNEL.bits();
 const SEND: u64 = Permissions::SEND_MESSAGES.bits();
 const ADMIN: u64 = Permissions::ADMINISTRATOR.bits();
@@ -126,29 +136,55 @@ async fn gate(
     verify: &[Id<RoleMarker>],
     added: &[Id<RoleMarker>],
 ) -> Result<Arc<Gate>> {
-    if let Some(g) = GATES.lock().unwrap_or_else(|p| p.into_inner()).get(&gid.get()) {
-        let fresh = g.at.is_some_and(|at| at.elapsed() < GATE_FOR);
-        if fresh && g.verify == verify && added.iter().all(|r| g.known.contains(r)) {
-            return Ok(g.clone());
+    let gen = {
+        let all = GATES.lock().unwrap_or_else(|p| p.into_inner());
+        let slot = all.get(&gid.get());
+        if let Some((g, fresh_for)) = slot.and_then(|s| s.gate.as_ref()) {
+            let fresh = g.at.is_some_and(|at| at.elapsed() < *fresh_for);
+            if fresh && g.verify == verify && added.iter().all(|r| g.known.contains(r)) {
+                return Ok(g.clone());
+            }
         }
-    }
+        slot.map_or(0, |s| s.gen)
+    };
     // Read fresh: a bot may give a role created a moment ago.
     let live = app.http.roles(gid).await?.models().await?;
     let live = live.iter().map(|r| (r.id, r.permissions.bits())).collect();
     let perms = crate::lockdown::unlocked(app, gid, live).await?;
     let channels = app.http.guild_channels(gid).await?.models().await?;
     let g = Arc::new(gate_of(gid, verify, &perms, &channels));
-    GATES
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(gid.get(), g.clone());
+    store_gate(gid, gen, g.clone());
     Ok(g)
 }
 
-/// Drops the guild's [`Gate`]: a role or channel changed (with `invalidate_guild`, and on the
-/// matching audit events, whichever comes first).
+/// Caches `g` unless a hard forget came while it was read (S R4-1); true when stored.
+fn store_gate(gid: Id<GuildMarker>, gen: u64, g: Arc<Gate>) -> bool {
+    let mut all = GATES.lock().unwrap_or_else(|p| p.into_inner());
+    let slot = all.entry(gid.get()).or_default();
+    let same = slot.gen == gen;
+    if same {
+        slot.gate = Some((g, GATE_FOR));
+    }
+    same
+}
+
+/// Drops the guild's [`Gate`] at once: someone else changed a role or channel (its audit event).
 pub(crate) fn forget_gate(gid: Id<GuildMarker>) {
-    GATES.lock().unwrap_or_else(|p| p.into_inner()).remove(&gid.get());
+    let mut all = GATES.lock().unwrap_or_else(|p| p.into_inner());
+    let slot = all.entry(gid.get()).or_default();
+    slot.gate = None;
+    slot.gen += 1;
+}
+
+/// Lets the guild's [`Gate`] live at most [`GATE_COALESCE`] more: a gateway role or channel
+/// event (whoever made it; another actor's edit is forgotten for good by its audit event), or
+/// TommyBot's own edit.
+pub(crate) fn soften_gate(gid: Id<GuildMarker>) {
+    let mut all = GATES.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((g, fresh_for)) = all.get_mut(&gid.get()).and_then(|s| s.gate.as_mut()) {
+        let left = g.at.map_or(Duration::ZERO, |at| at.elapsed()) + GATE_COALESCE;
+        *fresh_for = (*fresh_for).min(left);
+    }
 }
 
 fn forget(map: &Recent, gid: Id<GuildMarker>, user: Id<UserMarker>) {
@@ -234,14 +270,26 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     match e.action_type {
         A::MemberRoleUpdate => on_roles(app, e).await,
         A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate => {
-            forget_gate(gid);
+            changed(app, gid, e);
             on_overwrite(app, e).await
         }
         A::RoleCreate | A::RoleUpdate | A::ChannelCreate | A::ChannelUpdate | A::ChannelOverwriteDelete => {
-            forget_gate(gid);
+            changed(app, gid, e);
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+/// A role or channel changed. Another actor's edit drops the gate at once. TommyBot's own: a
+/// channel update is its slowmode or a rename (nothing a gate reads, so kept), and a role or
+/// overwrite edit (a lock) only shortens the gate's life, so a lock over many channels rebuilds
+/// it at most every few seconds.
+fn changed(app: &App, gid: Id<GuildMarker>, e: &AuditLogEntry) {
+    match (e.user_id == Some(app.me), e.action_type) {
+        (false, _) => forget_gate(gid),
+        (true, A::ChannelUpdate) => {}
+        (true, _) => soften_gate(gid),
     }
 }
 
@@ -281,19 +329,22 @@ async fn on_roles(app: &App, e: &AuditLogEntry) -> Result<()> {
         Err(e) => return failed(app, gid, target, actor, &e).await,
     };
     // A human may verify by hand only with a verify or quarantine permit, or as Owner, EO or TA
-    // (Thomas, 13:53): Discord's Manage Roles alone exempts nobody. Only verification roles are
-    // judged for humans; other roles are normal staff work.
+    // (Thomas, 13:53 and 13:26): Discord's Manage Roles alone exempts nobody. Like a bot, a
+    // human without one cannot give an unverified member a role that opens what verification
+    // opens; roles given to verified members are normal staff work (`take_back` leaves them).
+    // A failed permit lookup takes the role back: the rule fails closed, and staff are told.
+    let mut lookup_failed = None;
     if !bot {
-        if !added.iter().any(|r| v.roles.contains(r)) {
-            return Ok(());
-        }
-        let owner = app.guild_info(gid).await?.owner;
-        let level = app.level(gid, owner, actor).await?;
-        if level.has("verify") || level.has("quarantine") {
-            return Ok(());
+        let level = async {
+            let owner = app.guild_info(gid).await?.owner;
+            app.level(gid, owner, actor).await
+        };
+        match level.await {
+            Ok(l) if l.has("verify") || l.has("quarantine") => return Ok(()),
+            Ok(_) => {}
+            Err(e) => lookup_failed = Some(e),
         }
     }
-    let added: Vec<_> = added.into_iter().filter(|r| bot || v.roles.contains(r)).collect();
     // Roles given by anyone who may not verify; the name stays from when only bots counted.
     note(&BOT_GIVEN, gid, target, &added);
     // A bot may give two verification roles in two calls: wait for both, then judge them one
@@ -314,11 +365,17 @@ async fn on_roles(app: &App, e: &AuditLogEntry) -> Result<()> {
         Ok(t) if t.is_empty() => Ok(()),
         Ok(_) if bot => taken_log(app, gid, target, actor, "A verification role given by another bot was taken back").await,
         Ok(_) => {
-            let log = Log::new("Verification", ORANGE)
+            let mut log = Log::new("Verification", ORANGE)
                 .user("Member", target.get())
                 .user("Given by", actor.get())
-                .text(&format!("{NO} **A verification role given without a verify permit was taken back**"))
+                .text(&format!("{NO} **A role that skips verification, given without a verify permit, was taken back**"))
                 .line("Why", "Only TommyBot's verification, a verify or quarantine permit, or an owner or trusted admin can verify a member.");
+            if let Some(e) = &lookup_failed {
+                log = log.line(
+                    "Note",
+                    &format!("Their permits could not be read ({}), so the role was taken back to be safe.", crate::http_err::why(e)),
+                );
+            }
             if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
                 tracing::warn!(?e, "verification role log failed");
             }
@@ -494,6 +551,13 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Re
     if !v.enabled || v.roles.is_empty() {
         return Ok(());
     }
+    // One run per guild at a time: GuildCreate and a pending job can meet at a restart.
+    let lock = {
+        let mut all = CATCH_UP_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+        all.retain(|_, l| Arc::strong_count(l) > 1);
+        all.entry(gid.get()).or_default().clone()
+    };
+    let _one = lock.lock().await;
     let defer = crate::lockdown::Deferred::new(app, gid, CATCH_UP, first).await;
     if defer.waits(app, gid).await {
         return defer.later(app, gid).await;
@@ -510,63 +574,94 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Re
             return defer.later(app, gid).await;
         }
     };
-    if capped {
-        let log = Log::new("Verification", ORANGE).text(
-            "Checked only the newest 500 role changes for verification roles another bot gave while TommyBot was offline.",
-        );
-        if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
-            tracing::warn!(?e, "catch-up cap log failed");
-        }
+    if let Some(oldest) = capped {
+        cap_note(app, gid, oldest).await;
     }
-    // Whose grants are taken back, looked up once per actor for this run: true for another bot
-    // (every candidate role), false for a human without a verify or quarantine permit who is not
-    // Owner, EO or TA (verification roles only, as live).
-    let mut bots = Takers::new();
+    // Whose grants are taken back, looked up once per actor for this run: another bot, or a
+    // human without a verify or quarantine permit who is not Owner, EO or TA (as live).
+    let mut takers = Takers::new();
+    let mut skipped = false;
     let actors: HashSet<_> = by.values().filter(|(a, add)| *add && *a != app.me).map(|(a, _)| *a).collect();
     let owner = app.guild_info(gid).await?.owner;
     for actor in actors {
         let taker = async {
             if is_bot(app, actor).await? {
-                return anyhow::Ok(Some(true));
+                return anyhow::Ok(true);
             }
             let level = app.level(gid, owner, actor).await?;
-            Ok((!level.has("verify") && !level.has("quarantine")).then_some(false))
+            Ok(!level.has("verify") && !level.has("quarantine"))
         };
         match taker.await {
-            Ok(Some(bot)) => {
-                bots.insert(actor, bot);
+            Ok(true) => {
+                takers.insert(actor);
             }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(?e, actor = actor.get(), "actor lookup failed, their grants are skipped"),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(?e, actor = actor.get(), "actor lookup failed, retrying their grants in a job");
+                skipped = true;
+            }
         }
     }
     let members: HashSet<Id<UserMarker>> = by
         .keys()
-        .filter(|(u, r)| from_bot(&by, &bots, &v.roles, *u, r))
+        .filter(|(u, r)| from_taker(&by, &takers, *u, r))
         .map(|(u, _)| *u)
         .collect();
     for target in members {
-        if let Err(e) = catch_up_member(app, &cfg, &gate, gid, target, &by, &bots).await {
+        if let Err(e) = catch_up_member(app, &cfg, &gate, gid, target, &by, &takers).await {
             tracing::warn!(?e, user = target.get(), "checking one member's verification roles failed");
+            skipped = true;
         }
+    }
+    // A skipped actor or member is checked again by the next run.
+    if skipped {
+        defer.later(app, gid).await?;
     }
     Ok(())
 }
 
+type GuildLocks = Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>;
+static CATCH_UP_LOCKS: LazyLock<GuildLocks> = LazyLock::new(Default::default);
+/// Guilds whose first catch-up in this process ran: only that one follows a downtime.
+static CAUGHT_UP: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Default::default);
+
+/// Only a first run after a known downtime whose oldest entry read is newer than its start.
+fn cap_worth_telling(first: bool, last_up: i64, oldest_secs: i64) -> bool {
+    first && last_up > 0 && oldest_secs > last_up
+}
+
+/// The cap was hit. Staff hear of it only when the oldest entry read is newer than the time
+/// TommyBot was last up before this process (so grants from the downtime may be missing); a
+/// busy server's 45-day history alone, or a later re-identify, goes to tracing.
+async fn cap_note(app: &App, gid: Id<GuildMarker>, oldest: u64) {
+    let first = CAUGHT_UP.lock().unwrap_or_else(|p| p.into_inner()).insert(gid.get());
+    let oldest_secs = ((oldest >> 22) as i64 + 1_420_070_400_000) / 1000;
+    let up = crate::metrics::LAST_UP.load(std::sync::atomic::Ordering::Relaxed);
+    if !cap_worth_telling(first, up, oldest_secs) {
+        tracing::info!(guild = gid.get(), oldest_secs, up, "verification catch-up read its 500-entry cap");
+        return;
+    }
+    let log = Log::new("Verification", ORANGE).text(
+        "Checked only the newest 500 role changes for verification roles given while TommyBot was offline; older grants from that time were not checked.",
+    );
+    if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
+        tracing::warn!(?e, "catch-up cap log failed");
+    }
+}
+
 type Newest = HashMap<(Id<UserMarker>, Id<RoleMarker>), (Id<UserMarker>, bool)>;
 
-/// Actors whose grants [`catch_up`] takes back: true for a bot, false for a human without a permit.
-type Takers = HashMap<Id<UserMarker>, bool>;
+/// Actors whose grants [`catch_up`] takes back: other bots, and humans without a permit.
+type Takers = HashSet<Id<UserMarker>>;
 
-/// The newest change of this pair is a taker adding the role (a human: a verification role only).
-fn from_bot(by: &Newest, takers: &Takers, verify: &[Id<RoleMarker>], u: Id<UserMarker>, r: &Id<RoleMarker>) -> bool {
-    by.get(&(u, *r))
-        .is_some_and(|(a, add)| *add && takers.get(a).is_some_and(|bot| *bot || verify.contains(r)))
+/// The newest change of this pair is a taker adding the role.
+fn from_taker(by: &Newest, takers: &Takers, u: Id<UserMarker>, r: &Id<RoleMarker>) -> bool {
+    by.get(&(u, *r)).is_some_and(|(a, add)| *add && takers.contains(a))
 }
 
 /// (member, role) -> (who changed it last, whether that was an add), for candidate roles, and
-/// whether the page cap was hit. Entries come newest first.
-async fn newest_changes(app: &App, gid: Id<GuildMarker>, gate: &Gate) -> Result<(Newest, bool)> {
+/// the oldest entry id read when the page cap was hit. Entries come newest first.
+async fn newest_changes(app: &App, gid: Id<GuildMarker>, gate: &Gate) -> Result<(Newest, Option<u64>)> {
     let mut by = Newest::new();
     let mut before = None;
     // shortcut: reads the newest 500 role changes (logged when hit); read further if outages get long and busy.
@@ -589,10 +684,10 @@ async fn newest_changes(app: &App, gid: Id<GuildMarker>, gate: &Gate) -> Result<
         }
         match log.entries.last() {
             Some(e) if log.entries.len() == 100 => before = Some(e.id.get()),
-            _ => return Ok((by, false)),
+            _ => return Ok((by, None)),
         }
     }
-    Ok((by, true))
+    Ok((by, before))
 }
 
 async fn catch_up_member(
@@ -602,7 +697,7 @@ async fn catch_up_member(
     gid: Id<GuildMarker>,
     target: Id<UserMarker>,
     by: &Newest,
-    bots: &Takers,
+    takers: &Takers,
 ) -> Result<()> {
     let v = &cfg.verification;
     let lock = member_lock(gid, target);
@@ -615,10 +710,10 @@ async fn catch_up_member(
     };
     let actor = by
         .iter()
-        .find(|((u, _), (a, add))| *u == target && *add && bots.contains_key(a))
+        .find(|((u, _), (a, add))| *u == target && *add && takers.contains(a))
         .map(|(_, (a, _))| *a)
         .unwrap_or(app.me);
-    if member.roles.iter().any(|r| v.roles.contains(r) && !from_bot(by, bots, &v.roles, target, r))
+    if member.roles.iter().any(|r| v.roles.contains(r) && !from_taker(by, takers, target, r))
         || hold_takes_it(app, cfg, gid, target, actor).await?
     {
         return Ok(());
@@ -627,7 +722,7 @@ async fn catch_up_member(
         .roles
         .iter()
         .copied()
-        .filter(|r| gate.roles.contains(r) && from_bot(by, bots, &v.roles, target, r))
+        .filter(|r| gate.roles.contains(r) && from_taker(by, takers, target, r))
         .collect();
     if taken.is_empty() {
         return Ok(());
@@ -680,4 +775,37 @@ async fn failed(
         tracing::warn!(?e, "verification role failure log failed");
     }
     Ok(())
+}
+
+/// The cached gate's freshness, for tests.
+#[cfg(test)]
+pub(crate) fn cached_for(gid: Id<GuildMarker>) -> Option<Duration> {
+    let all = GATES.lock().unwrap_or_else(|p| p.into_inner());
+    all.get(&gid.get()).and_then(|s| s.gate.as_ref()).map(|(_, d)| *d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_gate_read_across_a_forget_is_not_stored() {
+        let gid = Id::new(4_242_424_242);
+        let gen = GATES.lock().unwrap().get(&gid.get()).map_or(0, |s| s.gen);
+        forget_gate(gid);
+        assert!(!store_gate(gid, gen, Arc::new(Gate::default())));
+        assert_eq!(cached_for(gid), None);
+        assert!(store_gate(gid, gen + 1, Arc::new(Gate { at: Some(Instant::now()), ..Default::default() })));
+        // TommyBot's own edit only shortens its life.
+        soften_gate(gid);
+        assert!(cached_for(gid).is_some_and(|d| d <= GATE_COALESCE + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn the_cap_is_told_only_after_a_downtime_it_may_have_cut() {
+        assert!(cap_worth_telling(true, 1_000, 2_000));
+        assert!(!cap_worth_telling(true, 1_000, 900), "the 500 reach back before the downtime");
+        assert!(!cap_worth_telling(false, 1_000, 2_000), "a later re-identify");
+        assert!(!cap_worth_telling(true, 0, 2_000), "downtime unknown");
+    }
 }
