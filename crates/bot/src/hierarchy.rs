@@ -101,7 +101,7 @@ impl App {
 
     pub fn invalidate_guild(&self, gid: Id<GuildMarker>) {
         self.guilds.lock().unwrap().remove(&gid);
-        crate::verify::given::soften_gate(gid);
+        crate::verify::given::invalidated(gid);
     }
 
     /// Tests: a cached server with this owner, so no Discord call is needed for it.

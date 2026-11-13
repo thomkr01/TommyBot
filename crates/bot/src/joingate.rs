@@ -221,8 +221,8 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
 /// Whitelist, Quarantine Hold off), and is left alone. `known`: GuildCreate's members, the whole
 /// list when `complete`; otherwise the member list is paged (its own rate-limit bucket, not the
 /// one punishments use). During a raid or lock the check waits in one job per guild, 5 minutes at
-/// a time and 30 minutes at most from the first wait (`first`, unix secs), then runs anyway.
-/// A failed run queues the job too. Runs one at a time per guild: a second run sees the first's
+/// a time and 30 minutes at most from the first wait, then runs anyway (`job`: the job's payload
+/// with `first` and `tries`). A failed run queues the job too, 5 times at most. Runs one at a time per guild: a second run sees the first's
 /// `quarantine` action_log rows and skips those members, so a restart's job and GuildCreate never
 /// quarantine or log one rejoin twice.
 pub async fn requarantine_missed(
@@ -230,7 +230,7 @@ pub async fn requarantine_missed(
     gid: Id<GuildMarker>,
     known: &[twilight_model::guild::Member],
     complete: bool,
-    first: Option<i64>,
+    job: Option<&serde_json::Value>,
 ) -> Result<()> {
     let lock = {
         let mut all = MISSED_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
@@ -238,17 +238,13 @@ pub async fn requarantine_missed(
         all.entry(gid.get()).or_default().clone()
     };
     let _one = lock.lock().await;
-    let defer = lockdown::Deferred::new(app, gid, MISSED_REJOINS, first).await;
-    let requeue = if defer.waits(app, gid).await {
-        true
-    } else if let Err(e) = missed(app, gid, known, complete).await {
+    let defer = lockdown::Deferred::new(app, gid, MISSED_REJOINS, job).await;
+    if defer.waits(app, gid).await {
+        return defer.later(app, gid, false).await;
+    }
+    if let Err(e) = missed(app, gid, known, complete).await {
         tracing::warn!(?e, "checking members who rejoined while the bot was down failed, retrying in a job");
-        true
-    } else {
-        false
-    };
-    if requeue {
-        defer.later(app, gid).await?;
+        return defer.later(app, gid, true).await;
     }
     Ok(())
 }

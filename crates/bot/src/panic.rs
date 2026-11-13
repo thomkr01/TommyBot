@@ -112,6 +112,7 @@ async fn put_everyone(
         allow: Some(allow),
         deny: Some(deny),
     };
+    crate::verify::given::mark_own(gid);
     app.http.update_channel_permission(channel, &o).await?;
     Ok(())
 }
@@ -153,6 +154,7 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
         let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
         put_everyone(app, gid, channel, bits("allow"), bits("deny")).await
     } else {
+        crate::verify::given::mark_own(gid);
         app.http
             .delete_channel_permission(channel)
             .role(Id::new(gid.get()))

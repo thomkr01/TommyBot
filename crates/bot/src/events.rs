@@ -540,6 +540,8 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         // Anti-nuke first: the verification check can wait for the gateway delete.
         Event::GuildAuditLogEntryCreate(e) => {
+            // Before anything slow: a grant handled in parallel must not use the old gate.
+            verify::given::audit_changed(app, &e.0);
             let nuke = antinuke::on_audit(app, &e.0).await;
             let ban = crate::bansync::on_ban(app, &e.0).await;
             let unban = crate::bansync::on_unban(app, &e.0).await;

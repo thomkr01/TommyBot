@@ -47,7 +47,8 @@ static MEMBER_LOCKS: LazyLock<Locks> = LazyLock::new(Default::default);
 #[derive(Default)]
 struct Slot {
     gate: Option<(Arc<Gate>, Duration)>,
-    gen: u64,
+    /// (hard forgets, softens) so far.
+    gen: (u64, u64),
 }
 static GATES: LazyLock<Mutex<HashMap<u64, Slot>>> = LazyLock::new(Default::default);
 /// Whether a user is a bot; it never changes, so it is kept.
@@ -145,27 +146,31 @@ async fn gate(
                 return Ok(g.clone());
             }
         }
-        slot.map_or(0, |s| s.gen)
+        slot.map_or((0, 0), |s| s.gen)
     };
     // Read fresh: a bot may give a role created a moment ago.
     let live = app.http.roles(gid).await?.models().await?;
     let live = live.iter().map(|r| (r.id, r.permissions.bits())).collect();
     let perms = crate::lockdown::unlocked(app, gid, live).await?;
-    let channels = app.http.guild_channels(gid).await?.models().await?;
+    let mut channels = app.http.guild_channels(gid).await?.models().await?;
+    // A channel lock's denies are not what verification opens: judge the saved overwrites.
+    crate::lockdown::unlocked_channels(app, gid, &mut channels).await?;
     let g = Arc::new(gate_of(gid, verify, &perms, &channels));
     store_gate(gid, gen, g.clone());
     Ok(g)
 }
 
-/// Caches `g` unless a hard forget came while it was read (S R4-1); true when stored.
-fn store_gate(gid: Id<GuildMarker>, gen: u64, g: Arc<Gate>) -> bool {
+/// Caches `g` unless a hard forget came while it was read (S R4-1); a soften during the read
+/// stores it with the short life (R5). True when stored.
+fn store_gate(gid: Id<GuildMarker>, gen: (u64, u64), g: Arc<Gate>) -> bool {
     let mut all = GATES.lock().unwrap_or_else(|p| p.into_inner());
     let slot = all.entry(gid.get()).or_default();
-    let same = slot.gen == gen;
-    if same {
-        slot.gate = Some((g, GATE_FOR));
+    if slot.gen.0 != gen.0 {
+        return false;
     }
-    same
+    let life = if slot.gen.1 == gen.1 { GATE_FOR } else { GATE_COALESCE };
+    slot.gate = Some((g, life));
+    true
 }
 
 /// Drops the guild's [`Gate`] at once: someone else changed a role or channel (its audit event).
@@ -173,15 +178,44 @@ pub(crate) fn forget_gate(gid: Id<GuildMarker>) {
     let mut all = GATES.lock().unwrap_or_else(|p| p.into_inner());
     let slot = all.entry(gid.get()).or_default();
     slot.gate = None;
-    slot.gen += 1;
+    slot.gen.0 += 1;
 }
 
-/// Lets the guild's [`Gate`] live at most [`GATE_COALESCE`] more: a gateway role or channel
-/// event (whoever made it; another actor's edit is forgotten for good by its audit event), or
-/// TommyBot's own edit.
+/// Guilds where TommyBot is editing roles or overwrites itself (a lock, an unlock, panic),
+/// marked just before each edit.
+static OWN_EDITS: LazyLock<Mutex<HashMap<u64, Instant>>> = LazyLock::new(Default::default);
+const OWN_FOR: Duration = Duration::from_secs(5);
+
+/// TommyBot is about to edit a role or channel itself: the gateway event it causes only softens
+/// the gate.
+pub(crate) fn mark_own(gid: Id<GuildMarker>) {
+    let mut all = OWN_EDITS.lock().unwrap_or_else(|p| p.into_inner());
+    all.retain(|_, at| at.elapsed() < OWN_FOR);
+    all.insert(gid.get(), Instant::now());
+}
+
+/// A gateway role or channel event (from `invalidate_guild`), which names no actor: a hard
+/// forget, unless TommyBot marked its own edits just now (S R5-1).
+pub(crate) fn invalidated(gid: Id<GuildMarker>) {
+    let own = OWN_EDITS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&gid.get())
+        .is_some_and(|at| at.elapsed() < OWN_FOR);
+    if own {
+        soften_gate(gid);
+    } else {
+        forget_gate(gid);
+    }
+}
+
+/// Lets the guild's [`Gate`] live at most [`GATE_COALESCE`] more: TommyBot's own edit. A read
+/// that crosses it is stored with that short life too.
 pub(crate) fn soften_gate(gid: Id<GuildMarker>) {
     let mut all = GATES.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((g, fresh_for)) = all.get_mut(&gid.get()).and_then(|s| s.gate.as_mut()) {
+    let slot = all.entry(gid.get()).or_default();
+    slot.gen.1 += 1;
+    if let Some((g, fresh_for)) = slot.gate.as_mut() {
         let left = g.at.map_or(Duration::ZERO, |at| at.elapsed()) + GATE_COALESCE;
         *fresh_for = (*fresh_for).min(left);
     }
@@ -286,10 +320,29 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
 /// overwrite edit (a lock) only shortens the gate's life, so a lock over many channels rebuilds
 /// it at most every few seconds.
 fn changed(app: &App, gid: Id<GuildMarker>, e: &AuditLogEntry) {
+    if !matches!(
+        e.action_type,
+        A::RoleCreate
+            | A::RoleUpdate
+            | A::ChannelCreate
+            | A::ChannelUpdate
+            | A::ChannelOverwriteCreate
+            | A::ChannelOverwriteUpdate
+            | A::ChannelOverwriteDelete
+    ) {
+        return;
+    }
     match (e.user_id == Some(app.me), e.action_type) {
         (false, _) => forget_gate(gid),
         (true, A::ChannelUpdate) => {}
         (true, _) => soften_gate(gid),
+    }
+}
+
+/// Runs first in the audit event arm, before anti-nuke, Ban Sync and the Raider List.
+pub(crate) fn audit_changed(app: &App, e: &AuditLogEntry) {
+    if let Some(gid) = e.guild_id {
+        changed(app, gid, e);
     }
 }
 
@@ -545,7 +598,7 @@ const CATCH_UP_PAGES: usize = 5;
 /// bot loses the roles that bot gave in [`Gate::roles`]; a role given by TommyBot, by staff or
 /// before the log counts as verified, and a pair whose newest change is a removal (TommyBot
 /// taking it back live) costs no member read. Waits out a raid or lock like D17.
-pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Result<()> {
+pub async fn catch_up(app: &App, gid: Id<GuildMarker>, job: Option<&serde_json::Value>) -> Result<()> {
     let cfg = app.cfg(gid.get()).await?;
     let v = &cfg.verification;
     if !v.enabled || v.roles.is_empty() {
@@ -558,9 +611,9 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Re
         all.entry(gid.get()).or_default().clone()
     };
     let _one = lock.lock().await;
-    let defer = crate::lockdown::Deferred::new(app, gid, CATCH_UP, first).await;
+    let defer = crate::lockdown::Deferred::new(app, gid, CATCH_UP, job).await;
     if defer.waits(app, gid).await {
-        return defer.later(app, gid).await;
+        return defer.later(app, gid, false).await;
     }
     let read = async {
         let gate = gate(app, gid, &v.roles, &[]).await?;
@@ -571,7 +624,7 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Re
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(?e, "reading the audit log for missed verification roles failed, retrying in a job");
-            return defer.later(app, gid).await;
+            return defer.later(app, gid, true).await;
         }
     };
     if let Some(oldest) = capped {
@@ -615,7 +668,7 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Re
     }
     // A skipped actor or member is checked again by the next run.
     if skipped {
-        defer.later(app, gid).await?;
+        defer.later(app, gid, true).await?;
     }
     Ok(())
 }
@@ -791,14 +844,19 @@ mod tests {
     #[test]
     fn a_gate_read_across_a_forget_is_not_stored() {
         let gid = Id::new(4_242_424_242);
-        let gen = GATES.lock().unwrap().get(&gid.get()).map_or(0, |s| s.gen);
+        let gen = GATES.lock().unwrap().get(&gid.get()).map_or((0, 0), |s| s.gen);
         forget_gate(gid);
         assert!(!store_gate(gid, gen, Arc::new(Gate::default())));
         assert_eq!(cached_for(gid), None);
-        assert!(store_gate(gid, gen + 1, Arc::new(Gate { at: Some(Instant::now()), ..Default::default() })));
-        // TommyBot's own edit only shortens its life.
+        let now = || Arc::new(Gate { at: Some(Instant::now()), ..Default::default() });
+        let gen = (gen.0 + 1, gen.1);
+        assert!(store_gate(gid, gen, now()));
+        assert_eq!(cached_for(gid), Some(GATE_FOR));
+        // TommyBot's own edit only shortens its life, and a read across it gets the short life.
         soften_gate(gid);
         assert!(cached_for(gid).is_some_and(|d| d <= GATE_COALESCE + Duration::from_secs(1)));
+        assert!(store_gate(gid, gen, now()));
+        assert_eq!(cached_for(gid), Some(GATE_COALESCE));
     }
 
     #[test]

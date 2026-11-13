@@ -143,10 +143,10 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         crate::reply::QUARANTINE_DM => crate::reply::quarantine_dm_job(app, gid, &job.payload).await?,
         crate::reply::QUARANTINE_DM_COOLDOWN => {}
         crate::verify::given::CATCH_UP => {
-            crate::verify::given::catch_up(app, gid, job.payload["first"].as_i64()).await?
+            crate::verify::given::catch_up(app, gid, Some(&job.payload)).await?
         }
         crate::joingate::MISSED_REJOINS => {
-            crate::joingate::requarantine_missed(app, gid, &[], false, job.payload["first"].as_i64()).await?
+            crate::joingate::requarantine_missed(app, gid, &[], false, Some(&job.payload)).await?
         }
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_blocked" => {
@@ -242,15 +242,28 @@ async fn round(app: &Arc<App>, heavy: bool) {
                 }
                 // Startup catch-ups page members or the audit log for minutes: they run beside the
                 // worker, so they never hold back panic_start or nuke_revert. Each takes its own
-                // per-guild lock and queues its own retry, so the job row is done here.
+                // per-guild lock. The row is done only on Ok; on an error it stays leased, so the
+                // lease, the attempt limit and the give-up log apply as for any job.
                 if SPAWNED.contains(&job.kind.as_str()) {
-                    if let Err(e) = jobs::finish(&app.pool, job.id).await {
-                        tracing::warn!(?e, id = job.id, "finishing job failed");
-                    }
                     let app = app.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = dispatch(&app, &job).await {
-                            tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
+                        match dispatch(&app, &job).await {
+                            Ok(()) => {
+                                metrics::JOBS_DONE.fetch_add(1, Relaxed);
+                                if let Err(e) = jobs::finish(&app.pool, job.id).await {
+                                    tracing::warn!(?e, id = job.id, "finishing job failed");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(?e, id = job.id, kind = %job.kind, "job failed");
+                                metrics::JOBS_FAILED.fetch_add(1, Relaxed);
+                                if job.attempts >= jobs::MAX_ATTEMPTS {
+                                    give_up_log(&app, &job, &e).await;
+                                    if let Err(e) = jobs::finish(&app.pool, job.id).await {
+                                        tracing::warn!(?e, id = job.id, "finishing job failed");
+                                    }
+                                }
+                            }
                         }
                     });
                     continue;

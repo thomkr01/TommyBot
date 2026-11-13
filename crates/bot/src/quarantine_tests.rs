@@ -21,7 +21,7 @@ const LOGS: u64 = 88;
 
 fn logging() -> Value {
     json!({"routes": {"anti_nuke": LOGS.to_string(), "verification": LOGS.to_string(),
-                      "join_gate": LOGS.to_string(), "mod_command": LOGS.to_string()}})
+                      "join_gate": LOGS.to_string(), "mod_command": LOGS.to_string(), "server": LOGS.to_string()}})
 }
 
 /// Server `i` with `cfg` (plus the log routes), its roles in Discord, and the bot holding the top role.
@@ -1231,8 +1231,8 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     const TALK: u64 = 514;
     const SENDS: u64 = 515;
     let (view, send) = (1024u64, 2048u64);
-    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human, s4, d, e, nobody] =
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].map(|n| t.base * 100 + n);
+    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human, s4, d, e, nobody, s5] =
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17].map(|n| t.base * 100 + n);
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(), "quarantine_hold": false});
     for i in 0..3 {
         server(&t, i, json!({"verification": web_verification(), "antinuke": an})).await;
@@ -1404,6 +1404,35 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     });
     given(give(1, s4, VERIFIED)).await;
     assert_eq!(roles(&t, 1, s4), Some(vec![]), "a later grant is still checked");
+    // A channel lock also denies Send to the verified role: the gate judges the saved overwrite,
+    // so the Send-only channel stays gated while the lock lasts.
+    let g1 = t.g(1).get();
+    t.set(|m| {
+        m.channels.insert(g1, chan(g1, "712", vec![ow(g1, 0, send), ow(VERIFIED, 0, send), ow(TALK, send, 0)]));
+        m.members.insert((g1, s5), vec![TALK]);
+    });
+    let lock = tommybot_automod::lockdown::Snapshot {
+        kind: Some(tommybot_automod::lockdown::LockKind::Channel(712)),
+        channel_denies: vec![(712, VERIFIED)],
+        prior: vec![(712, VERIFIED, send, 0)],
+        ..Default::default()
+    };
+    tommybot_automod::store::save_lock(&t.app.pool, g1, &lock).await.unwrap();
+    // The lock's gateway events: TommyBot marked them as its own, so they only soften.
+    crate::verify::given::mark_own(t.g(1));
+    t.app.invalidate_guild(t.g(1));
+    assert!(crate::verify::given::cached_for(t.g(1)).is_some_and(|d| d < std::time::Duration::from_secs(60)));
+    // Anyone else's gateway edit drops the gate at once (S R5-1).
+    std::thread::sleep(std::time::Duration::from_millis(5100));
+    t.app.invalidate_guild(t.g(1));
+    assert_eq!(crate::verify::given::cached_for(t.g(1)), None);
+    given(give(1, s5, TALK)).await;
+    sqlx::query("DELETE FROM lock_snapshots WHERE guild_id = $1")
+        .bind(g1 as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(roles(&t, 1, s5), Some(vec![]), "Send gate held during the lock");
     // At GuildCreate: only a role whose newest grant came from another bot goes.
     // During a raid the catch-up waits in a job and reads nothing.
     let raid = tommybot_automod::join::RaidDetector::restored(0, i64::MAX, String::new());
@@ -1430,6 +1459,18 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
         .await
         .unwrap();
     assert_eq!(n, 1, "a skipped member is checked again");
+    // A lasting failure stops after 5 tries and tells staff.
+    t.exec("UPDATE scheduled_jobs SET payload = '{\"tries\": 4}' WHERE guild_id = $1 + 2").await;
+    t.set(|m| m.fail_member = true);
+    crate::verify::given::catch_up(&t.app, t.g(2), None).await.unwrap();
+    t.set(|m| m.fail_member = false);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'verify_catch_up'")
+        .bind(t.g(2).get() as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "gave up");
+    assert_eq!(t.calls("Gave up after 5 failed tries"), 1);
     assert_eq!(roles(&t, 2, a), Some(vec![]), "a bot verified them while TommyBot was down");
     assert_eq!(roles(&t, 2, b), Some(vec![VERIFIED]), "staff with a verify permit gave it");
     assert_eq!(roles(&t, 2, e), Some(vec![]), "a human without a permit gave it");

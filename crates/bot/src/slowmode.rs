@@ -122,6 +122,8 @@ enum Started {
 
 /// Starts a slowmode after `ChannelHeat::on_message` claimed one. Failures are logged here.
 pub async fn start(app: &App, gid: Id<GuildMarker>, ch: Id<ChannelMarker>, cfg: &AutoSlowmodeCfg) {
+    // Its ChannelUpdate changes nothing the verification gate reads.
+    crate::verify::given::mark_own(gid);
     let r = try_start(app, gid, ch, cfg).await;
     if matches!(r, Ok(Started::Nothing) | Err(_)) {
         release(app, ch.get());
@@ -382,6 +384,7 @@ fn release(app: &App, ch: u64) {
 /// The `slowmode_off` job: waits while the channel is still hot, then puts the old value back if
 /// the slowmode is still ours.
 pub async fn off(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
+    crate::verify::given::mark_own(gid);
     let ch = p["channel"]
         .as_u64()
         .context("job payload has no channel")?;
