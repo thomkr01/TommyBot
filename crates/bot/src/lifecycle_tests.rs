@@ -920,6 +920,11 @@ async fn panic_stops_writing_and_puts_it_back() {
     let deny: u64 = body["deny"].as_str().unwrap().parse().unwrap();
     assert_eq!(allow & SEND, SEND, "{body}");
     assert_eq!((allow & (1 << 6), deny), (0, 1 << 6), "{body}");
+    assert_eq!(
+        allow & MENTION,
+        0,
+        "the role lock's Mention @everyone came back: {body}"
+    );
     // Server 1: the staff lock already took writing, so panic adds only the role lock and
     // the category, which the staff lock silenced too, is left as it is.
     assert_eq!(

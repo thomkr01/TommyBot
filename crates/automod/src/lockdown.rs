@@ -96,6 +96,32 @@ impl LockKind {
             || matches!((self, other), (LockKind::Channel(x), LockKind::Channel(y)) if x == y)
     }
 
+    /// This lock without the parts `active` locks already cover, so a raid's combined lock during
+    /// panic still gets its join lock. `None` when nothing is left, or the lock cannot be split.
+    pub fn rest(&self, active: &[LockKind]) -> Option<LockKind> {
+        if !active.iter().any(|k| k.overlaps(self)) {
+            return Some(self.clone());
+        }
+        let (c, r, j) = match self {
+            LockKind::Mixed {
+                channels,
+                roles,
+                joins,
+            } => (*channels, *roles, *joins),
+            LockKind::All => (true, true, true),
+            _ => return None,
+        };
+        let covered = |part: fn(&(bool, bool, Option<JoinLock>)) -> bool| {
+            active.iter().any(|k| part(&k.covers()))
+        };
+        let rest = LockKind::Mixed {
+            channels: c && !covered(|x| x.0),
+            roles: r && !covered(|x| x.1),
+            joins: j && !covered(|x| x.2.is_some()),
+        };
+        (rest.covers() != (false, false, None)).then_some(rest)
+    }
+
     /// Role permission bits this lock may strip, and so may give back.
     fn mask(&self) -> u64 {
         let (channels, roles, _) = self.covers();
@@ -616,6 +642,32 @@ mod tests {
                 role: 10,
                 perms: all
             }]
+        );
+    }
+
+    #[test]
+    fn a_combined_lock_takes_only_the_parts_left() {
+        let raid = LockKind::Mixed {
+            channels: true,
+            roles: false,
+            joins: true,
+        };
+        let joins_only = LockKind::Mixed {
+            channels: false,
+            roles: false,
+            joins: true,
+        };
+        // Panic holds Role and Server: a raid still locks joins.
+        let panic = [LockKind::Role, LockKind::Server];
+        assert_eq!(raid.rest(&panic), Some(joins_only.clone()));
+        assert_eq!(LockKind::All.rest(&panic), Some(joins_only.clone()));
+        assert_eq!(raid.rest(&[]), Some(raid.clone()));
+        assert_eq!(joins_only.rest(&[LockKind::Join(JoinLock::Kick)]), None);
+        // A lock of one part is never split.
+        assert_eq!(LockKind::Server.rest(&[LockKind::All]), None);
+        assert_eq!(
+            LockKind::Channel(5).rest(&[LockKind::Channel(6)]),
+            Some(LockKind::Channel(5))
         );
     }
 

@@ -133,14 +133,16 @@ async fn put_role(
 }
 
 /// The bits panic's server lock will take from each main role (@everyone when none are set),
-/// read before the lock. A role an earlier lock already stripped has nothing left to take.
+/// read before the lock. A role an earlier lock already stripped has nothing left to take. Never a
+/// bit the role lock takes too (Mention @everyone): a category allow would beat that lock.
 fn taken(
     roles: &[twilight_model::guild::Role],
     main: &[u64],
     gid: u64,
     voice: bool,
 ) -> Vec<(u64, u64)> {
-    let mask = lockdown_bits::SILENCE | if voice { lockdown_bits::VOICE } else { 0 };
+    let mask = (lockdown_bits::SILENCE | if voice { lockdown_bits::VOICE } else { 0 })
+        & !lockdown_bits::DANGEROUS;
     roles
         .iter()
         .map(|r| (r.id.get(), r.permissions.bits() & mask))
@@ -149,43 +151,69 @@ fn taken(
 }
 
 /// The bits to allow for `role` on a category so it can do there what the server lock took
-/// (`taken`) and nothing more: never a bit the category already denied it or @everyone.
-fn give_back(taken: u64, role_ow: (u64, u64), everyone_deny: u64) -> u64 {
-    taken & !role_ow.0 & !role_ow.1 & !everyone_deny
+/// (`taken`) and nothing more: never a bit the category already allows or denies the role, nor
+/// one `others_deny` (what other overwrites deny there) holds. A role allow beats every role deny,
+/// so giving such a bit would let a muted member write; the category stays locked for it instead.
+fn give_back(taken: u64, role_ow: (u64, u64), others_deny: u64) -> u64 {
+    taken & !role_ow.0 & !role_ow.1 & !others_deny
 }
 
-/// Gives each main role back, in a whitelisted category, what panic's server lock takes, so the
-/// category stays as writable as it was. Pushes the overwrite it replaced per role onto
-/// `exempted`, for [`unexempt`], right after each change.
-async fn exempt(
+/// One exemption to make: the overwrite `role` has on `category` now (`saved`, for [`unexempt`]),
+/// and the one to put.
+struct Exemption {
+    category: Id<ChannelMarker>,
+    role: u64,
+    allow: Permissions,
+    deny: Permissions,
+    saved: Value,
+}
+
+/// What a whitelisted category needs so each main role can do there what panic's server lock
+/// takes. Changes nothing; [`start`] saves each one in the `panic_end` job before it puts it.
+async fn exemptions(
     app: &App,
     gid: Id<GuildMarker>,
     category: Id<ChannelMarker>,
     taken: &[(u64, u64)],
-    exempted: &mut Vec<Value>,
-) -> Result<()> {
+    quarantine_role: Option<u64>,
+) -> Result<Vec<Exemption>> {
     let ch = app.http.channel(category).await?.model().await?;
     anyhow::ensure!(ch.guild_id == Some(gid), "category is not in this server");
-    let ows = ch.permission_overwrites.unwrap_or_default();
-    let of = |id: u64| {
-        ows.iter()
-            .find(|o| o.kind == ModelOverwriteType::Role && o.id.get() == id)
-    };
-    let everyone_deny = of(gid.get()).map_or(0, |o| o.deny.bits());
+    let ows: Vec<_> = ch
+        .permission_overwrites
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|o| o.kind == ModelOverwriteType::Role)
+        .collect();
+    let mut out = vec![];
     for &(role, bits) in taken {
-        let old = of(role);
+        let old = ows.iter().find(|o| o.id.get() == role);
         let (allow, deny) = old.map_or((0, 0), |o| (o.allow.bits(), o.deny.bits()));
-        let add = give_back(bits, (allow, deny), everyone_deny);
+        // @everyone's allow comes before every role deny, so only a role's allow needs them.
+        // Quarantined members lose their other roles, so the Quarantine role's deny never meets
+        // a main role's allow.
+        let others_deny = if role == gid.get() {
+            0
+        } else {
+            ows.iter()
+                .filter(|o| o.id.get() != role && Some(o.id.get()) != quarantine_role)
+                .fold(0, |d, o| d | o.deny.bits())
+        };
+        let add = give_back(bits, (allow, deny), others_deny);
         if add == 0 {
             continue;
         }
-        let p = Permissions::from_bits_retain;
-        put_role(app, gid, category, role, p(allow | add), p(deny)).await?;
-        exempted.push(json!({
-            "channel": category.get(), "role": role, "allow": allow, "deny": deny, "had": old.is_some()
-        }));
+        out.push(Exemption {
+            category,
+            role,
+            allow: Permissions::from_bits_retain(allow | add),
+            deny: Permissions::from_bits_retain(deny),
+            saved: json!({
+                "channel": category.get(), "role": role, "allow": allow, "deny": deny, "had": old.is_some()
+            }),
+        });
     }
-    Ok(())
+    Ok(out)
 }
 
 /// `channels` with panic's category exemptions undone as [`unexempt`] would: the overwrite each
@@ -329,16 +357,28 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             }
         }
     };
-    for &c in categories {
-        let before = exempted.len();
-        if let Err(e) = exempt(app, gid, c, &taken, &mut exempted).await {
-            tracing::warn!(?e, channel = c.get(), "panic: exempting category failed");
-        }
-        if exempted.len() > before {
-            // After each one, so a crash leaves a job that closes every category opened so far.
+    let quarantine_role = match app.cfg(gid.get()).await {
+        Ok(c) => c.antinuke.quarantine_role.map(|r| r.get()),
+        Err(_) => None,
+    };
+    'categories: for &c in categories {
+        let todo = match exemptions(app, gid, c, &taken, quarantine_role).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(?e, channel = c.get(), "panic: reading a category failed");
+                continue;
+            }
+        };
+        for one in todo {
+            // Saved before the change, so a crash or a lost answer still leaves a job that puts
+            // the overwrite back; putting back one that never changed does no harm.
+            exempted.push(one.saved.clone());
             saved = end_payload(app, gid, payload(&exempted, false)).await;
             if saved.is_err() {
-                break;
+                break 'categories;
+            }
+            if let Err(e) = put_role(app, gid, one.category, one.role, one.allow, one.deny).await {
+                tracing::warn!(?e, channel = c.get(), "panic: exempting category failed");
             }
         }
     }
@@ -375,13 +415,20 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             // The role lock takes dangerous perms, the server lock takes writing from main roles.
             PanicStep::LockServer => {
                 for (kind, key) in [(LockKind::Role, ROLE_LOCK), (LockKind::Server, SERVER_LOCK)] {
+                    // Marked first: a crash between the lock and the mark must not leave a lock
+                    // that panic's end never lifts (everyone muted). Cleared when no lock was saved.
+                    own_lock(app, gid, key, true).await;
                     let mut saved = false;
                     let r = lockdown::lock_saving(app, gid, kind, None, &mut saved).await;
                     if let Err(e) = r {
                         tracing::warn!(?e, key, "panic: locking the server failed");
                     }
-                    if saved {
-                        own_lock(app, gid, key, true).await;
+                    if !saved {
+                        own_lock(app, gid, key, false).await;
+                        // A lock staff made first covers writing, so the categories close with it.
+                        if key == SERVER_LOCK {
+                            drop_exemptions(app, gid, &exempted).await;
+                        }
                     }
                 }
             }
@@ -533,6 +580,34 @@ async fn lock_targets(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(u64, u64)>
     Ok(taken(&roles, &main, gid.get(), cfg.lockdown_prefs.voice))
 }
 
+/// Puts the categories back at once when panic's server lock was not made, and empties the job's
+/// list. Only logged on failure; the end puts back what is still listed.
+async fn drop_exemptions(app: &App, gid: Id<GuildMarker>, exempted: &[Value]) {
+    if exempted.is_empty() {
+        return;
+    }
+    let mut all = true;
+    for one in exempted {
+        if let Err(e) = unexempt(app, gid, one).await {
+            tracing::warn!(?e, "panic: putting a category back failed");
+            all = false;
+        }
+    }
+    if !all {
+        return;
+    }
+    let r = sqlx::query(
+        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object('exempt', '[]'::jsonb)
+         WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(?e, "panic: emptying the exemptions failed");
+    }
+}
+
 /// Records in the `panic_end` job whether the lock under `key` ([`ROLE_LOCK`], [`SERVER_LOCK`]) is
 /// panic's own, so its end lifts only that one. Only logged on failure.
 pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, key: &str, locked: bool) {
@@ -553,6 +628,14 @@ pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, key: &str, locked:
 /// Ends panic mode for a guild; runs from the `panic_end` job, whose payload says what to put back.
 pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()> {
     app.panic_runs.lock().unwrap().remove(&gid.get());
+    // The job as it is now: a staff unlock after the scheduler read it cleared panic's claim.
+    let now: Option<Value> = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await?;
+    let payload = now.as_ref().unwrap_or(payload);
     for saved in payload["exempt"].as_array().into_iter().flatten() {
         if let Err(e) = unexempt(app, gid, saved).await {
             tracing::warn!(?e, "panic: restoring category overwrite failed");
@@ -698,7 +781,7 @@ mod tests {
         };
         let (send, view, react) = (1u64 << 11, 1u64 << 10, 1u64 << 6);
         let roles = [
-            role(9, view | send | react),
+            role(9, view | send | react | (1 << 17)),
             role(5, view | send),
             role(6, view),
         ];

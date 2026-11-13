@@ -120,14 +120,15 @@ pub async fn lock_saving(
     }
     // Held until the lock is applied: a second lock waits, then sees this one as active.
     let _one = exclusive(app, gid).await;
-    let active = store::locks(&app.pool, gid.get()).await?;
-    if active
-        .iter()
-        .filter_map(|s| s.kind.as_ref())
-        .any(|k| k.overlaps(&kind))
-    {
+    let active: Vec<LockKind> = store::locks(&app.pool, gid.get())
+        .await?
+        .into_iter()
+        .filter_map(|s| s.kind)
+        .collect();
+    // A combined lock takes the parts no active lock has; its timer names what it took.
+    let Some(kind) = kind.rest(&active) else {
         return Ok(false);
-    }
+    };
     let plan = plan_now(app, gid, &kind).await?;
     // Saved first so a failure halfway can still be unlocked exactly, or finished after a restart.
     let r = store::save_lock(&app.pool, gid.get(), &plan.snapshot).await;
