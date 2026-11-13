@@ -463,8 +463,18 @@ pub async fn fallback_alert(
         .build();
     // Straight to Discord, not events::send: that reads the config, and this runs inside App::cfg.
     // Only to a channel @everyone cannot see: "Anti-nuke is off" helps a raider (R-h3 round 2, 4).
+    // Without readable main roles the check sees only @everyone, so a members-only channel
+    // would pass as private (R-h3 round 3, 1).
+    if sections.contains(&"lockdown") {
+        tracing::warn!(%gid, "settings-not-read log skipped: main roles unknown");
+        return;
+    }
     let private = async {
         let c = app.http.channel(ch).await?.model().await?;
+        // The id comes from raw config that may be damaged: only a channel of this server.
+        if c.guild_id != Some(gid) {
+            return anyhow::Ok(false);
+        }
         crate::events::public_with(app, c, main_roles)
             .await
             .map(|p| !p)

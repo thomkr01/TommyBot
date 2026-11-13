@@ -1637,6 +1637,29 @@ async fn a_section_on_defaults_is_posted_to_the_log() {
     });
     let _ = t.app.cfg(t.g(1).get()).await.unwrap();
     assert_eq!(t.calls(&format!("POST /channels/{open}/messages")), 0);
+    // R-h3 round 3, 1: not when the main roles are unknown, nor to another server's channel.
+    for (i, cfg, ch, home) in [
+        (
+            2,
+            json!({"antinuke": {"enabled": "yes"}, "lockdown": {"main_roles": "x"}}),
+            t.base + 7,
+            2,
+        ),
+        (3, json!({"antinuke": {"enabled": "yes"}}), t.base + 8, 4),
+    ] {
+        let mut cfg = cfg;
+        cfg["logging"] = json!({"config_changes": ch.to_string()});
+        t.server_config(i, t.owner(), cfg).await;
+        t.set(|m| {
+            m.text_channels.insert(ch, (t.g(home).get(), false));
+        });
+        let _ = t.app.cfg(t.g(i).get()).await.unwrap();
+        assert_eq!(
+            t.calls(&format!("POST /channels/{ch}/messages")),
+            0,
+            "server {i}"
+        );
+    }
     t.cleanup().await;
 }
 
