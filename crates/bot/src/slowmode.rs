@@ -75,10 +75,10 @@ pub async fn feed(
 }
 
 /// Staff by TommyBot's permits only (Owner, Extra Owner, Trusted Admin or the automod permit),
-/// never by a role's Discord permissions. A failed lookup counts as exempt: no slowmode is
-/// better than a wrong one.
+/// never by a role's Discord permissions. A failed lookup counts the message: during a raid these
+/// lookups hit 429s, and a slowmode that only goes up costs staff little.
 pub(crate) async fn exempt(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
-    app.whitelisted(gid, user, "automod").await.unwrap_or(true)
+    app.whitelisted(gid, user, "automod").await.unwrap_or(false)
 }
 
 /// A slowmode only goes up, never down.
