@@ -34,7 +34,8 @@ static MENTION_HITS: std::sync::LazyLock<ScopeHits> = std::sync::LazyLock::new(D
 /// Whether the rule was last created or edited by someone without a permit (see [`on_rule_audit`]).
 async fn untrusted(app: &App, gid: Id<GuildMarker>, rule: u64) -> Result<bool> {
     Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM automod_rule_untrusted WHERE guild_id = $1 AND rule_id = $2)",
+        "SELECT EXISTS (SELECT 1 FROM automod_rule_untrusted
+                        WHERE guild_id = $1 AND rule_id = $2 AND NOT trusted)",
     )
     .bind(gid.get() as i64)
     .bind(rule as i64)
@@ -50,7 +51,8 @@ fn trusted(level: &Level) -> bool {
 
 /// A rule created or edited by someone who is not [`trusted`] triggers no TommyBot action until a
 /// trusted edit (Thomas 2026-11-13 22:49: Discord's Manage Server gives no more power than a
-/// member has). Runs for live and replayed audit entries, with anti-nuke on or off.
+/// member has). Runs once per audit entry, live or replayed, with anti-nuke on or off; the newest
+/// entry per rule wins, so a late older one cannot clear a newer verdict.
 pub(crate) async fn on_rule_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     use AuditLogEventType as A;
     let (Some(gid), Some(actor), Some(rule)) = (e.guild_id, e.user_id, e.target_id) else {
@@ -66,32 +68,38 @@ pub(crate) async fn on_rule_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
                 .await?;
         }
         A::AutoModerationRuleCreate | A::AutoModerationRuleUpdate => {
-            if actor == app.me
-                || trusted(
-                    &app.level(gid, app.guild_info(gid).await?.owner, actor)
-                        .await?,
-                )
-            {
-                sqlx::query(
-                    "DELETE FROM automod_rule_untrusted WHERE guild_id = $1 AND rule_id = $2",
-                )
-                .bind(g)
-                .bind(r)
-                .execute(&app.pool)
-                .await?;
-                return Ok(());
-            }
-            let new: Option<i64> = sqlx::query_scalar(
-                "INSERT INTO automod_rule_untrusted (guild_id, rule_id, actor) VALUES ($1, $2, $3)
-                 ON CONFLICT (guild_id, rule_id) DO UPDATE SET actor = $3, at = now()
-                 RETURNING (xmax = 0)::int::bigint",
+            // A failed lookup counts as untrusted: a trusted edit clears it later.
+            let ok = actor == app.me
+                || match app.guild_info(gid).await {
+                    Ok(info) => match app.level(gid, info.owner, actor).await {
+                        Ok(level) => trusted(&level),
+                        Err(err) => {
+                            tracing::warn!(?err, "permit lookup for an AutoMod rule edit failed");
+                            false
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(?err, "owner lookup for an AutoMod rule edit failed");
+                        false
+                    }
+                };
+            let won = sqlx::query(
+                "INSERT INTO automod_rule_untrusted (guild_id, rule_id, audit_id, actor, trusted)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (guild_id, rule_id) DO UPDATE
+                   SET audit_id = $3, actor = $4, trusted = $5, at = now()
+                   WHERE automod_rule_untrusted.audit_id < $3",
             )
             .bind(g)
             .bind(r)
+            .bind(e.id.get() as i64)
             .bind(actor.get() as i64)
-            .fetch_optional(&app.pool)
-            .await?;
-            if new == Some(1) {
+            .bind(ok)
+            .execute(&app.pool)
+            .await?
+            .rows_affected()
+                == 1;
+            if won && !ok {
                 let log = Log::new("Discord AutoMod Rule Changed Without A Permit", ORANGE)
                     .user("Responsible", actor.get())
                     .line("Rule", &format!("`{rule}`"))

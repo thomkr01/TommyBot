@@ -400,9 +400,9 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
         json!({"discord_automod": {"actions": {"77": ["timeout"]}}}),
     )
     .await;
-    let edit = |actor: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
+    let edit = |id: u64, actor: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
         serde_json::from_value(json!({
-            "id": "1", "action_type": 141, "guild_id": gid.to_string(), "target_id": "77",
+            "id": id.to_string(), "action_type": 141, "guild_id": gid.to_string(), "target_id": "77",
             "user_id": actor.to_string(), "reason": null, "changes": [],
         }))
         .unwrap()
@@ -414,12 +414,16 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
             "matched_keyword": null, "matched_content": null,
         }))
         .unwrap();
-    crate::native::on_rule_audit(&t.app, &edit(t.base + 5))
+    crate::native::on_rule_audit(&t.app, &edit(2, t.base + 5))
+        .await
+        .unwrap();
+    // An older trusted entry arriving late (a replay, a parallel task) does not clear it.
+    crate::native::on_rule_audit(&t.app, &edit(1, t.owner()))
         .await
         .unwrap();
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();
     assert_eq!(t.calls("PATCH"), 0, "no action after an untrusted change");
-    crate::native::on_rule_audit(&t.app, &edit(t.owner()))
+    crate::native::on_rule_audit(&t.app, &edit(3, t.owner()))
         .await
         .unwrap();
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();

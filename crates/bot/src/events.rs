@@ -584,17 +584,17 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             let g = e.0.guild_id.map(|g| g.get());
             let inflight = g.and_then(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
             let new = g.is_none() || inflight.is_some();
-            let nuke = if new {
-                antinuke::on_audit(app, &e.0).await
+            let (nuke, rule) = if new {
+                let nuke = antinuke::on_audit(app, &e.0).await;
+                (nuke, crate::native::on_rule_audit(app, &e.0).await)
             } else {
-                Ok(())
+                (Ok(()), Ok(()))
             };
             if let (true, Some(g)) = (new, g) {
                 crate::welcome::handled_audit(app, g, &e.0).await;
             }
             drop(inflight);
             let allow = crate::raiders::on_unban(app, &e.0).await;
-            let rule = crate::native::on_rule_audit(app, &e.0).await;
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
             }
