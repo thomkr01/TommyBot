@@ -110,7 +110,8 @@ fn follow(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
 }
 
 /// A refreshed list with under half the entries of the one it replaces is refused, unless the next
-/// refresh brings the same non-empty count again: then the source really shrank. Per list name.
+/// refresh brings about the same non-empty count again (within 10%): then the source really shrank.
+/// Per list name.
 #[derive(Default)]
 pub(crate) struct ShrinkGuard(std::sync::Mutex<std::collections::HashMap<&'static str, usize>>);
 
@@ -122,7 +123,8 @@ impl ShrinkGuard {
             seen.remove(var);
             return true;
         }
-        if new > 0 && seen.get(var) == Some(&new) {
+        let close = |prev: usize| new.abs_diff(prev) * 10 <= prev;
+        if new > 0 && seen.get(var).copied().is_some_and(close) {
             seen.remove(var);
             tracing::warn!(
                 var,
@@ -141,6 +143,21 @@ impl ShrinkGuard {
         );
         false
     }
+}
+
+/// Wait before the next list refresh. While a list that is on has nothing loaded (its filter is off),
+/// retry after 1, 5 and 15 minutes before falling back to [`REFRESH`]; `failures` counts the retries.
+pub fn next_refresh(loaded: bool, failures: &mut usize) -> Duration {
+    const RETRY_SECS: [u64; 3] = [60, 300, 900];
+    if loaded {
+        *failures = 0;
+        return REFRESH;
+    }
+    let wait = RETRY_SECS
+        .get(*failures)
+        .map_or(REFRESH, |s| Duration::from_secs(*s));
+    *failures += 1;
+    wait
 }
 
 /// The body, refused as soon as it passes `max` bytes (a missing or wrong Content-Length included).
@@ -195,8 +212,9 @@ impl Sites {
     }
 
     /// Re-downloads both lists. `PHISHING_LIST_URL` / `NSFW_LIST_URL` override the sources, empty disables one.
-    /// A failed download keeps the old list.
-    pub async fn refresh(&self) {
+    /// A failed download keeps the old list. True when every list that is on holds entries afterwards.
+    pub async fn refresh(&self) -> bool {
+        let mut all = true;
         for (var, default, slot) in [
             ("PHISHING_LIST_URL", PHISHING_URL, &self.phishing),
             ("NSFW_LIST_URL", NSFW_URL, &self.nsfw),
@@ -219,7 +237,9 @@ impl Sites {
                 }
                 Err(e) => tracing::warn!(?e, var, "refreshing a site list failed"),
             }
+            all &= !slot.read().unwrap().0.is_empty();
         }
+        all
     }
 
     /// Downloads an attachment for the QR check; `None` past `max` bytes or on any error.
@@ -368,16 +388,38 @@ mod tests {
         let g = ShrinkGuard::default();
         assert!(g.accept("A", 1000, 500) && g.accept("A", 0, 0) && g.accept("A", 10, 50));
         assert!(!g.accept("A", 1000, 499), "first shrunk refresh is refused");
-        assert!(!g.accept("A", 1000, 300), "a different size starts over");
         assert!(
-            g.accept("A", 1000, 300),
-            "the same size twice in a row is taken"
+            !g.accept("A", 1000, 300),
+            "a size more than 10% off starts over"
+        );
+        assert!(
+            g.accept("A", 1000, 320),
+            "within 10% of the last one is taken"
+        );
+        assert!(
+            !g.accept("A", 1000, 300) && g.accept("A", 1000, 300),
+            "the same size too"
         );
         assert!(
             !g.accept("A", 1000, 0) && !g.accept("A", 1000, 0),
             "never an empty list"
         );
         assert!(!g.accept("B", 1000, 300), "per list");
+    }
+
+    #[test]
+    fn a_list_that_is_not_loaded_is_retried_soon() {
+        let mut n = 0;
+        let waits: Vec<u64> = (0..5)
+            .map(|_| next_refresh(false, &mut n).as_secs())
+            .collect();
+        assert_eq!(waits, [60, 300, 900, REFRESH.as_secs(), REFRESH.as_secs()]);
+        assert_eq!(next_refresh(true, &mut n), REFRESH);
+        assert_eq!(
+            next_refresh(false, &mut n).as_secs(),
+            60,
+            "starts over after a load"
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ use std::{
 const TOR_URL: &str = "https://check.torproject.org/torbulkexitlist";
 const VPN_URLS: &str = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv6.txt";
 const DC_URLS: &str = "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv6.txt";
-/// A real list has no range this wide; one that does is broken or poisoned and would block whole countries.
 const MAX_BYTES: usize = 20 << 20;
+/// A real list has no range this wide; one that does is broken or poisoned and would block whole countries.
 const MIN_V4_PREFIX: u8 = 8;
 const MIN_V6_PREFIX: u8 = 16;
 /// Refuse a list that covers more than a quarter of the IPv4 space.
@@ -173,7 +173,8 @@ impl IpLists {
 
     /// Re-downloads every list. `TOR_LIST_URL` / `VPN_LIST_URL` / `HOSTING_LIST_URL` (space-separated URLs)
     /// override the sources, empty disables one. A failed, broken or much smaller download keeps the old list.
-    pub async fn refresh(&self) {
+    /// True when every list that is on holds entries afterwards.
+    pub async fn refresh(&self) -> bool {
         let slots = [
             ("TOR_LIST_URL", TOR_URL, &self.tor),
             ("VPN_LIST_URL", VPN_URLS, &self.vpn),
@@ -216,11 +217,14 @@ impl IpLists {
             }
         }
         // `loaded()` is true once any list is, so say which one is still missing.
+        let mut all = true;
         for (var, default, slot) in slots {
             if !urls(var, default).trim().is_empty() && slot.read().unwrap().is_empty() {
                 tracing::warn!(var, "IP list is empty, addresses on it are let through");
+                all = false;
             }
         }
+        all
     }
 
     async fn download(&self, url: &str) -> anyhow::Result<String> {

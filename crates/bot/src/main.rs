@@ -144,9 +144,11 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let app = app.clone();
         async move {
+            let mut failures = 0;
             loop {
-                app.sites.refresh().await;
-                tokio::time::sleep(tommybot_automod::sites::REFRESH).await;
+                let loaded = app.sites.refresh().await;
+                let wait = tommybot_automod::sites::next_refresh(loaded, &mut failures);
+                tokio::time::sleep(wait).await;
             }
         }
     });

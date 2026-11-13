@@ -151,6 +151,20 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
     }
 }
 
+/// Rewrites the pending `panic_end` job's payload in place (one statement, so it is never missing).
+async fn end_payload(app: &App, gid: Id<GuildMarker>, payload: Value) -> Result<()> {
+    let n = sqlx::query(
+        "UPDATE scheduled_jobs SET payload = $2 WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .bind(payload)
+    .execute(&app.pool)
+    .await?
+    .rows_affected();
+    anyhow::ensure!(n == 1, "panic_end job missing");
+    Ok(())
+}
+
 pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()> {
     // The check and the insert are one step: two trips at once must not start it twice, or the
     // second saves the already exempted overwrites and the categories stay open after panic ends.
@@ -168,30 +182,54 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     }
     let ends = crate::app::now_secs() + cfg.duration_secs as i64;
     // The dashboard reads the mod command lock from this job, so it exists before the category calls.
-    // No unlock yet: nothing is locked until the full payload below is saved.
-    let early = json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": false, "exempt": []});
-    if let Err(e) = jobs::replace(&app.pool, gid.get() as i64, "panic_end", early, ends).await {
+    // No unlock until the end: nothing is locked before the full payload is saved.
+    let payload = |exempted: &[Value], unlock: bool| json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": unlock, "exempt": exempted});
+    if let Err(e) = jobs::replace(
+        &app.pool,
+        gid.get() as i64,
+        "panic_end",
+        payload(&[], false),
+        ends,
+    )
+    .await
+    {
         app.panic_runs.lock().unwrap().remove(&gid.get());
         return Err(e);
     }
     let mut exempted = vec![];
+    let mut saved = Ok(());
     for &c in &cfg.whitelisted_categories {
         match exempt(app, gid, c).await {
-            Ok(saved) => exempted.push(saved),
+            Ok(one) => {
+                exempted.push(one);
+                // After each one, so a crash leaves a job that closes every category opened so far.
+                saved = end_payload(app, gid, payload(&exempted, false)).await;
+                if saved.is_err() {
+                    break;
+                }
+            }
             Err(e) => tracing::warn!(?e, channel = c.get(), "panic: exempting category failed"),
         }
     }
-    let payload = json!({
-        "lock_mod_commands": cfg.lock_mod_commands, "unlock": cfg.unlock_when_ending,
-        "exempt": &exempted
-    });
-    if let Err(e) = jobs::replace(&app.pool, gid.get() as i64, "panic_end", payload, ends).await {
+    if saved.is_ok() {
+        saved = end_payload(app, gid, payload(&exempted, cfg.unlock_when_ending)).await;
+    }
+    if let Err(e) = saved {
         // Without its end job panic mode would never end: mod commands stay locked and the
-        // categories open. Undo the start so the next trip can try again.
-        for saved in &exempted {
-            if let Err(e) = unexempt(app, gid, saved).await {
+        // categories open. Undo the start so the next trip can try again, and drop the job, or the
+        // dashboard and a restart would still read mod commands as locked.
+        for one in &exempted {
+            if let Err(e) = unexempt(app, gid, one).await {
                 tracing::warn!(?e, "panic: putting a category back failed");
             }
+        }
+        let drop_job =
+            sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'")
+                .bind(gid.get() as i64)
+                .execute(&app.pool)
+                .await;
+        if let Err(e) = drop_job {
+            tracing::warn!(?e, "panic: removing the panic_end job failed");
         }
         app.panic_runs.lock().unwrap().remove(&gid.get());
         return Err(e);
@@ -389,6 +427,52 @@ pub async fn restore(app: &App) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. The per-category re-save changes the
+    /// one pending job in place, and refuses when there is none (start then undoes itself).
+    #[tokio::test]
+    async fn end_payload_rewrites_the_pending_job_in_place() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(9_890_000_000 + std::process::id() as u64);
+        let g = gid.get() as i64;
+        assert!(end_payload(&app, gid, json!({})).await.is_err());
+        jobs::replace(
+            &app.pool,
+            g,
+            "panic_end",
+            json!({"exempt": []}),
+            crate::app::now_secs() + 3600,
+        )
+        .await
+        .unwrap();
+        let one = json!({"unlock": false, "exempt": [{"channel": 5, "had": false}]});
+        end_payload(&app, gid, one.clone()).await.unwrap();
+        assert_eq!(
+            jobs::pending(&app.pool, "panic_end")
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|(id, _)| *id == g)
+                .map(|(_, p)| p)
+                .collect::<Vec<_>>(),
+            [one]
+        );
+        sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
 
     fn text(l: Log) -> String {
         serde_json::to_string(&l.build()).unwrap()
