@@ -998,8 +998,15 @@ mod tests {
         let l = super::nuke_fallback(&an, "kick").unwrap();
         assert_eq!((l.per_min, l.per_hour), (2, 8), "kicks share the ban card");
         assert!(super::nuke_fallback(&an, "purge").is_none());
-        assert_eq!(super::limit_key(false, "kick"), super::limit_key(false, "ban"));
-        assert_eq!(super::limit_key(true, "kick"), "kick", "a permit's own limit");
+        assert_eq!(
+            super::limit_key(false, "kick"),
+            super::limit_key(false, "ban")
+        );
+        assert_eq!(
+            super::limit_key(true, "kick"),
+            "kick",
+            "a permit's own limit"
+        );
         assert!(
             super::nuke_fallback(&an, "timeout").is_none(),
             "opt-in card not set"

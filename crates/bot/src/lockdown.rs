@@ -308,7 +308,11 @@ pub async fn unlocked_info(
 /// The active locks of each guild, kept in memory: dangerous-role checks run per join and per
 /// audit entry, and a raid is when locks are on. Every lock write in this module forgets the
 /// guild (`forget_locks`); a read that raced a forget is not kept (generation).
-static LOCKS: std::sync::Mutex<(u64, std::collections::BTreeMap<u64, std::sync::Arc<Vec<Snapshot>>>)> =
+type LockCache = (
+    u64,
+    std::collections::BTreeMap<u64, std::sync::Arc<Vec<Snapshot>>>,
+);
+static LOCKS: std::sync::Mutex<LockCache> =
     std::sync::Mutex::new((0, std::collections::BTreeMap::new()));
 
 pub(crate) async fn active_locks(app: &App, guild: u64) -> Result<std::sync::Arc<Vec<Snapshot>>> {

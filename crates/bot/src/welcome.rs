@@ -179,7 +179,12 @@ async fn catch_up_retrying(app: &App, mut todo: Vec<(u64, u64)>) {
         }
         if wait == 0 {
             for (g, _) in failed {
-                gap_alert(app, Id::new(g), "TommyBot could not read the audit log after a restart or reconnect").await;
+                gap_alert(
+                    app,
+                    Id::new(g),
+                    "TommyBot could not read the audit log after a restart or reconnect",
+                )
+                .await;
             }
             return;
         }
@@ -191,7 +196,9 @@ async fn catch_up_retrying(app: &App, mut todo: Vec<(u64, u64)>) {
 async fn gap_alert(app: &App, gid: Id<GuildMarker>, why: &str) {
     let log = tommybot_logging::Log::new("Anti Nuke", tommybot_logging::embed::ALERT)
         .text(&format!("**{why}.** Actions made while it was away were not all checked by anti-nuke. Check the audit log."));
-    if let Err(e) = crate::events::send_log(app, gid.get(), tommybot_logging::LogKind::AntiNuke, log).await {
+    if let Err(e) =
+        crate::events::send_log(app, gid.get(), tommybot_logging::LogKind::AntiNuke, log).await
+    {
         tracing::warn!(?e, "audit gap alert failed");
     }
 }
@@ -221,8 +228,18 @@ pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -
         before = oldest;
     };
     if !reached {
-        tracing::warn!(guild = gid.get(), "more than {CATCH_UP_MAX} audit entries missed");
-        gap_alert(app, gid, &format!("More than {CATCH_UP_MAX} audit log entries were made while TommyBot was away")).await;
+        tracing::warn!(
+            guild = gid.get(),
+            "more than {CATCH_UP_MAX} audit entries missed"
+        );
+        gap_alert(
+            app,
+            gid,
+            &format!(
+                "More than {CATCH_UP_MAX} audit log entries were made while TommyBot was away"
+            ),
+        )
+        .await;
     }
     for mut e in missed(all, last) {
         e.guild_id = Some(gid);

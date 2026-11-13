@@ -1486,7 +1486,10 @@ async fn a_restart_reads_the_audit_entries_it_missed() {
         .unwrap();
     assert_eq!(last(&fresh), Some(9));
     assert_eq!(fresh.calls("audit-logs"), 1, "a short page is the end");
-    assert!(!crate::welcome::saw_audit(&fresh.app, g.get(), 9), "a live 9 is skipped");
+    assert!(
+        !crate::welcome::saw_audit(&fresh.app, g.get(), 9),
+        "a live 9 is skipped"
+    );
     assert_eq!(fresh.app.audit_done.lock().unwrap().get(&g.get()), Some(&9));
     // Full pages are read back until the cap.
     fresh.set(|m| m.audit = (1000..1100).map(e).collect());
@@ -1587,12 +1590,20 @@ async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
     crate::antinuke::hold_overwrite(&t.app, &lift(15, "6", "0"), Id::new(9))
         .await
         .unwrap();
-    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 2, "role deny deleted");
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/50"),
+        2,
+        "role deny deleted"
+    );
     t.set(|m| {
         m.overwrites.insert(30, vec![]);
     });
     let _ = crate::antinuke::hold_overwrite(&t.app, &lift(15, "50", "1"), Id::new(9)).await;
-    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 3, "member deny deleted");
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/50"),
+        3,
+        "member deny deleted"
+    );
     assert_eq!(t.calls(r#""deny":"1026""#), 3, "put back as it was");
     // A deny the quarantine did not put there is not the hold's matter.
     let _ = crate::antinuke::hold_overwrite(&t.app, &lift(14, "52", "1"), Id::new(9)).await;
@@ -1635,6 +1646,12 @@ async fn discord_permissions_make_nobody_staff() {
         m.members.insert((g.get(), 60), vec![5]);
         m.members.insert((g.get(), 2), vec![]);
     });
-    assert!(!crate::slowmode::exempt(&t.app, g, Id::new(60)).await, "an Administrator role");
-    assert!(crate::slowmode::exempt(&t.app, g, Id::new(2)).await, "the owner");
+    assert!(
+        !crate::slowmode::exempt(&t.app, g, Id::new(60)).await,
+        "an Administrator role"
+    );
+    assert!(
+        crate::slowmode::exempt(&t.app, g, Id::new(2)).await,
+        "the owner"
+    );
 }

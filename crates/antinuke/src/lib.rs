@@ -649,7 +649,10 @@ mod tests {
         // Four bans spread over 40 minutes of downtime, read at once: no minute holds three.
         for m in [40, 30, 20, 10] {
             let v = a.on_actions_at(1, 2, Action::Ban, false, t0, at(m), 1);
-            assert!(matches!(v, Verdict::Allow(c) if c.minute == 1), "{m}: {v:?}");
+            assert!(
+                matches!(v, Verdict::Allow(c) if c.minute == 1),
+                "{m}: {v:?}"
+            );
         }
         // A real burst in the gap still trips, and a live action sees all of them in its hour.
         assert!(matches!(

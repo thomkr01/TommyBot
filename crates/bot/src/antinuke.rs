@@ -222,7 +222,7 @@ async fn count_audit(
     e: &AuditLogEntry,
 ) -> Result<()> {
     if matches!(e.action_type, A::MemberDisconnect | A::MemberMove) {
-        return crate::voice_nuke::note(app, &cfg, gid, e).await;
+        return crate::voice_nuke::note(app, cfg, gid, e).await;
     }
     let Some(action) = watched(e) else {
         return Ok(());
@@ -276,7 +276,7 @@ async fn count_audit(
     }
     count_at(
         app,
-        &cfg,
+        cfg,
         gid,
         actor,
         action,
@@ -336,7 +336,19 @@ pub(crate) async fn count(
     exempt: bool,
     n: u32,
 ) -> Result<()> {
-    count_at(app, cfg, gid, actor, action, target, inv, exempt, n, Duration::ZERO).await
+    count_at(
+        app,
+        cfg,
+        gid,
+        actor,
+        action,
+        target,
+        inv,
+        exempt,
+        n,
+        Duration::ZERO,
+    )
+    .await
 }
 
 /// As `count`, for actions made `ago` (an audit entry read after downtime, D20): logged and
@@ -395,7 +407,15 @@ pub(crate) async fn count_at(
     let verdict = {
         let mut an = app.antinuke.lock().unwrap();
         an.limits = cfg.antinuke.watched();
-        an.on_actions_at(gid.get(), actor.get(), action, exempt, Instant::now(), ago, n)
+        an.on_actions_at(
+            gid.get(),
+            actor.get(),
+            action,
+            exempt,
+            Instant::now(),
+            ago,
+            n,
+        )
     };
     if let Some(why) = breach(&verdict, hot, action) {
         quarantine_and_revert(app, gid, actor, &why).await?;
@@ -698,7 +718,10 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
             .user("Member", target.get())
             .text("Gave a member a role that carries a permit")
             .line("Roles", &names.join(", "))
-            .line("Action", "logged only: the permit holds no moderation, dashboard or anti-nuke rights");
+            .line(
+                "Action",
+                "logged only: the permit holds no moderation, dashboard or anti-nuke rights",
+            );
         return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
     }
     // A failed undo must not spare the actor.
@@ -2027,9 +2050,13 @@ pub(crate) async fn revert_and_report(
                 let r = revert_actor(app, gid, actor, since, Some(&cfg.backups)).await;
                 // The overwrite part of the containment, after the channels are back (D14).
                 if done.applied == Applied::Quarantined {
-                    let m = async { anyhow::Ok(app.http.guild_member(gid, actor).await?.model().await?) };
+                    let m = async {
+                        anyhow::Ok(app.http.guild_member(gid, actor).await?.model().await?)
+                    };
                     match m.await {
-                        Ok(m) => hide_channels_best_effort(app, gid, actor, &m.roles, Kind::Real).await,
+                        Ok(m) => {
+                            hide_channels_best_effort(app, gid, actor, &m.roles, Kind::Real).await
+                        }
                         Err(e) => tracing::warn!(?e, "reading a nuker to hide channels failed"),
                     }
                 }
@@ -2419,7 +2446,12 @@ pub(crate) async fn hold_overwrite(
 }
 
 /// Whether the quarantine put a deny on `user`'s overwrite in `channel` (`hide_channels`).
-async fn hid_channel(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, channel: u64) -> Result<bool> {
+async fn hid_channel(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    channel: u64,
+) -> Result<bool> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = $2 AND channel_id = $3)",
     )
@@ -3020,13 +3052,15 @@ mod tests {
         .await
         .unwrap();
         for (p, r) in [(id, 7), (weak, 8), (weak, 7)] {
-            sqlx::query("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, $3)")
-                .bind(p)
-                .bind(g)
-                .bind(r)
-                .execute(&pool)
-                .await
-                .unwrap();
+            sqlx::query(
+                "INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, $3)",
+            )
+            .bind(p)
+            .bind(g)
+            .bind(r)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         let mut got = permit_roles_in(&pool, g, &[5, 7, 8]).await.unwrap();
         got.sort();
