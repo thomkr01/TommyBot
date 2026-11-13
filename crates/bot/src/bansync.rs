@@ -269,6 +269,24 @@ async fn hand_ban_since(app: &App, (to, user, src): Key) -> Result<bool> {
     .await?)
 }
 
+/// Deletes the unban job of the local temp ban a copy was laid over, with `?`: the ban's own
+/// `forget_jobs` is best effort, and a job left behind would make `owned` disown the copy and
+/// then lift it at the old end. A failure leaves the row pending for the retry.
+async fn drop_temp_job(app: &App, (to, user, src): Key) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM scheduled_jobs j USING ban_sync_links l
+         WHERE l.guild_id = $1 AND l.user_id = $2 AND l.source_guild = $3
+           AND j.guild_id = $1 AND j.kind = 'unban' AND j.payload->>'user' = $2::text
+           AND extract(epoch FROM j.run_at)::bigint = extract(epoch FROM l.temp_end)::bigint",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .execute(&app.pool)
+    .await?;
+    Ok(())
+}
+
 /// Remembers the local temp ban a copy is about to be laid over (`owned`).
 async fn over_temp(app: &App, (to, user, src): Key, reason: &str, end: Option<i64>) -> Result<()> {
     sqlx::query(
@@ -971,6 +989,7 @@ async fn ban_copy(
 /// The ban is made: the row becomes banned, then it gets its case if it has none yet.
 async fn finish_ban(app: &App, key: Key, case: Option<i32>, why: &str) -> Result<()> {
     let (to, user, src) = key;
+    drop_temp_job(app, key).await?;
     let Some(None) = claim_banned(app, key, case).await? else {
         return Ok(());
     };
