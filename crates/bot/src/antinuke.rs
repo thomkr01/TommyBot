@@ -685,12 +685,24 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
     if added.is_empty() {
         return Ok(());
     }
-    let permit = permit_roles_in(&app.pool, gid.get() as i64, &added).await?;
-    if permit.is_empty() || app.is_immune(gid, actor).await? {
+    let roles = permit_roles_in(&app.pool, gid.get() as i64, &added).await?;
+    if roles.is_empty() || app.is_immune(gid, actor).await? {
         return Ok(());
     }
+    let (permit, weak): (Vec<_>, Vec<_>) = roles.into_iter().partition(|r| r.1);
+    if permit.is_empty() {
+        // A weak permit (a link whitelist, say): reaction-role and level bots hand these out.
+        let names: Vec<String> = weak.iter().map(|r| format!("<@&{}>", r.0)).collect();
+        let log = Log::new("Anti Nuke", ALERT)
+            .user("Responsible", actor.get())
+            .user("Member", target.get())
+            .text("Gave a member a role that carries a permit")
+            .line("Roles", &names.join(", "))
+            .line("Action", "logged only: the permit holds no moderation, dashboard or anti-nuke rights");
+        return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
+    }
     // A failed undo must not spare the actor.
-    for r in permit {
+    for (r, _) in permit {
         let undo = app
             .http
             .remove_guild_member_role(gid, target.cast(), Id::new(r as u64))
@@ -711,13 +723,18 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
     .await
 }
 
-/// Which of `roles` carry a permit in the guild.
-async fn permit_roles_in(pool: &PgPool, guild: i64, roles: &[i64]) -> Result<Vec<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT DISTINCT role_id FROM permit_roles WHERE guild_id = $1 AND role_id = ANY($2)",
+/// Which of `roles` carry a permit in the guild, and whether one of their permits is guarded
+/// (`permits::GUARDED_PERMS`, `GUARDED_WHITELIST`).
+async fn permit_roles_in(pool: &PgPool, guild: i64, roles: &[i64]) -> Result<Vec<(i64, bool)>> {
+    Ok(sqlx::query_as(
+        "SELECT r.role_id, bool_or(p.perms && $3 OR p.whitelist && $4) FROM permit_roles r
+         JOIN permits p ON p.id = r.permit_id
+         WHERE r.guild_id = $1 AND r.role_id = ANY($2) GROUP BY r.role_id",
     )
     .bind(guild)
     .bind(roles)
+    .bind(permits::GUARDED_PERMS)
+    .bind(permits::GUARDED_WHITELIST)
     .fetch_all(pool)
     .await?)
 }
@@ -2995,13 +3012,26 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, 7)")
-            .bind(id)
-            .bind(g)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(permit_roles_in(&pool, g, &[5, 7]).await.unwrap(), vec![7]);
+        let (weak,): (i64,) = sqlx::query_as(
+            "INSERT INTO permits (guild_id, name, rank, whitelist) VALUES ($1, 'Links', 1, '{links}') RETURNING id",
+        )
+        .bind(g)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for (p, r) in [(id, 7), (weak, 8), (weak, 7)] {
+            sqlx::query("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, $3)")
+                .bind(p)
+                .bind(g)
+                .bind(r)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut got = permit_roles_in(&pool, g, &[5, 7, 8]).await.unwrap();
+        got.sort();
+        // 7 is guarded through its ban permit; 8 carries only a link whitelist.
+        assert_eq!(got, vec![(7, true), (8, false)]);
         assert!(permit_roles_in(&pool, g + 1, &[7])
             .await
             .unwrap()

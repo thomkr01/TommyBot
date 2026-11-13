@@ -260,7 +260,7 @@ Ticket categories and panic's Whitelisted Categories exempted every channel crea
 
 **Manage Roles handed out a whitelist.** (overlap deep dive D16, 13-11)
 Anyone with Manage Roles could give themselves a role that carries a permit, and with it the permit's anti-nuke whitelist, then nuke uncounted. Root cause: the permit tables decide trust, but who may hand out a permit's role was left to Discord's hierarchy.
-*Avoid:* giving a member a permit role is a guarded action (`antinuke::guard_permit_roles`): the role is taken back and the actor quarantined unless they are Owner, Extra Owner or Trusted Admin. Runs with anti-nuke on, after `guard_perms`, also for a self-grant.
+*Avoid:* giving a member a permit role is a guarded action (`antinuke::guard_permit_roles`): the role is taken back and the actor quarantined unless they are Owner, Extra Owner or Trusted Admin. Runs with anti-nuke on, after `guard_perms`, also for a self-grant. Only a guarded permit counts (round 2, Thomas): moderation commands, quarantine or verify, dashboard access, or the anti-nuke/quarantine whitelist (`permits::GUARDED_PERMS`, `GUARDED_WHITELIST`, one place to widen or narrow). Reaction-role, level and autorole bots hand out roles with weak permits (a link whitelist) all day; those are only logged.
 
 **A failed whitelist lookup dropped the action.** (overlap deep dive D21, 13-11)
 `on_audit` used `app.whitelisted(..)?`, so a 5xx or timeout on the member lookup returned before the action was logged or counted: a nuke during a Discord hiccup was never stopped or reverted. Root cause: an error in the exemption check was handled like "exempt".
