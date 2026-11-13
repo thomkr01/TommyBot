@@ -20,6 +20,9 @@ def call(method, path, token=None, body=None, auth=True, soft=False):
     headers = {"Content-Type": "application/json", "User-Agent": "DiscordBot (tommybot-e2e, 1)"}
     if auth:
         headers["Authorization"] = f"Bot {token or os.environ['DISCORD_TOKEN']}"
+    # Discord refuses some body-less DELETEs that carry a JSON Content-Type (400, 50109); `{}` works live.
+    if body is None and method == "DELETE":
+        body = {}
     data = json.dumps(body).encode() if body is not None else None
     while True:
         req = urllib.request.Request(API + path, data, headers, method=method)

@@ -222,8 +222,9 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         }
         ("PUT", ["guilds", _, "bans", _]) if m.fail_put => err(403, 50013),
         ("PUT", ["guilds", _, "bans", _]) if m.fail_put_5xx => err(502, 0),
+        // Discord keeps the first ban's reason when a banned user is banned again (live 11-13).
         ("PUT", ["guilds", g, "bans", u]) => {
-            m.bans.insert((n(g), n(u)), reason);
+            m.bans.entry((n(g), n(u))).or_insert(reason);
             (204, String::new())
         }
         ("DELETE", ["guilds", g, "bans", u]) => match m.bans.remove(&(n(g), n(u))) {

@@ -217,6 +217,152 @@ async fn a_synced_ban_replaces_a_shorter_local_temp_ban() {
     t.run_copies().await;
     assert_eq!(t.rows(720).await, [T::row(1, "banned", None)]);
     assert!(pending(&t, 1, "unban").await.is_empty());
+    // Discord kept the first reason, yet the copy is ours: the source's lift gives the temp ban back.
+    assert_eq!(t.banned(1, 720).as_deref(), Some("temp ban"));
+    t.set(|m| {
+        m.bans.remove(&(t.g(0).get(), 720));
+    });
+    bansync::lift_job(&t.app, t.g(0), &t.share(720, Some(77)))
+        .await
+        .unwrap();
+    let why = Some("the local temp ban runs on");
+    assert_eq!(t.rows(720).await, [T::row(1, "lifted", why)]);
+    assert_eq!(t.banned(1, 720).as_deref(), Some("temp ban"));
+    let left = pending(&t, 1, "unban").await;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!((3590..=3600).contains(&left[0].1), "the old end: {left:?}");
+    t.cleanup().await;
+}
+
+/// Live 11-13: a copy laid over a local temp ban that has ended by the source's lift is unbanned,
+/// and a retry after the copy's ban (row still pending) sees that ban as its own.
+#[tokio::test]
+async fn a_copy_over_a_temp_ban_is_ours_on_retry_and_lifted_after_its_end() {
+    let Some(t) = T::new(87).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    t.ban(1, 721, "temp ban");
+    enqueue(&t, 1, "unban", json!({"user": 721}), 3600).await;
+    t.ban(0, 721, "raiding");
+    bansync::share_job(&t.app, t.g(0), &t.share(721, Some(77)))
+        .await
+        .unwrap();
+    t.run_copies().await;
+    assert_eq!(t.rows(721).await, [T::row(1, "banned", None)]);
+    t.exec("UPDATE ban_sync_links SET temp_end = now() - interval '1 minute' WHERE guild_id = $1 + 1 AND user_id = 721")
+        .await;
+    t.set(|m| {
+        m.bans.remove(&(t.g(0).get(), 721));
+    });
+    bansync::lift_job(&t.app, t.g(0), &t.share(721, Some(77)))
+        .await
+        .unwrap();
+    assert_eq!(t.rows(721).await, [T::row(1, "lifted", None)]);
+    assert_eq!(t.banned(1, 721), None);
+    assert!(pending(&t, 1, "unban").await.is_empty());
+    // A try banned over the temp ban (its unban job is gone) and stopped before the row moved on.
+    t.ban(1, 722, "temp ban");
+    t.ban(0, 722, "raiding");
+    t.link(1, 722, 0, "pending").await;
+    t.exec("UPDATE ban_sync_links SET over_reason = 'temp ban', temp_end = now() + interval '1 hour' WHERE guild_id = $1 + 1 AND user_id = 722")
+        .await;
+    let copy = json!({"user": 722, "source": t.g(0).get()});
+    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
+    assert_eq!(t.rows(722).await, [T::row(1, "banned", None)]);
+    let cases = t
+        .count(
+            "SELECT count(*) FROM cases WHERE guild_id = $1 + 1 AND user_id = 722 AND kind = 'ban'",
+        )
+        .await;
+    assert_eq!(cases, 1, "the retry finished the copy");
+    t.cleanup().await;
+}
+
+/// R-g4: a staff ban over a done copy is theirs (Discord keeps the copy's reason, or the temp
+/// ban's), so the source's lift leaves it and its unban job; a leased temp unban job still counts.
+#[tokio::test]
+async fn a_staff_ban_over_a_copy_is_not_lifted_and_a_leased_temp_job_counts() {
+    let Some(t) = T::new(62).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    bot_on_top(&t, 1);
+    let unban_source = |u: u64| {
+        t.set(|m| {
+            m.bans.remove(&(t.g(0).get(), u));
+        })
+    };
+    let hand = Some("banned again by hand");
+    // A copy laid over a local temp ban, then a week's tempban by staff.
+    t.ban(1, 723, "temp ban");
+    enqueue(&t, 1, "unban", json!({"user": 723}), 3600).await;
+    // A plain copy, then a permanent ban by staff.
+    for u in [723, 724] {
+        t.ban(0, u, "raiding");
+        bansync::share_job(&t.app, t.g(0), &t.share(u, Some(77)))
+            .await
+            .unwrap();
+    }
+    t.run_copies().await;
+    assert_eq!(t.rows(723).await, [T::row(1, "banned", None)]);
+    assert_eq!(t.rows(724).await, [T::row(1, "banned", None)]);
+    ban(&t, 1, 723, Some(7 * 86_400)).await;
+    ban(&t, 1, 724, None).await;
+    for u in [723, 724] {
+        unban_source(u);
+        bansync::lift_job(&t.app, t.g(0), &t.share(u, Some(77)))
+            .await
+            .unwrap();
+        assert_eq!(t.rows(u).await, [T::row(1, "skipped", hand)], "{u}");
+        assert!(t.banned(1, u).is_some(), "{u}");
+    }
+    let left = pending(&t, 1, "unban").await;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].1 > 7 * 86_400 - 10, "staff's own end: {left:?}");
+    // A retry while the temp ban's unban job is leased did not ban yet: not ours, it waits.
+    t.ban(1, 725, "temp ban");
+    t.ban(0, 725, "raiding");
+    enqueue(&t, 1, "unban", json!({"user": 725}), 3600).await;
+    t.exec("UPDATE scheduled_jobs SET locked_until = now() + interval '60 seconds' WHERE guild_id = $1 + 1 AND payload->>'user' = '725'")
+        .await;
+    t.link(1, 725, 0, "pending").await;
+    t.exec("UPDATE ban_sync_links SET over_reason = 'temp ban', temp_end = (SELECT run_at FROM scheduled_jobs WHERE guild_id = $1 + 1 AND payload->>'user' = '725') WHERE guild_id = $1 + 1 AND user_id = 725")
+        .await;
+    let copy = json!({"user": 725, "source": t.g(0).get()});
+    assert!(bansync::copy_job(&t.app, t.g(1), &copy).await.is_err());
+    assert_eq!(
+        t.rows(725).await,
+        [T::row(1, "pending", None)],
+        "no phantom ban case"
+    );
+    t.cleanup().await;
+}
+
+/// R-g4 round 2: a copy is not laid over a temp ban that is ending (its unban is due or running);
+/// the copy job fails and retries, and lays the copy once the temp unban is no longer running.
+#[tokio::test]
+async fn a_copy_waits_for_a_temp_ban_that_is_ending() {
+    let Some(t) = T::new(63).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    t.ban(1, 726, "temp ban");
+    t.ban(0, 726, "raiding");
+    enqueue(&t, 1, "unban", json!({"user": 726}), 3600).await;
+    t.exec("UPDATE scheduled_jobs SET locked_until = now() + interval '60 seconds' WHERE guild_id = $1 + 1 AND payload->>'user' = '726'")
+        .await;
+    t.link(1, 726, 0, "pending").await;
+    let copy = json!({"user": 726, "source": t.g(0).get()});
+    assert!(bansync::copy_job(&t.app, t.g(1), &copy).await.is_err());
+    assert_eq!(t.rows(726).await, [T::row(1, "pending", None)]);
+    assert_eq!(pending(&t, 1, "unban").await.len(), 1, "the temp job stays");
+    // The try failed and freed its lease: the copy goes over the temp ban.
+    t.exec("UPDATE scheduled_jobs SET locked_until = NULL WHERE guild_id = $1 + 1")
+        .await;
+    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
+    assert_eq!(t.rows(726).await, [T::row(1, "banned", None)]);
+    assert!(pending(&t, 1, "unban").await.is_empty());
     t.cleanup().await;
 }
 
@@ -466,6 +612,46 @@ async fn panic_owns_only_a_lock_it_saved() {
     for i in [0, 1] {
         t.app.panic_runs.lock().unwrap().remove(&t.g(i).get());
     }
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+/// Live 11-13: a role lock and unlock keep permission bits twilight does not know (1<<48, Set
+/// Voice Channel Status), on the role and on a channel overwrite.
+#[tokio::test]
+async fn a_lock_and_unlock_keep_unknown_permission_bits() {
+    let Some(t) = T::new(86).await else { return };
+    t.server_config(0, t.owner(), json!({})).await;
+    let (g, gid) = (t.g(0).get(), t.g(0));
+    let (voice_status, ban) = (1u64 << 48, 1u64 << 2);
+    t.set(|m| {
+        m.roles.insert(
+            g,
+            vec![(g, false, voice_status | ban, 0), (500, true, 8, 10)],
+        );
+        m.members.insert((g, bansync::tests::ME), vec![500]);
+    });
+    assert!(crate::lockdown::lock(&t.app, gid, LockKind::Role)
+        .await
+        .unwrap());
+    let perms = |t: &T| t.mock.lock().unwrap().roles[&g][0].2;
+    assert_eq!(
+        perms(&t),
+        voice_status,
+        "locked: Ban Members goes, bit 48 stays"
+    );
+    crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Role))
+        .await
+        .unwrap();
+    assert_eq!(perms(&t), voice_status | ban);
+    // Overwrites are read through the same twilight type.
+    let o: twilight_model::channel::permission_overwrite::PermissionOverwrite =
+        serde_json::from_value(
+            json!({"id": "5", "type": 0, "allow": voice_status.to_string(), "deny": "0"}),
+        )
+        .unwrap();
+    assert_eq!(o.allow.bits(), voice_status);
     t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
         .await;
     t.cleanup().await;

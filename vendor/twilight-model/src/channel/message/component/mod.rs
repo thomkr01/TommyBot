@@ -1,0 +1,2129 @@
+//! Interactive message elements for use with [`Interaction`]s.
+//!
+//! Refer to [Discord Docs/Message Components] for additional information.
+//!
+//! [`Interaction`]: crate::application::interaction::Interaction
+//! [Discord Docs/Message Components]: https://discord.com/developers/docs/interactions/message-components
+
+mod action_row;
+mod button;
+mod checkbox;
+mod checkbox_group;
+mod container;
+mod file_display;
+mod file_upload;
+mod kind;
+mod label;
+mod media_gallery;
+mod section;
+mod select_menu;
+mod separator;
+mod text_display;
+mod text_input;
+mod thumbnail;
+mod unfurled_media;
+
+pub use self::{
+    action_row::ActionRow,
+    button::{Button, ButtonStyle},
+    checkbox::Checkbox,
+    checkbox_group::{CheckboxGroup, CheckboxGroupOption},
+    container::Container,
+    file_display::FileDisplay,
+    file_upload::FileUpload,
+    kind::ComponentType,
+    label::Label,
+    media_gallery::{MediaGallery, MediaGalleryItem},
+    section::Section,
+    select_menu::{SelectDefaultValue, SelectMenu, SelectMenuOption, SelectMenuType},
+    separator::{Separator, SeparatorSpacingSize},
+    text_display::TextDisplay,
+    text_input::{TextInput, TextInputStyle},
+    thumbnail::Thumbnail,
+    unfurled_media::UnfurledMediaItem,
+};
+
+use super::EmojiReactionType;
+use crate::{
+    channel::ChannelType,
+    id::{Id, marker::SkuMarker},
+};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    de::{Deserializer, Error as DeError, IgnoredAny, MapAccess, Visitor},
+    ser::{Error as SerError, SerializeStruct},
+};
+use serde_value::{DeserializerError, Value};
+use std::fmt::{Formatter, Result as FmtResult};
+
+/// Interactive message element.
+///
+/// Must be either a top level [`ActionRow`] or nested inside one.
+///
+/// # Examples
+///
+/// ## Button
+///
+/// ```
+/// use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle, Component};
+///
+/// Component::ActionRow(ActionRow {
+///     id: None,
+///     components: Vec::from([Component::Button(Button {
+///         id: None,
+///         custom_id: Some("click_one".to_owned()),
+///         disabled: false,
+///         emoji: None,
+///         label: Some("Click me!".to_owned()),
+///         style: ButtonStyle::Primary,
+///         url: None,
+///         sku_id: None,
+///     })]),
+/// });
+/// ```
+///
+/// ## Select menu
+///
+/// ```
+/// use twilight_model::{
+///     channel::message::{
+///         EmojiReactionType,
+///         component::{ActionRow, Component, SelectMenu, SelectMenuOption, SelectMenuType},
+///     },
+///     id::Id,
+/// };
+///
+/// Component::ActionRow(ActionRow {
+///     id: None,
+///     components: vec![Component::SelectMenu(SelectMenu {
+///         id: None,
+///         channel_types: None,
+///         custom_id: "class_select_1".to_owned(),
+///         default_values: None,
+///         disabled: false,
+///         kind: SelectMenuType::Text,
+///         max_values: Some(3),
+///         min_values: Some(1),
+///         options: Some(Vec::from([
+///             SelectMenuOption {
+///                 default: false,
+///                 emoji: Some(EmojiReactionType::Custom {
+///                     animated: false,
+///                     id: Id::new(625891304148303894),
+///                     name: Some("rogue".to_owned()),
+///                 }),
+///                 description: Some("Sneak n stab".to_owned()),
+///                 label: "Rogue".to_owned(),
+///                 value: "rogue".to_owned(),
+///             },
+///             SelectMenuOption {
+///                 default: false,
+///                 emoji: Some(EmojiReactionType::Custom {
+///                     animated: false,
+///                     id: Id::new(625891304081063986),
+///                     name: Some("mage".to_owned()),
+///                 }),
+///                 description: Some("Turn 'em into a sheep".to_owned()),
+///                 label: "Mage".to_owned(),
+///                 value: "mage".to_owned(),
+///             },
+///             SelectMenuOption {
+///                 default: false,
+///                 emoji: Some(EmojiReactionType::Custom {
+///                     animated: false,
+///                     id: Id::new(625891303795982337),
+///                     name: Some("priest".to_owned()),
+///                 }),
+///                 description: Some("You get heals when I'm done doing damage".to_owned()),
+///                 label: "Priest".to_owned(),
+///                 value: "priest".to_owned(),
+///             },
+///         ])),
+///         placeholder: Some("Choose a class".to_owned()),
+///         required: None,
+///     })],
+/// });
+/// ```
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum Component {
+    /// Top level, non-interactive container of other (non action row) components.
+    ActionRow(ActionRow),
+    /// Clickable item that renders below messages.
+    Button(Button),
+    /// A selectable checkbox in a modal
+    Checkbox(Checkbox),
+    /// A group of selectable checkboxes in a modal
+    CheckboxGroup(CheckboxGroup),
+    /// Container that visually groups a set of components.
+    Container(Container),
+    /// Displays an attached file.
+    File(FileDisplay),
+    /// Allows uploading files in a modal.
+    FileUpload(FileUpload),
+    /// Wrapper for modal components providing a label and an optional description.
+    Label(Label),
+    /// Display images and other media.
+    MediaGallery(MediaGallery),
+    /// Container to display text alongside an accessory component.
+    Section(Section),
+    /// Dropdown-style item that renders below messages.
+    SelectMenu(SelectMenu),
+    /// Component to add vertical padding between other components.
+    Separator(Separator),
+    /// Markdown text.
+    TextDisplay(TextDisplay),
+    /// Pop-up item that renders on modals.
+    TextInput(TextInput),
+    /// Small image that can be used as an accessory.
+    Thumbnail(Thumbnail),
+    /// Variant value is unknown to the library.
+    Unknown(u8),
+}
+
+impl Component {
+    /// Type of component that this is.
+    ///
+    /// ```
+    /// use twilight_model::channel::message::component::{
+    ///     Button, ButtonStyle, Component, ComponentType,
+    /// };
+    ///
+    /// let component = Component::Button(Button {
+    ///     id: None,
+    ///     custom_id: None,
+    ///     disabled: false,
+    ///     emoji: None,
+    ///     label: Some("ping".to_owned()),
+    ///     style: ButtonStyle::Primary,
+    ///     url: None,
+    ///     sku_id: None,
+    /// });
+    ///
+    /// assert_eq!(ComponentType::Button, component.kind());
+    /// ```
+    pub const fn kind(&self) -> ComponentType {
+        match self {
+            Component::ActionRow(_) => ComponentType::ActionRow,
+            Component::Button(_) => ComponentType::Button,
+            Component::Checkbox(_) => ComponentType::Checkbox,
+            Component::CheckboxGroup(_) => ComponentType::CheckboxGroup,
+            Component::Container(_) => ComponentType::Container,
+            Component::File(_) => ComponentType::File,
+            Component::FileUpload(_) => ComponentType::FileUpload,
+            Component::Label(_) => ComponentType::Label,
+            Component::MediaGallery(_) => ComponentType::MediaGallery,
+            Component::Section(_) => ComponentType::Section,
+            Component::SelectMenu(SelectMenu { kind, .. }) => match kind {
+                SelectMenuType::Channel => ComponentType::ChannelSelectMenu,
+                SelectMenuType::Mentionable => ComponentType::MentionableSelectMenu,
+                SelectMenuType::Role => ComponentType::RoleSelectMenu,
+                SelectMenuType::Text => ComponentType::TextSelectMenu,
+                SelectMenuType::User => ComponentType::UserSelectMenu,
+            },
+            Component::Separator(_) => ComponentType::Separator,
+            Component::TextDisplay(_) => ComponentType::TextDisplay,
+            Component::TextInput(_) => ComponentType::TextInput,
+            Component::Thumbnail(_) => ComponentType::Thumbnail,
+            Component::Unknown(unknown) => ComponentType::Unknown(*unknown),
+        }
+    }
+
+    /// Get the amount of components a component should count as.
+    pub const fn component_count(&self) -> usize {
+        match self {
+            Component::ActionRow(action_row) => 1 + action_row.components.len(),
+            Component::Button(_)
+            | Component::Checkbox(_)
+            | Component::CheckboxGroup(_)
+            | Component::File(_)
+            | Component::FileUpload(_)
+            | Component::MediaGallery(_)
+            | Component::SelectMenu(_)
+            | Component::Separator(_)
+            | Component::TextDisplay(_)
+            | Component::TextInput(_)
+            | Component::Thumbnail(_)
+            | Component::Unknown(_) => 1,
+            Component::Container(container) => 1 + container.components.len(),
+            Component::Label(_) => 2,
+            Component::Section(section) => 1 + section.components.len(),
+        }
+    }
+}
+
+impl From<ActionRow> for Component {
+    fn from(action_row: ActionRow) -> Self {
+        Self::ActionRow(action_row)
+    }
+}
+
+impl From<Button> for Component {
+    fn from(button: Button) -> Self {
+        Self::Button(button)
+    }
+}
+
+impl From<Checkbox> for Component {
+    fn from(checkbox: Checkbox) -> Self {
+        Self::Checkbox(checkbox)
+    }
+}
+
+impl From<CheckboxGroup> for Component {
+    fn from(checkbox_group: CheckboxGroup) -> Self {
+        Self::CheckboxGroup(checkbox_group)
+    }
+}
+
+impl From<Container> for Component {
+    fn from(container: Container) -> Self {
+        Self::Container(container)
+    }
+}
+
+impl From<FileDisplay> for Component {
+    fn from(file_display: FileDisplay) -> Self {
+        Self::File(file_display)
+    }
+}
+
+impl From<FileUpload> for Component {
+    fn from(file_upload: FileUpload) -> Self {
+        Self::FileUpload(file_upload)
+    }
+}
+
+impl From<Label> for Component {
+    fn from(label: Label) -> Self {
+        Self::Label(label)
+    }
+}
+
+impl From<MediaGallery> for Component {
+    fn from(media_gallery: MediaGallery) -> Self {
+        Self::MediaGallery(media_gallery)
+    }
+}
+
+impl From<Section> for Component {
+    fn from(section: Section) -> Self {
+        Self::Section(section)
+    }
+}
+
+impl From<SelectMenu> for Component {
+    fn from(select_menu: SelectMenu) -> Self {
+        Self::SelectMenu(select_menu)
+    }
+}
+
+impl From<Separator> for Component {
+    fn from(separator: Separator) -> Self {
+        Self::Separator(separator)
+    }
+}
+
+impl From<TextDisplay> for Component {
+    fn from(text_display: TextDisplay) -> Self {
+        Self::TextDisplay(text_display)
+    }
+}
+
+impl From<TextInput> for Component {
+    fn from(text_input: TextInput) -> Self {
+        Self::TextInput(text_input)
+    }
+}
+
+impl From<Thumbnail> for Component {
+    fn from(thumbnail: Thumbnail) -> Self {
+        Self::Thumbnail(thumbnail)
+    }
+}
+
+impl TryFrom<Component> for ActionRow {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::ActionRow(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for Button {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::Button(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for Checkbox {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::Checkbox(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for CheckboxGroup {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::CheckboxGroup(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for Container {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::Container(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for FileDisplay {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::File(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for FileUpload {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::FileUpload(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for Label {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::Label(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for MediaGallery {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::MediaGallery(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for Section {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::Section(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for SelectMenu {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::SelectMenu(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for Separator {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::Separator(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for TextDisplay {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::TextDisplay(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for TextInput {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::TextInput(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl TryFrom<Component> for Thumbnail {
+    type Error = Component;
+
+    fn try_from(value: Component) -> Result<Self, Self::Error> {
+        match value {
+            Component::Thumbnail(inner) => Ok(inner),
+            _ => Err(value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Component {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ComponentVisitor)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum Field {
+    AccentColor,
+    Accessory,
+    ChannelTypes,
+    Component,
+    Components,
+    Content,
+    CustomId,
+    Default,
+    DefaultValues,
+    Description,
+    Disabled,
+    Divider,
+    Emoji,
+    File,
+    FileTypes,
+    Id,
+    Items,
+    Label,
+    MaxLength,
+    MaxValues,
+    Media,
+    MinLength,
+    MinValues,
+    Options,
+    Placeholder,
+    Required,
+    SkuId,
+    Spacing,
+    Spoiler,
+    Style,
+    Type,
+    Url,
+    Value,
+}
+
+struct ComponentVisitor;
+
+impl<'de> Visitor<'de> for ComponentVisitor {
+    type Value = Component;
+
+    fn expecting(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str("struct Component")
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn visit_map<V: MapAccess<'de>>(self, mut map: V) -> Result<Self::Value, V::Error> {
+        // Required fields.
+        let mut components: Option<Vec<Component>> = None;
+        let mut kind: Option<ComponentType> = None;
+        let mut options: Option<Value> = None;
+        let mut style: Option<Value> = None;
+
+        // Liminal fields.
+        let mut custom_id: Option<Option<Value>> = None;
+        let mut label: Option<Option<String>> = None;
+
+        // Optional fields.
+        let mut channel_types: Option<Vec<ChannelType>> = None;
+        let mut default_values: Option<Vec<SelectDefaultValue>> = None;
+        let mut disabled: Option<bool> = None;
+        let mut emoji: Option<Option<EmojiReactionType>> = None;
+        let mut max_length: Option<Option<u16>> = None;
+        let mut max_values: Option<Option<u8>> = None;
+        let mut min_length: Option<Option<u16>> = None;
+        let mut min_values: Option<Option<u8>> = None;
+        let mut placeholder: Option<Option<String>> = None;
+        let mut required: Option<Option<bool>> = None;
+        let mut url: Option<Option<String>> = None;
+        let mut sku_id: Option<Id<SkuMarker>> = None;
+        let mut value: Option<Option<String>> = None;
+        let mut default: Option<bool> = None;
+
+        let mut id: Option<i32> = None;
+        let mut content: Option<String> = None;
+        let mut items: Option<Vec<MediaGalleryItem>> = None;
+        let mut divider: Option<bool> = None;
+        let mut spacing: Option<SeparatorSpacingSize> = None;
+        let mut file: Option<UnfurledMediaItem> = None;
+        let mut spoiler: Option<bool> = None;
+        let mut accessory: Option<Component> = None;
+        let mut media: Option<UnfurledMediaItem> = None;
+        let mut description: Option<Option<String>> = None;
+        let mut accent_color: Option<Option<u32>> = None;
+        let mut component: Option<Component> = None;
+        let mut file_types: Option<Option<Vec<String>>> = None;
+
+        loop {
+            let key = match map.next_key() {
+                Ok(Some(key)) => key,
+                Ok(None) => break,
+                Err(_) => {
+                    map.next_value::<IgnoredAny>()?;
+
+                    continue;
+                }
+            };
+
+            match key {
+                Field::ChannelTypes => {
+                    if channel_types.is_some() {
+                        return Err(DeError::duplicate_field("channel_types"));
+                    }
+
+                    channel_types = Some(map.next_value()?);
+                }
+                Field::Components => {
+                    if components.is_some() {
+                        return Err(DeError::duplicate_field("components"));
+                    }
+
+                    components = Some(map.next_value()?);
+                }
+                Field::CustomId => {
+                    if custom_id.is_some() {
+                        return Err(DeError::duplicate_field("custom_id"));
+                    }
+
+                    custom_id = Some(map.next_value()?);
+                }
+                Field::Default => {
+                    if default.is_some() {
+                        return Err(DeError::duplicate_field("default"));
+                    }
+
+                    default = Some(map.next_value()?)
+                }
+                Field::DefaultValues => {
+                    if default_values.is_some() {
+                        return Err(DeError::duplicate_field("default_values"));
+                    }
+
+                    default_values = map.next_value()?;
+                }
+                Field::Disabled => {
+                    if disabled.is_some() {
+                        return Err(DeError::duplicate_field("disabled"));
+                    }
+
+                    disabled = Some(map.next_value()?);
+                }
+                Field::Emoji => {
+                    if emoji.is_some() {
+                        return Err(DeError::duplicate_field("emoji"));
+                    }
+
+                    emoji = Some(map.next_value()?);
+                }
+                Field::FileTypes => {
+                    if file_types.is_some() {
+                        return Err(DeError::duplicate_field("file_types"));
+                    }
+
+                    file_types = Some(map.next_value()?);
+                }
+                Field::Label => {
+                    if label.is_some() {
+                        return Err(DeError::duplicate_field("label"));
+                    }
+
+                    label = Some(map.next_value()?);
+                }
+                Field::MaxLength => {
+                    if max_length.is_some() {
+                        return Err(DeError::duplicate_field("max_length"));
+                    }
+
+                    max_length = Some(map.next_value()?);
+                }
+                Field::MaxValues => {
+                    if max_values.is_some() {
+                        return Err(DeError::duplicate_field("max_values"));
+                    }
+
+                    max_values = Some(map.next_value()?);
+                }
+                Field::MinLength => {
+                    if min_length.is_some() {
+                        return Err(DeError::duplicate_field("min_length"));
+                    }
+
+                    min_length = Some(map.next_value()?);
+                }
+                Field::MinValues => {
+                    if min_values.is_some() {
+                        return Err(DeError::duplicate_field("min_values"));
+                    }
+
+                    min_values = Some(map.next_value()?);
+                }
+                Field::Options => {
+                    if options.is_some() {
+                        return Err(DeError::duplicate_field("options"));
+                    }
+
+                    options = Some(map.next_value()?);
+                }
+                Field::Placeholder => {
+                    if placeholder.is_some() {
+                        return Err(DeError::duplicate_field("placeholder"));
+                    }
+
+                    placeholder = Some(map.next_value()?);
+                }
+                Field::Required => {
+                    if required.is_some() {
+                        return Err(DeError::duplicate_field("required"));
+                    }
+
+                    required = Some(map.next_value()?);
+                }
+                Field::Style => {
+                    if style.is_some() {
+                        return Err(DeError::duplicate_field("style"));
+                    }
+
+                    style = Some(map.next_value()?);
+                }
+                Field::Type => {
+                    if kind.is_some() {
+                        return Err(DeError::duplicate_field("type"));
+                    }
+
+                    kind = Some(map.next_value()?);
+                }
+                Field::Url => {
+                    if url.is_some() {
+                        return Err(DeError::duplicate_field("url"));
+                    }
+
+                    url = Some(map.next_value()?);
+                }
+                Field::SkuId => {
+                    if sku_id.is_some() {
+                        return Err(DeError::duplicate_field("sku_id"));
+                    }
+
+                    sku_id = map.next_value()?;
+                }
+                Field::Value => {
+                    if value.is_some() {
+                        return Err(DeError::duplicate_field("value"));
+                    }
+
+                    value = Some(map.next_value()?);
+                }
+                Field::Id => {
+                    if id.is_some() {
+                        return Err(DeError::duplicate_field("id"));
+                    }
+
+                    id = Some(map.next_value()?);
+                }
+                Field::Content => {
+                    if content.is_some() {
+                        return Err(DeError::duplicate_field("content"));
+                    }
+
+                    content = Some(map.next_value()?);
+                }
+                Field::Items => {
+                    if items.is_some() {
+                        return Err(DeError::duplicate_field("items"));
+                    }
+
+                    items = Some(map.next_value()?);
+                }
+                Field::Divider => {
+                    if divider.is_some() {
+                        return Err(DeError::duplicate_field("divider"));
+                    }
+
+                    divider = Some(map.next_value()?);
+                }
+                Field::Spacing => {
+                    if spacing.is_some() {
+                        return Err(DeError::duplicate_field("spacing"));
+                    }
+
+                    spacing = Some(map.next_value()?);
+                }
+                Field::File => {
+                    if file.is_some() {
+                        return Err(DeError::duplicate_field("file"));
+                    }
+
+                    file = Some(map.next_value()?);
+                }
+                Field::Spoiler => {
+                    if spoiler.is_some() {
+                        return Err(DeError::duplicate_field("spoiler"));
+                    }
+
+                    spoiler = Some(map.next_value()?);
+                }
+                Field::Accessory => {
+                    if accessory.is_some() {
+                        return Err(DeError::duplicate_field("accessory"));
+                    }
+
+                    accessory = Some(map.next_value()?);
+                }
+                Field::Media => {
+                    if media.is_some() {
+                        return Err(DeError::duplicate_field("media"));
+                    }
+
+                    media = Some(map.next_value()?);
+                }
+                Field::Description => {
+                    if description.is_some() {
+                        return Err(DeError::duplicate_field("description"));
+                    }
+
+                    description = Some(map.next_value()?);
+                }
+                Field::AccentColor => {
+                    if accent_color.is_some() {
+                        return Err(DeError::duplicate_field("accent_color"));
+                    }
+
+                    accent_color = Some(map.next_value()?);
+                }
+                Field::Component => {
+                    if component.is_some() {
+                        return Err(DeError::duplicate_field("component"));
+                    }
+
+                    component = Some(map.next_value()?);
+                }
+            }
+        }
+
+        let kind = kind.ok_or_else(|| DeError::missing_field("type"))?;
+
+        Ok(match kind {
+            // Required fields:
+            // - components
+            ComponentType::ActionRow => {
+                let components = components.ok_or_else(|| DeError::missing_field("components"))?;
+
+                Self::Value::ActionRow(ActionRow { components, id })
+            }
+            // Required fields:
+            // - style
+            //
+            // Optional fields:
+            // - custom_id
+            // - disabled
+            // - emoji
+            // - label
+            // - url
+            // - sku_id
+            ComponentType::Button => {
+                let style = style
+                    .ok_or_else(|| DeError::missing_field("style"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+
+                let custom_id = custom_id
+                    .flatten()
+                    .map(Value::deserialize_into)
+                    .transpose()
+                    .map_err(DeserializerError::into_error)?;
+
+                Self::Value::Button(Button {
+                    custom_id,
+                    disabled: disabled.unwrap_or_default(),
+                    emoji: emoji.unwrap_or_default(),
+                    label: label.flatten(),
+                    style,
+                    url: url.unwrap_or_default(),
+                    sku_id,
+                    id,
+                })
+            }
+            // Required fields:
+            // - custom_id
+            // - options (if this is a text select menu)
+            //
+            // Optional fields:
+            // - default_values
+            // - disabled
+            // - max_values
+            // - min_values
+            // - placeholder
+            // - channel_types (if this is a channel select menu)
+            // - required
+            kind @ (ComponentType::TextSelectMenu
+            | ComponentType::UserSelectMenu
+            | ComponentType::RoleSelectMenu
+            | ComponentType::MentionableSelectMenu
+            | ComponentType::ChannelSelectMenu) => {
+                // Verify the individual variants' required fields
+                if kind == ComponentType::TextSelectMenu && options.is_none() {
+                    return Err(DeError::missing_field("options"));
+                }
+
+                let custom_id = custom_id
+                    .flatten()
+                    .ok_or_else(|| DeError::missing_field("custom_id"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+
+                Self::Value::SelectMenu(SelectMenu {
+                    channel_types,
+                    custom_id,
+                    default_values,
+                    disabled: disabled.unwrap_or_default(),
+                    kind: match kind {
+                        ComponentType::TextSelectMenu => SelectMenuType::Text,
+                        ComponentType::UserSelectMenu => SelectMenuType::User,
+                        ComponentType::RoleSelectMenu => SelectMenuType::Role,
+                        ComponentType::MentionableSelectMenu => SelectMenuType::Mentionable,
+                        ComponentType::ChannelSelectMenu => SelectMenuType::Channel,
+                        // This branch is unreachable unless we add a new type above and forget to
+                        // also add it here
+                        _ => {
+                            unreachable!("select menu component type is only partially implemented")
+                        }
+                    },
+                    max_values: max_values.unwrap_or_default(),
+                    min_values: min_values.unwrap_or_default(),
+                    options: options
+                        .map(Value::deserialize_into)
+                        .transpose()
+                        .map_err(DeserializerError::into_error)?,
+                    placeholder: placeholder.unwrap_or_default(),
+                    id,
+                    required: required.unwrap_or_default(),
+                })
+            }
+            // Required fields:
+            // - custom_id
+            // - style
+            //
+            // Optional fields:
+            // - label
+            // - max_length
+            // - min_length
+            // - placeholder
+            // - required
+            // - value
+            ComponentType::TextInput => {
+                let custom_id = custom_id
+                    .flatten()
+                    .ok_or_else(|| DeError::missing_field("custom_id"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+
+                let style = style
+                    .ok_or_else(|| DeError::missing_field("style"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+
+                #[allow(deprecated)]
+                Self::Value::TextInput(TextInput {
+                    custom_id,
+                    label: label.unwrap_or_default(),
+                    max_length: max_length.unwrap_or_default(),
+                    min_length: min_length.unwrap_or_default(),
+                    placeholder: placeholder.unwrap_or_default(),
+                    required: required.unwrap_or_default(),
+                    style,
+                    value: value.unwrap_or_default(),
+                    id,
+                })
+            }
+            ComponentType::TextDisplay => {
+                let content = content.ok_or_else(|| DeError::missing_field("content"))?;
+
+                Self::Value::TextDisplay(TextDisplay { content, id })
+            }
+            ComponentType::MediaGallery => {
+                let items = items.ok_or_else(|| DeError::missing_field("items"))?;
+
+                Self::Value::MediaGallery(MediaGallery { id, items })
+            }
+            ComponentType::Separator => Self::Value::Separator(Separator {
+                divider,
+                id,
+                spacing,
+            }),
+            ComponentType::File => {
+                let file = file.ok_or_else(|| DeError::missing_field("file"))?;
+
+                Self::Value::File(FileDisplay { file, id, spoiler })
+            }
+            ComponentType::Unknown(unknown) => Self::Value::Unknown(unknown),
+            ComponentType::Section => {
+                let components = components.ok_or_else(|| DeError::missing_field("components"))?;
+                let accessory = accessory.ok_or_else(|| DeError::missing_field("accessory"))?;
+                Self::Value::Section(Section {
+                    id,
+                    components,
+                    accessory: Box::new(accessory),
+                })
+            }
+            ComponentType::Thumbnail => {
+                let media = media.ok_or_else(|| DeError::missing_field("media"))?;
+                Self::Value::Thumbnail(Thumbnail {
+                    description,
+                    id,
+                    media,
+                    spoiler,
+                })
+            }
+            ComponentType::Container => {
+                let components = components.ok_or_else(|| DeError::missing_field("components"))?;
+                Self::Value::Container(Container {
+                    accent_color,
+                    components,
+                    id,
+                    spoiler,
+                })
+            }
+            ComponentType::Label => {
+                let label = label
+                    .flatten()
+                    .ok_or_else(|| DeError::missing_field("label"))?;
+                let component = component.ok_or_else(|| DeError::missing_field("component"))?;
+                Self::Value::Label(Label {
+                    id,
+                    label,
+                    description: description.unwrap_or_default(),
+                    component: Box::new(component),
+                })
+            }
+            ComponentType::FileUpload => {
+                let custom_id = custom_id
+                    .flatten()
+                    .ok_or_else(|| DeError::missing_field("custom_id"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+
+                Self::Value::FileUpload(FileUpload {
+                    id,
+                    custom_id,
+                    max_values: max_values.unwrap_or_default(),
+                    min_values: min_values.unwrap_or_default(),
+                    required: required.unwrap_or_default(),
+                    file_types: file_types.unwrap_or_default(),
+                })
+            }
+            ComponentType::CheckboxGroup => {
+                let custom_id = custom_id
+                    .flatten()
+                    .ok_or_else(|| DeError::missing_field("custom_id"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+
+                let options = options
+                    .ok_or_else(|| DeError::missing_field("options"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+
+                Self::Value::CheckboxGroup(CheckboxGroup {
+                    id,
+                    custom_id,
+                    options,
+                    min_values: min_values.unwrap_or_default(),
+                    max_values: max_values.unwrap_or_default(),
+                    required: required.unwrap_or_default(),
+                })
+            }
+            ComponentType::Checkbox => {
+                let custom_id = custom_id
+                    .flatten()
+                    .ok_or_else(|| DeError::missing_field("custom_id"))?
+                    .deserialize_into()
+                    .map_err(DeserializerError::into_error)?;
+                Self::Value::Checkbox(Checkbox {
+                    custom_id,
+                    default,
+                    id,
+                })
+            }
+        })
+    }
+}
+
+impl Serialize for Component {
+    #[allow(clippy::too_many_lines)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let len = match self {
+            // Required fields:
+            // - type
+            // - components
+            //
+            // Optional fields:
+            // - id
+            Component::ActionRow(row) => 2 + usize::from(row.id.is_some()),
+            // Required fields:
+            // - type
+            // - style
+            //
+            // Optional fields:
+            // - id
+            // - custom_id
+            // - disabled
+            // - emoji
+            // - label
+            // - url
+            // - sku_id
+            Component::Button(button) => {
+                2 + usize::from(button.custom_id.is_some())
+                    + usize::from(button.disabled)
+                    + usize::from(button.emoji.is_some())
+                    + usize::from(button.label.is_some())
+                    + usize::from(button.url.is_some())
+                    + usize::from(button.sku_id.is_some())
+                    + usize::from(button.id.is_some())
+            }
+            // Required fields:
+            // - custom_id
+            // - options (for text select menus)
+            // - type
+            //
+            // Optional fields:
+            // - id
+            // - channel_types (for channel select menus)
+            // - default_values
+            // - disabled
+            // - max_values
+            // - min_values
+            // - placeholder
+            // - required
+            Component::SelectMenu(select_menu) => {
+                // We ignore text menus that don't include the `options` field, as those are
+                // detected later in the serialization process
+                2 + usize::from(select_menu.channel_types.is_some())
+                    + usize::from(select_menu.default_values.is_some())
+                    + usize::from(select_menu.disabled)
+                    + usize::from(select_menu.max_values.is_some())
+                    + usize::from(select_menu.min_values.is_some())
+                    + usize::from(select_menu.options.is_some())
+                    + usize::from(select_menu.placeholder.is_some())
+                    + usize::from(select_menu.id.is_some())
+                    + usize::from(select_menu.required.is_some())
+            }
+            // Required fields:
+            // - custom_id
+            // - style
+            // - type
+            //
+            // Optional fields:
+            // - id
+            // - label
+            // - max_length
+            // - min_length
+            // - placeholder
+            // - required
+            // - value
+            #[allow(deprecated)]
+            Component::TextInput(text_input) => {
+                3 + usize::from(text_input.label.is_some())
+                    + usize::from(text_input.max_length.is_some())
+                    + usize::from(text_input.min_length.is_some())
+                    + usize::from(text_input.placeholder.is_some())
+                    + usize::from(text_input.required.is_some())
+                    + usize::from(text_input.value.is_some())
+                    + usize::from(text_input.id.is_some())
+            }
+            // Required fields:
+            // - type
+            // - content
+            // Optional fields:
+            // - id
+            Component::TextDisplay(text_display) => 2 + usize::from(text_display.id.is_some()),
+            // Required fields:
+            // - type
+            // - items
+            // Optional fields:
+            // - id
+            Component::MediaGallery(media_gallery) => 2 + usize::from(media_gallery.id.is_some()),
+            // Required fields:
+            // - type
+            // Optional fields:
+            // - id
+            // - divider
+            // - spacing
+            Component::Separator(separator) => {
+                1 + usize::from(separator.divider.is_some())
+                    + usize::from(separator.spacing.is_some())
+                    + usize::from(separator.id.is_some())
+            }
+            // Required fields:
+            // - type
+            // - file
+            // Optional fields:
+            // - id
+            // - spoiler
+            Component::File(file) => {
+                2 + usize::from(file.spoiler.is_some()) + usize::from(file.id.is_some())
+            }
+            // Required fields:
+            // - type
+            // - components
+            // - accessory
+            // Optional fields:
+            // - id
+            Component::Section(section) => 3 + usize::from(section.id.is_some()),
+            // Required fields:
+            // - type
+            // - components
+            // Optional fields:
+            // - id
+            // - accent_color
+            // - spoiler
+            Component::Container(container) => {
+                2 + usize::from(container.accent_color.is_some())
+                    + usize::from(container.spoiler.is_some())
+                    + usize::from(container.id.is_some())
+            }
+            // Required fields:
+            // - type
+            // - media
+            // Optional fields:
+            // - id
+            // - description
+            // - spoiler
+            Component::Thumbnail(thumbnail) => {
+                2 + usize::from(thumbnail.spoiler.is_some())
+                    + usize::from(thumbnail.description.is_some())
+                    + usize::from(thumbnail.id.is_some())
+            }
+            // Required fields:
+            // - type
+            // - label
+            // - component
+            // Optional fields:
+            // - id
+            // - description
+            Component::Label(label) => {
+                3 + usize::from(label.description.is_some()) + usize::from(label.id.is_some())
+            }
+            // Required fields:
+            // - type
+            // - custom_id
+            // Optional fields:
+            // - id
+            // - min_values
+            // - max_values
+            // - file_types
+            // - required
+            Component::FileUpload(file_upload) => {
+                2 + usize::from(file_upload.min_values.is_some())
+                    + usize::from(file_upload.max_values.is_some())
+                    + usize::from(file_upload.required.is_some())
+                    + usize::from(file_upload.id.is_some())
+                    + usize::from(file_upload.file_types.is_some())
+            }
+            Component::CheckboxGroup(checkbox_group) => {
+                3 + usize::from(checkbox_group.id.is_some())
+                    + usize::from(checkbox_group.min_values.is_some())
+                    + usize::from(checkbox_group.max_values.is_some())
+                    + usize::from(checkbox_group.required.is_some())
+            }
+            Component::Checkbox(checkbox) => {
+                2 + usize::from(checkbox.id.is_some()) + usize::from(checkbox.default.is_some())
+            }
+            // We are dropping fields here but nothing we can do about that for
+            // the time being.
+            Component::Unknown(_) => 1,
+        };
+
+        let mut state = serializer.serialize_struct("Component", len)?;
+
+        match self {
+            Component::ActionRow(action_row) => {
+                state.serialize_field("type", &ComponentType::ActionRow)?;
+                if let Some(id) = action_row.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                state.serialize_field("components", &action_row.components)?;
+            }
+            Component::Button(button) => {
+                state.serialize_field("type", &ComponentType::Button)?;
+                if let Some(id) = button.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                if button.custom_id.is_some() {
+                    state.serialize_field("custom_id", &button.custom_id)?;
+                }
+
+                if button.disabled {
+                    state.serialize_field("disabled", &button.disabled)?;
+                }
+
+                if button.emoji.is_some() {
+                    state.serialize_field("emoji", &button.emoji)?;
+                }
+
+                if button.label.is_some() {
+                    state.serialize_field("label", &button.label)?;
+                }
+
+                state.serialize_field("style", &button.style)?;
+
+                if button.url.is_some() {
+                    state.serialize_field("url", &button.url)?;
+                }
+
+                if button.sku_id.is_some() {
+                    state.serialize_field("sku_id", &button.sku_id)?;
+                }
+            }
+            Component::SelectMenu(select_menu) => {
+                match &select_menu.kind {
+                    SelectMenuType::Text => {
+                        state.serialize_field("type", &ComponentType::TextSelectMenu)?;
+                        if let Some(id) = select_menu.id {
+                            state.serialize_field("id", &id)?;
+                        }
+
+                        state.serialize_field(
+                            "options",
+                            &select_menu.options.as_ref().ok_or(SerError::custom(
+                                "required field \"option\" missing for text select menu",
+                            ))?,
+                        )?;
+                    }
+                    SelectMenuType::User => {
+                        state.serialize_field("type", &ComponentType::UserSelectMenu)?;
+                        if let Some(id) = select_menu.id {
+                            state.serialize_field("id", &id)?;
+                        }
+                    }
+                    SelectMenuType::Role => {
+                        state.serialize_field("type", &ComponentType::RoleSelectMenu)?;
+                        if let Some(id) = select_menu.id {
+                            state.serialize_field("id", &id)?;
+                        }
+                    }
+                    SelectMenuType::Mentionable => {
+                        state.serialize_field("type", &ComponentType::MentionableSelectMenu)?;
+                        if let Some(id) = select_menu.id {
+                            state.serialize_field("id", &id)?;
+                        }
+                    }
+                    SelectMenuType::Channel => {
+                        state.serialize_field("type", &ComponentType::ChannelSelectMenu)?;
+                        if let Some(id) = select_menu.id {
+                            state.serialize_field("id", &id)?;
+                        }
+
+                        if let Some(channel_types) = &select_menu.channel_types {
+                            state.serialize_field("channel_types", channel_types)?;
+                        }
+                    }
+                }
+
+                // Due to `custom_id` being required in some variants and
+                // optional in others, serialize as an Option.
+                state.serialize_field("custom_id", &Some(&select_menu.custom_id))?;
+
+                if select_menu.default_values.is_some() {
+                    state.serialize_field("default_values", &select_menu.default_values)?;
+                }
+
+                state.serialize_field("disabled", &select_menu.disabled)?;
+
+                if select_menu.max_values.is_some() {
+                    state.serialize_field("max_values", &select_menu.max_values)?;
+                }
+
+                if select_menu.min_values.is_some() {
+                    state.serialize_field("min_values", &select_menu.min_values)?;
+                }
+
+                if select_menu.placeholder.is_some() {
+                    state.serialize_field("placeholder", &select_menu.placeholder)?;
+                }
+
+                if select_menu.required.is_some() {
+                    state.serialize_field("required", &select_menu.required)?;
+                }
+            }
+            Component::TextInput(text_input) => {
+                state.serialize_field("type", &ComponentType::TextInput)?;
+                if let Some(id) = text_input.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                // Due to `custom_id` being required in some
+                // variants and optional in others, serialize as an Option.
+                state.serialize_field("custom_id", &Some(&text_input.custom_id))?;
+
+                #[allow(deprecated)]
+                if text_input.label.is_some() {
+                    state.serialize_field("label", &text_input.label)?;
+                }
+
+                if text_input.max_length.is_some() {
+                    state.serialize_field("max_length", &text_input.max_length)?;
+                }
+
+                if text_input.min_length.is_some() {
+                    state.serialize_field("min_length", &text_input.min_length)?;
+                }
+
+                if text_input.placeholder.is_some() {
+                    state.serialize_field("placeholder", &text_input.placeholder)?;
+                }
+
+                if text_input.required.is_some() {
+                    state.serialize_field("required", &text_input.required)?;
+                }
+
+                state.serialize_field("style", &text_input.style)?;
+
+                if text_input.value.is_some() {
+                    state.serialize_field("value", &text_input.value)?;
+                }
+            }
+            Component::TextDisplay(text_display) => {
+                state.serialize_field("type", &ComponentType::TextDisplay)?;
+                if let Some(id) = text_display.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                state.serialize_field("content", &text_display.content)?;
+            }
+            Component::MediaGallery(media_gallery) => {
+                state.serialize_field("type", &ComponentType::MediaGallery)?;
+                if let Some(id) = media_gallery.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                state.serialize_field("items", &media_gallery.items)?;
+            }
+            Component::Separator(separator) => {
+                state.serialize_field("type", &ComponentType::Separator)?;
+                if let Some(id) = separator.id {
+                    state.serialize_field("id", &id)?;
+                }
+                if let Some(divider) = separator.divider {
+                    state.serialize_field("divider", &divider)?;
+                }
+                if let Some(spacing) = &separator.spacing {
+                    state.serialize_field("spacing", spacing)?;
+                }
+            }
+            Component::File(file) => {
+                state.serialize_field("type", &ComponentType::File)?;
+                if let Some(id) = file.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                state.serialize_field("file", &file.file)?;
+                if let Some(spoiler) = file.spoiler {
+                    state.serialize_field("spoiler", &spoiler)?;
+                }
+            }
+            Component::Section(section) => {
+                state.serialize_field("type", &ComponentType::Section)?;
+                if let Some(id) = section.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                state.serialize_field("components", &section.components)?;
+                state.serialize_field("accessory", &section.accessory)?;
+            }
+            Component::Container(container) => {
+                state.serialize_field("type", &ComponentType::Container)?;
+                if let Some(id) = container.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                if let Some(accent_color) = container.accent_color {
+                    state.serialize_field("accent_color", &accent_color)?;
+                }
+                if let Some(spoiler) = container.spoiler {
+                    state.serialize_field("spoiler", &spoiler)?;
+                }
+                state.serialize_field("components", &container.components)?;
+            }
+            Component::Thumbnail(thumbnail) => {
+                state.serialize_field("type", &ComponentType::Thumbnail)?;
+                if let Some(id) = thumbnail.id {
+                    state.serialize_field("id", &id)?;
+                }
+
+                state.serialize_field("media", &thumbnail.media)?;
+                if let Some(description) = &thumbnail.description {
+                    state.serialize_field("description", description)?;
+                }
+                if let Some(spoiler) = thumbnail.spoiler {
+                    state.serialize_field("spoiler", &spoiler)?;
+                }
+            }
+            Component::Label(label) => {
+                state.serialize_field("type", &ComponentType::Label)?;
+                if label.id.is_some() {
+                    state.serialize_field("id", &label.id)?;
+                }
+                // Due to `label` being required in some
+                // variants and optional in others, serialize as an Option.
+                state.serialize_field("label", &Some(&label.label))?;
+                if label.description.is_some() {
+                    state.serialize_field("description", &label.description)?;
+                }
+                state.serialize_field("component", &label.component)?;
+            }
+            Component::FileUpload(file_upload) => {
+                state.serialize_field("type", &ComponentType::FileUpload)?;
+                if file_upload.id.is_some() {
+                    state.serialize_field("id", &file_upload.id)?;
+                }
+
+                // Due to `custom_id` being required in some variants and
+                // optional in others, serialize as an Option.
+                state.serialize_field("custom_id", &Some(&file_upload.custom_id))?;
+                if file_upload.min_values.is_some() {
+                    state.serialize_field("min_values", &file_upload.min_values)?;
+                }
+                if file_upload.max_values.is_some() {
+                    state.serialize_field("max_values", &file_upload.max_values)?;
+                }
+                if file_upload.required.is_some() {
+                    state.serialize_field("required", &file_upload.required)?;
+                }
+                if file_upload.file_types.is_some() {
+                    state.serialize_field("file_types", &file_upload.file_types)?;
+                }
+            }
+            Component::CheckboxGroup(checkbox_group) => {
+                state.serialize_field("type", &ComponentType::CheckboxGroup)?;
+                if checkbox_group.id.is_some() {
+                    state.serialize_field("id", &checkbox_group.id)?;
+                }
+                state.serialize_field("custom_id", &Some(&checkbox_group.custom_id))?;
+                state.serialize_field("options", &checkbox_group.options)?;
+                if checkbox_group.min_values.is_some() {
+                    state.serialize_field("min_values", &checkbox_group.min_values)?;
+                }
+                if checkbox_group.max_values.is_some() {
+                    state.serialize_field("max_values", &checkbox_group.max_values)?;
+                }
+                if checkbox_group.required.is_some() {
+                    state.serialize_field("required", &checkbox_group.required)?;
+                }
+            }
+            Component::Checkbox(checkbox) => {
+                state.serialize_field("type", &ComponentType::Checkbox)?;
+                if checkbox.id.is_some() {
+                    state.serialize_field("id", &checkbox.id)?;
+                }
+                state.serialize_field("custom_id", &Some(&checkbox.custom_id))?;
+                if checkbox.default.is_some() {
+                    state.serialize_field("default", &checkbox.default)?;
+                }
+            }
+
+            // We are not serializing all fields so this will fail to
+            // deserialize. But it is all that can be done to avoid losing
+            // incoming messages at this time.
+            Component::Unknown(unknown) => {
+                state.serialize_field("type", &ComponentType::Unknown(*unknown))?;
+            }
+        }
+
+        state.end()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Required due to the use of a unicode emoji in a constant.
+    #![allow(clippy::non_ascii_literal)]
+
+    use super::*;
+    use crate::id::Id;
+    use serde_test::Token;
+    use static_assertions::assert_impl_all;
+
+    assert_impl_all!(
+        Component: From<ActionRow>,
+        From<Button>,
+        From<SelectMenu>,
+        From<TextInput>
+    );
+
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn component_full() {
+        let component = Component::ActionRow(ActionRow {
+            components: Vec::from([
+                Component::Button(Button {
+                    custom_id: Some("test custom id".into()),
+                    disabled: true,
+                    emoji: None,
+                    label: Some("test label".into()),
+                    style: ButtonStyle::Primary,
+                    url: None,
+                    sku_id: None,
+                    id: None,
+                }),
+                Component::SelectMenu(SelectMenu {
+                    channel_types: None,
+                    custom_id: "test custom id 2".into(),
+                    default_values: None,
+                    disabled: false,
+                    kind: SelectMenuType::Text,
+                    max_values: Some(25),
+                    min_values: Some(5),
+                    options: Some(Vec::from([SelectMenuOption {
+                        label: "test option label".into(),
+                        value: "test option value".into(),
+                        description: Some("test description".into()),
+                        emoji: None,
+                        default: false,
+                    }])),
+                    placeholder: Some("test placeholder".into()),
+                    id: None,
+                    required: Some(true),
+                }),
+            ]),
+            id: None,
+        });
+
+        serde_test::assert_tokens(
+            &component,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 2,
+                },
+                Token::Str("type"),
+                Token::U8(ComponentType::ActionRow.into()),
+                Token::Str("components"),
+                Token::Seq { len: Some(2) },
+                Token::Struct {
+                    name: "Component",
+                    len: 5,
+                },
+                Token::Str("type"),
+                Token::U8(ComponentType::Button.into()),
+                Token::Str("custom_id"),
+                Token::Some,
+                Token::Str("test custom id"),
+                Token::Str("disabled"),
+                Token::Bool(true),
+                Token::Str("label"),
+                Token::Some,
+                Token::Str("test label"),
+                Token::Str("style"),
+                Token::U8(ButtonStyle::Primary.into()),
+                Token::StructEnd,
+                Token::Struct {
+                    name: "Component",
+                    len: 7,
+                },
+                Token::Str("type"),
+                Token::U8(ComponentType::TextSelectMenu.into()),
+                Token::Str("options"),
+                Token::Seq { len: Some(1) },
+                Token::Struct {
+                    name: "SelectMenuOption",
+                    len: 4,
+                },
+                Token::Str("default"),
+                Token::Bool(false),
+                Token::Str("description"),
+                Token::Some,
+                Token::Str("test description"),
+                Token::Str("label"),
+                Token::Str("test option label"),
+                Token::Str("value"),
+                Token::Str("test option value"),
+                Token::StructEnd,
+                Token::SeqEnd,
+                Token::Str("custom_id"),
+                Token::Some,
+                Token::Str("test custom id 2"),
+                Token::Str("disabled"),
+                Token::Bool(false),
+                Token::Str("max_values"),
+                Token::Some,
+                Token::U8(25),
+                Token::Str("min_values"),
+                Token::Some,
+                Token::U8(5),
+                Token::Str("placeholder"),
+                Token::Some,
+                Token::Str("test placeholder"),
+                Token::Str("required"),
+                Token::Some,
+                Token::Bool(true),
+                Token::StructEnd,
+                Token::SeqEnd,
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn action_row() {
+        let value = Component::ActionRow(ActionRow {
+            components: Vec::from([Component::Button(Button {
+                custom_id: Some("button-1".to_owned()),
+                disabled: false,
+                emoji: None,
+                style: ButtonStyle::Primary,
+                label: Some("Button".to_owned()),
+                url: None,
+                sku_id: None,
+                id: None,
+            })]),
+            id: None,
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 2,
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::ActionRow.into()),
+                Token::String("components"),
+                Token::Seq { len: Some(1) },
+                Token::Struct {
+                    name: "Component",
+                    len: 4,
+                },
+                Token::String("type"),
+                Token::U8(2),
+                Token::String("custom_id"),
+                Token::Some,
+                Token::String("button-1"),
+                Token::String("label"),
+                Token::Some,
+                Token::String("Button"),
+                Token::String("style"),
+                Token::U8(1),
+                Token::StructEnd,
+                Token::SeqEnd,
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn button() {
+        // Free Palestine.
+        //
+        // Palestinian Flag.
+        const FLAG: &str = "🇵🇸";
+
+        let value = Component::Button(Button {
+            custom_id: Some("test".to_owned()),
+            disabled: false,
+            emoji: Some(EmojiReactionType::Unicode {
+                name: FLAG.to_owned(),
+            }),
+            label: Some("Test".to_owned()),
+            style: ButtonStyle::Link,
+            url: Some("https://twilight.rs".to_owned()),
+            sku_id: None,
+            id: None,
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 6,
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::Button.into()),
+                Token::String("custom_id"),
+                Token::Some,
+                Token::String("test"),
+                Token::String("emoji"),
+                Token::Some,
+                Token::Struct {
+                    name: "EmojiReactionType",
+                    len: 1,
+                },
+                Token::String("name"),
+                Token::String(FLAG),
+                Token::StructEnd,
+                Token::String("label"),
+                Token::Some,
+                Token::String("Test"),
+                Token::String("style"),
+                Token::U8(ButtonStyle::Link.into()),
+                Token::String("url"),
+                Token::Some,
+                Token::String("https://twilight.rs"),
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn select_menu() {
+        fn check_select(default_values: Option<Vec<(SelectDefaultValue, &'static str)>>) {
+            let select_menu = Component::SelectMenu(SelectMenu {
+                channel_types: None,
+                custom_id: String::from("my_select"),
+                default_values: default_values
+                    .clone()
+                    .map(|values| values.into_iter().map(|pair| pair.0).collect()),
+                disabled: false,
+                kind: SelectMenuType::User,
+                max_values: None,
+                min_values: None,
+                options: None,
+                placeholder: None,
+                id: None,
+                required: None,
+            });
+            let mut tokens = vec![
+                Token::Struct {
+                    name: "Component",
+                    len: 2 + usize::from(default_values.is_some()),
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::UserSelectMenu.into()),
+                Token::Str("custom_id"),
+                Token::Some,
+                Token::Str("my_select"),
+            ];
+            if let Some(default_values) = default_values {
+                tokens.extend_from_slice(&[
+                    Token::Str("default_values"),
+                    Token::Some,
+                    Token::Seq {
+                        len: Some(default_values.len()),
+                    },
+                ]);
+                for (_, id) in default_values {
+                    tokens.extend_from_slice(&[
+                        Token::Struct {
+                            name: "SelectDefaultValue",
+                            len: 2,
+                        },
+                        Token::Str("type"),
+                        Token::UnitVariant {
+                            name: "SelectDefaultValue",
+                            variant: "user",
+                        },
+                        Token::Str("id"),
+                        Token::NewtypeStruct { name: "Id" },
+                        Token::Str(id),
+                        Token::StructEnd,
+                    ])
+                }
+                tokens.push(Token::SeqEnd);
+            }
+            tokens.extend_from_slice(&[
+                Token::Str("disabled"),
+                Token::Bool(false),
+                Token::StructEnd,
+            ]);
+            serde_test::assert_tokens(&select_menu, &tokens);
+        }
+
+        check_select(None);
+        check_select(Some(vec![(
+            SelectDefaultValue::User(Id::new(1234)),
+            "1234",
+        )]));
+        check_select(Some(vec![
+            (SelectDefaultValue::User(Id::new(1234)), "1234"),
+            (SelectDefaultValue::User(Id::new(5432)), "5432"),
+        ]));
+    }
+
+    #[test]
+    fn text_input() {
+        #[allow(deprecated)]
+        let value = Component::TextInput(TextInput {
+            custom_id: "test".to_owned(),
+            label: Some("The label".to_owned()),
+            max_length: Some(100),
+            min_length: Some(1),
+            placeholder: Some("Taking this place".to_owned()),
+            required: Some(true),
+            style: TextInputStyle::Short,
+            value: Some("Hello World!".to_owned()),
+            id: None,
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 9,
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::TextInput.into()),
+                Token::String("custom_id"),
+                Token::Some,
+                Token::String("test"),
+                Token::String("label"),
+                Token::Some,
+                Token::String("The label"),
+                Token::String("max_length"),
+                Token::Some,
+                Token::U16(100),
+                Token::String("min_length"),
+                Token::Some,
+                Token::U16(1),
+                Token::String("placeholder"),
+                Token::Some,
+                Token::String("Taking this place"),
+                Token::String("required"),
+                Token::Some,
+                Token::Bool(true),
+                Token::String("style"),
+                Token::U8(TextInputStyle::Short as u8),
+                Token::String("value"),
+                Token::Some,
+                Token::String("Hello World!"),
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn premium_button() {
+        let value = Component::Button(Button {
+            custom_id: None,
+            disabled: false,
+            emoji: None,
+            label: None,
+            style: ButtonStyle::Premium,
+            url: None,
+            sku_id: Some(Id::new(114_941_315_417_899_012)),
+            id: None,
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 3,
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::Button.into()),
+                Token::String("style"),
+                Token::U8(ButtonStyle::Premium.into()),
+                Token::String("sku_id"),
+                Token::Some,
+                Token::NewtypeStruct { name: "Id" },
+                Token::Str("114941315417899012"),
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn label() {
+        #[allow(deprecated)]
+        let value = Component::Label(Label {
+            id: None,
+            label: "The label".to_owned(),
+            description: Some("The description".to_owned()),
+            component: Box::new(Component::TextInput(TextInput {
+                id: None,
+                custom_id: "The custom id".to_owned(),
+                label: None,
+                max_length: None,
+                min_length: None,
+                placeholder: None,
+                required: None,
+                style: TextInputStyle::Paragraph,
+                value: None,
+            })),
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 4,
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::Label.into()),
+                Token::String("label"),
+                Token::Some,
+                Token::String("The label"),
+                Token::String("description"),
+                Token::Some,
+                Token::String("The description"),
+                Token::String("component"),
+                Token::Struct {
+                    name: "Component",
+                    len: 3,
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::TextInput.into()),
+                Token::String("custom_id"),
+                Token::Some,
+                Token::String("The custom id"),
+                Token::String("style"),
+                Token::U8(TextInputStyle::Paragraph as u8),
+                Token::StructEnd,
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn file_upload() {
+        let value = Component::FileUpload(FileUpload {
+            id: None,
+            custom_id: "test".to_owned(),
+            max_values: None,
+            min_values: None,
+            required: Some(true),
+            file_types: None,
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 3,
+                },
+                Token::String("type"),
+                Token::U8(ComponentType::FileUpload.into()),
+                Token::String("custom_id"),
+                Token::Some,
+                Token::String("test"),
+                Token::String("required"),
+                Token::Some,
+                Token::Bool(true),
+                Token::StructEnd,
+            ],
+        )
+    }
+
+    #[test]
+    fn checkbox_group() {
+        let value = Component::CheckboxGroup(CheckboxGroup {
+            id: None,
+            custom_id: "group".to_owned(),
+            options: vec![CheckboxGroupOption {
+                default: None,
+                description: None,
+                label: "Option A".to_owned(),
+                value: "a".to_owned(),
+            }],
+            min_values: None,
+            max_values: None,
+            required: None,
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 3, // type, custom_id, options
+                },
+                Token::Str("type"),
+                Token::U8(ComponentType::CheckboxGroup.into()),
+                Token::Str("custom_id"),
+                Token::Some,
+                Token::Str("group"),
+                Token::Str("options"),
+                Token::Seq { len: Some(1) },
+                Token::Struct {
+                    name: "CheckboxGroupOption",
+                    len: 2, // value, label
+                },
+                Token::Str("label"),
+                Token::Str("Option A"),
+                Token::Str("value"),
+                Token::Str("a"),
+                Token::StructEnd,
+                Token::SeqEnd,
+                Token::StructEnd,
+            ],
+        );
+    }
+    #[test]
+    fn checkbox() {
+        let value = Component::Checkbox(Checkbox {
+            custom_id: "test".to_owned(),
+            default: None,
+            id: None,
+        });
+
+        serde_test::assert_tokens(
+            &value,
+            &[
+                Token::Struct {
+                    name: "Component",
+                    len: 2,
+                },
+                Token::Str("type"),
+                Token::U8(ComponentType::Checkbox.into()),
+                Token::Str("custom_id"),
+                Token::Some,
+                Token::Str("test"),
+                Token::StructEnd,
+            ],
+        )
+    }
+}

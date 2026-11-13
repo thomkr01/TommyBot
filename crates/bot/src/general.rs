@@ -1157,7 +1157,7 @@ async fn tshoot_lockdown(app: &App, gid: Id<GuildMarker>) -> Result<Embed> {
         if want != p {
             app.http
                 .update_role(gid, r.id)
-                .permissions(Permissions::from_bits_truncate(want))
+                .permissions(Permissions::from_bits_retain(want))
                 .await?;
             tweaked += 1;
         }
