@@ -495,7 +495,15 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             app.invalidate_guild(g.id);
             crate::bansync::on_owner(app, g.id, g.owner_id).await?
         }
-        Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
+        Event::GuildCreate(g) => {
+            let r = crate::welcome::on_guild_create(app, g).await;
+            crate::automod::sync_at_start(app, g.id().get()).await;
+            r?
+        }
+        Event::AutoModerationRuleUpdate(r) => {
+            crate::automod::on_rule_change(app, &r.0, false).await
+        }
+        Event::AutoModerationRuleDelete(r) => crate::automod::on_rule_change(app, &r.0, true).await,
         Event::GuildDelete(g) => crate::welcome::on_guild_delete(app, g).await?,
         Event::Ready(r) => crate::welcome::on_ready(app, r).await?,
         Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),

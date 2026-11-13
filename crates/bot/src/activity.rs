@@ -102,6 +102,10 @@ async fn heat_up(
     let secs = act.timeout_ms / 1000;
     // As for messages: auto timeouts off still records the strike and its strike-cap lockdown.
     if !am.strike.enabled {
+        let log = crate::automod::strike_log("A member", reason, user.get(), act.strike);
+        if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+            tracing::warn!(?e, "automod log failed");
+        }
         return strike_cap_lock(app, cfg, gid, user, act.strike).await;
     }
     // As for messages: a failed timeout, case or log never skips the strike-cap lockdown.

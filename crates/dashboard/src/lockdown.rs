@@ -511,20 +511,13 @@ async fn update_rule(
     Ok(Json(json!({"ok": true})))
 }
 
-/// "Migrate words to Discord's AutoMod": the local word blacklist goes into Discord's keyword rule,
-/// which the bot then keeps in step ("Use Discord AutoMod" on). The local lists stay: thread and
-/// reaction names still read them, and messages read only what did not fit in the rule.
+/// "Migrate words to Discord's AutoMod": turns "Use Discord AutoMod" on, so the bot's sync (run on
+/// this save) creates or updates its one keyword rule. The local lists stay: thread and reaction
+/// names still read them, and messages read only what the rule does not block.
 async fn migrate_words(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
     let (version, mut config) = crate::store::current(&st.db, guild).await?;
-    let spec = migrate_plan(&mut config["automod"]["filters"]["words"])?;
-    st.discord
-        .call(
-            Method::POST,
-            &format!("/guilds/{guild}/auto-moderation/rules"),
-            Some(body(&spec)?),
-        )
-        .await?;
+    let n = migrate_plan(&mut config["automod"]["filters"]["words"])?;
     let mut tx = st.db.begin().await?;
     crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
     tx.commit().await?;
@@ -532,18 +525,14 @@ async fn migrate_words(State(st): State<AppState>, s: Sess, Path(guild): Path<i6
         &st,
         &s,
         guild,
-        format!(
-            "migrated {} word(s) to Discord AutoMod",
-            spec.keywords.len()
-        ),
+        format!("migrated {n} word(s) to Discord AutoMod"),
     )
     .await?;
-    Ok(Json(json!({"ok": true, "migrated": spec.keywords.len()})))
+    Ok(Json(json!({"ok": true, "migrated": n})))
 }
 
-/// The rule to create from the words config `w`, and `w` switched to keep it in sync. The rule
-/// carries the sync's name, so the bot updates this rule instead of making a second one.
-fn migrate_plan(w: &mut Value) -> Result<RuleSpec, ApiError> {
+/// Switches the words config `w` to the sync; the number of words it hands to Discord.
+fn migrate_plan(w: &mut Value) -> Result<usize, ApiError> {
     if w["use_discord_automod"] == true {
         return Err(ApiError::BadRequest(
             "The words are already kept in Discord's AutoMod".into(),
@@ -552,32 +541,19 @@ fn migrate_plan(w: &mut Value) -> Result<RuleSpec, ApiError> {
     let list =
         |k: &str| -> Vec<String> { serde_json::from_value(w[k].clone()).unwrap_or_default() };
     let flag = |k: &str| w[k] == true;
-    let keywords: Vec<String> = list("strict")
-        .into_iter()
-        .chain(list("wildcard").into_iter().map(|x| format!("*{x}*")))
-        .chain(tommybot_automod::filters::premade_words(
+    let n = list("strict").len()
+        + list("wildcard").len()
+        + tommybot_automod::filters::premade_words(
             flag("premade_profane"),
             flag("premade_vulgar"),
             flag("premade_racist"),
-        ))
-        .collect();
-    if keywords.is_empty() {
+        )
+        .len();
+    if n == 0 {
         return Err(ApiError::BadRequest("There are no words to migrate".into()));
     }
-    if keywords.len() > 1000 || keywords.iter().any(|k| k.chars().count() > 60) {
-        return Err(ApiError::BadRequest(
-            "Discord allows at most 1000 words of up to 60 characters per rule".into(),
-        ));
-    }
     w["use_discord_automod"] = json!(true);
-    Ok(RuleSpec {
-        name: tommybot_automod::discord_api::KEYWORD_RULE.into(),
-        enabled: true,
-        trigger: "keyword".into(),
-        keywords,
-        block_message: true,
-        ..Default::default()
-    })
+    Ok(n)
 }
 
 #[derive(Deserialize)]
@@ -695,18 +671,17 @@ mod tests {
             .unwrap();
     }
 
-    /// Migrating keeps the local lists (thread and reaction names read them) and turns on the
-    /// sync, under the sync rule's name; a second migrate is refused.
+    /// Migrating only turns the sync on and keeps the local lists (thread and reaction names read
+    /// them); the sync makes the one rule. A second migrate is refused.
     #[test]
     fn migrate_keeps_the_local_lists() {
         let mut w = json!({"strict": ["darn"], "wildcard": ["heck"], "premade_vulgar": false});
-        let spec = migrate_plan(&mut w).unwrap();
-        assert_eq!(spec.keywords, ["darn", "*heck*"]);
-        assert_eq!(spec.name, tommybot_automod::discord_api::KEYWORD_RULE);
+        assert_eq!(migrate_plan(&mut w).unwrap(), 2);
         assert_eq!(w["strict"], json!(["darn"]));
         assert_eq!(w["wildcard"], json!(["heck"]));
         assert_eq!(w["use_discord_automod"], true);
         assert!(migrate_plan(&mut w).is_err());
+        assert!(migrate_plan(&mut json!({})).is_err(), "no words");
     }
 
     #[test]

@@ -471,6 +471,30 @@ pub fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) 
     )
 }
 
+/// The keyword rule Discord holds is the one the bot would send for these lists (order and case
+/// aside), switched on as the bot sets it.
+pub fn rule_matches(
+    words: &[String],
+    regex: &[String],
+    enabled: bool,
+    keywords: &[String],
+    patterns: &[String],
+) -> bool {
+    let body = keyword_rule_body(words, regex);
+    let set = |v: &Value| -> std::collections::BTreeSet<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str().map(str::to_lowercase))
+            .collect()
+    };
+    let have = |l: &[String]| l.iter().map(|x| x.to_lowercase()).collect();
+    let meta = &body["trigger_metadata"];
+    body["enabled"] == enabled
+        && set(&meta["keyword_filter"]) == have(keywords)
+        && set(&meta["regex_patterns"]) == have(patterns)
+}
+
 fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
     let fit = |list: &[String], ok: Vec<bool>| -> Vec<String> {
         list.iter()
@@ -629,6 +653,13 @@ mod tests {
         assert_eq!(v["trigger_metadata"]["keyword_filter"], json!(["bad"]));
         assert_eq!(v["enabled"], true);
         assert_eq!(keyword_rule_body(&[], &[])["enabled"], false);
+        let w = ["Bad".to_string(), "x".repeat(61)];
+        assert!(rule_matches(&w, &[], true, &["bad".into()], &[]));
+        assert!(
+            !rule_matches(&w, &[], false, &["bad".into()], &[]),
+            "switched off"
+        );
+        assert!(!rule_matches(&w, &[], true, &[], &[]), "keywords removed");
         let r = keyword_rule_body(&[], &["b[a4]d".into()]);
         assert_eq!(r["trigger_metadata"]["regex_patterns"], json!(["b[a4]d"]));
         assert_eq!(r["enabled"], true);

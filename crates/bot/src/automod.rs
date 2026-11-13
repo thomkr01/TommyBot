@@ -2,7 +2,7 @@
 use anyhow::Result;
 use tommybot_automod::{
     filters,
-    heat::{heat, Breakdown, HeatCfg, MsgFacts, Post, Whitelist},
+    heat::{heat, Breakdown, HeatCfg, MsgFacts, Post, Whitelist, STRIKE_RANK},
     join::account_created_ms,
     store,
     strike::strike,
@@ -262,7 +262,7 @@ async fn check_message(
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
         blacklisted_words: if f.words.filter.enabled {
-            local_word_hits(gid.get(), f, &filters::word_forms(&linked))
+            local_word_hits(gid.get(), f, content, &filters::word_forms(&linked))
         } else {
             0
         },
@@ -337,7 +337,7 @@ async fn check_message(
     };
     let key = (gid.get(), m.author.id.get());
     let heat_cfg = enabled_weights(am);
-    let (mut triggered, fresh, mut breakdown, crowd) = {
+    let (mut triggered, mut breakdown, crowd) = {
         let mut map = app.heat.lock().unwrap();
         // Past 100k users, users idle for 10 minutes go first; everyone only if that frees nothing.
         if map.len() > 100_000 {
@@ -383,7 +383,7 @@ async fn check_message(
         }
         // An edit adding nothing must not trip on heat left over from earlier messages.
         let triggered = state.apply(&b, now, &heat_cfg) && !(edit && b.parts.is_empty());
-        (triggered, triggered && state.claim(now), b, crowd)
+        (triggered, b, crowd)
     };
     // Threads and spam-whitelisted channels or members never count towards an auto slowmode.
     if !edit && !facts.whitelist.spam && parent == m.channel_id {
@@ -392,13 +392,24 @@ async fn check_message(
     if let Some(posts) = &crowd {
         punish_crowd(app, &cfg, gid, m, posts, now).await;
     }
-    if !triggered && !mention_lock {
+    let unexempt = breakdown.parts.iter().any(|(n, _)| UNEXEMPT.contains(n));
+    if !triggered && !mention_lock && !unexempt {
         return Ok(());
     }
-    // The automod permit skips spam heat, not a scam or NSFW post: a hacked trusted account sends those.
-    if triggered && app.whitelisted(gid, m.author.id, "automod").await? {
-        breakdown.parts.retain(|(n, _)| UNEXEMPT.contains(n));
-        triggered = breakdown.total() >= heat_cfg.max;
+    if triggered || unexempt {
+        let owner = app.guild_info(gid).await?.owner;
+        let level = app.level(gid, owner, m.author.id).await?;
+        // Owner, Extra Owners and Trusted Admins are exempt from every bot action.
+        if level.immune() {
+            return Ok(());
+        }
+        // The automod permit skips spam heat, not a scam or NSFW post: a hacked trusted account
+        // sends those. Such a post is acted on whatever the heat weights, and the exempt spam takes
+        // no punishment claim (the claim comes below).
+        if level.whitelisted("automod") {
+            breakdown.parts.retain(|(n, _)| UNEXEMPT.contains(n));
+            triggered = unexempt;
+        }
     }
     // A tripped message with a scam link or QR code is deleted below, whichever path punishes.
     if triggered && facts.malicious_link && m.webhook_id.is_none() && !click {
@@ -447,32 +458,65 @@ async fn check_message(
         }
         return Ok(());
     }
+    let tripped = tripped_filter(&breakdown, f, bad_site);
+    let factor = tripped.map_or("Automod", |t| t.1);
     if let Some(hook) = m.webhook_id {
         if crate::webhooks::webhook_exempt(app, gid, hook, listed(&wl.spam)).await {
             // The exemption (PluralKit, Tupperbox) is for spam heat: a relayed scam, NSFW post,
-            // invite or blacklisted word is still deleted.
+            // invite or blacklisted word is still deleted, and logged.
             if breakdown.parts.iter().any(|(n, _)| INSTANT.contains(n)) {
                 crate::http_err::best_effort(
                     app.http.delete_message(m.channel_id, m.id).await,
                     "automod delete",
                 );
+                let what = (m.channel_id.get(), m.content.as_str());
+                let log = filter_log(
+                    &m.author.name,
+                    FilterAction::Delete,
+                    factor,
+                    what,
+                    m.author.id.get(),
+                );
+                if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+                    tracing::warn!(?e, "automod log failed");
+                }
             }
             return Ok(());
         }
     }
-    let tripped = tripped_filter(&breakdown, f, bad_site);
-    let own = tripped.and_then(|(fc, factor)| own_action(fc, am).map(|a| (a, factor)));
-    // A filter with its own action (a Ban for scam or NSFW) is no part of a heat burst, so the
-    // grace window does not soften it. One message is still punished once.
-    let instant = own.is_some() && top_part(&breakdown).is_some_and(|n| INSTANT.contains(&n));
-    if ACTED.contains((m.id.get(), m.author.id.get())) || !fresh && !instant {
-        // Sent before the punishment landed: remove it, the burst was already punished once.
+    let own = tripped.and_then(|(fc, _)| own_action(fc, am));
+    let rank = own.map_or(STRIKE_RANK, |(a, _)| action_rank(a));
+    let delete_only = || async {
+        // A punishment at least this strong already landed for this burst or this message.
         crate::http_err::best_effort(
             app.http.delete_message(m.channel_id, m.id).await,
             "automod delete",
         );
-        return Ok(());
-    }
+        Ok(())
+    };
+    // Claimed before acting, so two passes over one message (a create and its image scan) cannot
+    // both punish; given back when the punishment did not land.
+    let msg_key = (m.id.get(), m.author.id.get());
+    let acted = if m.webhook_id.is_some() {
+        None
+    } else {
+        match acted_claim(msg_key, rank) {
+            Some(prev) => Some(prev),
+            None => return delete_only().await,
+        }
+    };
+    let window = app
+        .heat
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_default()
+        .0
+        .claim_rank(now, rank);
+    let Some(window) = window else {
+        acted_unclaim(msg_key, acted);
+        return delete_only().await;
+    };
     if m.webhook_id.is_some() {
         // A webhook is not a member: no strikes, remove its spam (the messages that built the heat
         // too, or the first ones stay) and the freshly made hooks.
@@ -491,9 +535,7 @@ async fn check_message(
     }
     crate::panic::note_heat(app, gid, m.author.id).await;
     let r = match own {
-        Some(((action, secs), factor)) => {
-            filter_action(app, &cfg, gid, m, action, (factor, secs)).await
-        }
+        Some((action, secs)) => filter_action(app, &cfg, gid, m, action, (factor, secs)).await,
         None => {
             strike_member(
                 app,
@@ -509,19 +551,58 @@ async fn check_message(
             .await
         }
     };
-    // Landed (also when a step after the punishment failed): a later pass over it only deletes.
+    // Not landed (an error before the punishment): free both claims, so a retry can act.
     if r.as_ref()
-        .err()
-        .is_none_or(|e| e.downcast_ref::<Punished>().is_some())
+        .is_err_and(|e| e.downcast_ref::<Punished>().is_none())
     {
-        ACTED.first((m.id.get(), m.author.id.get()));
+        acted_unclaim(msg_key, acted);
+        if let Some((s, _)) = app.heat.lock().unwrap().get_mut(&key) {
+            s.unclaim(window);
+        }
     }
     r
 }
 
-/// Messages automod punished their author for, keyed (message, author): the NSFW scan, a preview update or
-/// an edit of the same message must not punish it again, also past the grace window.
-static ACTED: std::sync::LazyLock<Seen> = std::sync::LazyLock::new(Default::default);
+/// Strength of a filter's own action, as [`STRIKE_RANK`] ranks a strike.
+fn action_rank(a: FilterAction) -> u8 {
+    match a {
+        FilterAction::Delete => 0,
+        FilterAction::Warn => 1,
+        FilterAction::Timeout => 2,
+        FilterAction::Kick => 3,
+        FilterAction::Ban => 4,
+    }
+}
+
+/// The strongest punishment acted on per (message, author): the NSFW scan, a preview update or an
+/// edit of the same message acts again only with a stronger one, also past the grace window.
+type Acted = std::sync::Mutex<std::collections::HashMap<(u64, u64), u8>>;
+static ACTED: std::sync::LazyLock<Acted> = std::sync::LazyLock::new(Default::default);
+
+/// Claims `rank` for the message; None when one at least as strong was claimed, else Some(the rank
+/// it replaced) for [`acted_unclaim`].
+fn acted_claim(key: (u64, u64), rank: u8) -> Option<Option<u8>> {
+    let mut a = ACTED.lock().unwrap();
+    // shortcut: past the cap every message is forgotten; a later pass over one can punish once more.
+    if a.len() >= 100_000 {
+        a.clear();
+    }
+    let prev = a.get(&key).copied();
+    if prev.is_some_and(|p| p >= rank) {
+        return None;
+    }
+    a.insert(key, rank);
+    Some(prev)
+}
+
+fn acted_unclaim(key: (u64, u64), prev: Option<Option<u8>>) {
+    let Some(prev) = prev else { return };
+    let mut a = ACTED.lock().unwrap();
+    match prev {
+        Some(r) => a.insert(key, r),
+        None => a.remove(&key),
+    };
+}
 
 /// A filter's own action and its timeout length, or None when the strikes decide. A Timeout
 /// without its own duration uses the Auto Timeouts; with those off, the strike timeout length.
@@ -1034,11 +1115,15 @@ fn heat_log(
     if timed {
         return timeout_log(name, reason, (user, ch), act.timeout_ms, act.strike);
     }
+    strike_log(name, reason, user, act.strike).line("Channel", &channel(ch))
+}
+
+/// A heat strike with the auto timeouts off: no timeout to report.
+pub(crate) fn strike_log(name: &str, reason: &str, user: u64, strike: u32) -> Log {
     Log::new(&format!("*{name} got a strike!*"), ORANGE)
         .line("Reason", &format!("*{reason}*"))
         .user("Member", user)
-        .line("Channel", &channel(ch))
-        .line("Strike", &format!("`{}`", act.strike))
+        .line("Strike", &format!("`{strike}`"))
 }
 
 fn action_color(action: FilterAction) -> u32 {
@@ -1048,43 +1133,54 @@ fn action_color(action: FilterAction) -> u32 {
     }
 }
 
-/// Guilds whose last Discord AutoMod rule sync failed: the local filter reads every word there.
-static SYNC_FAILED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+/// Guilds whose Discord AutoMod keyword rule was synced in this process and not changed since.
+/// Any other guild with "Use Discord AutoMod" on gets every word from the local filter.
+static SYNCED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Blacklisted word hits the local filter counts. With "Use Discord AutoMod" on, Discord's rule
-/// blocks what fits in it, so only the words and patterns left out of it count here, or all of
-/// them while the sync is failing.
-fn local_word_hits(guild: u64, f: &FiltersCfg, forms: &str) -> usize {
+/// Blacklisted word hits the local filter counts on `forms` (the cured text). With "Use Discord
+/// AutoMod" on and the rule synced, a message whose plain `raw` text hits a word in the rule was
+/// Discord's to block (it reaches us only from someone Discord exempts), so then only the words and
+/// patterns left out of the rule count. A lookalike Discord's exact keywords miss still counts.
+fn local_word_hits(guild: u64, f: &FiltersCfg, raw: &str, forms: &str) -> usize {
     let words = blacklist_words(f);
     let regex = &f.words.regex;
-    if !f.words.use_discord_automod || SYNC_FAILED.lock().unwrap().contains(&guild) {
-        return filters::word_hits(forms, &words) + regex.hits(forms);
+    let all = || filters::word_hits(forms, &words) + regex.hits(forms);
+    if !f.words.use_discord_automod || !SYNCED.lock().unwrap().contains(&guild) {
+        return all();
     }
     let (w_ok, r_ok) = tommybot_automod::discord_api::on_discord(&words, regex.as_slice());
-    let left: Vec<String> = words
-        .into_iter()
-        .zip(w_ok)
-        .filter(|(w, ok)| !ok && !w.is_empty())
-        .map(|(w, _)| w)
-        .collect();
-    let left_hits = if left.is_empty() {
-        0
-    } else {
-        filters::word_hits(forms, &left)
+    let pick = |ok: bool| -> Vec<String> {
+        words
+            .iter()
+            .zip(&w_ok)
+            .filter(|(w, o)| **o == ok && !w.is_empty())
+            .map(|(w, _)| w.clone())
+            .collect()
     };
-    left_hits
-        + regex
-            .matched(forms)
+    let (synced, left) = (pick(true), pick(false));
+    let hits = |text: &str, list: &[String], on: bool| {
+        let w = if list.is_empty() {
+            0
+        } else {
+            filters::word_hits(text, list)
+        };
+        w + regex
+            .matched(text)
             .into_iter()
-            .filter(|&i| !r_ok[i])
+            .filter(|&i| r_ok[i] == on)
             .count()
+    };
+    if hits(raw, &synced, true) == 0 {
+        return all();
+    }
+    hits(forms, &left, false)
 }
 
 /// Keeps the native Discord AutoMod keyword rule in step with the saved word lists.
 /// Only runs while the guild opted in; turning it off is done from the rule list (`Api::set_rule_enabled`).
 /// A failed sync alerts the mod log, and the local filter covers every word until one works.
-pub async fn sync_discord_rule(app: std::sync::Arc<App>, guild: u64) {
+pub async fn sync_discord_rule(app: &App, guild: u64) {
     let run = async {
         let cfg = app.cfg(guild).await?;
         let f = &cfg.automod.filters;
@@ -1093,20 +1189,93 @@ pub async fn sync_discord_rule(app: std::sync::Arc<App>, guild: u64) {
                 .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice())
                 .await?;
         }
-        anyhow::Ok(())
+        anyhow::Ok(f.words.use_discord_automod)
     };
-    let Err(e) = run.await else {
-        SYNC_FAILED.lock().unwrap().remove(&guild);
-        return;
+    let e = match run.await {
+        Ok(on) => {
+            let mut s = SYNCED.lock().unwrap();
+            if on {
+                s.insert(guild);
+            } else {
+                s.remove(&guild);
+            }
+            return;
+        }
+        Err(e) => e,
     };
     tracing::warn!(?e, guild, "syncing the Discord AutoMod rule failed");
-    SYNC_FAILED.lock().unwrap().insert(guild);
+    SYNCED.lock().unwrap().remove(&guild);
     let log = Log::new("Discord AutoMod Sync Failed", RED)
         .line("Error", &crate::http_err::why(&e))
         .text("TommyBot's own word filter checks every blacklisted word until a sync works.");
-    if let Err(e) = send_log(&app, guild, LogKind::AutoMod, log).await {
+    if let Err(e) = send_log(app, guild, LogKind::AutoMod, log).await {
         tracing::warn!(?e, guild, "could not log the failed Discord AutoMod sync");
     }
+}
+
+/// At startup (each guild's create): a guild with the sync on is synced once, one guild per second,
+/// so the local filter trusts the rule only after it was checked in this process.
+pub(crate) async fn sync_at_start(app: &App, guild: u64) {
+    static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let on = app
+        .cfg(guild)
+        .await
+        .is_ok_and(|c| c.automod.filters.words.use_discord_automod);
+    if !on || SYNCED.lock().unwrap().contains(&guild) {
+        return;
+    }
+    let _turn = GATE.lock().await;
+    sync_discord_rule(app, guild).await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+
+/// Someone changed or deleted the bot's keyword rule in Discord: the local filter reads every word
+/// again, and the rule is synced back (at most once a minute per guild, so a rule Discord stores
+/// differently cannot loop). The bot's own update matches the lists and changes nothing.
+pub(crate) async fn on_rule_change(
+    app: &App,
+    rule: &twilight_model::guild::auto_moderation::AutoModerationRule,
+    deleted: bool,
+) {
+    use tommybot_automod::discord_api::{rule_matches, KEYWORD_RULE};
+    if rule.name != KEYWORD_RULE {
+        return;
+    }
+    let guild = rule.guild_id.get();
+    let Ok(cfg) = app.cfg(guild).await else {
+        SYNCED.lock().unwrap().remove(&guild);
+        return;
+    };
+    let f = &cfg.automod.filters;
+    if !f.words.use_discord_automod {
+        return;
+    }
+    let meta = &rule.trigger_metadata;
+    let same = rule_matches(
+        &blacklist_words(f),
+        f.words.regex.as_slice(),
+        rule.enabled,
+        meta.keyword_filter.as_deref().unwrap_or_default(),
+        meta.regex_patterns.as_deref().unwrap_or_default(),
+    );
+    if !deleted && same {
+        return;
+    }
+    SYNCED.lock().unwrap().remove(&guild);
+    static LAST: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, i64>>> =
+        std::sync::LazyLock::new(Default::default);
+    let now = now_ms();
+    {
+        let mut last = LAST.lock().unwrap();
+        if last.get(&guild).is_some_and(|&t| now - t < 60_000) {
+            return;
+        }
+        if last.len() > 10_000 {
+            last.clear();
+        }
+        last.insert(guild, now);
+    }
+    sync_discord_rule(app, guild).await;
 }
 
 pub(crate) async fn warn_actions(

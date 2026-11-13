@@ -247,6 +247,11 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
         "links_blacklist",
         hit(m.blacklisted_link, cfg.blacklisted_link),
     );
+    // The instant parts come first: a tie goes to them (`automod::top_part`).
+    b.add(
+        "blacklisted_words",
+        cfg.per_blacklisted_word * m.blacklisted_words as f64,
+    );
     if !w.spam {
         b.add("message", cfg.base);
         let sim = hist.best_similarity(m.content);
@@ -286,10 +291,6 @@ pub fn heat(m: &MsgFacts, hist: &UserHistory, cfg: &HeatCfg) -> Breakdown {
     if !w.everyone {
         b.add("everyone", cfg.per_everyone * m.everyone_mentions as f64);
     }
-    b.add(
-        "blacklisted_words",
-        cfg.per_blacklisted_word * m.blacklisted_words as f64,
-    );
     if m.suspicious_account && !w.spam {
         b.add("suspicious_account", cfg.suspicious_account);
     }
@@ -476,7 +477,12 @@ pub struct HeatState {
     pub at_ms: i64,
     /// When the last punishment started; 0 if none.
     pub punished_ms: i64,
+    /// How strong it was ([`STRIKE_RANK`] for a strike).
+    pub punished_rank: u8,
 }
+
+/// A strike times out, so it ranks as a Timeout: delete 0, warn 1, timeout 2, kick 3, ban 4.
+pub const STRIKE_RANK: u8 = 2;
 
 /// Messages already on their way when a punishment lands keep arriving for a moment.
 pub const PUNISH_GRACE_MS: i64 = 10_000;
@@ -494,14 +500,30 @@ impl HeatState {
         self.value >= cfg.max
     }
 
-    /// Claims the punishment for a trigger; false while the last one is under `PUNISH_GRACE_MS` old,
-    /// so a burst costs one strike, not one per message in flight.
+    /// Claims a strike for a trigger; see [`Self::claim_rank`].
     pub fn claim(&mut self, now: i64) -> bool {
-        if self.punished_ms > 0 && now - self.punished_ms < PUNISH_GRACE_MS {
-            return false;
+        self.claim_rank(now, STRIKE_RANK).is_some()
+    }
+
+    /// Claims a punishment of strength `rank`; None while one at least as strong is under
+    /// `PUNISH_GRACE_MS` old, so a burst costs one punishment, not one per message in flight, while
+    /// a stronger one (a Ban filter after a strike) still lands. Some(the state it replaced), for
+    /// [`Self::unclaim`] when the punishment did not land.
+    pub fn claim_rank(&mut self, now: i64, rank: u8) -> Option<(i64, u8)> {
+        let prev = (self.punished_ms, self.punished_rank);
+        let recent = self.punished_ms > 0 && now - self.punished_ms < PUNISH_GRACE_MS;
+        if recent && rank <= self.punished_rank {
+            return None;
         }
         self.punished_ms = now;
-        true
+        self.punished_rank = rank;
+        Some(prev)
+    }
+
+    /// Gives back a claim whose punishment did not land.
+    pub fn unclaim(&mut self, (ms, rank): (i64, u8)) {
+        self.punished_ms = ms;
+        self.punished_rank = rank;
     }
 }
 
@@ -673,6 +695,15 @@ mod tests {
         assert!(s.claim(1_000));
         assert!(!s.claim(1_500), "a message in flight is not a new offence");
         assert!(s.claim(1_000 + PUNISH_GRACE_MS));
+        // A stronger punishment in the window still lands; a weaker or equal one does not.
+        let now = 1_000 + PUNISH_GRACE_MS + 1;
+        assert!(s.claim_rank(now, STRIKE_RANK + 2).is_some());
+        assert!(s.claim_rank(now, STRIKE_RANK).is_none());
+        let prev = s.claim_rank(now, STRIKE_RANK + 2);
+        assert!(prev.is_none(), "equal rank");
+        let prev = s.claim_rank(now + PUNISH_GRACE_MS, 1).unwrap();
+        s.unclaim(prev);
+        assert_eq!((s.punished_ms, s.punished_rank), (now, STRIKE_RANK + 2));
     }
 
     #[test]
