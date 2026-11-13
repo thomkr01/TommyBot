@@ -18,7 +18,9 @@ use twilight_model::{
 
 use crate::{
     app::{App, GuildCfg},
-    automod::{action_failed, auto_case, blacklist_words, enabled_weights, now_ms},
+    automod::{
+        action_failed, auto_case, blacklist_words, enabled_weights, now_ms, strike_cap_lock,
+    },
     commands::timeout,
     events::send_log,
 };
@@ -97,17 +99,26 @@ async fn heat_up(
         }
     }
     let secs = act.timeout_ms / 1000;
-    if let Err(e) = timeout(&app.http, gid, user, secs, "Automod").await {
-        action_failed(app, gid, user.get(), "Timeout", &e).await;
-        return Err(e);
+    // As for messages: a failed timeout, case or log never skips the strike-cap lockdown.
+    let timed = timeout(&app.http, gid, user, secs, "Automod").await;
+    match &timed {
+        Err(e) => action_failed(app, gid, user.get(), "Timeout", e).await,
+        Ok(()) => {
+            if let Err(e) = auto_case(app, gid, user, "timeout", reason, Some(secs)).await {
+                tracing::warn!(?e, "automod case failed");
+            }
+            let log = Log::new("*A member has been timed out!*", ORANGE)
+                .line("Reason", &format!("*{reason}*"))
+                .user("Member", user.get())
+                .line("Duration", &format!("`{}`", duration(secs)))
+                .line("Strike", &format!("`{}`", act.strike));
+            if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+                tracing::warn!(?e, "automod log failed");
+            }
+        }
     }
-    auto_case(app, gid, user, "timeout", reason, Some(secs)).await?;
-    let log = Log::new("*A member has been timed out!*", ORANGE)
-        .line("Reason", &format!("*{reason}*"))
-        .user("Member", user.get())
-        .line("Duration", &format!("`{}`", duration(secs)))
-        .line("Strike", &format!("`{}`", act.strike));
-    send_log(app, gid.get(), LogKind::AutoMod, log).await
+    strike_cap_lock(app, cfg, gid, user, act.strike).await?;
+    timed
 }
 
 pub async fn on_reaction(app: &App, r: &ReactionAdd) -> Result<()> {
@@ -182,7 +193,7 @@ pub async fn on_thread(app: &App, t: &Channel) -> Result<()> {
         return Ok(());
     }
     let w = enabled_weights(am);
-    if bad_name_deleted(app, &cfg, gid, t, parent, owner).await? {
+    if thread_name_hit(app, &cfg, gid, (t, parent, owner), true).await? {
         return heat_up(
             app,
             &cfg,
@@ -203,8 +214,8 @@ pub async fn on_thread(app: &App, t: &Channel) -> Result<()> {
     heat_up(app, &cfg, gid, owner, w.base, "Thread spam").await
 }
 
-/// A rename can add a word after the create passed. The thread goes, but nobody is heated: staff
-/// may have renamed it.
+/// A rename can add a word after the create passed. Only logged: an update names no actor and also
+/// comes for a lock, tags or pins, and a delete would lose the whole thread.
 pub async fn on_thread_update(app: &App, t: &Channel) -> Result<()> {
     let (Some(gid), Some(parent)) = (t.guild_id, t.parent_id) else {
         return Ok(());
@@ -217,26 +228,30 @@ pub async fn on_thread_update(app: &App, t: &Channel) -> Result<()> {
     };
     let cfg = app.cfg(gid.get()).await?;
     if cfg.automod.enabled {
-        bad_name_deleted(app, &cfg, gid, t, parent, owner).await?;
+        thread_name_hit(app, &cfg, gid, (t, parent, owner), false).await?;
     }
     Ok(())
 }
 
-/// Deletes and logs a thread whose name has a blacklisted word; true when it did.
-async fn bad_name_deleted(
+/// Logs a thread whose name has a blacklisted word, and deletes it when `delete`; true on a hit.
+async fn thread_name_hit(
     app: &App,
     cfg: &GuildCfg,
     gid: Id<GuildMarker>,
-    t: &Channel,
-    parent: Id<ChannelMarker>,
-    owner: Id<UserMarker>,
+    (t, parent, owner): (&Channel, Id<ChannelMarker>, Id<UserMarker>),
+    delete: bool,
 ) -> Result<bool> {
     let name = t.name.as_deref().unwrap_or_default();
     if !word_hit(&cfg.automod.filters, name) || words_exempt(app, gid, owner).await? {
         return Ok(false);
     }
-    crate::http_err::best_effort(app.http.delete_channel(t.id).await, "automod thread delete");
-    let log = Log::new("Thread deleted", RED)
+    let title = if delete {
+        crate::http_err::best_effort(app.http.delete_channel(t.id).await, "automod thread delete");
+        "Thread deleted"
+    } else {
+        "Thread name flagged"
+    };
+    let log = Log::new(title, RED)
         .line("Reason", "*Blacklisted words in the thread name*")
         .user("Member", owner.get())
         .line("Channel", &channel(parent.get()))
@@ -248,6 +263,108 @@ async fn bad_name_deleted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::bansync::tests::T;
+    use serde_json::json;
+
+    /// A reaction or thread heat strike reaches the strike-cap lockdown too, also when the timeout
+    /// fails (the mock has no member PATCH).
+    #[tokio::test]
+    async fn heat_strikes_reach_the_strike_cap_lockdown() {
+        let Some(t) = T::new(97).await else { return };
+        let gid = t.g(0);
+        let cfg =
+            json!({"automod": {"enabled": true, "auto_lockdown": {"enabled": true, "strikes": 1}}});
+        t.server_config(0, t.owner(), cfg).await;
+        let cfg = t.app.cfg(gid.get()).await.unwrap();
+        let r = heat_up(
+            &t.app,
+            &cfg,
+            gid,
+            Id::new(t.base + 5),
+            1_000.0,
+            "Reaction spam",
+        )
+        .await;
+        assert!(r.is_err());
+        assert!(t.calls("PATCH") >= 1, "timeout tried");
+        assert!(t.calls("/roles") >= 1, "lockdown planned");
+        t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.cleanup().await;
+    }
+
+    /// A bad emoji name from an automod-permit holder is left alone, as their messages are; another
+    /// member's reaction is removed.
+    #[tokio::test]
+    async fn an_automod_permit_covers_reaction_names() {
+        let Some(t) = T::new(99).await else { return };
+        let gid = t.g(0);
+        let cfg = json!({"automod": {"enabled": true,
+            "filters": {"words": {"filter": {"enabled": true}, "strict": ["scam"]}}}});
+        t.server_config(0, t.owner(), cfg).await;
+        t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1, $1, 'Trusted', '{}', '{automod}')")
+            .await;
+        t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 556)")
+            .await;
+        let (holder, other) = (t.base + 5, t.base + 6);
+        t.set(|m| {
+            m.members.insert((gid.get(), holder), vec![556]);
+            m.members.insert((gid.get(), other), vec![]);
+        });
+        let react = |user: u64, roles: Vec<&str>| -> ReactionAdd {
+            ReactionAdd(serde_json::from_value(json!({
+                "burst": false, "burst_colors": [], "channel_id": "7", "message_id": "100",
+                "guild_id": gid.to_string(), "user_id": user.to_string(),
+                "emoji": {"id": "5", "name": "scam"},
+                "member": {"deaf": false, "mute": false, "flags": 0, "pending": false, "roles": roles,
+                    "joined_at": "2026-01-01T00:00:00.000000+00:00",
+                    "user": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": null}},
+            }))
+            .unwrap())
+        };
+        on_reaction(&t.app, &react(holder, vec!["556"]))
+            .await
+            .unwrap();
+        assert_eq!(t.calls("/reactions/"), 0, "permit holder: reaction kept");
+        assert_eq!(t.calls("PATCH"), 0, "permit holder: no timeout");
+        let _ = on_reaction(&t.app, &react(other, vec![])).await;
+        assert!(
+            t.calls("/reactions/") >= 1,
+            "another member's reaction is removed"
+        );
+        t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.cleanup().await;
+    }
+
+    /// A renamed thread with a blacklisted word is logged, never deleted.
+    #[tokio::test]
+    async fn a_renamed_thread_is_only_logged() {
+        let Some(t) = T::new(98).await else { return };
+        let gid = t.g(0);
+        let cfg = json!({"logging": {"fallback": "55"}, "automod": {"enabled": true,
+            "filters": {"words": {"filter": {"enabled": true}, "strict": ["scam"]}}}});
+        t.server_config(0, t.owner(), cfg).await;
+        let thread = |name: &str| -> Channel {
+            serde_json::from_value(json!({
+                "id": "40", "type": 11, "guild_id": gid.to_string(), "parent_id": "7",
+                "owner_id": (t.base + 5).to_string(), "name": name,
+                "thread_metadata": {"archived": false, "auto_archive_duration": 60,
+                    "archive_timestamp": "2026-01-01T00:00:00.000000+00:00", "locked": false},
+            }))
+            .unwrap()
+        };
+        on_thread_update(&t.app, &thread("hello")).await.unwrap();
+        assert_eq!(t.calls("/channels/55"), 0, "a clean name is not logged");
+        // The mock refuses the log channel lookup, so the update reports the failed log.
+        let _ = on_thread_update(&t.app, &thread("ｓｃａｍ here")).await;
+        assert!(t.calls("/channels/55") >= 1, "logged");
+        assert_eq!(t.calls("DELETE"), 0, "not deleted");
+        t.cleanup().await;
+    }
 
     #[test]
     fn names_are_cured_before_the_word_filter() {

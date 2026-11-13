@@ -109,7 +109,7 @@ async fn a_failed_strike_timeout_still_locks_at_the_cap() {
     let cfg = t.app.cfg(gid.get()).await.unwrap();
     let user = Id::new(t.base + 5);
     let r = strike_member(&t.app, &cfg, gid, (user, "x"), Id::new(7), None, None).await;
-    assert!(r.is_err());
+    assert!(r.unwrap_err().downcast_ref::<NotPunished>().is_some());
     assert!(t.calls("PATCH") >= 1, "timeout tried");
     assert!(
         t.calls("/roles") >= 1,
@@ -213,6 +213,60 @@ async fn main_roles_of_a_quarantined_member_go_to_the_quarantine() {
     saved.sort();
     assert_eq!(saved, [11, 12]);
     assert_eq!(t.calls("PUT"), 0, "no role added during the quarantine");
+    t.cleanup().await;
+}
+
+/// Heat panic's raiders are held with automod off, also when a server app posts for them.
+#[tokio::test]
+async fn raiders_are_held_with_automod_off() {
+    let Some(t) = T::new(89).await else { return };
+    let gid = t.g(0);
+    t.server_config(0, t.owner(), json!({"automod": {"enabled": false}}))
+        .await;
+    let raider = t.base + 5;
+    t.app
+        .heat_raiders
+        .lock()
+        .unwrap()
+        .insert(gid.get(), ([raider].into(), crate::app::now_secs() + 600));
+    let own = msg(json!({"guild_id": gid.to_string(),
+        "author": {"id": raider.to_string(), "username": "x", "discriminator": "0", "avatar": null}}));
+    let _ = on_message(
+        &t.app,
+        &MessageCreate {
+            channel_type: None,
+            message: own,
+        },
+    )
+    .await;
+    assert_eq!(
+        t.calls("DELETE /channels/7/messages/100"),
+        1,
+        "their post is removed"
+    );
+    assert_eq!(
+        t.calls(&format!("PATCH /guilds/{gid}/members/{raider}")),
+        1,
+        "and they are timed out"
+    );
+    let via_app = msg(json!({"guild_id": gid.to_string(), "id": "101",
+        "author": {"id": "1", "username": "bot", "discriminator": "0", "avatar": null, "bot": true},
+        "interaction_metadata": {"id": "5", "type": 2, "authorizing_integration_owners": {"0": "1"},
+            "user": {"id": raider.to_string(), "username": "x", "discriminator": "0", "avatar": null}}}));
+    let _ = on_message(
+        &t.app,
+        &MessageCreate {
+            channel_type: None,
+            message: via_app,
+        },
+    )
+    .await;
+    assert_eq!(
+        t.calls("DELETE /channels/7/messages/101"),
+        1,
+        "a server app's post for them too"
+    );
+    assert_eq!(t.calls(&format!("PATCH /guilds/{gid}/members/{raider}")), 2);
     t.cleanup().await;
 }
 

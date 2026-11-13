@@ -34,7 +34,7 @@ use crate::{
 #[path = "automod_parts.rs"]
 mod parts;
 use parts::app_text;
-pub(crate) use parts::{attachments, files_can_be_new};
+pub(crate) use parts::{attachments, files_can_be_new, Seen};
 
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -107,8 +107,12 @@ async fn check_message(
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
-    // Heat panic's raiders are held even with automod off.
-    if crate::panic::is_raider(app, gid, m.author.id) {
+    // Heat panic's raiders are held even with automod off, also when a server app posts for them.
+    let poster = m
+        .interaction_metadata
+        .as_ref()
+        .map_or(m.author.id, |i| i.user.id);
+    if crate::panic::is_raider(app, gid, poster) {
         crate::http_err::best_effort(
             app.http.delete_message(m.channel_id, m.id).await,
             "automod delete",
@@ -116,21 +120,24 @@ async fn check_message(
         return timeout(
             &app.http,
             gid,
-            m.author.id,
+            poster,
             am.strike.strike_timeout_ms / 1000,
             "Automod",
         )
         .await;
     }
-    // Server-installed apps' replies are not spam (user-installed ones were rewritten above).
-    let app_reply = m.interaction_metadata.is_some();
-    if !am.enabled || app_reply || (m.webhook_id.is_some() && !am.monitor_webhooks) {
+    if !am.enabled || (m.webhook_id.is_some() && !am.monitor_webhooks) {
         return Ok(());
     }
     // A user-installed app's reply runs as an edit (instant filters only), but its files are new.
     let new_files = !nsfw_image && files_can_be_new(m);
     if !nsfw_image && am.filters.nsfw_images.enabled {
         app.nsfw.enqueue(m, !new_files, false);
+    }
+    // Server-installed apps' replies are not spam (user-installed ones were rewritten above); the
+    // image scan above only logs theirs.
+    if m.interaction_metadata.is_some() {
+        return Ok(());
     }
     let wl = &cfg.whitelist;
     let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
@@ -473,7 +480,6 @@ async fn strike_member(
     reason: Option<&str>,
 ) -> Result<()> {
     let am = &cfg.automod;
-    let lock = &am.auto_lockdown;
     let now = now_ms();
     let key = (gid.get(), user.get());
     let mut st = store::load_strikes(&app.pool, gid.get(), user.get()).await?;
@@ -540,8 +546,40 @@ async fn strike_member(
             tracing::warn!(?e, "automod log failed");
         }
     }
+    let locked = strike_cap_lock(app, cfg, gid, user, act.strike).await;
+    match failed {
+        // The failed timeout is what the caller must see; the lockdown error is only logged then.
+        Some(e) => {
+            if let Err(l) = locked {
+                tracing::warn!(?l, "strike-cap lockdown failed");
+            }
+            Err(e.context(NotPunished))
+        }
+        None => locked,
+    }
+}
+
+/// The error of a punishment that did not land: nothing was done to the member.
+#[derive(Debug)]
+pub(crate) struct NotPunished;
+
+impl std::fmt::Display for NotPunished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the automod punishment failed")
+    }
+}
+
+/// The auto lockdown at a strike number, for every path that records a strike.
+pub(crate) async fn strike_cap_lock(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    strike: u32,
+) -> Result<()> {
+    let lock = &cfg.automod.auto_lockdown;
     if lock.enabled
-        && lock.strikes.is_some_and(|n| act.strike >= n)
+        && lock.strikes.is_some_and(|n| strike >= n)
         && lockdown::lock(app, gid, cfg.lockdown_prefs.kind()).await?
     {
         send_log(
@@ -551,11 +589,11 @@ async fn strike_member(
             Log::new("Server Locked", ALERT)
                 .text(&format!("{YES} **The server has been locked down.**"))
                 .user("Member", user.get())
-                .line("Reason", &format!("Reached strike `{}`", act.strike)),
+                .line("Reason", &format!("Reached strike `{strike}`")),
         )
         .await?;
     }
-    failed.map_or(Ok(()), Err)
+    Ok(())
 }
 
 /// The tracked heat messages plus the triggering one (an edit is not tracked), as (channel, message).
@@ -749,8 +787,9 @@ async fn filter_action(
             // The threshold's timeout is the punishment; the strikes only keep count of it.
             if warn_actions(app, cfg, gid, uid).await? {
                 let mut st = store::load_strikes(&app.pool, gid.get(), uid.get()).await?;
-                strike(&mut st, &cfg.automod.strike, now_ms());
+                let act = strike(&mut st, &cfg.automod.strike, now_ms());
                 store::save_strikes(&app.pool, gid.get(), uid.get(), &st).await?;
+                strike_cap_lock(app, cfg, gid, uid, act.strike).await?;
             }
         }
         FilterAction::Timeout | FilterAction::Kick | FilterAction::Ban => {
@@ -776,7 +815,7 @@ async fn filter_action(
             };
             if let Err(e) = done {
                 action_failed(app, gid, uid.get(), kind, &e).await;
-                return Err(e);
+                return Err(e.context(NotPunished));
             }
             auto_case(app, gid, uid, kind, factor, timed).await?;
         }

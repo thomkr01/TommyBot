@@ -9,12 +9,15 @@ const MAX_SIDE: u32 = 1024;
 
 /// The text of every QR code in the first few image attachments, one per line.
 pub async fn texts(app: &App, attachments: impl Iterator<Item = &Attachment>) -> String {
+    static READ: std::sync::LazyLock<crate::automod::Seen> =
+        std::sync::LazyLock::new(Default::default);
     let mut out = String::new();
     let images = attachments.filter(|a| {
         a.size <= MAX_BYTES as u64
             && a.content_type
                 .as_deref()
                 .is_some_and(|t| t.starts_with("image/"))
+            && READ.first(a.id.get())
     });
     for a in images.take(MAX_IMAGES) {
         let Some(bytes) = app.sites.fetch(&a.url, MAX_BYTES).await else {

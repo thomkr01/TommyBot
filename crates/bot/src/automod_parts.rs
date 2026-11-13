@@ -5,6 +5,30 @@ use twilight_model::channel::{
     Attachment, Message,
 };
 
+/// Attachment ids a check already read: an attachment's file never changes, so an edit of a webhook
+/// or app message reads only its new files.
+#[derive(Default)]
+pub(crate) struct Seen(std::sync::Mutex<std::collections::HashSet<u64>>);
+
+impl Seen {
+    /// True the first time `id` comes.
+    pub(crate) fn first(&self, id: u64) -> bool {
+        let mut s = self.0.lock().unwrap();
+        // shortcut: past the cap every id is forgotten; an edit then reads its files once more.
+        if s.len() >= 100_000 {
+            s.clear();
+        }
+        s.insert(id)
+    }
+
+    pub(crate) fn forget(&self, ids: impl Iterator<Item = u64>) {
+        let mut s = self.0.lock().unwrap();
+        for id in ids {
+            s.remove(&id);
+        }
+    }
+}
+
 /// The message's own attachments and those of what it forwards.
 pub(crate) fn attachments(m: &Message) -> impl Iterator<Item = &Attachment> {
     m.attachments.iter().chain(

@@ -643,7 +643,7 @@ def g2b_hook_app_text(kind):
 
 
 def g2b_thread_rename():
-    """D40: a thread renamed to a blacklisted word goes; a lookalike-letter name goes on create."""
+    """D40: a thread renamed to a blacklisted word stays and is logged; a lookalike-letter name goes on create."""
     set_config("automod", {"enabled": True, "filters": {"words": {"filter": {"enabled": True}, "strict": [G2B_WORD]}}})
     since = snowflake_now()
     chan = text_channel("general")
@@ -653,12 +653,14 @@ def g2b_thread_rename():
     time.sleep(3)
     kept = exists(clean["id"])
     call("PATCH", f"/channels/{clean['id']}", tok, {"name": f"e2e g2b {G2B_WORD}"}, soft=True)
-    renamed_gone = False
+    flagged = False
     for _ in range(6):
         time.sleep(2)
-        if not exists(clean["id"]):
-            renamed_gone = True
+        if logged("auto_mod", since, "Thread name flagged"):
+            flagged = True
             break
+    # A ThreadUpdate names no actor, so a rename is only logged.
+    renamed_kept = exists(clean["id"])
     wide = "".join(chr(ord(c) + 0xFEE0) for c in G2B_WORD)  # fullwidth letters
     look = call("POST", f"/channels/{chan}/threads", tok, {"name": f"e2e g2b {wide}", "type": 11})
     time.sleep(4)
@@ -667,8 +669,9 @@ def g2b_thread_rename():
         call("DELETE", f"/channels/{t}", soft=True)
     automod_back()
     print("cleaned: both e2e g2b threads")
-    return check(kept and renamed_gone and look_gone and logged("auto_mod", since, "Thread deleted"),
-                 f"g2b_thread_rename: clean kept={kept}, renamed deleted={renamed_gone}, lookalike deleted={look_gone}")
+    return check(kept and flagged and renamed_kept and look_gone and logged("auto_mod", since, "Thread deleted"),
+                 f"g2b_thread_rename: clean kept={kept}, rename logged={flagged}, renamed kept={renamed_kept}, "
+                 f"lookalike deleted={look_gone}")
 
 
 def g2b_nsfw_hook_off(monitor=False):

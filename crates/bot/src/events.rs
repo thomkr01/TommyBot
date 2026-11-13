@@ -444,6 +444,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         {
             automod::on_edit(app, &m.0).await?;
         }
+        // A deferred app reply is filled in by an update that may have no edited_timestamp: it is
+        // a new post for the text filters and the image scan.
+        Event::MessageUpdate(m) if app_fill_in(&m.0) => automod::on_edit(app, &m.0).await?,
         // A link preview or GIF arrived after the post: only the image scan looks at it.
         Event::MessageUpdate(m)
             if m.edited_timestamp.is_none()
@@ -455,7 +458,8 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Some(gid) = m.guild_id {
                 let am = &app.cfg(gid.get()).await?.automod;
                 if am.enabled && am.filters.nsfw_images.enabled {
-                    app.nsfw.enqueue(&m.0, true, false);
+                    app.nsfw
+                        .enqueue(&m.0, !automod::files_can_be_new(&m.0), false);
                 }
             }
         }
@@ -578,9 +582,27 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
     Ok(())
 }
 
+/// An app's update without `edited_timestamp`: how Discord can complete a deferred reply.
+fn app_fill_in(m: &twilight_model::channel::Message) -> bool {
+    m.edited_timestamp.is_none() && (m.application_id.is_some() || m.interaction_metadata.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_app_replies_are_read_as_posts() {
+        let m = |extra: serde_json::Value| crate::automod::more_tests::msg(extra);
+        let edited = serde_json::json!("2026-01-01T00:01:00.000000+00:00");
+        assert!(app_fill_in(&m(serde_json::json!({"application_id": "3"}))));
+        assert!(!app_fill_in(&m(
+            serde_json::json!({"application_id": "3", "edited_timestamp": edited})
+        )));
+        // A member's or a plain webhook's preview update stays on the cheap path.
+        assert!(!app_fill_in(&m(serde_json::json!({}))));
+        assert!(!app_fill_in(&m(serde_json::json!({"webhook_id": "9"}))));
+    }
 
     #[test]
     fn sees_follows_base_and_overwrites() {
