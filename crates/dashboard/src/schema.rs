@@ -487,8 +487,8 @@ pub fn schema() -> Vec<Value> {
             "All messages in the channel add their heat to one pool. Each member adds at most max heat, so 300 needs at least three members, and the lowest value, 200, needs two. Bots, webhooks and members with server-wide Manage Messages, Manage Channels or Administrator add nothing, as Discord lets them skip slowmode.",
         ),
         hp(
-            ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode"),
-            "A slowmode staff set that is as high or higher is left alone.",
+            ti(dv(fg("Auto slowmode", "auto_slowmode.slowmode_secs", "int"), 5), "Slowmode (seconds)"),
+            "1 to 120 seconds: it is only meant to calm a flood for a moment. A slowmode staff set that is as high or higher is left alone.",
         ),
         ti(dv(fg("Auto slowmode", "auto_slowmode.min_on_secs", "int"), 60), "Minimum time on"),
         hp(
