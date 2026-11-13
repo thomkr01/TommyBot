@@ -1149,7 +1149,7 @@ mod tests {
             c.detail.contains("1 Extra Owner(s) and 2 Trusted Admin(s)")
                 && c.detail.contains("Ban Sync off")
         );
-        keep_staff(&st, &s, g, &json!({})).await.unwrap();
+        let _ = keep_staff(&st, &s, g, &json!({})).await.unwrap();
         let n: i64 = sqlx::query_scalar("select (select count(*) from extra_owners where guild_id = $1) + (select count(*) from trusted_admins where guild_id = $1)")
             .bind(g).fetch_one(&st.db).await.unwrap();
         assert_eq!(n, 3);
