@@ -1213,13 +1213,17 @@ async fn other_bot_grants_that_skip_verification_are_all_taken_back() {
 #[tokio::test]
 async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_at_startup() {
     let Some(t) = T::new(174).await else { return };
+    t.exec("INSERT INTO permits (id, guild_id, name, perms) VALUES ($1 + 3, $1 + 2, 'Mods', '{verify}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 3, $1 + 2, 516)")
+        .await;
     const MEMBER: u64 = 512;
     const PINGS: u64 = 513;
     const TALK: u64 = 514;
     const SENDS: u64 = 515;
     let (view, send) = (1024u64, 2048u64);
-    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human, s4, d] =
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].map(|n| t.base * 100 + n);
+    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human, s4, d, e, nobody] =
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].map(|n| t.base * 100 + n);
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(), "quarantine_hold": false});
     for i in 0..3 {
         server(&t, i, json!({"verification": web_verification(), "antinuke": an})).await;
@@ -1266,7 +1270,12 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
         let mut taken = add(10, ME, d);
         taken["changes"][0]["key"] = json!("$remove");
         m.members.insert((g, d), vec![VERIFIED]);
-        m.audit.insert(g, vec![taken, add(9, ME, c), add(8, bot, a), add(7, human, b), add(6, bot, c), add(5, bot, d)]);
+        // `human` holds a verify permit, `nobody` only Discord's Manage Roles.
+        m.roles.get_mut(&g).unwrap().push((516, false, 0, 6));
+        m.members.insert((g, human), vec![516]);
+        m.members.insert((g, nobody), vec![]);
+        m.members.insert((g, e), vec![VERIFIED]);
+        m.audit.insert(g, vec![taken, add(11, nobody, e), add(9, ME, c), add(8, bot, a), add(7, human, b), add(6, bot, c), add(5, bot, d)]);
     });
     let give = |i: u64, target: u64, role: u64| {
         let mut e = role_added(&t, bot, target, role);
@@ -1377,7 +1386,8 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     crate::verify::given::catch_up(&t.app, t.g(2), None).await.unwrap();
     assert_eq!(reads(2, d), 0, "TommyBot took it back last: no member read");
     assert_eq!(roles(&t, 2, a), Some(vec![]), "a bot verified them while TommyBot was down");
-    assert_eq!(roles(&t, 2, b), Some(vec![VERIFIED]), "staff gave it");
+    assert_eq!(roles(&t, 2, b), Some(vec![VERIFIED]), "staff with a verify permit gave it");
+    assert_eq!(roles(&t, 2, e), Some(vec![]), "a human without a permit gave it");
     assert_eq!(roles(&t, 2, c), Some(vec![VERIFIED]), "TommyBot gave it last");
     // Quarantine Hold off: the hold leaves a held member's role, so this check takes it.
     row(&t, 2, z, &[]).await;

@@ -518,20 +518,31 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Re
             tracing::warn!(?e, "catch-up cap log failed");
         }
     }
-    let mut bots = HashSet::new();
+    // Whose grants are taken back, looked up once per actor for this run: true for another bot
+    // (every candidate role), false for a human without a verify or quarantine permit who is not
+    // Owner, EO or TA (verification roles only, as live).
+    let mut bots = Takers::new();
     let actors: HashSet<_> = by.values().filter(|(a, add)| *add && *a != app.me).map(|(a, _)| *a).collect();
+    let owner = app.guild_info(gid).await?.owner;
     for actor in actors {
-        match is_bot(app, actor).await {
-            Ok(true) => {
-                bots.insert(actor);
+        let taker = async {
+            if is_bot(app, actor).await? {
+                return anyhow::Ok(Some(true));
             }
-            Ok(false) => {}
-            Err(e) => tracing::warn!(?e, actor = actor.get(), "bot lookup failed, its grants are skipped"),
+            let level = app.level(gid, owner, actor).await?;
+            Ok((!level.has("verify") && !level.has("quarantine")).then_some(false))
+        };
+        match taker.await {
+            Ok(Some(bot)) => {
+                bots.insert(actor, bot);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(?e, actor = actor.get(), "actor lookup failed, their grants are skipped"),
         }
     }
     let members: HashSet<Id<UserMarker>> = by
         .keys()
-        .filter(|(u, r)| from_bot(&by, &bots, *u, r))
+        .filter(|(u, r)| from_bot(&by, &bots, &v.roles, *u, r))
         .map(|(u, _)| *u)
         .collect();
     for target in members {
@@ -544,9 +555,13 @@ pub async fn catch_up(app: &App, gid: Id<GuildMarker>, first: Option<i64>) -> Re
 
 type Newest = HashMap<(Id<UserMarker>, Id<RoleMarker>), (Id<UserMarker>, bool)>;
 
-/// The newest change of this pair is another bot adding the role.
-fn from_bot(by: &Newest, bots: &HashSet<Id<UserMarker>>, u: Id<UserMarker>, r: &Id<RoleMarker>) -> bool {
-    by.get(&(u, *r)).is_some_and(|(a, add)| *add && bots.contains(a))
+/// Actors whose grants [`catch_up`] takes back: true for a bot, false for a human without a permit.
+type Takers = HashMap<Id<UserMarker>, bool>;
+
+/// The newest change of this pair is a taker adding the role (a human: a verification role only).
+fn from_bot(by: &Newest, takers: &Takers, verify: &[Id<RoleMarker>], u: Id<UserMarker>, r: &Id<RoleMarker>) -> bool {
+    by.get(&(u, *r))
+        .is_some_and(|(a, add)| *add && takers.get(a).is_some_and(|bot| *bot || verify.contains(r)))
 }
 
 /// (member, role) -> (who changed it last, whether that was an add), for candidate roles, and
@@ -587,7 +602,7 @@ async fn catch_up_member(
     gid: Id<GuildMarker>,
     target: Id<UserMarker>,
     by: &Newest,
-    bots: &HashSet<Id<UserMarker>>,
+    bots: &Takers,
 ) -> Result<()> {
     let v = &cfg.verification;
     let lock = member_lock(gid, target);
@@ -600,10 +615,10 @@ async fn catch_up_member(
     };
     let actor = by
         .iter()
-        .find(|((u, _), (a, add))| *u == target && *add && bots.contains(a))
+        .find(|((u, _), (a, add))| *u == target && *add && bots.contains_key(a))
         .map(|(_, (a, _))| *a)
         .unwrap_or(app.me);
-    if member.roles.iter().any(|r| v.roles.contains(r) && !from_bot(by, bots, target, r))
+    if member.roles.iter().any(|r| v.roles.contains(r) && !from_bot(by, bots, &v.roles, target, r))
         || hold_takes_it(app, cfg, gid, target, actor).await?
     {
         return Ok(());
@@ -612,13 +627,13 @@ async fn catch_up_member(
         .roles
         .iter()
         .copied()
-        .filter(|r| gate.roles.contains(r) && from_bot(by, bots, target, r))
+        .filter(|r| gate.roles.contains(r) && from_bot(by, bots, &v.roles, target, r))
         .collect();
     if taken.is_empty() {
         return Ok(());
     }
     match remove_roles(app, gid, target, &taken).await {
-        Ok(()) => taken_log(app, gid, target, actor, "A verification role given by another bot while TommyBot was offline was taken back").await,
+        Ok(()) => taken_log(app, gid, target, actor, "A verification role given while TommyBot was offline, by another bot or without a verify permit, was taken back").await,
         Err(e) => failed(app, gid, target, actor, &e).await,
     }
 }
