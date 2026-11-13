@@ -628,11 +628,12 @@ pub async fn run(
                     &roles,
                 )
                 .await?;
-                // Roles with Administrator or other dangerous permissions count as staff too.
-                let info = app.guild_info(gid).await?;
+                // Roles with Administrator or other dangerous permissions count as staff too,
+                // judged by what they held before a role lock stripped them.
+                let perms = crate::lockdown::unlocked_role_perms(app, gid).await?;
                 let dangerous = roles.iter().any(|r| {
                     Id::new_checked(*r as u64)
-                        .and_then(|r| info.role_perms.get(&r))
+                        .and_then(|r| perms.get(&r))
                         .is_some_and(|p| p & tommybot_antinuke::DANGEROUS_PERMS != 0)
                 });
                 // Staff caught by anti-nuke or a rate limit go free only through an owner or TA.

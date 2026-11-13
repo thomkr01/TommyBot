@@ -626,6 +626,8 @@ pub(crate) async fn grant(
             safe
         })
         .collect();
+    // Before the roles land: the other-bot check must not take back what TommyBot gives.
+    given::note_verified(gid, user);
     // A join quarantine ends whatever "quarantine on join" says now: it may have been switched
     // off since they joined.
     let join = crate::antinuke::quarantine_kind(app, gid, user).await? == Some(true);

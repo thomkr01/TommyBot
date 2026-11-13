@@ -327,32 +327,40 @@ fn reach_staff(kind: &str, reason: Option<&str>, tickets: bool) -> Option<&'stat
 /// quarantine or the revert after it; a raid wave queues none, so the bot stays off DM limits.
 /// Callers skip join and verification quarantines, which get the verification prompt.
 pub(crate) async fn queue_quarantine_dm(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) {
-    let Ok(cfg) = app.cfg(gid.get()).await else {
-        return;
-    };
-    let now = crate::automod::now_ms();
-    let raid = app
-        .raids
-        .lock()
-        .unwrap()
-        .get(&gid.get())
-        .is_some_and(|r| r.active(now))
-        || app
+    let r = async {
+        let cfg = app.cfg(gid.get()).await?;
+        let now = crate::automod::now_ms();
+        let voice_raid = app
             .voice_raids
             .lock()
             .unwrap()
             .get(&gid.get())
             .is_some_and(|r| r.active(now));
-    if !cfg.tickets.enabled || raid {
-        return;
-    }
-    let job = json!({ "user": user.get() });
-    if let Err(e) = jobs::enqueue(&app.pool, gid.get() as i64, QUARANTINE_DM, job, now_secs()).await
-    {
+        // New tickets are refused during a raid or lock, so the DM would promise nothing.
+        if !cfg.tickets.enabled || voice_raid || crate::lockdown::raid_or_lock(app, gid).await? {
+            return anyhow::Ok(());
+        }
+        // One DM per member and server a day: the marker job runs (and ends) after 24 h.
+        let g = gid.get() as i64;
+        if jobs::of_user(&app.pool, g, QUARANTINE_DM_COOLDOWN, user.get())
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let job = json!({ "user": user.get() });
+        jobs::enqueue(&app.pool, g, QUARANTINE_DM_COOLDOWN, job.clone(), now_secs() + 86_400)
+            .await?;
+        jobs::enqueue(&app.pool, g, QUARANTINE_DM, job, now_secs()).await?;
+        Ok(())
+    };
+    if let Err(e) = r.await {
         tracing::warn!(?e, "queueing the quarantine DM failed");
     }
 }
 
+/// Marks that a member got the quarantine DM in the last 24 hours; its run does nothing.
+pub(crate) const QUARANTINE_DM_COOLDOWN: &str = "quarantine_dm_cooldown";
 pub(crate) const QUARANTINE_DM: &str = "quarantine_dm";
 
 /// The `quarantine_dm` job: only a member still in a real quarantine, and never a bot. A failed

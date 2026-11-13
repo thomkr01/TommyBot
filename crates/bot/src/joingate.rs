@@ -92,12 +92,17 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
     // Raid detection comes before this join's REST calls (invite lookup, bot adder, verification),
     // so a raid is caught as it starts (D57). A Raider List hit counts but is not punished again (D56).
     // A raid hit that keeps the member holds their sticky roles back, but keeps them saved.
-    let (mut raided, mut gone) = (false, false);
+    // `raid_removed`: the raid's kick or ban of this joiner went through.
+    let (mut raided, mut gone, mut raid_removed) = (false, false, None);
     let raid = cfg.joinraid.as_ref().filter(|r| r.enabled);
     if let Some(raid) = raid {
         match join_raid(app, &cfg, gid, raid, &j, suspicious, now, listed).await {
-            Ok(true) => (raided, gone) = (true, removes(raid.action)),
-            Ok(false) => {}
+            Ok((hit, removed)) => {
+                raided = hit;
+                if removed {
+                    (gone, raid_removed) = (true, Some(raid.action));
+                }
+            }
             Err(e) => tracing::warn!(?e, "join raid check failed"),
         }
     }
@@ -165,8 +170,9 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
             is_bot: user.bot,
             adder: adder.map(|a| a.get()),
         };
-        // Already removed by the raid: not punished twice. A refused punishment is only logged.
-        if !gone {
+        // Already removed by the raid: not punished twice, unless the gate bans and the raid
+        // only kicked. A refused punishment is only logged.
+        if raid_removed.is_none_or(|r| r == Action::Kick && action == Action::Ban) {
             gone = removes(action);
             if let Err(e) = punish(app, &cfg, gid, j.id, action, &why, detail).await {
                 tracing::warn!(?e, "join gate punishment failed");
@@ -213,8 +219,8 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
 /// quarantined again, through the rejoin path (a join quarantine with verification off ends there).
 /// One who joined before is in the same membership, still held or released by hand (Quarantine
 /// Whitelist, Quarantine Hold off), and is left alone. `known`: GuildCreate's members, the whole
-/// list when `complete`; anyone else is read one by one, so a large server costs one member read
-/// per row, paced by the rate limiter.
+/// list when `complete`; otherwise the member list is paged (its own rate-limit bucket, not the
+/// one punishments use). During a raid or lock the check waits 5 minutes in a job.
 pub async fn requarantine_missed(
     app: &App,
     gid: Id<GuildMarker>,
@@ -222,6 +228,11 @@ pub async fn requarantine_missed(
     complete: bool,
 ) -> Result<()> {
     use sqlx::types::chrono::{DateTime, Utc};
+    if lockdown::raid_or_lock(app, gid).await? {
+        let at = now_secs() + 300;
+        jobs::enqueue(&app.pool, gid.get() as i64, MISSED_REJOINS, serde_json::json!({}), at).await?;
+        return Ok(());
+    }
     let rows: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
         "SELECT q.user_id, greatest(q.created_at, a.at) FROM quarantines q
          LEFT JOIN (SELECT target_id, max(created_at) AS at FROM action_log
@@ -233,29 +244,58 @@ pub async fn requarantine_missed(
     .bind(app.me.get() as i64)
     .fetch_all(&app.pool)
     .await?;
-    for (user, since) in rows {
-        let uid = Id::new(user as u64);
-        let joined = match known.iter().find(|m| m.user.id == uid) {
-            Some(m) => m.joined_at,
-            None if complete => continue,
-            None => match crate::http_err::member(&app.http, gid, uid).await {
-                Ok(Some(m)) => m.joined_at,
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(?e, user, "checking a quarantined member at startup failed");
-                    continue;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let since: std::collections::HashMap<u64, i64> = rows
+        .into_iter()
+        .map(|(u, at)| (u as u64, at.timestamp_micros()))
+        .collect();
+    let mut joined: Vec<(u64, Option<i64>)> = known
+        .iter()
+        .filter(|m| since.contains_key(&m.user.id.get()))
+        .map(|m| (m.user.id.get(), m.joined_at.map(|j| j.as_micros())))
+        .collect();
+    if !complete {
+        joined.clear();
+        let mut after = None;
+        // shortcut: stops after 500 pages (500k members); a bigger server is checked only that far.
+        for _ in 0..500 {
+            let req = app.http.guild_members(gid).limit(1000);
+            let req = match after {
+                Some(a) => req.after(a),
+                None => req,
+            };
+            let page = req.await?.models().await?;
+            joined.extend(
+                page.iter()
+                    .filter(|m| since.contains_key(&m.user.id.get()))
+                    .map(|m| (m.user.id.get(), m.joined_at.map(|j| j.as_micros()))),
+            );
+            match page.last() {
+                Some(m) if page.len() == 1000 && joined.len() < since.len() => {
+                    after = Some(m.user.id)
                 }
-            },
-        };
-        if joined.is_none_or(|j| j.as_micros() <= since.timestamp_micros()) {
+                _ => break,
+            }
+        }
+    }
+    for (user, at) in joined {
+        // The row's times come from the database's clock, the join time from Discord's: a
+        // rejoin counts only past a margin, so a skewed clock never catches a same-membership row.
+        if at.is_none_or(|j| j <= since[&user] + CLOCK_MARGIN_MICROS) {
             continue;
         }
-        if let Err(e) = crate::antinuke::requarantine_rejoin(app, gid, uid).await {
+        if let Err(e) = crate::antinuke::requarantine_rejoin(app, gid, Id::new(user)).await {
             tracing::warn!(?e, user, "quarantining a member who rejoined while the bot was down failed");
         }
     }
     Ok(())
 }
+
+/// The job that runs [`requarantine_missed`] again once a raid or lock is over.
+pub(crate) const MISSED_REJOINS: &str = "requarantine_missed";
+const CLOCK_MARGIN_MICROS: i64 = 30_000_000;
 
 /// The punishment takes the member out of the server.
 fn removes(action: Action) -> bool {
@@ -351,8 +391,9 @@ pub(crate) fn report_log((title, raid): (&str, &str), caught: i64, code: Option<
 /// The link button under a raid report.
 pub(crate) const RAID_REPORT: &str = "Full Raid Report ↗";
 
-/// True when the joiner was among the flagged raiders. `listed`: the Raider List already acted on
-/// the joiner, who counts but is not punished again (nor is an earlier listed joiner).
+/// (the joiner was among the flagged raiders, the raid's kick or ban of them went through).
+/// `listed`: the Raider List already acted on the joiner, who counts but is not punished again
+/// (nor is an earlier listed joiner).
 #[allow(clippy::too_many_arguments)]
 async fn join_raid(
     app: &App,
@@ -363,7 +404,7 @@ async fn join_raid(
     suspicious: bool,
     now: i64,
     listed: bool,
-) -> Result<bool> {
+) -> Result<(bool, bool)> {
     let (out, started, names, invites, code, skip) = {
         let mut raids = app.raids.lock().unwrap();
         let d = raids.entry(gid.get()).or_default();
@@ -441,6 +482,7 @@ async fn join_raid(
         }
     }
     let hit = out.flagged.contains(&j.id);
+    let mut removed = false;
     // One raider who already left (404) or a failed log must not let the rest go.
     let flagged_ids = out.flagged.clone();
     for id in out.flagged.into_iter().filter(|id| !skip.contains(id)) {
@@ -457,10 +499,13 @@ async fn join_raid(
                 }
             }
         }
-        punish_or_retry(app, cfg, gid, id, raid.action, "join raid").await;
+        let done = punish_or_retry(app, cfg, gid, id, raid.action, "join raid").await;
+        if id == j.id {
+            removed = done && removes(raid.action);
+        }
     }
     crate::raiders::raid_flagged(app, gid, &flagged_ids, &code).await;
-    Ok(hit)
+    Ok((hit, removed))
 }
 
 /// The cured names, one per line, as `GateCfg::name_matches` reads them.
@@ -760,7 +805,7 @@ pub(crate) async fn punish(
 }
 
 /// A raid punishment: one that failed without a refusal (5xx, timeout) is tried again from a
-/// `raid_punish` job, so an outage during a raid does not let a raider stay.
+/// `raid_punish` job, so an outage during a raid does not let a raider stay. True when it worked.
 pub(crate) async fn punish_or_retry(
     app: &App,
     cfg: &GuildCfg,
@@ -768,17 +813,18 @@ pub(crate) async fn punish_or_retry(
     user: u64,
     action: Action,
     why: &str,
-) {
+) -> bool {
     let Err(e) = punish(app, cfg, gid, user, action, why, Detail::default()).await else {
-        return;
+        return true;
     };
     tracing::warn!(?e, user, why, "punishing a raider failed");
     // A warn writes its case before anything can fail, so it is never retried.
     let retries = matches!(action, Action::Timeout(_) | Action::Kick | Action::Ban);
     if !retries || crate::http_err::refused(&e) {
-        return;
+        return false;
     }
     queue_retry(app, gid, user, action, why).await;
+    false
 }
 
 /// Queues a `raid_punish` job in 30 s; it checks immunity and the Raider List's Allow again.

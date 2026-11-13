@@ -89,7 +89,7 @@ fn web_verification() -> Value {
 /// re-armed nuker is contained again (and today's roles saved), not only reverted.
 #[tokio::test]
 async fn a_stale_quarantine_row_does_not_count_as_contained() {
-    let Some(t) = T::new(20).await else { return };
+    let Some(t) = T::new(150).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(),
                     "limits": {"Ban": {"per_minute": 1, "per_hour": 1}}});
     server(&t, 0, json!({ "antinuke": an })).await;
@@ -138,7 +138,7 @@ async fn a_stale_quarantine_row_does_not_count_as_contained() {
 /// roles Discord will not take off) and staff are told the role is missing.
 #[tokio::test]
 async fn a_deleted_quarantine_role_still_strips_the_member() {
-    let Some(t) = T::new(21).await else { return };
+    let Some(t) = T::new(151).await else { return };
     // 599 is not a role of the server any more.
     let an = json!({"enabled": true, "quarantine_role": "599"});
     server(&t, 0, json!({ "antinuke": an })).await;
@@ -158,7 +158,7 @@ async fn a_deleted_quarantine_role_still_strips_the_member() {
 /// verification does not let them out.
 #[tokio::test]
 async fn a_raider_list_quarantine_of_a_roleless_joiner_cannot_be_verified_out() {
-    let Some(t) = T::new(22).await else { return };
+    let Some(t) = T::new(152).await else { return };
     let cfg = json!({
         "antinuke": {"quarantine_role": Q.to_string()},
         "raider_list": {"enabled": true, "action": "quarantine"},
@@ -201,7 +201,7 @@ async fn a_raider_list_quarantine_of_a_roleless_joiner_cannot_be_verified_out() 
 /// D2: an autorole landing before verification's join quarantine does not turn it into a real one.
 #[tokio::test]
 async fn a_join_quarantine_with_an_autorole_still_lifts_on_verify() {
-    let Some(t) = T::new(23).await else { return };
+    let Some(t) = T::new(153).await else { return };
     let mut v = web_verification();
     v["quarantine_on_join"] = json!(true);
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v});
@@ -222,7 +222,7 @@ async fn a_join_quarantine_with_an_autorole_still_lifts_on_verify() {
 /// N1: turning "quarantine on join" off while someone waits does not strand them in quarantine.
 #[tokio::test]
 async fn turning_quarantine_on_join_off_does_not_strand_a_verifying_member() {
-    let Some(t) = T::new(24).await else { return };
+    let Some(t) = T::new(154).await else { return };
     let mut v = web_verification();
     v["quarantine_on_join"] = json!(true);
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v.clone()});
@@ -254,7 +254,7 @@ async fn turning_quarantine_on_join_off_does_not_strand_a_verifying_member() {
 /// leaves it.
 #[tokio::test]
 async fn a_raider_list_quarantine_of_a_bot_clears_its_role() {
-    let Some(t) = T::new(25).await else { return };
+    let Some(t) = T::new(155).await else { return };
     let cfg = json!({
         "antinuke": {"quarantine_role": Q.to_string()},
         "raider_list": {"enabled": true, "action": "quarantine"},
@@ -303,7 +303,7 @@ async fn a_raider_list_quarantine_of_a_bot_clears_its_role() {
 /// D12: a failed undo (the role is above the bot) does not spare the actor.
 #[tokio::test]
 async fn a_failed_undo_still_quarantines_the_actor() {
-    let Some(t) = T::new(26).await else { return };
+    let Some(t) = T::new(156).await else { return };
     let an = json!({"enabled": true, "strict_mode": true, "quarantine_role": Q.to_string()});
     server(&t, 0, json!({ "antinuke": an })).await;
     let actor = t.base * 10 + 1;
@@ -327,7 +327,7 @@ async fn a_failed_undo_still_quarantines_the_actor() {
 /// D18: a managed role Discord will not take off does not keep enforce_permits from the rest.
 #[tokio::test]
 async fn enforce_permits_skips_managed_roles() {
-    let Some(t) = T::new(27).await else { return };
+    let Some(t) = T::new(157).await else { return };
     server(&t, 0, json!({"misc": {"enforce_permits": true}})).await;
     let (u, managed, plain) = (t.base * 10 + 1, 510, 511);
     t.set(|m| {
@@ -360,7 +360,7 @@ async fn enforce_permits_skips_managed_roles() {
 #[tokio::test]
 async fn enforce_quarantine_gives_the_verification_channel_its_shape() {
     use tommybot_core::sections::{QUARANTINE_DENY, VERIFY_ALLOW, VERIFY_DENY};
-    let Some(t) = T::new(28).await else { return };
+    let Some(t) = T::new(158).await else { return };
     let q = json!({"quarantine_role": Q.to_string()});
     let misc = json!({"enforce_quarantine_perms": true});
     let mut unsaved = web_verification();
@@ -427,7 +427,7 @@ async fn enforce_quarantine_gives_the_verification_channel_its_shape() {
 /// Round 2, item 1: a failed member read counts as not contained, so the nuker gets the full run.
 #[tokio::test]
 async fn a_failed_member_read_does_not_count_as_contained() {
-    let Some(t) = T::new(31).await else { return };
+    let Some(t) = T::new(161).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(),
                     "limits": {"Ban": {"per_minute": 1, "per_hour": 1}}});
     server(&t, 0, json!({ "antinuke": an })).await;
@@ -532,7 +532,7 @@ async fn a_join_quarantine_ends_on_rejoin_when_verification_is_off() {
 /// N5: a report log the bot cannot post (the nuker hid the channel) still DMs the owner.
 #[tokio::test]
 async fn a_failed_report_log_still_alerts_the_owner() {
-    let Some(t) = T::new(29).await else { return };
+    let Some(t) = T::new(159).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
     server(&t, 0, json!({ "antinuke": an })).await;
     let actor = t.base * 10 + 1;
@@ -615,7 +615,7 @@ async fn migration_3900_marks_only_empty_saved_rows_as_join() {
 /// held: their sticky roles wait for verification instead of being dropped.
 #[tokio::test]
 async fn a_join_quarantine_rejoin_keeps_sticky_roles_for_verification() {
-    let Some(t) = T::new(30).await else { return };
+    let Some(t) = T::new(160).await else { return };
     let mut v = web_verification();
     v["quarantine_on_join"] = json!(true);
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v,
@@ -776,7 +776,7 @@ async fn verifying_during_a_timeout_does_not_give_back_main_roles() {
 /// permit), and saved roles with dangerous permissions (Administrator) need an owner or TA.
 #[tokio::test]
 async fn verify_lifts_only_a_join_quarantine_and_admin_roles_need_staff() {
-    let Some(t) = T::new(42).await else { return };
+    let Some(t) = T::new(163).await else { return };
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": web_verification()});
     server(&t, 0, cfg).await;
     const ADMIN: u64 = 505;
@@ -811,6 +811,31 @@ async fn verify_lifts_only_a_join_quarantine_and_admin_roles_need_staff() {
     let text = run(permit(&["quarantine"]), Unquarantine { user: admin }).await;
     assert!(text.starts_with("Cannot release"), "{text}");
     assert_eq!(saved(&t, 0, admin).await, Some(vec![ADMIN as i64]));
+    // During a role lock the Administrator role reads 0 live; the lock's saved value counts.
+    const LOCKED: u64 = 506;
+    let stripped = t.base * 10 + 3;
+    t.set(|m| {
+        let g = t.g(0).get();
+        m.roles.get_mut(&g).unwrap().push((LOCKED, false, 0, 7));
+        m.members.insert((g, stripped), vec![Q]);
+    });
+    t.app.invalidate_guild(t.g(0));
+    row(&t, 0, stripped, &[LOCKED as i64]).await;
+    let lock = tommybot_automod::lockdown::Snapshot {
+        kind: Some(tommybot_automod::lockdown::LockKind::Role),
+        role_perms: vec![(LOCKED, 8)],
+        ..Default::default()
+    };
+    tommybot_automod::store::save_lock(&t.app.pool, t.g(0).get(), &lock)
+        .await
+        .unwrap();
+    let text = run(permit(&["quarantine"]), Unquarantine { user: stripped }).await;
+    sqlx::query("DELETE FROM lock_snapshots WHERE guild_id = $1")
+        .bind(t.g(0).get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    assert!(text.starts_with("Cannot release"), "role lock: {text}");
     // With the quarantine permit, verify may end it.
     let text = run(permit(&["verify", "quarantine"]), Verify { user: real }).await;
     assert_eq!(saved(&t, 0, real).await, None, "{text}");
@@ -840,7 +865,7 @@ fn joined(t: &T, u: u64) -> MemberAdd {
 /// bot is not quarantined. A human doing the same still is.
 #[tokio::test]
 async fn an_autorole_bot_after_a_rejoin_quarantine_is_undone_not_punished() {
-    let Some(t) = T::new(43).await else { return };
+    let Some(t) = T::new(165).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
     server(&t, 0, json!({ "antinuke": an })).await;
     let (u, bot, human) = (t.base * 10 + 1, t.base * 10 + 2, t.base * 10 + 3);
@@ -867,11 +892,56 @@ async fn an_autorole_bot_after_a_rejoin_quarantine_is_undone_not_punished() {
     t.cleanup().await;
 }
 
+/// D15 review: the grace covers only the first bot change and only plain roles. An Administrator
+/// role, or a second change in the window, quarantines the bot as before.
+#[tokio::test]
+async fn the_rejoin_grace_never_covers_admin_roles_or_a_second_change() {
+    let Some(t) = T::new(162).await else { return };
+    let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    const ADMIN: u64 = 507;
+    let [u, v, admin_bot, twice_bot] = [1, 2, 3, 4].map(|n| t.base * 10 + n);
+    t.set(|m| {
+        let g = t.g(0).get();
+        m.roles.get_mut(&g).unwrap().push((ADMIN, false, 8, 6));
+        m.bots.extend([admin_bot, twice_bot]);
+        for x in [u, v] {
+            m.members.insert((g, x), vec![]);
+        }
+        for b in [admin_bot, twice_bot] {
+            m.members.insert((g, b), vec![]);
+        }
+    });
+    for x in [u, v] {
+        row(&t, 0, x, &[ROLE as i64]).await;
+        crate::joingate::on_join(&t.app, &joined(&t, x), false)
+            .await
+            .unwrap();
+    }
+    let give = |actor: u64, target: u64, role: u64| {
+        let t = &t;
+        async move {
+            t.set(|m| {
+                m.members.insert((t.g(0).get(), target), vec![Q, role]);
+            });
+            let e = role_added(t, actor, target, role);
+            crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+        }
+    };
+    give(admin_bot, u, ADMIN).await;
+    assert!(saved(&t, 0, admin_bot).await.is_some(), "Administrator is no autorole");
+    give(twice_bot, v, AUTOROLE).await;
+    assert_eq!(saved(&t, 0, twice_bot).await, None, "the first plain role is graced");
+    give(twice_bot, v, AUTOROLE).await;
+    assert!(saved(&t, 0, twice_bot).await.is_some(), "a second change is not");
+    t.cleanup().await;
+}
+
 /// D12b: an undo Discord refuses on a join-quarantined member punishes nobody, is tried once
 /// more and then shown to staff.
 #[tokio::test]
 async fn a_failed_undo_on_a_join_quarantine_is_retried_and_logged() {
-    let Some(t) = T::new(44).await else { return };
+    let Some(t) = T::new(166).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
     server(&t, 0, json!({ "antinuke": an })).await;
     let (u, actor) = (t.base * 10 + 1, t.base * 10 + 2);
@@ -900,7 +970,7 @@ async fn a_failed_undo_on_a_join_quarantine_is_retried_and_logged() {
 /// them, and one who is gone is skipped.
 #[tokio::test]
 async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
-    let Some(t) = T::new(45).await else { return };
+    let Some(t) = T::new(167).await else { return };
     server(&t, 0, json!({"antinuke": {"quarantine_role": Q.to_string()}})).await;
     let [back, freed, held_live, gone] = [1, 2, 3, 4].map(|n| t.base * 10 + n);
     for u in [back, freed, held_live, gone] {
@@ -934,6 +1004,21 @@ async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
     assert_eq!(roles(&t, 0, freed), Some(vec![ROLE]), "released by hand");
     assert_eq!(roles(&t, 0, held_live), Some(vec![ROLE]), "same membership");
     assert_eq!(saved(&t, 0, back).await, Some(vec![ROLE as i64]), "saved list kept");
+    // During a raid the check waits in a job instead of reading members.
+    let raid = tommybot_automod::join::RaidDetector::restored(0, i64::MAX, String::new());
+    t.app.raids.lock().unwrap().insert(t.g(0).get(), raid);
+    let reads = t.calls(&format!("GET /guilds/{}/members", t.g(0)));
+    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false)
+        .await
+        .unwrap();
+    t.app.raids.lock().unwrap().clear();
+    assert_eq!(t.calls(&format!("GET /guilds/{}/members", t.g(0))), reads);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'requarantine_missed'")
+        .bind(t.g(0).get() as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
     t.cleanup().await;
 }
 
@@ -942,7 +1027,7 @@ async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
 /// "quarantine on join" the hold already did this (#170); this covers verification without it.
 #[tokio::test]
 async fn a_verification_role_from_another_bot_is_taken_back() {
-    let Some(t) = T::new(46).await else { return };
+    let Some(t) = T::new(168).await else { return };
     server(&t, 0, json!({"verification": web_verification()})).await;
     let (u, bot, human) = (t.base * 10 + 1, t.base * 10 + 2, t.base * 10 + 3);
     t.set(|m| m.bots.push(bot));
@@ -963,7 +1048,7 @@ async fn a_verification_role_from_another_bot_is_taken_back() {
 /// are on; none during a raid, none for a bot, and the job skips a join quarantine.
 #[tokio::test]
 async fn an_automatic_quarantine_tells_the_member_how_to_reach_staff() {
-    let Some(t) = T::new(49).await else { return };
+    let Some(t) = T::new(169).await else { return };
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "tickets": {"enabled": true}});
     server(&t, 0, cfg).await;
     let [member, bot, raider] = [1, 2, 3].map(|n| t.base * 10 + n);
@@ -1001,6 +1086,11 @@ async fn an_automatic_quarantine_tells_the_member_how_to_reach_staff() {
         crate::reply::quarantine_dm_job(&t.app, t.g(0), p).await.unwrap();
     }
     assert_eq!(t.calls("You can DM TommyBot to reach this server"), 1, "the member, not the bot");
+    // A second quarantine within 24 h queues no second DM.
+    crate::antinuke::quarantine_actor(&t.app, t.g(0), Id::new(member), why)
+        .await
+        .unwrap();
+    assert_eq!(jobs().await.len(), 2, "one DM a day");
     // A join quarantine gets the verification prompt instead.
     sqlx::query("UPDATE quarantines SET on_join = true WHERE guild_id = $1 AND user_id = $2")
         .bind(t.g(0).get() as i64)
@@ -1012,5 +1102,58 @@ async fn an_automatic_quarantine_tells_the_member_how_to_reach_staff() {
         .await
         .unwrap();
     assert_eq!(t.calls("You can DM TommyBot to reach this server"), 1);
+    t.cleanup().await;
+}
+
+/// D58 review: a role opening the verified channels counts as a verification role; two grants in
+/// parallel are both taken back; a removal Discord refuses is tried again and then told to staff;
+/// and a Quarantine Whitelist bot's grant to a join-quarantined member is taken back too.
+#[tokio::test]
+async fn other_bot_grants_that_skip_verification_are_all_taken_back() {
+    let Some(t) = T::new(164).await else { return };
+    const EXTRA: u64 = 508;
+    const VERIFIED2: u64 = 509;
+    const STUCK: u64 = 510;
+    let mut v = web_verification();
+    v["roles"] = json!([VERIFIED.to_string(), VERIFIED2.to_string(), STUCK.to_string()]);
+    let [u, w, x, y, bot] = [1, 2, 3, 4, 5].map(|n| t.base * 10 + n);
+    let cfg = json!({"verification": v, "antinuke": {"enabled": true, "quarantine_role": Q.to_string(),
+                     "quarantine_whitelist": [bot.to_string()]}});
+    server(&t, 0, cfg).await;
+    t.set(|m| {
+        let g = t.g(0).get();
+        let r = m.roles.get_mut(&g).unwrap();
+        r.extend([(EXTRA, false, 0, 6), (VERIFIED2, false, 0, 7), (STUCK, true, 0, 8)]);
+        m.bots.push(bot);
+        let ow = |role: u64| json!({"id": role.to_string(), "type": 0, "allow": "1024", "deny": "0"});
+        m.channels.insert(g, json!([{"id": "701", "type": 0, "guild_id": g.to_string(), "name": "general",
+            "position": 0, "permission_overwrites": [ow(VERIFIED), ow(EXTRA)]}]));
+        m.members.insert((g, u), vec![EXTRA]);
+        m.members.insert((g, w), vec![VERIFIED, VERIFIED2]);
+        m.members.insert((g, x), vec![STUCK]);
+        m.members.insert((g, y), vec![Q, VERIFIED]);
+    });
+    let give = |target: u64, role: u64| role_added(&t, bot, target, role);
+    // A plain role that opens the verified channel.
+    crate::verify::given::on_audit(&t.app, &give(u, EXTRA)).await.unwrap();
+    assert_eq!(roles(&t, 0, u), Some(vec![]));
+    // Two verification roles in two calls at once: neither proves the other.
+    let (a, b) = (give(w, VERIFIED), give(w, VERIFIED2));
+    let (ra, rb) = tokio::join!(
+        crate::verify::given::on_audit(&t.app, &a),
+        crate::verify::given::on_audit(&t.app, &b)
+    );
+    ra.unwrap();
+    rb.unwrap();
+    assert_eq!(roles(&t, 0, w), Some(vec![]));
+    // Discord refuses the removal (a managed role): tried twice, then staff hear of it.
+    crate::verify::given::on_audit(&t.app, &give(x, STUCK)).await.unwrap();
+    let del = format!("DELETE /guilds/{}/members/{x}/roles/{STUCK}", t.g(0));
+    assert_eq!(t.calls(&del), 2);
+    assert_eq!(t.calls("Could not take back a verification role"), 1);
+    // The hold lets a Quarantine Whitelist bot through; this check does not.
+    row(&t, 0, y, &[]).await;
+    crate::verify::given::on_audit(&t.app, &give(y, VERIFIED)).await.unwrap();
+    assert_eq!(roles(&t, 0, y), Some(vec![Q]));
     t.cleanup().await;
 }

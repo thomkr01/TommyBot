@@ -238,8 +238,17 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
             let text = "That server is in lockdown and does not take new tickets right now. Please try again later.";
             return say(app, dm, error(text)).await;
         }
-        None if opened_last_hour(app, gid, m.author.id).await? >= TICKETS_PER_HOUR => {
+        None if opened_last_hour(app, gid, Some(m.author.id)).await? >= TICKETS_PER_HOUR => {
             let text = "You opened too many tickets in that server in the last hour. Please try again later.";
+            return say(app, dm, error(text)).await;
+        }
+        None if opened_last_hour(app, gid, None).await? >= SERVER_TICKETS_PER_HOUR => {
+            let text = "That server gets too many new tickets right now. Please try again later.";
+            return say(app, dm, error(text)).await;
+        }
+        // Thomas (D27): a quarantined member reaches staff only when nobody told them why.
+        None if quarantined_with_reason(app, gid, m.author.id).await? => {
+            let text = "You are quarantined in that server and were given the reason, so you cannot open a ticket there.";
             return say(app, dm, error(text)).await;
         }
         None if t.paused => {
@@ -290,16 +299,42 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
     remember(app, m.author.id, gid).await
 }
 
-/// New tickets one member may open in a server per hour (D27).
+/// New tickets one member, and the whole server, may open per hour (D27).
 const TICKETS_PER_HOUR: i64 = 3;
+const SERVER_TICKETS_PER_HOUR: i64 = 20;
 
-async fn opened_last_hour(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<i64> {
+/// Tickets opened in the last hour in the server, by `user` or by anyone.
+async fn opened_last_hour(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Option<Id<UserMarker>>,
+) -> Result<i64> {
     Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM tickets WHERE guild_id = $1 AND user_id = $2
+        "SELECT count(*) FROM tickets WHERE guild_id = $1 AND ($2::bigint IS NULL OR user_id = $2)
          AND opened_at > now() - interval '1 hour'",
     )
     .bind(gid.get() as i64)
+    .bind(user.map(|u| u.get() as i64))
+    .fetch_one(&app.pool)
+    .await?)
+}
+
+/// Quarantined, and the newest quarantine case is staff's with a reason. Automatic quarantines
+/// (the bot's own cases) and staff quarantines without a reason told the member nothing.
+async fn quarantined_with_reason(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM quarantines WHERE guild_id = $1 AND user_id = $2)
+            AND coalesce((SELECT mod_id <> $3 AND coalesce(reason, '') <> '' FROM cases
+                          WHERE guild_id = $1 AND user_id = $2 AND kind = 'quarantine'
+                          ORDER BY case_no DESC LIMIT 1), false)",
+    )
+    .bind(gid.get() as i64)
     .bind(user.get() as i64)
+    .bind(app.me.get() as i64)
     .fetch_one(&app.pool)
     .await?)
 }
@@ -581,7 +616,7 @@ mod tests {
     /// or lockdown or past the hourly limit. Every refusal comes before a channel is made.
     #[tokio::test]
     async fn ticket_dms_are_filtered_and_new_tickets_limited() {
-        let Some(t) = crate::bansync::tests::T::new(47).await else {
+        let Some(t) = crate::bansync::tests::T::new(173).await else {
             return;
         };
         const CAT: u64 = 600;
@@ -650,9 +685,54 @@ mod tests {
             .execute(&t.app.pool)
             .await
             .unwrap();
+        // Quarantined by staff with a reason: told why, so no ticket.
+        let case = |m: u64, reason: Option<&str>, n: i32| {
+            let t = &t;
+            let reason = reason.map(String::from);
+            async move {
+                sqlx::query("INSERT INTO cases (guild_id, case_no, kind, user_id, mod_id, reason) VALUES ($1, $2, 'quarantine', $3, $4, $5)")
+                    .bind(gid.get() as i64)
+                    .bind(n)
+                    .bind(u as i64)
+                    .bind(m as i64)
+                    .bind(reason)
+                    .execute(&t.app.pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        case(9, Some("spamming"), 1).await;
+        send_mail(&t.app, &dm("let me out"), gid).await.unwrap();
+        assert_eq!(said("were given the reason"), 1);
+        // A later automatic quarantine (the bot's case) told them nothing.
+        case(crate::bansync::tests::ME, Some("anti-nuke"), 2).await;
         send_mail(&t.app, &dm("why am I quarantined?"), gid).await.unwrap();
         assert_eq!(said(&format!("POST /guilds/{gid}/channels")), 1, "ticket opened");
         assert_eq!(said("Quarantined"), 1);
+        // The server cap: 20 new tickets an hour from anyone.
+        sqlx::query("INSERT INTO tickets (guild_id, number, user_id, closed_at) SELECT $1, n, n, now() FROM generate_series(100, 119) n")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tickets SET closed_at = now() WHERE guild_id = $1")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM quarantines WHERE guild_id = $1")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM tickets WHERE guild_id = $1 AND user_id = $2")
+            .bind(gid.get() as i64)
+            .bind(u as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        send_mail(&t.app, &dm("help"), gid).await.unwrap();
+        assert_eq!(said("too many new tickets right now"), 1);
         sqlx::query("DELETE FROM ticket_users WHERE user_id = $1")
             .bind(u as i64)
             .execute(&t.app.pool)

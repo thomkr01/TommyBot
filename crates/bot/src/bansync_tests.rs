@@ -140,6 +140,8 @@ pub(crate) struct Mock {
     pub(crate) fail_delete_channel: bool,
     /// Member role-list edits fail with 500.
     pub(crate) fail_member_edit: bool,
+    /// Channels by guild, as Discord's JSON array; `[]` when not set.
+    pub(crate) channels: HashMap<u64, Value>,
     pub(crate) log: Vec<String>,
 }
 
@@ -294,7 +296,10 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 .collect();
             (200, json!(all).to_string())
         }
-        ("GET", ["guilds", _, "channels"]) => (200, "[]".into()),
+        ("GET", ["guilds", g, "channels"]) => match m.channels.get(&n(g)) {
+            Some(c) => (200, c.to_string()),
+            None => (200, "[]".into()),
+        },
         ("PATCH", ["guilds", _, "roles", _]) if m.fail_role_edit => err(403, 50013),
         ("PATCH", ["guilds", g, "roles", r]) => {
             let perms = serde_json::from_str::<Value>(body).unwrap_or_default()["permissions"]
@@ -426,7 +431,7 @@ pub(crate) struct T {
 }
 
 impl T {
-    /// `n` picks this test's guild ids, so it must be unique across every test file using `T`.
+    /// `n` (below 1000) picks this test's guild ids, so it must be unique across every test file using `T`.
     pub(crate) async fn new(n: u64) -> Option<T> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = tommybot_core::db::connect(&url).await.unwrap();
@@ -457,7 +462,7 @@ impl T {
         let t = T {
             app,
             mock,
-            base: 3_300_000_000_000 + std::process::id() as u64 * 1000 + n * 10,
+            base: 3_300_000_000_000 + std::process::id() as u64 * 10_000 + n * 10,
         };
         t.cleanup().await;
         Some(t)

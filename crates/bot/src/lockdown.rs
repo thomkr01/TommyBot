@@ -290,6 +290,25 @@ pub async fn active(app: &App, gid: Id<GuildMarker>) -> Result<Vec<LockKind>> {
         .collect())
 }
 
+/// Role permissions as they were before the active locks stripped them: a role lock saves the old
+/// value, and the oldest lock holds the real one. Other roles read live.
+// merge: unify with h1 lockdown::unlocked_info
+pub async fn unlocked_role_perms(
+    app: &App,
+    gid: Id<GuildMarker>,
+) -> Result<std::collections::HashMap<Id<twilight_model::id::marker::RoleMarker>, u64>> {
+    let mut perms = app.guild_info(gid).await?.role_perms.clone();
+    let mut saved = std::collections::HashSet::new();
+    for snap in store::locks(&app.pool, gid.get()).await? {
+        for (r, p) in snap.role_perms {
+            if let Some(r) = Id::new_checked(r).filter(|r| saved.insert(*r)) {
+                perms.insert(r, p);
+            }
+        }
+    }
+    Ok(perms)
+}
+
 /// A join raid is running or a lock is on: member edits and new tickets wait.
 pub async fn raid_or_lock(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
     let now = crate::automod::now_ms();

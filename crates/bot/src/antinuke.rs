@@ -1732,7 +1732,12 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
     }
     // An autorole bot right after a rejoin's quarantine: undone, not punished (D15, as 11-11).
-    if rejoined_recently(gid, target) && is_bot(app, actor).await {
+    // Only its first change, and only plain roles: a dangerous or permit role is punished as before.
+    if rejoined_recently(gid, target)
+        && is_bot(app, actor).await
+        && take_rejoin(gid, target)
+        && plain_roles_added(app, gid, e).await
+    {
         undo_role_change(app, &cfg, gid, target).await;
         return Ok(());
     }
@@ -1803,6 +1808,37 @@ fn rejoined_recently(gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
     let all = REJOINED.lock().unwrap_or_else(|p| p.into_inner());
     all.get(&(gid.get(), user.get()))
         .is_some_and(|at| at.elapsed() < REJOIN_GRACE)
+}
+
+/// Uses up the rejoin grace: true when it was still running.
+fn take_rejoin(gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
+    let mut all = REJOINED.lock().unwrap_or_else(|p| p.into_inner());
+    all.remove(&(gid.get(), user.get()))
+        .is_some_and(|at| at.elapsed() < REJOIN_GRACE)
+}
+
+/// The entry adds only roles an autorole gives: no dangerous permissions (as held before a role
+/// lock) and no permit. A failed lookup counts as not plain.
+async fn plain_roles_added(app: &App, gid: Id<GuildMarker>, e: &AuditLogEntry) -> bool {
+    let added: Vec<Id<RoleMarker>> = e
+        .changes
+        .iter()
+        .filter_map(|c| match c {
+            AuditLogChange::RoleAdded { new, .. } => Some(new),
+            _ => None,
+        })
+        .flatten()
+        .map(|r| r.id)
+        .collect();
+    let check = async {
+        let perms = crate::lockdown::unlocked_role_perms(app, gid).await?;
+        let permit = permits::permit_roles(&app.pool, gid.get() as i64).await?;
+        anyhow::Ok(added.iter().all(|r| {
+            !permit.contains(&(r.get() as i64))
+                && perms.get(r).is_none_or(|p| p & tommybot_antinuke::DANGEROUS_PERMS == 0)
+        }))
+    };
+    check.await.unwrap_or(false)
 }
 
 /// A bot account; a failed lookup counts as no bot, so the hold punishes as before.
