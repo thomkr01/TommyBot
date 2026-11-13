@@ -181,6 +181,12 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             guard_permit_roles(app, e, actor).await?;
         }
     }
+    if matches!(
+        e.action_type,
+        A::RoleUpdate | A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete
+    ) {
+        guard_lock(app, &cfg, e, actor).await?;
+    }
     match e.action_type {
         A::MemberUpdate | A::MemberKick | A::MemberBanAdd if cfg.antinuke.quarantine_hold => {
             hold(app, e, actor).await?
@@ -623,6 +629,130 @@ async fn permit_roles_in(pool: &PgPool, guild: i64, roles: &[i64]) -> Result<Vec
     .bind(roles)
     .fetch_all(pool)
     .await?)
+}
+
+/// A change to something an active lock holds (D79).
+#[derive(Debug, PartialEq)]
+enum Locked {
+    /// A stripped role's permissions changed: `old` is what the lock left.
+    Role { id: u64, old: Permissions },
+    /// A locked overwrite changed or was deleted: its values before, None where unchanged.
+    Overwrite {
+        channel: u64,
+        role: u64,
+        allow: Option<Permissions>,
+        deny: Option<Permissions>,
+        deleted: bool,
+    },
+}
+
+/// What `e` changed of the active locks' targets, if anything.
+fn lock_target(e: &AuditLogEntry, locks: &[tommybot_automod::lockdown::Snapshot]) -> Option<Locked> {
+    let target = e.target_id?.get();
+    match e.action_type {
+        A::RoleUpdate => {
+            let old = e.changes.iter().find_map(|c| match c {
+                AuditLogChange::Permissions { old, .. } => *old,
+                _ => None,
+            })?;
+            let held = locks.iter().any(|l| l.role_perms.iter().any(|(r, _)| *r == target));
+            held.then_some(Locked::Role { id: target, old })
+        }
+        A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete => {
+            let role = e.options.as_ref()?.id?.get();
+            let held = locks.iter().any(|l| {
+                l.channel_denies.contains(&(target, role))
+                    || l.prior.iter().any(|p| (p.0, p.1) == (target, role))
+            });
+            let find = |deny: bool| {
+                e.changes.iter().find_map(|c| match c {
+                    AuditLogChange::Allow { old, .. } if !deny => Some(old.unwrap_or(Permissions::empty())),
+                    AuditLogChange::Deny { old, .. } if deny => Some(old.unwrap_or(Permissions::empty())),
+                    _ => None,
+                })
+            };
+            held.then(|| Locked::Overwrite {
+                channel: target,
+                role,
+                allow: find(false),
+                deny: find(true),
+                deleted: e.action_type == A::ChannelOverwriteDelete,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// During a lock, a change to a locked role or overwrite is set back (unless an Owner, Extra
+/// Owner or Trusted Admin made it), logged, and counted on the Channel or Role Updates card.
+async fn guard_lock(app: &App, cfg: &GuildCfg, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+    let Some(gid) = e.guild_id else {
+        return Ok(());
+    };
+    let locks = tommybot_automod::store::locks(&app.pool, gid.get()).await?;
+    let Some(locked) = lock_target(e, &locks) else {
+        return Ok(());
+    };
+    // Unknown counts as not immune, as for the count (D21).
+    let immune = app.is_immune(gid, actor).await.unwrap_or(false);
+    let set_back: Result<()> = async {
+        match &locked {
+            _ if immune => {}
+            Locked::Role { id, old } => {
+                app.http.update_role(gid, Id::new(*id)).permissions(*old).await?;
+            }
+            Locked::Overwrite { channel, role, allow, deny, deleted } => {
+                let live = if *deleted {
+                    None
+                } else {
+                    app.http
+                        .channel(Id::new(*channel))
+                        .await?
+                        .model()
+                        .await?
+                        .permission_overwrites
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|o| o.id.get() == *role)
+                };
+                let o = PermissionOverwrite {
+                    id: Id::new(*role),
+                    kind: PermissionOverwriteType::Role,
+                    allow: allow.or(live.as_ref().map(|o| o.allow)),
+                    deny: deny.or(live.as_ref().map(|o| o.deny)),
+                };
+                app.http.update_channel_permission(Id::new(*channel), &o).await?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let (what, action) = match &locked {
+        Locked::Role { id, .. } => (format!("<@&{id}>"), Action::RoleUpdate),
+        Locked::Overwrite { channel, role, .. } => {
+            (format!("<#{channel}> (<@&{role}>)"), Action::ChannelUpdate)
+        }
+    };
+    let result = match (&set_back, immune) {
+        (_, true) => "left as is (Owner, Extra Owner or Trusted Admin)".to_string(),
+        (Ok(()), _) => "set back".to_string(),
+        (Err(err), _) => format!("could not be set back: {}", crate::http_err::why(err)),
+    };
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Responsible", actor.get())
+        .text(&format!("{NO} **Changed a locked target during a lockdown**"))
+        .line("Target", &what)
+        .line("Change", &result);
+    if let Err(err) = send_log(app, gid.get(), LogKind::AntiNuke, log).await {
+        tracing::warn!(?err, "lock change log failed");
+    }
+    // A rename is already counted as a Role Update by `watched`.
+    if immune || watched(e) == Some(action) {
+        return Ok(());
+    }
+    let exempt = app.whitelisted(gid, actor, "antinuke").await.unwrap_or(false);
+    let target = e.target_id.map(|t| t.get());
+    count(app, cfg, gid, actor, action, target, &[], exempt, 1).await
 }
 
 /// Roles of `member` that carry dangerous permissions and sit below the bot, so it can take them.
@@ -2424,6 +2554,45 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn changes_to_locked_targets_are_found() {
+        let lock: tommybot_automod::lockdown::Snapshot = serde_json::from_value(json!({
+            "kind": null, "role_perms": [[5, 2048]], "channel_denies": [[9, 5]],
+            "join_lock": false, "invites_paused": false
+        }))
+        .unwrap();
+        let entry = |t: u16, target: &str, changes: serde_json::Value| -> AuditLogEntry {
+            serde_json::from_value(json!({
+                "action_type": t, "changes": changes, "id": "1", "user_id": "2",
+                "target_id": target, "options": {"id": "5", "type": "0"}
+            }))
+            .unwrap()
+        };
+        let perms = json!([{"key": "permissions", "old_value": "0", "new_value": "2048"}]);
+        assert_eq!(
+            lock_target(&entry(31, "5", perms.clone()), std::slice::from_ref(&lock)),
+            Some(Locked::Role { id: 5, old: Permissions::empty() })
+        );
+        assert_eq!(lock_target(&entry(31, "6", perms), std::slice::from_ref(&lock)), None);
+        let deny = json!([{"key": "deny", "old_value": "2048", "new_value": "0"}]);
+        assert_eq!(
+            lock_target(&entry(14, "9", deny.clone()), std::slice::from_ref(&lock)),
+            Some(Locked::Overwrite {
+                channel: 9,
+                role: 5,
+                allow: None,
+                deny: Some(Permissions::SEND_MESSAGES),
+                deleted: false
+            })
+        );
+        assert!(matches!(
+            lock_target(&entry(15, "9", deny.clone()), std::slice::from_ref(&lock)),
+            Some(Locked::Overwrite { deleted: true, .. })
+        ));
+        assert_eq!(lock_target(&entry(14, "8", deny.clone()), std::slice::from_ref(&lock)), None);
+        assert_eq!(lock_target(&entry(14, "9", deny), &[]), None, "no lock");
     }
 
     #[test]

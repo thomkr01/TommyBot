@@ -280,6 +280,9 @@ Deleting threads and forum posts (audit type 112) was not an anti-nuke action at
 **A lost gateway session lost its audit entries.** (overlap deep dive D20, 13-11)
 Discord replays missed events only on a resume. After a new session (`Ready`) the audit entries made in the gap never arrived, so a nuke during a reconnect was never counted. *Avoid:* `welcome::saw_audit` keeps the newest audit id per guild, and `on_ready` runs anti-nuke on the entries after it (`catch_up_audit`, oldest first, at most 100 per guild). After a restart the map is empty: the windows come back from the database instead (N3), entries from the downtime itself are not read.
 
+**Staff could take a lock apart one channel at a time.** (overlap deep dive D79, 13-11)
+During an active lock, deleting a locked overwrite, removing its deny or giving a stripped role its permissions back went unwatched: overwrite changes are not a watched action, a role's permission change counted only as a rename, and nothing reapplied the lock. *Avoid:* `antinuke::guard_lock` checks every role update and overwrite update or delete against the active locks' snapshots (`role_perms`, `channel_denies`, `prior`): the change is set back to its old values from the audit entry, logged, and counted on the Channel Updates or Role Updates card (when that card is on). An Owner, Extra Owner or Trusted Admin is only logged.
+
 **The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
 `/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
 *Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).
