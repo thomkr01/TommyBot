@@ -19,15 +19,11 @@ pub fn write_bar(section: &str) -> (Level, bool) {
     match section {
         "misc" => (Level::Owner, false),
         // Backups steer anti-nuke's revert and panic's restore, so they get its bar (D67).
-        "antinuke" | "panic" | "backups" | "ban_sync" | "raider_list" => (Level::Owner, true),
+        "antinuke" | "panic" | "backups" | "raider_list" => (Level::Owner, true),
         s if SENSITIVE.contains(&s) => (Level::Admin, true),
         _ => (Level::Editor, false),
     }
 }
-
-/// Sections only the Discord owner may change, not extra owners: Ban Sync lets bans from the owner's
-/// other servers act here (checked in `api` on top of `write_bar`).
-pub const DISCORD_OWNER_ONLY: &[&str] = &["ban_sync"];
 
 pub const SECTIONS: &[&str] = &[
     "wizard",
@@ -47,7 +43,6 @@ pub const SECTIONS: &[&str] = &[
     "appeals",
     "misc",
     "logging",
-    "ban_sync",
     "raider_list",
 ];
 
@@ -89,8 +84,6 @@ pub const PAGES: &[&str] = &[
     "raid_log",
     "verification",
     "cases",
-    "ban_sync",
-    "ban_sync_log",
     "mod_stats",
     "raider_list",
     "raider_matches",
@@ -125,9 +118,6 @@ pub fn page(page: &str, l: Level, perms: &[String]) -> PageAccess {
         "cases" | "raid_log" | "joingate_log" | "notes" | "report_list" | "report_blacklist"
         | "appeal_list" => Hidden,
         "rescue" if l < Level::Owner => Hidden,
-        // Trusted admins and extra owners may look (`api::page_access` makes it Read for extra owners).
-        "ban_sync" | "ban_sync_log" if l < Level::Admin => Hidden,
-        "ban_sync_log" => Full,
         // Trusted admins see the settings read-only (`write_bar`) and the matches in full.
         "raider_list" | "raider_matches" if l < Level::Admin => Hidden,
         "raider_matches" => Full,
@@ -231,9 +221,6 @@ mod tests {
             PageAccess::Hidden
         );
         assert_eq!(page("channel_setup", Level::Admin, &[]), PageAccess::Read);
-        assert_eq!(page("ban_sync", Level::Editor, &[]), PageAccess::Hidden);
-        assert_eq!(page("ban_sync", Level::Admin, &[]), PageAccess::Read);
-        assert_eq!(page("ban_sync_log", Level::Admin, &[]), PageAccess::Full);
         assert_eq!(page("raider_list", Level::Editor, &[]), PageAccess::Hidden);
         assert_eq!(page("raider_list", Level::Admin, &[]), PageAccess::Read);
         assert_eq!(page("raider_matches", Level::Admin, &[]), PageAccess::Full);
@@ -252,7 +239,7 @@ mod tests {
             assert_eq!(step_up, SENSITIVE.contains(s));
             let owner_only = matches!(
                 *s,
-                "misc" | "antinuke" | "panic" | "backups" | "ban_sync" | "raider_list"
+                "misc" | "antinuke" | "panic" | "backups" | "raider_list"
             );
             let want = match (owner_only, step_up) {
                 (true, _) => Level::Owner,
@@ -262,9 +249,6 @@ mod tests {
             assert_eq!(min, want);
         }
         assert!(SENSITIVE.iter().all(|s| SECTIONS.contains(s)));
-        assert!(DISCORD_OWNER_ONLY
-            .iter()
-            .all(|s| write_bar(s) == (Level::Owner, true)));
         // A viewer can never write, and an editor never touches anti-nuke.
         assert!(Level::Viewer < write_bar("misc").0 && Level::Editor < write_bar("antinuke").0);
     }

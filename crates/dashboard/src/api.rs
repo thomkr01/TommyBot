@@ -31,7 +31,7 @@ pub(crate) async fn permit_perms(
 }
 
 /// The Discord owner, checked fresh against Discord and against what the bot recorded: owner-only
-/// writes (Ban Sync, Extra Owners, Keep, purge) need the bot to have processed an ownership
+/// writes (Extra Owners, Keep, purge) need the bot to have processed an ownership
 /// change, so it has paused the previous owner's staff first (D47).
 pub(crate) async fn is_discord_owner(
     st: &AppState,
@@ -246,7 +246,6 @@ pub async fn page_access(State(st): State<AppState>, s: Sess, Path(guild): Path<
         .collect();
     if level == Level::Owner && !is_discord_owner(&st, &s, guild).await? {
         pages.insert("rescue".into(), json!(access::PageAccess::Hidden));
-        pages.insert("ban_sync".into(), json!(access::PageAccess::Read));
     }
     let cmds = sqlx::query_scalar::<_, Option<Value>>(
         "select messages->'commands'->'commands' from bot_previews",
@@ -456,8 +455,6 @@ pub async fn put_section(
     // Access first, so someone without it learns nothing about the section's shape.
     let (min, step_up) = access::write_bar(&section);
     require(&st, &s, guild, min, step_up).await?;
-    let owner_only = access::DISCORD_OWNER_ONLY.contains(&section.as_str());
-    discord_owner_for(&st, &s, guild, owner_only).await?;
     if !b.value.is_object() {
         return Err(ApiError::BadRequest("section must be an object".into()));
     }
@@ -500,28 +497,6 @@ pub async fn put_section(
     )
     .await;
     Ok(Json(json!({"version": version})))
-}
-
-/// Whether `new` and `now` differ in a section only the Discord owner may change.
-fn owner_only_changed(new: &Value, now: &Value) -> bool {
-    access::DISCORD_OWNER_ONLY
-        .iter()
-        .any(|k| new.get(*k) != now.get(*k))
-}
-
-/// With `needed`, refuses anyone but the Discord owner (extra owners included).
-async fn discord_owner_for(
-    st: &AppState,
-    s: &Sess,
-    guild: i64,
-    needed: bool,
-) -> Result<(), ApiError> {
-    if needed && !is_discord_owner(st, s, guild).await? {
-        return Err(ApiError::Forbidden(
-            "only the server owner can change Ban Sync",
-        ));
-    }
-    Ok(())
 }
 
 /// Replaces EO/TA lists and custom permits; recorded as a config version so it can be rolled back.
@@ -684,10 +659,6 @@ pub async fn rollback(
     .fetch_one(&st.db)
     .await?;
     let mut held = vec![];
-    if before_handover && old["ban_sync"]["enabled"] == true && now["ban_sync"]["enabled"] != true {
-        old["ban_sync"]["enabled"] = json!(false);
-        held.push("Ban Sync stays off".to_string());
-    }
     // The quarantine whitelist is paused like EO/TA and comes back only through Keep.
     let qw = |c: &Value| match &c["antinuke"]["quarantine_whitelist"] {
         Value::Null => json!([]),
@@ -702,7 +673,6 @@ pub async fn rollback(
             "this rollback changes a section only owners can edit",
         ));
     }
-    discord_owner_for(&st, &s, guild, owner_only_changed(&old, &now)).await?;
     // The same checks as a save: an old version may hold a value the bot would now read as off.
     // A number out of range is pulled into it and reported, so a cleanup is not blocked (D69b).
     let mut clamped = vec![];
@@ -913,8 +883,8 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
         .ok_or_else(|| ApiError::BadRequest("this is not a TommyBot settings export".into()))?;
     let (mut new, mut cleared) = (now.clone(), vec![]);
     for (k, v) in file {
-        // Removed with the old Channel Setup; exports made before still carry it.
-        if k == "channel_profiles" {
+        // Removed sections (the old Channel Setup, Ban Sync); exports made before still carry them.
+        if k == "channel_profiles" || k == "ban_sync" {
             continue;
         }
         if k != "permits" && !access::SECTIONS.contains(&k.as_str()) {
@@ -926,7 +896,7 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
         let mut v = v.clone();
         strip_ids(&mut v, k, &mut cleared);
         // An import never switches a cross-server feature on.
-        if k == "ban_sync" || k == "raider_list" {
+        if k == "raider_list" {
             v["enabled"] = json!(false);
         }
         if k == "permits" {
@@ -985,7 +955,6 @@ pub async fn import(
     let (new, cleared) = import_config(&b.config, &now)?;
     let (min, step_up) = import_bar(&new, &now);
     let level = require(&st, &s, guild, min, step_up).await?;
-    discord_owner_for(&st, &s, guild, owner_only_changed(&new, &now)).await?;
     web_mode_ok(&new, &now)?;
     if !b.apply {
         return Ok(Json(
@@ -1086,8 +1055,8 @@ pub(crate) fn validate(section: &str, v: &Value, old: &Value) -> Result<(), ApiE
 /// Whether the bot's type for `section` reads `v`; one that fails runs on its defaults (D48).
 fn reads(section: &str, v: Value) -> Result<(), serde_json::Error> {
     use tommybot_core::sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
-        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
+        RaiderListCfg, TicketsCfg, WhitelistCfg,
     };
     match section {
         "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),
@@ -1111,7 +1080,6 @@ fn reads(section: &str, v: Value) -> Result<(), serde_json::Error> {
         "tickets" => serde_json::from_value::<TicketsCfg>(v).map(drop),
         "whitelist" => serde_json::from_value::<WhitelistCfg>(v).map(drop),
         "catch" => serde_json::from_value::<CatchCfg>(v).map(drop),
-        "ban_sync" => serde_json::from_value::<BanSyncCfg>(v).map(drop),
         "raider_list" => serde_json::from_value::<RaiderListCfg>(v).map(drop),
         _ => Ok(()),
     }
@@ -1232,16 +1200,9 @@ mod logging_validate_tests {
         let old = json!({"channel_profiles": {"profiles": []}, "automod": {}});
         let (new, _) = import_config(&old, &json!({})).unwrap();
         assert!(new.get("channel_profiles").is_none());
-    }
-
-    #[test]
-    fn import_never_turns_ban_sync_on() {
-        let file = json!({"ban_sync": {"enabled": true, "receive": "ban"}});
-        let (new, _) = import_config(&file, &json!({})).unwrap();
-        assert_eq!(new["ban_sync"], json!({"enabled": false, "receive": "ban"}));
-        assert!(import_config(&json!({"ban_sync": {"receive": "nuke"}}), &json!({})).is_err());
-        assert_eq!(import_bar(&new, &json!({})), (Level::Owner, true));
-        assert!(owner_only_changed(&new, &json!({})));
+        let old = json!({"ban_sync": {"enabled": true, "receive": "ban"}, "automod": {}});
+        let (new, _) = import_config(&old, &json!({})).unwrap();
+        assert!(new.get("ban_sync").is_none());
     }
 
     #[test]
@@ -1255,7 +1216,6 @@ mod logging_validate_tests {
         let bad = json!({"raider_list": {"categories": ["nuke", "bad"]}});
         assert!(import_config(&bad, &json!({})).is_err());
         assert_eq!(import_bar(&new, &json!({})), (Level::Owner, true));
-        assert!(!owner_only_changed(&new, &json!({})));
     }
 
     #[test]
@@ -1826,7 +1786,7 @@ pub(crate) mod g3_handler_tests {
     }
 
     /// D47 (R-h3 S4): a rollback to before the ownership change leaves the paused staff, the
-    /// strong permit's roles and Ban Sync as they are, says so, and the card stays.
+    /// strong permit's roles as they are, says so, and the card stays.
     #[tokio::test]
     async fn a_rollback_to_before_the_handover_keeps_what_it_paused() {
         let Some((st, s, g)) = setup(9_895_000_000).await else {
@@ -1844,13 +1804,13 @@ pub(crate) mod g3_handler_tests {
             sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
         }
         // Helpers was guarded in v1 and made weak before the handover, so its role stayed on.
-        let old = json!({"ban_sync": {"enabled": true}, "antinuke": {"quarantine_whitelist": ["9"]}, "permits": {"eo": ["5"], "ta": ["6"], "custom": [
+        let old = json!({"antinuke": {"quarantine_whitelist": ["9"]}, "permits": {"eo": ["5"], "ta": ["6"], "custom": [
             {"name": "Admins", "rank": 0, "perms": ["dashboard_edit"], "limits": {}, "whitelist": [], "roles": ["20"]},
             {"name": "Helpers", "rank": 0, "perms": ["dashboard_edit"], "limits": {}, "whitelist": ["wl_role_delete"], "roles": ["30"]},
             {"name": "Mods", "rank": 0, "perms": ["ban"], "limits": {}, "whitelist": [], "roles": ["21"]}]}});
         sqlx::query("insert into guild_config (guild_id, version, config, created_at) values ($1, 1, $2, now() - interval '1 hour')")
             .bind(g).bind(old).execute(&st.db).await.unwrap();
-        put_version(&st, g, 2, json!({"ban_sync": {"enabled": false}})).await;
+        put_version(&st, g, 2, json!({})).await;
         let r = rollback(
             State(st.clone()),
             s.clone(),
@@ -1862,7 +1822,6 @@ pub(crate) mod g3_handler_tests {
         assert_eq!(
             r.0["held"],
             json!([
-                "Ban Sync stays off",
                 "the quarantine whitelist stays as it is",
                 "Extra Owners stay as they are",
                 "Trusted Admins stay as they are",
@@ -1872,7 +1831,6 @@ pub(crate) mod g3_handler_tests {
         );
         assert_eq!(c_qw(&st, g).await, json!([]));
         let (_, c) = store::current(&st.db, g).await.unwrap();
-        assert_eq!(c["ban_sync"]["enabled"], json!(false));
         let p = &c["permits"];
         assert_eq!((&p["eo"], &p["ta"]), (&json!([]), &json!([])));
         let roles = |n: &str| {

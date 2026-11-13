@@ -144,7 +144,6 @@ async fn read_only_role_and_tools() {
         "appeals",
         "reports",
         "backups",
-        "ban_sync",
         "nsfw_scans",
     ] {
         tool(&st, t, json!({"guild_id": g.to_string()})).await;
