@@ -109,7 +109,7 @@ async fn a_failed_strike_timeout_still_locks_at_the_cap() {
     let cfg = t.app.cfg(gid.get()).await.unwrap();
     let user = Id::new(t.base + 5);
     let r = strike_member(&t.app, &cfg, gid, (user, "x"), Id::new(7), None, None).await;
-    assert!(r.unwrap_err().downcast_ref::<NotPunished>().is_some());
+    assert!(r.unwrap_err().downcast_ref::<Punished>().is_some());
     assert!(t.calls("PATCH") >= 1, "timeout tried");
     assert!(
         t.calls("/roles") >= 1,
@@ -267,6 +267,13 @@ async fn raiders_are_held_with_automod_off() {
         "a server app's post for them too"
     );
     assert_eq!(t.calls(&format!("PATCH /guilds/{gid}/members/{raider}")), 2);
+    // Their button click updating a shared panel does not delete the panel.
+    let panel = msg(json!({"guild_id": gid.to_string(), "id": "102",
+        "author": {"id": "1", "username": "bot", "discriminator": "0", "avatar": null, "bot": true},
+        "interaction_metadata": {"id": "6", "type": 3, "authorizing_integration_owners": {"0": "1"},
+            "user": {"id": raider.to_string(), "username": "x", "discriminator": "0", "avatar": null}}}));
+    let _ = on_edit(&t.app, &panel).await;
+    assert_eq!(t.calls("DELETE /channels/7/messages/102"), 0);
     t.cleanup().await;
 }
 

@@ -8,7 +8,7 @@ const MAX_IMAGES: usize = 3;
 const MAX_SIDE: u32 = 1024;
 
 /// The text of every QR code in the first few image attachments, one per line.
-pub async fn texts(app: &App, attachments: impl Iterator<Item = &Attachment>) -> String {
+pub async fn texts(app: &App, msg: u64, attachments: impl Iterator<Item = &Attachment>) -> String {
     static READ: std::sync::LazyLock<crate::automod::Seen> =
         std::sync::LazyLock::new(Default::default);
     let mut out = String::new();
@@ -17,13 +17,14 @@ pub async fn texts(app: &App, attachments: impl Iterator<Item = &Attachment>) ->
             && a.content_type
                 .as_deref()
                 .is_some_and(|t| t.starts_with("image/"))
-            && READ.first(a.id.get())
+            && !READ.contains((msg, a.id.get()))
     });
     for a in images.take(MAX_IMAGES) {
         let Some(bytes) = app.sites.fetch(&a.url, MAX_BYTES).await else {
             continue;
         };
         if let Ok(found) = tokio::task::spawn_blocking(move || decode(&bytes)).await {
+            READ.first((msg, a.id.get()));
             for t in found {
                 out.push_str(&t);
                 out.push('\n');

@@ -16,6 +16,7 @@ use tommybot_logging::{
     Log, LogKind,
 };
 use twilight_model::{
+    application::interaction::InteractionType,
     channel::Message,
     gateway::payload::incoming::MessageCreate,
     id::{
@@ -108,9 +109,11 @@ async fn check_message(
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
     // Heat panic's raiders are held even with automod off, also when a server app posts for them.
+    // Not for a button click's update: a held raider clicking a shared panel must not delete it.
     let poster = m
         .interaction_metadata
         .as_ref()
+        .filter(|i| i.kind != InteractionType::MessageComponent)
         .map_or(m.author.id, |i| i.user.id);
     if crate::panic::is_raider(app, gid, poster) {
         crate::http_err::best_effort(
@@ -174,7 +177,7 @@ async fn check_message(
         .count();
     // Edits cannot add attachments, so images are only read once.
     let qr_scam = new_files && images > 0 && (f.scam_links.enabled || f.bad_sites.enabled) && {
-        let qr = crate::qr::texts(app, attachments(m)).await;
+        let qr = crate::qr::texts(app, m.id.get(), attachments(m)).await;
         filters::is_discord_login(&qr)
             || f.bad_sites.enabled && app.sites.phishing(&filters::hosts(&qr))
             || f.scam_links.enabled && filters::is_nitro_steam_scam(&qr)
@@ -547,26 +550,32 @@ async fn strike_member(
         }
     }
     let locked = strike_cap_lock(app, cfg, gid, user, act.strike).await;
+    // The strike is saved: whatever failed since, this pass punished.
     match failed {
         // The failed timeout is what the caller must see; the lockdown error is only logged then.
         Some(e) => {
             if let Err(l) = locked {
                 tracing::warn!(?l, "strike-cap lockdown failed");
             }
-            Err(e.context(NotPunished))
+            Err(punished(e))
         }
-        None => locked,
+        None => locked.map_err(punished),
     }
 }
 
-/// The error of a punishment that did not land: nothing was done to the member.
+/// Marks an error that came after the punishment landed (or a strike was saved), so a retry must
+/// not punish again.
 #[derive(Debug)]
-pub(crate) struct NotPunished;
+pub(crate) struct Punished;
 
-impl std::fmt::Display for NotPunished {
+impl std::fmt::Display for Punished {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the automod punishment failed")
+        f.write_str("after the automod punishment")
     }
+}
+
+fn punished(e: anyhow::Error) -> anyhow::Error {
+    e.context(Punished)
 }
 
 /// The auto lockdown at a strike number, for every path that records a strike.
@@ -784,13 +793,18 @@ async fn filter_action(
                 },
             )
             .await?;
-            // The threshold's timeout is the punishment; the strikes only keep count of it.
-            if warn_actions(app, cfg, gid, uid).await? {
-                let mut st = store::load_strikes(&app.pool, gid.get(), uid.get()).await?;
-                let act = strike(&mut st, &cfg.automod.strike, now_ms());
-                store::save_strikes(&app.pool, gid.get(), uid.get(), &st).await?;
-                strike_cap_lock(app, cfg, gid, uid, act.strike).await?;
-            }
+            // The warn landed. The threshold's timeout is the punishment; the strikes only keep
+            // count of it.
+            let counted = async {
+                if warn_actions(app, cfg, gid, uid).await? {
+                    let mut st = store::load_strikes(&app.pool, gid.get(), uid.get()).await?;
+                    let act = strike(&mut st, &cfg.automod.strike, now_ms());
+                    store::save_strikes(&app.pool, gid.get(), uid.get(), &st).await?;
+                    strike_cap_lock(app, cfg, gid, uid, act.strike).await?;
+                }
+                anyhow::Ok(())
+            };
+            counted.await.map_err(punished)?;
         }
         FilterAction::Timeout | FilterAction::Kick | FilterAction::Ban => {
             let (kind, timed) = match action {
@@ -815,9 +829,11 @@ async fn filter_action(
             };
             if let Err(e) = done {
                 action_failed(app, gid, uid.get(), kind, &e).await;
-                return Err(e.context(NotPunished));
+                return Err(e);
             }
-            auto_case(app, gid, uid, kind, factor, timed).await?;
+            auto_case(app, gid, uid, kind, factor, timed)
+                .await
+                .map_err(punished)?;
         }
     }
     send_log(
@@ -833,6 +849,7 @@ async fn filter_action(
         ),
     )
     .await
+    .map_err(punished)
 }
 
 /// The automod log for a filter's own action.

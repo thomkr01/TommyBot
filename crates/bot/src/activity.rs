@@ -245,6 +245,19 @@ async fn thread_name_hit(
     if !word_hit(&cfg.automod.filters, name) || words_exempt(app, gid, owner).await? {
         return Ok(false);
     }
+    // shortcut: in memory, so a restart logs a still flagged name once more on its next update.
+    static FLAGGED: std::sync::LazyLock<crate::automod::Seen> =
+        std::sync::LazyLock::new(Default::default);
+    let named = (t.id.get(), {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut h);
+        h.finish()
+    });
+    // A lock, tags or pins send the same name again: logged once.
+    if !delete && !FLAGGED.first(named) {
+        return Ok(true);
+    }
     let title = if delete {
         crate::http_err::best_effort(app.http.delete_channel(t.id).await, "automod thread delete");
         "Thread deleted"
@@ -361,8 +374,12 @@ mod tests {
         assert_eq!(t.calls("/channels/55"), 0, "a clean name is not logged");
         // The mock refuses the log channel lookup, so the update reports the failed log.
         let _ = on_thread_update(&t.app, &thread("ｓｃａｍ here")).await;
-        assert!(t.calls("/channels/55") >= 1, "logged");
+        let logged = t.calls("/channels/55");
+        assert!(logged >= 1, "logged");
         assert_eq!(t.calls("DELETE"), 0, "not deleted");
+        // A later update (lock, tags, pins) with the same name logs nothing new.
+        let _ = on_thread_update(&t.app, &thread("ｓｃａｍ here")).await;
+        assert_eq!(t.calls("/channels/55"), logged);
         t.cleanup().await;
     }
 

@@ -433,6 +433,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                     }
                 }
             }
+            note_deferred(app.me, m);
             automod::on_message(app, m).await?;
         }
         // Discord also sends updates for link previews; only real edits are checked again.
@@ -582,9 +583,24 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
     Ok(())
 }
 
-/// An app's update without `edited_timestamp`: how Discord can complete a deferred reply.
+/// Another app's "thinking" replies (Discord's LOADING flag), whose filling update is read once.
+static DEFERRED: std::sync::LazyLock<automod::Seen> = std::sync::LazyLock::new(Default::default);
+
+fn note_deferred(
+    me: Id<twilight_model::id::marker::UserMarker>,
+    m: &twilight_model::channel::Message,
+) {
+    let loading = m
+        .flags
+        .is_some_and(|f| f.contains(twilight_model::channel::message::MessageFlags::LOADING));
+    if loading && m.author.id != me {
+        DEFERRED.first((m.id.get(), 0));
+    }
+}
+
+/// The update that fills a deferred reply (it may have no `edited_timestamp`), once per message.
 fn app_fill_in(m: &twilight_model::channel::Message) -> bool {
-    m.edited_timestamp.is_none() && (m.application_id.is_some() || m.interaction_metadata.is_some())
+    m.edited_timestamp.is_none() && DEFERRED.take((m.id.get(), 0))
 }
 
 #[cfg(test)]
@@ -592,16 +608,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deferred_app_replies_are_read_as_posts() {
-        let m = |extra: serde_json::Value| crate::automod::more_tests::msg(extra);
-        let edited = serde_json::json!("2026-01-01T00:01:00.000000+00:00");
-        assert!(app_fill_in(&m(serde_json::json!({"application_id": "3"}))));
-        assert!(!app_fill_in(&m(
-            serde_json::json!({"application_id": "3", "edited_timestamp": edited})
-        )));
-        // A member's or a plain webhook's preview update stays on the cheap path.
-        assert!(!app_fill_in(&m(serde_json::json!({}))));
-        assert!(!app_fill_in(&m(serde_json::json!({"webhook_id": "9"}))));
+    fn deferred_app_replies_are_read_once() {
+        use serde_json::json;
+        let m = |id: &str, extra: serde_json::Value| {
+            let mut v = json!({"id": id, "application_id": "3"});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            crate::automod::more_tests::msg(v)
+        };
+        let me = Id::new(1);
+        note_deferred(me, &m("900001", json!({"flags": 128})));
+        assert!(app_fill_in(&m("900001", json!({}))), "the fill is read");
+        assert!(!app_fill_in(&m("900001", json!({}))), "only once");
+        // A reply that was never deferred, or TommyBot's own: its updates stay on the cheap path.
+        assert!(!app_fill_in(&m("900002", json!({}))));
+        let own = json!({"flags": 128, "author": {"id": "1", "username": "tb", "discriminator": "0", "avatar": null}});
+        note_deferred(me, &m("900003", own));
+        assert!(!app_fill_in(&m("900003", json!({}))));
     }
 
     #[test]

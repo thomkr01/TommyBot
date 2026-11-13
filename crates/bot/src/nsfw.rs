@@ -119,11 +119,9 @@ fn small(url: &str) -> String {
 impl Scanner {
     /// Queues the message's images (the caller checked the filter is on). Never waits.
     pub fn enqueue(&self, m: &Message, edit: bool, backlog: bool) {
-        // Counted, not `any`: every attachment is marked, so none waits for a second edit.
-        let fresh = crate::automod::attachments(m)
-            .filter(|a| self.seen.first(a.id.get()))
-            .count()
-            > 0;
+        // Files are marked once their scan row is saved (in `scan`).
+        let fresh =
+            crate::automod::attachments(m).any(|a| !self.seen.contains((m.id.get(), a.id.get())));
         let urls = image_urls(m, edit || !fresh);
         if urls.is_empty() {
             return;
@@ -304,6 +302,9 @@ async fn scan(app: &App, job: Job) -> Result<()> {
             threshold,
         )
         .await?;
+        if let Some(a) = crate::automod::attachments(&m).find(|a| a.proxy_url == *url) {
+            app.nsfw.seen.first((m.id.get(), a.id.get()));
+        }
         if let (Some(id), None) = (row, hit) {
             hit = Some((id, scores));
         }
@@ -344,10 +345,10 @@ async fn act(
     (id, scores): (i64, &[f32; 5]),
 ) -> Result<()> {
     let acted = crate::automod::on_nsfw_image(app, msg).await;
-    // Only a punishment that did not land frees the message: all its rows and files, so the next
+    // Unless the punishment landed, a failure frees the message: all its rows and files, so the next
     // pass (sweep, preview update, edit) scans it whole again. A failed case, log or lockdown after
-    // it must not punish twice.
-    let failed = |e: &anyhow::Error| e.downcast_ref::<crate::automod::NotPunished>().is_some();
+    // a landed punishment (or a saved strike) must not punish twice.
+    let failed = |e: &anyhow::Error| e.downcast_ref::<crate::automod::Punished>().is_none();
     if acted.as_ref().is_err_and(failed) {
         sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1 AND message_id = $2")
             .bind(gid.get() as i64)
@@ -356,7 +357,7 @@ async fn act(
             .await?;
         app.nsfw
             .seen
-            .forget(crate::automod::attachments(msg).map(|a| a.id.get()));
+            .forget(crate::automod::attachments(msg).map(|a| (msg.id.get(), a.id.get())));
         return acted;
     }
     hit_log(app, gid, msg, id, scores).await?;
@@ -587,7 +588,7 @@ mod tests {
             .unwrap()
         };
         // A new author each time: the heat claim allows one punishment per member in 10 s.
-        let try_once = |filter: serde_json::Value, author: u64| {
+        let try_once = |filter: serde_json::Value, author: u64, strikes: bool| {
             let t = &t;
             async move {
                 let msg = crate::automod::more_tests::msg(json!({"guild_id": gid.to_string(),
@@ -599,8 +600,8 @@ mod tests {
                     .await
                     .unwrap();
                 t.app.forget_cfg(gid.get());
-                let cfg = json!({"automod": {"enabled": true, "auto_lockdown": {"enabled": true, "strikes": 1},
-                    "strike": {"enabled": false}, "filters": {"nsfw_images": filter}}});
+                let cfg = json!({"automod": {"enabled": true, "auto_lockdown": {"enabled": !strikes, "strikes": 1},
+                    "strike": {"enabled": strikes}, "filters": {"nsfw_images": filter}}});
                 t.server_config(0, t.owner(), cfg).await;
                 let ids = (gid.get(), 7, 100, 50);
                 let id = record(&t.app.pool, ids, &[1; 32], &porn, 0.8)
@@ -616,14 +617,29 @@ mod tests {
         let failed = try_once(
             json!({"enabled": true, "action": "timeout", "duration_secs": 60}),
             t.base + 5,
+            false,
         )
         .await;
         assert!(failed.is_err());
         assert_eq!(rows().await, 0);
         // A strike without a timeout, then the strike-cap lockdown fails: the rows stay.
-        let locked = try_once(json!({"enabled": true}), t.base + 6).await;
+        let locked = try_once(json!({"enabled": true}), t.base + 6, false).await;
         assert!(locked.is_err());
         assert_eq!(rows().await, 2);
+        // The strike is saved, then its timeout fails: the rows stay, so no pass adds a second strike.
+        let timed = try_once(json!({"enabled": true}), t.base + 7, true).await;
+        assert!(timed.is_err());
+        assert_eq!(rows().await, 2);
+        // An error before any punishment (a held raider's timeout fails): the rows go, to retry.
+        let raider = t.base + 8;
+        t.app
+            .heat_raiders
+            .lock()
+            .unwrap()
+            .insert(gid.get(), ([raider].into(), crate::app::now_secs() + 600));
+        let early = try_once(json!({"enabled": true}), raider, true).await;
+        assert!(early.is_err());
+        assert_eq!(rows().await, 0);
         sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1")
             .bind(gid.get() as i64)
             .execute(&t.app.pool)
@@ -649,10 +665,21 @@ mod tests {
         };
         s.enqueue(&hook(json!([file("1")])), false, false);
         assert_eq!(s.take(0).unwrap().urls.len(), 1);
+        // Not scanned yet (dropped, or the scan stopped early): queued again.
+        s.enqueue(&hook(json!([file("1")])), false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
+        // `scan` marks a file once its row is saved.
+        s.seen.first((100, 1));
         s.enqueue(&hook(json!([file("1")])), false, false);
         assert!(s.take(0).is_none(), "same file again");
         s.enqueue(&hook(json!([file("1"), file("2")])), false, false);
         assert_eq!(s.take(0).unwrap().urls.len(), 2, "a new file came");
+        // A forward keeps the attachment id but is another message: scanned.
+        let fwd = crate::automod::more_tests::msg(
+            json!({"id": "101", "webhook_id": "9", "attachments": [file("1")]}),
+        );
+        s.enqueue(&fwd, false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
     }
 
     /// With Monitor Webhooks off a webhook's image is not scanned, saved or logged.
