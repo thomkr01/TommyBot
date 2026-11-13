@@ -992,18 +992,35 @@ async fn panic_takes_back_what_an_older_lock_gave_up() {
         (p["locked"].clone(), p["locked_server"].clone())
     };
     assert_eq!(flags().await, (json!(true), json!(false)));
+    assert_eq!(
+        pending(&t, 0, "panic_end").await[0].0["waits_server"],
+        json!(true)
+    );
     // The staff lock's timer runs during panic.
     crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Server))
         .await
         .unwrap();
     assert_eq!(perms(g) & SEND, 0, "everyone writes again during panic");
     assert_eq!(flags().await, (json!(true), json!(true)));
-    // Staff lifting panic's own lock is not undone.
+    // Staff lifting panic's own lock is not undone, also not by a later unlock of another part.
     crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Server))
         .await
         .unwrap();
     assert_ne!(perms(g) & SEND, 0);
     assert_eq!(flags().await, (json!(true), json!(false)));
+    crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Role))
+        .await
+        .unwrap();
+    assert_ne!(
+        perms(g) & SEND,
+        0,
+        "an unlock of another part muted everyone again"
+    );
+    let p = pending(&t, 0, "panic_end").await[0].0.clone();
+    assert_eq!(
+        (p["waits_role"].clone(), p["waits_server"].clone()),
+        (json!(null), json!(false))
+    );
     // A restore made the locked role 7 again as 70, with the backup's Send.
     crate::lockdown::lock(&t.app, gid, LockKind::Server)
         .await

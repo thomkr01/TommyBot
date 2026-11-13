@@ -877,7 +877,7 @@ mod tests {
             g.get(),
             crate::app::PanicRun {
                 lock_mod_commands: false,
-                starting: false,
+                starting: 0,
             },
         );
         assert!(run(Level::ExtraOwner, load(true))

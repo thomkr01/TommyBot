@@ -607,22 +607,21 @@ async fn relink_roles_now(
         .iter()
         .map(|r| (r.id.get(), r.permissions.bits()))
         .collect();
+    // Every lock's entry moves to the new id first, so a failed PATCH or a crash still leaves an
+    // unlock that knows the role; then one PATCH per role takes what all its locks take.
+    let mut strip: std::collections::HashMap<u64, (u64, u64)> = Default::default();
     for mut snap in locks {
         let takes = snap.takes();
         let mut moved = false;
-        for i in 0..snap.role_perms.len() {
-            let Some(&new) = map.get(&snap.role_perms[i].0) else {
+        for entry in snap.role_perms.iter_mut() {
+            let Some(&new) = map.get(&entry.0) else {
                 continue;
             };
             let Some(&(_, now)) = live.iter().find(|(r, _)| *r == new) else {
                 continue;
             };
-            let op = Op::SetRolePerms {
-                role: new,
-                perms: now & !takes,
-            };
-            exec(app, gid, &op, &snap).await?;
-            snap.role_perms[i] = (new, now);
+            *entry = (new, now);
+            strip.entry(new).or_insert((now, 0)).1 |= takes;
             moved = true;
         }
         if moved {
@@ -635,6 +634,13 @@ async fn relink_roles_now(
             r?;
         }
     }
+    for (role, (now, takes)) in strip {
+        let op = Op::SetRolePerms {
+            role,
+            perms: now & !takes,
+        };
+        exec(app, gid, &op, &Snapshot::default()).await?;
+    }
     Ok(())
 }
 
@@ -642,23 +648,27 @@ async fn relink_roles_now(
 /// A lock lifted during panic that covered a part panic does not hold is taken again by panic.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
     let before = crate::panic::held(app, gid).await;
-    let r = unlock_now(app, gid, which).await;
-    if matches!(r, Ok(n) if n > 0) {
-        if let Some(held) = before {
-            crate::panic::relock(app, gid, held).await;
-        }
+    let lifted = unlock_now(app, gid, which).await?;
+    if let Some(waiting) = before {
+        crate::panic::relock(app, gid, waiting, &lifted).await;
     }
-    r
+    Ok(lifted.len())
 }
 
-async fn unlock_now(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
+/// [`unlock`] without panic taking anything back.
+pub(crate) async fn unlock_now(
+    app: &App,
+    gid: Id<GuildMarker>,
+    which: Option<&LockKind>,
+) -> Result<Vec<LockKind>> {
     if let Some(k) = which {
         if lock_thread(app, gid, k, false).await? {
-            return Ok(1);
+            return Ok(vec![k.clone()]);
         }
     }
     let _one = exclusive(app, gid).await;
     let (mut lifted, mut failed) = (0, 0);
+    let mut kinds = vec![];
     for snap in store::locks(&app.pool, gid.get()).await? {
         let hit = match (which, &snap.kind) {
             (Some(w), Some(k)) => w.overlaps(k),
@@ -733,6 +743,7 @@ async fn unlock_now(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
         if let Some(k) = &snap.kind {
             forget_timers(app, gid, k).await;
         }
+        kinds.extend(snap.kind.clone());
         lifted += 1;
     }
     if failed > 0 {
@@ -757,7 +768,7 @@ async fn unlock_now(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
         )
         .await;
     }
-    Ok(lifted)
+    Ok(kinds)
 }
 
 /// `lock MESSAGE ?t update`: adds the message as UPDATE n to the blind lock's notice, or, without a
