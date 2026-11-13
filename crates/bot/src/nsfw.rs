@@ -168,8 +168,9 @@ impl Scanner {
         if backlog || waiting + job.urls.len() > PER_MEMBER_LIVE {
             push_capped(old, job, BACKLOG_CAP);
         } else {
+            // A full live lane moves the flooding server's oldest job, not another server's.
             if live.len() >= LIVE_CAP {
-                if let Some(j) = live.pop_front() {
+                if let Some(j) = live.remove(most_jobs(live)) {
                     push_capped(old, j, BACKLOG_CAP);
                 }
             }
@@ -236,17 +237,21 @@ fn guild(j: &Job) -> u64 {
     j.msg.guild_id.map_or(0, |g| g.get())
 }
 
+/// Index of the oldest job of the server with the most jobs in `q`.
+fn most_jobs(q: &VecDeque<Job>) -> usize {
+    let mut per: HashMap<u64, usize> = HashMap::new();
+    for x in q.iter() {
+        *per.entry(guild(x)).or_default() += 1;
+    }
+    let most = per.into_iter().max_by_key(|e| e.1).map(|e| e.0);
+    q.iter().position(|x| Some(guild(x)) == most).unwrap_or(0)
+}
+
 /// A full lane drops the oldest job of the server with the most jobs in it, so one server's flood
 /// drops its own jobs, not the others'.
 fn push_capped(q: &mut VecDeque<Job>, j: Job, cap: usize) {
     if q.len() >= cap {
-        let mut per: HashMap<u64, usize> = HashMap::new();
-        for x in q.iter() {
-            *per.entry(guild(x)).or_default() += 1;
-        }
-        let most = per.into_iter().max_by_key(|e| e.1).map(|e| e.0);
-        let i = q.iter().position(|x| Some(guild(x)) == most).unwrap_or(0);
-        q.remove(i);
+        q.remove(most_jobs(q));
         tracing::debug!("NSFW scan backlog full, dropped a job");
     }
     q.push_back(j);
@@ -1039,6 +1044,32 @@ mod tests {
         push_capped(&mut q, in_guild(4, 10), 3);
         let ids: Vec<u64> = q.iter().map(|j| j.msg.id.get()).collect();
         assert_eq!(ids, [1, 3, 4]);
+    }
+
+    /// A full live lane moves the flooding server's oldest job to the backlog, not the other
+    /// server's older one.
+    #[test]
+    fn a_full_live_lane_moves_the_flooder_s_job() {
+        let s = Scanner::default();
+        let mut first = in_guild(1, 20);
+        first.msg.author.id = Id::new(99);
+        s.push(first, false);
+        for n in 0..LIVE_CAP as u64 {
+            let mut j = in_guild(100 + n, 10);
+            j.msg.author.id = Id::new(1_000 + n); // one image each: under the member cap
+            j.urls = vec![String::new()];
+            s.push(j, false);
+        }
+        let l = s.lanes.lock().unwrap();
+        assert_eq!(
+            l.0.front().map(|j| j.msg.id.get()),
+            Some(1),
+            "guild 20 stays live"
+        );
+        assert_eq!(
+            l.1.iter().map(|j| j.msg.id.get()).collect::<Vec<_>>(),
+            [100]
+        );
     }
 
     #[test]
