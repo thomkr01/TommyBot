@@ -78,14 +78,32 @@ async fn owner_state(
     if !other_owner {
         return Ok(Some(true));
     }
-    sqlx::query(
-        "insert into scheduled_jobs (guild_id, kind, payload, run_at)
-         select $1, 'owner_check', '{}', now()
-         where not exists (select 1 from scheduled_jobs where guild_id = $1 and kind = 'owner_check')",
-    )
-    .bind(guild)
-    .execute(&st.db)
-    .await?;
+    // At most once an hour per server: a job dropped after its retries failed would otherwise come
+    // back on every request and repeat its failure log (R-h3 round 3, 3). The bot's own guild
+    // events still queue it at once.
+    // shortcut: per process, so a dashboard restart may queue once more; fine for one instance.
+    static QUEUED: std::sync::Mutex<std::collections::BTreeMap<i64, std::time::Instant>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let due = {
+        let mut q = QUEUED.lock().unwrap();
+        let due = q
+            .get(&guild)
+            .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(3600));
+        if due {
+            q.insert(guild, std::time::Instant::now());
+        }
+        due
+    };
+    if due {
+        sqlx::query(
+            "insert into scheduled_jobs (guild_id, kind, payload, run_at)
+             select $1, 'owner_check', '{}', now()
+             where not exists (select 1 from scheduled_jobs where guild_id = $1 and kind = 'owner_check')",
+        )
+        .bind(guild)
+        .execute(&st.db)
+        .await?;
+    }
     Ok(Some(false))
 }
 
@@ -521,9 +539,17 @@ pub async fn put_permits(
         return Err(ApiError::Forbidden("only owners can change the TA list"));
     }
     if old["eo"] != b.value["eo"] && !is_discord_owner(&st, &s, guild).await? {
-        return Err(ApiError::Forbidden(
-            "only the server owner can change the Extra Owners list",
-        ));
+        // While the bot has not processed an ownership change yet, the real owner may still
+        // remove the previous owner's Extra Owners, never add one (S-h3 round 3).
+        let had = old["eo"].as_array().cloned().unwrap_or_default();
+        let only_removes = b.value["eo"]
+            .as_array()
+            .is_some_and(|n| n.iter().all(|u| had.contains(u)));
+        if !(only_removes && owner_state(&st, &s, guild, true).await? == Some(false)) {
+            return Err(ApiError::Forbidden(
+                "only the server owner can change the Extra Owners list",
+            ));
+        }
     }
     store::write_permits(&mut tx, guild, &b.value).await?;
     keep_exemptions(&mut tx, guild, level, &old).await?;
@@ -1741,6 +1767,37 @@ pub(crate) mod g3_handler_tests {
             .execute(&st.db)
             .await
             .unwrap();
+        // R-h3 round 3: a dropped retry is not queued again within the hour.
+        let _ = level_of(&st, &s, g).await.unwrap();
+        let queued: i64 = sqlx::query_scalar("select count(*) from scheduled_jobs where guild_id = $1")
+            .bind(g)
+            .fetch_one(&st.db)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0, "at most one owner_check per hour");
+        // S-h3 round 3: while the reset is pending the real owner may remove Extra Owners, not add.
+        sqlx::query("insert into extra_owners (guild_id, user_id) values ($1, 5)")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        let put = |eo: Value| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                let v = store::current(&st.db, g).await.unwrap().0;
+                put_permits(
+                    State(st),
+                    s,
+                    Path(g),
+                    body(json!({"expected_version": v, "value": {"eo": eo, "ta": [], "custom": []}})),
+                )
+                .await
+            }
+        };
+        let add = put(json!(["5", "6"])).await;
+        assert!(matches!(add, Err(ApiError::Forbidden(_))), "{add:?}");
+        let remove = put(json!([])).await;
+        assert!(remove.is_ok(), "{remove:?}");
         // S1: the memo (10 s old) still names 7, but no fresh answer confirms it.
         st.discord.memo.lock().unwrap().insert(
             format!("/guilds/{g}"),
