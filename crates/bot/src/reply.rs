@@ -428,6 +428,39 @@ pub async fn fallback_alert(app: &App, gid: Id<GuildMarker>, sections: &[&str]) 
         "{WARNING} TommyBot could not read these settings of **{name}** and uses their defaults until they are saved again: {list}. Defaults are off for most systems, Anti-nuke too. This happens after a rollback to an older TommyBot version; update it again, or open the dashboard and save these settings."
     );
     dm_owner(app, gid, &text).await;
+    // Also in the log, so it is seen with the owner's DMs closed (S-h3 6). Read from the raw
+    // config: the logging section may be one that failed.
+    let ch: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT coalesce(config->'logging'->>'config_changes', config->'logging'->>'fallback')
+         FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(?e, "settings-not-read log: config lookup failed");
+        None
+    });
+    let Some(ch) = ch
+        .flatten()
+        .and_then(|c| c.parse().ok())
+        .and_then(Id::new_checked)
+    else {
+        return;
+    };
+    let log = Log::new("Settings Not Read", tommybot_logging::embed::RED)
+        .line("Sections", &list)
+        .line(
+            "Effect",
+            "TommyBot runs them on their defaults (off for most systems, Anti-nuke too) until they are saved again or TommyBot is updated.",
+        )
+        .time()
+        .build();
+    // Straight to Discord, not events::send: that reads the config, and this runs inside App::cfg.
+    // The embed names only section names, so the public-channel check is not needed.
+    if let Err(e) = app.http.create_message(ch).embeds(&[log]).await {
+        tracing::warn!(?e, "settings-not-read log not sent");
+    }
 }
 
 /// DMs the server owner right away, without [`alert_owner`]'s 10-minute limit.

@@ -214,7 +214,7 @@ pub async fn get_config(State(st): State<AppState>, s: Sess, Path(guild): Path<i
     let (version, mut config) = store::current(&st.db, guild).await?;
     config["permits"] = store::read_permits(&mut *st.db.acquire().await?, guild).await?;
     Ok(Json(
-        json!({"version": version, "config": config, "level": level, "sensitive": access::SENSITIVE}),
+        json!({"version": version, "config": config, "level": level, "sensitive": access::SENSITIVE, "unread": unread_sections(&config)}),
     ))
 }
 
@@ -917,10 +917,6 @@ pub async fn import(
 /// Sections the bot parses must deserialize into its types; the rest are stored as-is. `old` is
 /// the stored section: an entry the bot skips is refused only when it is not stored as it is.
 pub(crate) fn validate(section: &str, v: &Value, old: &Value) -> Result<(), ApiError> {
-    use tommybot_core::sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
-        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
-    };
     // The bot skips an unknown entry (D48); a save must still refuse it.
     if let Some(e) = tommybot_core::sections::unreadable_entry(section, v, old) {
         return Err(ApiError::BadRequest(format!(
@@ -985,8 +981,17 @@ pub(crate) fn validate(section: &str, v: &Value, old: &Value) -> Result<(), ApiE
     if section == "misc" && v["warn_actions"].as_array().is_some_and(|a| a.len() > 5) {
         return Err(ApiError::BadRequest("at most 5 warn actions".into()));
     }
-    let v = v.clone();
-    let r = match section {
+    let r = reads(section, v.clone());
+    r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
+}
+
+/// Whether the bot's type for `section` reads `v`; one that fails runs on its defaults (D48).
+fn reads(section: &str, v: Value) -> Result<(), serde_json::Error> {
+    use tommybot_core::sections::{
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
+        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
+    };
+    match section {
         "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),
         "antinuke" => serde_json::from_value::<AntinukeCfg>(v).map(drop),
         "automod" => serde_json::from_value::<AutomodCfg>(v).map(drop),
@@ -1011,8 +1016,20 @@ pub(crate) fn validate(section: &str, v: &Value, old: &Value) -> Result<(), ApiE
         "ban_sync" => serde_json::from_value::<BanSyncCfg>(v).map(drop),
         "raider_list" => serde_json::from_value::<RaiderListCfg>(v).map(drop),
         _ => Ok(()),
-    };
-    r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
+    }
+}
+
+/// Sections in `config` that the bot cannot read and so runs on defaults (S-h3 6).
+pub(crate) fn unread_sections(config: &Value) -> Vec<&'static str> {
+    access::SECTIONS
+        .iter()
+        .copied()
+        .filter(|k| {
+            config
+                .get(*k)
+                .is_some_and(|v| !v.is_null() && reads(k, v.clone()).is_err())
+        })
+        .collect()
 }
 
 /// Web verification's rules, checked only when a whole-config write changes verification or lockdown.
@@ -1044,6 +1061,15 @@ fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
 mod logging_validate_tests {
     use super::*;
     use serde_json::json;
+
+    /// S-h3 6: a section the bot cannot read is named, so Overview and the page show it.
+    #[test]
+    fn unread_sections_are_named() {
+        let c =
+            json!({"antinuke": {"enabled": "yes"}, "automod": {}, "logging": null, "permits": {}});
+        assert_eq!(unread_sections(&c), ["antinuke"]);
+        assert!(unread_sections(&json!({"antinuke": {"enabled": true}})).is_empty());
+    }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres. Only a save also reaches the channel
     /// of the version before; other events go to the current channel alone.
@@ -1722,11 +1748,26 @@ pub(crate) mod g3_handler_tests {
                 .await
             }
         };
-        let ok = save(json!({"enabled": true, "limits": {"Future": {"per": 3}}}), 1).await;
+        let ok = save(
+            json!({"enabled": true, "limits": {"Future": {"per": 3}}}),
+            1,
+        )
+        .await;
         assert!(ok.is_ok(), "{ok:?}");
-        let changed = save(json!({"enabled": true, "limits": {"Future": {"per": 4}}}), 2).await;
-        assert!(matches!(changed, Err(ApiError::BadRequest(_))), "{changed:?}");
-        let bad = save(json!({"enabled": true, "limits": {"Ban": {"enabled": "no"}}}), 2).await;
+        let changed = save(
+            json!({"enabled": true, "limits": {"Future": {"per": 4}}}),
+            2,
+        )
+        .await;
+        assert!(
+            matches!(changed, Err(ApiError::BadRequest(_))),
+            "{changed:?}"
+        );
+        let bad = save(
+            json!({"enabled": true, "limits": {"Ban": {"enabled": "no"}}}),
+            2,
+        )
+        .await;
         assert!(matches!(bad, Err(ApiError::BadRequest(_))), "{bad:?}");
         cleanup(&st, g).await;
     }

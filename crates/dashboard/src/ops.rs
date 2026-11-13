@@ -236,6 +236,20 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     );
     rows.extend(crate::channels::overview_check(&st, guild).await?);
     rows.extend(handover_check(&st, guild).await?);
+    // D48 (S-h3 6): a section the bot cannot read runs on defaults, Anti-nuke off among them.
+    let unread = crate::api::unread_sections(&config);
+    if !unread.is_empty() {
+        rows.push(Check {
+            id: "sections_unread".into(),
+            severity: Severity::Bad,
+            title: "Settings not read",
+            detail: format!(
+                "TommyBot could not read these saved settings and runs them on their defaults (off for most systems, Anti-nuke too): {}. A newer TommyBot version saved them. Update TommyBot again, or open each page and save it.",
+                unread.join(", ")
+            ),
+            fix: None,
+        });
+    }
     // D70b: old zero values are left as they are, but the owner should see them.
     let old = tommybot_core::limits::stored_outside(&config);
     if !old.is_empty() {

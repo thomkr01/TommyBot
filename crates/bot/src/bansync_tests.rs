@@ -1582,3 +1582,20 @@ async fn a_discord_outage_on_the_ban_retries_instead_of_skipping() {
     assert_eq!(t.rows(620).await, [T::row(1, "banned", None)]);
     t.cleanup().await;
 }
+
+/// D48 (S-h3 6): a section the bot cannot read is also posted to the log, not only DMed.
+#[tokio::test]
+async fn a_section_on_defaults_is_posted_to_the_log() {
+    let Some(t) = T::new(205).await else { return };
+    let log = t.base + 5;
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"antinuke": {"enabled": "yes"}, "logging": {"config_changes": log.to_string()}}),
+    )
+    .await;
+    let cfg = t.app.cfg(t.g(0).get()).await.unwrap();
+    assert_eq!(cfg.fallbacks, ["antinuke"]);
+    assert_eq!(t.calls(&format!("POST /channels/{log}/messages")), 1);
+    t.cleanup().await;
+}

@@ -260,7 +260,9 @@ fn SystemToggle(guild: String, section: &'static str, title: &'static str, all: 
     let busy = RwSignal::new(true);
     Effect::new(move |_| {
         if let Some(v) = all.get() {
-            on.set(v["config"][section]["enabled"].as_bool().unwrap_or(false));
+            // A section the bot cannot read runs on defaults, so it never shows as on (D48).
+            let unread = v["unread"].as_array().is_some_and(|u| u.iter().any(|x| x == section));
+            on.set(!unread && v["config"][section]["enabled"].as_bool().unwrap_or(false));
             busy.set(false);
         }
     });
