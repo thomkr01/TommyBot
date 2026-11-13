@@ -277,6 +277,9 @@ A Role lock saves each role's permissions and strips them, so sticky roles and v
 **A new delete type was not watched.** (overlap deep dive D19, 13-11)
 Deleting threads and forum posts (audit type 112) was not an anti-nuke action at all, so a forum could be wiped without a count. *Avoid:* the "Thread & forum post deletions" card (`Action::ThreadDelete`, opt-in like the other later cards, nothing to restore). A new action needs the enum, `ALL`, `watched()`, the dashboard's `NUKE_CARDS` and the UI's `NUKE_WORDS`.
 
+**A lost gateway session lost its audit entries.** (overlap deep dive D20, 13-11)
+Discord replays missed events only on a resume. After a new session (`Ready`) the audit entries made in the gap never arrived, so a nuke during a reconnect was never counted. *Avoid:* `welcome::saw_audit` keeps the newest audit id per guild, and `on_ready` runs anti-nuke on the entries after it (`catch_up_audit`, oldest first, at most 100 per guild). After a restart the map is empty: the windows come back from the database instead (N3), entries from the downtime itself are not read.
+
 **The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
 `/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
 *Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).

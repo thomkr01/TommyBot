@@ -73,7 +73,45 @@ pub async fn on_ready(
         .bind(&ids)
         .execute(&app.pool)
         .await?;
+    // A new session (not a resume) gets no replay of the audit entries made while the old one
+    // was gone: anti-nuke reads them from the audit log (D20).
+    let seen: Vec<(u64, u64)> = app.last_audit.lock().unwrap().clone().into_iter().collect();
+    for (g, last) in seen {
+        if let Err(e) = catch_up_audit(app, Id::new(g), last).await {
+            tracing::warn!(?e, guild = g, "catching up on the audit log failed");
+        }
+    }
     Ok(())
+}
+
+/// Remembers the newest audit entry of a guild.
+pub fn saw_audit(app: &App, guild: u64, id: u64) {
+    let mut m = app.last_audit.lock().unwrap();
+    let last = m.entry(guild).or_default();
+    *last = (*last).max(id);
+}
+
+/// Runs anti-nuke on the entries after `last`, oldest first (at most 100: a nuke trips far sooner).
+async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -> Result<()> {
+    let log = app.http.audit_log(gid).after(last).limit(100).await?.model().await?;
+    for mut e in missed(log.entries, last) {
+        e.guild_id = Some(gid);
+        saw_audit(app, gid.get(), e.id.get());
+        if let Err(err) = crate::antinuke::on_audit(app, &e).await {
+            tracing::warn!(?err, "anti-nuke on a missed audit entry failed");
+        }
+    }
+    Ok(())
+}
+
+/// The entries newer than `last`, oldest first.
+fn missed(
+    mut entries: Vec<twilight_model::guild::audit_log::AuditLogEntry>,
+    last: u64,
+) -> Vec<twilight_model::guild::audit_log::AuditLogEntry> {
+    entries.retain(|e| e.id.get() > last);
+    entries.sort_by_key(|e| e.id);
+    entries
 }
 
 /// Deletes the data of servers the bot left more than `KEEP_DAYS` ago, hourly.
@@ -278,6 +316,19 @@ async fn find_bot_adder(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missed_entries_replay_oldest_first() {
+        let e = |id: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
+            serde_json::from_value(serde_json::json!({"action_type": 22, "changes": [], "id": id.to_string()}))
+                .unwrap()
+        };
+        let got: Vec<u64> = super::missed(vec![e(9), e(5), e(7), e(3)], 5)
+            .iter()
+            .map(|e| e.id.get())
+            .collect();
+        assert_eq!(got, [7, 9]);
+    }
+
     #[test]
     fn wizard_link_uses_hash_route() {
         assert_eq!(

@@ -176,6 +176,8 @@ pub struct App {
     /// Each channel's category as last seen, and when it last moved to another (D4).
     /// Permit levels [`App::whitelisted`] read in the last [`LEVEL_TTL`].
     pub(crate) levels: Mutex<LevelCache>,
+    /// Newest audit entry id seen per guild, so a new gateway session can fetch what it missed (D20).
+    pub last_audit: Mutex<HashMap<u64, u64>>,
     pub category_moves: Mutex<HashMap<u64, (Option<u64>, crate::hierarchy::CategoryMove)>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
@@ -293,6 +295,7 @@ impl App {
             guilds: Default::default(),
             channel_parents: Default::default(),
             category_moves: Default::default(),
+            last_audit: Default::default(),
             levels: Default::default(),
             nuke_runs: Default::default(),
             lock_ops: Default::default(),
