@@ -266,6 +266,14 @@ Anyone with Manage Roles could give themselves a role that carries a permit, and
 `on_audit` used `app.whitelisted(..)?`, so a 5xx or timeout on the member lookup returned before the action was logged or counted: a nuke during a Discord hiccup was never stopped or reverted. Root cause: an error in the exemption check was handled like "exempt".
 *Avoid:* on a protection path a failed exemption check means "not exempt" for counting (the limits apply). The instant tripwires (`guard_perms`, the hold) still stop on the error, as #97 asks for staff. During a nuke the level is reused for 5 s (`App::whitelisted`, D77), cleared on every member update or leave before the event's first await, and a lookup that raced a clear is not kept (as D66).
 
+**The unauthorized-bot filter let a bot in when the audit lookup failed.** (overlap deep dive D59, 13-11)
+A bot whose adder could not be read (5xx, 429, the audit entry not written yet) counted as authorised, on purpose, and a failed immunity check of the adder did too. Root cause: "unknown" was read as "allowed" on a protection path.
+*Avoid:* `welcome::bot_adder_retry` tries once more after 1.5 s (each try bounded to 3 s) and Join Gate blocks the bot when that fails too, or when the adder's level cannot be read. No entry at all after the retry still counts as authorised, as before.
+
+**During a Role lock the stripped permissions were read as the real ones.** (overlap deep dive D62, 13-11)
+A Role lock saves each role's permissions and strips them, so sticky roles and verification saw a stripped Admin role as harmless and handed it out, and `strict_member_roles` and "enforce permits" did not see it either; when the lock ended the member held Administrator. Root cause: live role permissions are not the role's permissions while a lock holds them.
+*Avoid:* a check that judges a role dangerous reads `lockdown::unlocked_info` (live permissions OR the active locks' saved ones). Used by `sticky` (3 places), `verify::grant`, `antinuke::guard_perms` and `enforce_permits`. Staff detection from role permissions (`hierarchy` automod staff check, `slowmode`) still reads live permissions: during a lock staff look like members there.
+
 **The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
 `/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
 *Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).

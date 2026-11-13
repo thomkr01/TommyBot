@@ -290,6 +290,34 @@ pub async fn active(app: &App, gid: Id<GuildMarker>) -> Result<Vec<LockKind>> {
         .collect())
 }
 
+/// Guild info whose role permissions include what an active lock saved (D62): a Role lock strips
+/// them, and a role it stripped is dangerous again once the lock ends. For every check that judges
+/// a role dangerous; a failed lock read fails the check.
+pub async fn unlocked_info(
+    app: &App,
+    gid: Id<GuildMarker>,
+) -> Result<std::sync::Arc<crate::hierarchy::GuildInfo>> {
+    let info = app.guild_info(gid).await?;
+    Ok(with_saved(info, &store::locks(&app.pool, gid.get()).await?))
+}
+
+fn with_saved(
+    info: std::sync::Arc<crate::hierarchy::GuildInfo>,
+    locks: &[Snapshot],
+) -> std::sync::Arc<crate::hierarchy::GuildInfo> {
+    let saved: Vec<&(u64, u64)> = locks.iter().flat_map(|l| &l.role_perms).collect();
+    if saved.is_empty() {
+        return info;
+    }
+    let mut i = (*info).clone();
+    for (r, p) in saved {
+        if let Some(live) = i.role_perms.get_mut(&Id::new(*r)) {
+            *live |= p;
+        }
+    }
+    std::sync::Arc::new(i)
+}
+
 /// Join lock of the guild's stored snapshot, if it has one.
 pub async fn join_lock(app: &App, gid: Id<GuildMarker>) -> Result<Option<JoinLock>> {
     load_join_lock(&app.pool, gid.get()).await
@@ -910,6 +938,31 @@ mod tests {
                 && d.contains("UPDATE 8")
         );
         assert!(d.contains("note 8"));
+    }
+
+    #[test]
+    fn a_stripped_role_is_judged_by_its_saved_permissions() {
+        let info = std::sync::Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(1),
+            roles: Default::default(),
+            role_perms: [(Id::new(5), 1 << 10), (Id::new(6), 0)].into(),
+            managed: Default::default(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: Instant::now(),
+        });
+        let lock: Snapshot = serde_json::from_value(serde_json::json!({
+            "kind": null, "role_perms": [[5, 8], [9, 8]], "channel_denies": [],
+            "join_lock": false, "invites_paused": false
+        }))
+        .unwrap();
+        let got = with_saved(info.clone(), &[lock]);
+        assert_eq!(got.role_perms[&Id::new(5)], (1 << 10) | 8);
+        assert_eq!(got.role_perms[&Id::new(6)], 0);
+        assert!(!got.role_perms.contains_key(&Id::new(9)), "deleted since");
+        assert!(std::sync::Arc::ptr_eq(&with_saved(info.clone(), &[]), &info));
     }
 
     #[test]

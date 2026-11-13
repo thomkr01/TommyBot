@@ -476,7 +476,7 @@ async fn guard_perms(
             "gave a role dangerous permissions"
         }
         A::MemberRoleUpdate if an.strict_member_roles => {
-            let info = app.guild_info(gid).await?;
+            let info = crate::lockdown::unlocked_info(app, gid).await?;
             let added: Vec<Id<RoleMarker>> = e
                 .changes
                 .iter()
@@ -645,7 +645,7 @@ pub async fn enforce_permits(app: &App, m: &MemberUpdate) -> Result<()> {
     if m.user.bot || !app.cfg(gid.get()).await?.misc.enforce_permits {
         return Ok(());
     }
-    let info = app.guild_info(gid).await?;
+    let info = crate::lockdown::unlocked_info(app, gid).await?;
     let (managed, bad): (Vec<_>, Vec<_>) =
         dangerous_below_bot(&m.roles, &info.role_perms, &info.roles, info.bot_top)
             .into_iter()

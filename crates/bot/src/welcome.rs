@@ -234,20 +234,46 @@ pub async fn bot_adder(
     gid: Id<GuildMarker>,
     bot: Id<UserMarker>,
 ) -> Option<Id<UserMarker>> {
-    let log = app
-        .http
-        .audit_log(gid)
-        .action_type(AuditLogEventType::BotAdd)
-        .limit(10)
-        .await
-        .ok()?
-        .model()
-        .await
-        .ok()?;
-    log.entries
-        .iter()
-        .find(|e| e.target_id.is_some_and(|t| t.get() == bot.get()))
-        .and_then(|e| e.user_id)
+    find_bot_adder(app, gid, bot).await.ok().flatten()
+}
+
+/// [`bot_adder`] for the unauthorized-bot filter (D59): a failed lookup or a missing entry (the
+/// audit log can lag the join) is tried once more after 1.5 s; Err when that fails too.
+pub async fn bot_adder_retry(
+    app: &App,
+    gid: Id<GuildMarker>,
+    bot: Id<UserMarker>,
+) -> Result<Option<Id<UserMarker>>> {
+    if let Ok(Some(a)) = find_bot_adder(app, gid, bot).await {
+        return Ok(Some(a));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    find_bot_adder(app, gid, bot).await
+}
+
+/// One audit lookup, bounded: it runs on the join path (PITFALLS: a REST call on the join path).
+async fn find_bot_adder(
+    app: &App,
+    gid: Id<GuildMarker>,
+    bot: Id<UserMarker>,
+) -> Result<Option<Id<UserMarker>>> {
+    let read = async {
+        let log = app
+            .http
+            .audit_log(gid)
+            .action_type(AuditLogEventType::BotAdd)
+            .limit(10)
+            .await?
+            .model()
+            .await?;
+        anyhow::Ok(
+            log.entries
+                .iter()
+                .find(|e| e.target_id.is_some_and(|t| t.get() == bot.get()))
+                .and_then(|e| e.user_id),
+        )
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), read).await?
 }
 
 #[cfg(test)]

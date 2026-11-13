@@ -17,6 +17,7 @@ use crate::app::App;
 
 const TTL: Duration = Duration::from_secs(300);
 
+#[derive(Clone)]
 pub struct GuildInfo {
     pub owner: Id<UserMarker>,
     pub roles: HashMap<Id<RoleMarker>, i64>,
