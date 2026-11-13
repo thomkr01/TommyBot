@@ -92,7 +92,7 @@ async function matrix(browser) {
     ['POST', `${g}/discord-rules-migrate-words`, () => ({}), 'editor', false],
     ['POST', `${g}/backups`, () => ({}), 'editor', false],
     ['POST', `${g}/backups/999999/load`, () => ({}), 'owner', true],
-    ['POST', `${g}/backups/999999/delete`, () => ({}), 'admin', true],
+    ['POST', `${g}/backups/999999/delete`, () => ({}), 'owner', true],
     ['POST', `${g}/panic/start`, () => ({}), 'admin', true],
     ['POST', `${g}/panic/end`, () => ({}), 'admin', true],
     ['POST', `${g}/score/fix`, () => ({ setting: 'none' }), 'admin', true],

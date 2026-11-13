@@ -26,6 +26,7 @@ fn queued(
 
 #[component]
 pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
+    let access = expect_context::<Access>();
     let rows = RwSignal::new(Vec::<Value>::new());
     let preview = RwSignal::new(None::<(i64, Vec<String>)>);
     let detail = RwSignal::new(None::<(i64, Value)>);
@@ -130,7 +131,9 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
     });
     view! {
         <div class:hide=move || detail.with(Option::is_some)>
-        <Section guild=guild.clone() name="backups".to_string() enrolled />
+        // Saving Backups settings needs the owner level (write_bar); below it they are only shown.
+        {move || (access.rank() < 4).then(|| view! { <p class="card info" role="note">"Only the owner and Extra Owners can change these settings or delete backups."</p> })}
+        <fieldset class:ro=move || access.rank() < 4 disabled=move || access.rank() < 4><Section guild=guild.clone() name="backups".to_string() enrolled /></fieldset>
         <div class="card">
             <div class="row"><h2>"Backups"</h2><span class="sp"></span><button on:click=create>"Create backup"</button></div>
             <p class="muted">"TommyBot also saves one on the interval set above and keeps the newest ones (Max Images). Loading a backup syncs the server to it: it recreates what is missing, fixes what changed and removes what was added since."</p>
@@ -144,7 +147,7 @@ pub fn Backups(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView {
                             <span class="sp"></span>
                             <button class="ghost" on:click={let c = r["code"].as_str().unwrap_or_default().to_string(); move |_| view_it.run((id, c.clone()))}>"View"</button>
                             <button class="ghost" on:click=move |_| show.run(id)>"Preview & load"</button>
-                            <button class="ghost" on:click=move |_| remove.run(id)>"Delete"</button>
+                            <button class="ghost" disabled=move || access.rank() < 4 title=move || (access.rank() < 4).then_some("Needs the owner or an Extra Owner") on:click=move |_| remove.run(id)>"Delete"</button>
                         </div>
                     }
                 }
@@ -249,6 +252,7 @@ fn BackupView(
     load: Callback<i64>,
     remove: Callback<i64>,
 ) -> impl IntoView {
+    let access = expect_context::<Access>();
     let (show_ch, show_roles) = (RwSignal::new(true), RwSignal::new(true));
     // Remembered per browser, like the theme: big servers want it on every time.
     let storage = || web_sys::window().and_then(|w| w.local_storage().ok().flatten());
@@ -283,7 +287,7 @@ fn BackupView(
                 <h1>{crate::icons::icon("backup")}{code}</h1>
                 <span class="sp"></span>
                 <button class="go" on:click=move |_| load.run(id)>{crate::icons::icon("restore")}"Load"</button>
-                <button class="danger" on:click=move |_| remove.run(id)>{crate::icons::icon("trash")}"Delete"</button>
+                <button class="danger" disabled=move || access.rank() < 4 title=move || (access.rank() < 4).then_some("Needs the owner or an Extra Owner") on:click=move |_| remove.run(id)>{crate::icons::icon("trash")}"Delete"</button>
                 <button class="ghost" on:click=move |_| detail.set(None)>{crate::icons::icon("back")}"Go back"</button>
             </div>
             <div class="bgrid">

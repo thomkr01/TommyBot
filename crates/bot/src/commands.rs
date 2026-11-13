@@ -852,18 +852,28 @@ pub async fn backup_cmd(
     if let Some(msg) = gated(app, gid, actor_id, actor, "backups").await? {
         return Ok(msg);
     }
-    // Loading deletes whatever the backup lacks and clearing removes anti-nuke's restore source:
-    // owner level plus a fresh 2FA, as the dashboard asks (D10/D11). The load preview only reads.
+    // Loading deletes whatever the backup lacks, and clearing or deleting (ten deletes are a clear)
+    // removes anti-nuke's restore source: owner level plus a fresh 2FA, as the dashboard asks
+    // (D10/D11, S-h3 2). The load preview only reads.
     if matches!(
         cmd,
-        BackupCmd::Clear | BackupCmd::Load { confirm: true, .. }
+        BackupCmd::Clear | BackupCmd::Delete { .. } | BackupCmd::Load { confirm: true, .. }
     ) {
         if !matches!(actor, permits::Level::Owner | permits::Level::ExtraOwner) {
-            return Ok("Only the owner and Extra Owners can load or clear backups".into());
+            return Ok("Only the owner and Extra Owners can load or delete backups".into());
         }
         if !crate::settings::fresh_2fa(app, actor_id.get()).await? {
             return Ok(crate::settings::needs_2fa(gid.get()));
         }
+    }
+    // A nuke under way should not lose its restore source to a hijacked owner account.
+    if matches!(cmd, BackupCmd::Clear | BackupCmd::Delete { .. })
+        && backup::locked_or_panic(app, gid).await?
+    {
+        return Ok(
+            "Cannot delete backups while the server is locked or in panic mode. End it first."
+                .into(),
+        );
     }
     Ok(match cmd {
         BackupCmd::Create => match backup::save(app, gid, Some(actor_id.get())).await {

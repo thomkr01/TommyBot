@@ -288,11 +288,7 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> R
     let keep = keep_set(app, gid).await?;
     if confirm {
         // A restore during a lock or panic would undo the locked permissions (D11).
-        if app.panic_runs.lock().unwrap().contains_key(&gid.get())
-            || !tommybot_automod::store::locks(&app.pool, gid.get())
-                .await?
-                .is_empty()
-        {
+        if locked_or_panic(app, gid).await? {
             return Ok(
                 "Cannot load a backup while the server is locked or in panic mode. End it first."
                     .into(),
@@ -720,6 +716,14 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
     }
 }
 
+/// The server is in panic mode or has a lock on: a restore or a backup delete waits until it ends.
+pub(crate) async fn locked_or_panic(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
+    Ok(app.panic_runs.lock().unwrap().contains_key(&gid.get())
+        || !tommybot_automod::store::locks(&app.pool, gid.get())
+            .await?
+            .is_empty())
+}
+
 /// A nuke run or panic mode is on: a backup now would save the damage as the newest image.
 fn under_attack(app: &App, gid: u64) -> bool {
     app.panic_runs.lock().unwrap().contains_key(&gid)
@@ -882,7 +886,24 @@ mod tests {
         assert!(run(Level::ExtraOwner, load(true))
             .await
             .starts_with("Cannot load a backup while"));
+        // A backup delete is a clear one at a time (S-h3 2): the same bar.
+        let delete = || BackupCmd::Delete {
+            id: "h3load".into(),
+        };
+        assert!(run(Level::ExtraOwner, delete())
+            .await
+            .starts_with("Cannot delete backups while"));
+        assert!(run(Level::ExtraOwner, clear())
+            .await
+            .starts_with("Cannot delete backups while"));
         t.app.panic_runs.lock().unwrap().clear();
+        assert!(run(custom.clone(), delete())
+            .await
+            .starts_with("Only the owner"));
+        t.exec("UPDATE dash_session SET step_up_until = now() - interval '1 minute' WHERE id = 'h3-' || $1::text").await;
+        assert!(run(Level::Owner, delete()).await.contains("needs 2FA"));
+        t.exec("UPDATE dash_session SET step_up_until = now() + interval '5 minutes' WHERE id = 'h3-' || $1::text").await;
+        assert_eq!(run(Level::Owner, delete()).await, "Deleted backup `h3load`");
         assert_eq!(run(Level::Owner, clear()).await, "Deleted all backups");
         t.exec("DELETE FROM backups WHERE guild_id = $1").await;
     }
