@@ -115,6 +115,20 @@ pub async fn lock_saving(
     secs: Option<i64>,
     saved: &mut bool,
 ) -> Result<bool> {
+    lock_marked(app, gid, kind, secs, saved, None).await
+}
+
+/// [`lock_saving`] that, with `panic_key`, marks the lock as panic's own (`panic::own_lock`) right
+/// after its snapshot is saved, while no other lock or unlock of the guild can run: an unlock or a
+/// second lock then always sees the mark.
+pub async fn lock_marked(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: LockKind,
+    secs: Option<i64>,
+    saved: &mut bool,
+    panic_key: Option<&str>,
+) -> Result<bool> {
     if lock_thread(app, gid, &kind, true).await? {
         return Ok(true);
     }
@@ -135,6 +149,9 @@ pub async fn lock_saving(
     forget_locks(gid.get());
     r?;
     *saved = true;
+    if let Some(key) = panic_key {
+        crate::panic::own_lock(app, gid, key, true).await;
+    }
     if let Some(d) = secs {
         let job = serde_json::json!({ "lock": kind });
         tommybot_core::jobs::enqueue(&app.pool, gid.get() as i64, "unlock", job, now_secs() + d)

@@ -702,8 +702,8 @@ pub(crate) async fn relock(
     }
 }
 
-/// Takes a part panic waits for. Marked only once saved: a second unlock at the same time must not
-/// clear the first's mark. A refused or failed lock keeps waiting, unless panic's own lock holds
+/// Takes a part panic waits for. Marked once saved, inside the guild's lock mutex, so a second
+/// take at the same time sees the mark. A refused or failed lock keeps waiting, unless panic's own lock holds
 /// the part already (a second relock at the same time). A lock that an end of panic missed
 /// meanwhile is lifted again at once. Only logged on failure.
 async fn take_waited(
@@ -715,7 +715,8 @@ async fn take_waited(
 ) {
     own_lock(app, gid, wait, false).await;
     let mut saved = false;
-    if let Err(e) = lockdown::lock_saving(app, gid, kind.clone(), None, &mut saved).await {
+    let r = lockdown::lock_marked(app, gid, kind.clone(), None, &mut saved, Some(key)).await;
+    if let Err(e) = r {
         tracing::warn!(?e, key, "panic: locking again failed");
     }
     if !saved {
@@ -725,7 +726,6 @@ async fn take_waited(
         return;
     }
     let made = created(app, gid, &kind).await;
-    own_lock(app, gid, key, true).await;
     let ended =
         !app.panic_runs.lock().unwrap().contains_key(&gid.get()) || !ends_later(app, gid).await;
     if ended && made.is_some() && created(app, gid, &kind).await == made {
@@ -786,10 +786,13 @@ async fn covered(app: &App, gid: Id<GuildMarker>, kind: &LockKind) -> bool {
 async fn take_lock(app: &App, gid: Id<GuildMarker>, kind: LockKind, key: &'static str) -> bool {
     own_lock(app, gid, key, true).await;
     let mut saved = false;
-    if let Err(e) = lockdown::lock_saving(app, gid, kind, None, &mut saved).await {
+    let r = lockdown::lock_marked(app, gid, kind, None, &mut saved, Some(key)).await;
+    if let Err(e) = r {
         tracing::warn!(?e, key, "panic: locking the server failed");
     }
-    own_lock(app, gid, key, saved).await;
+    if !saved {
+        own_lock(app, gid, key, false).await;
+    }
     saved
 }
 
