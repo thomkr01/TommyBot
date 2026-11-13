@@ -517,6 +517,8 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
                 Some(r) => ban.reason(r).await?,
                 None => ban.await?,
             };
+            crate::scheduler::forget_jobs(app, gid, user.get(), crate::scheduler::BANNED, None)
+                .await;
         }
         FailAction::Quarantine => {
             let kind = crate::antinuke::Kind::Deadline;

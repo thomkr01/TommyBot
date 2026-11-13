@@ -252,7 +252,8 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, json!(page).to_string())
         }
         ("PATCH", ["guilds", g, "members", u])
-            if m.members.contains_key(&(n(g), n(u))) && body.contains("communication_disabled_until") =>
+            if m.members.contains_key(&(n(g), n(u)))
+                && body.contains("communication_disabled_until") =>
         {
             let b: Value = serde_json::from_str(body).unwrap_or_default();
             match b["communication_disabled_until"].as_str() {
