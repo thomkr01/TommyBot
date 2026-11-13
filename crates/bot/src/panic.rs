@@ -471,7 +471,8 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
                         own_lock(app, gid, wait, true).await;
                     }
                     if saved {
-                        owned.push(kind);
+                        let made = created(app, gid, &kind).await;
+                        owned.push((kind, made));
                     } else if key == SERVER_LOCK {
                         // A lock staff made first covers writing, so the categories close with it.
                         drop_exemptions(app, gid, &exempted).await;
@@ -529,16 +530,21 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     // Staff can end panic from the dashboard while this ran (D74): its end then read flags this
     // call had not set yet, or never saw these locks. Whatever the end missed is lifted here.
     if !ends_later(app, gid).await {
-        // Only a lock of exactly panic's kind: a staff lock made meanwhile (say `All`) stays.
-        let active = lockdown::active(app, gid).await.unwrap_or_default();
-        for kind in owned.iter().filter(|k| active.contains(k)) {
-            if let Err(e) = lockdown::unlock(app, gid, Some(kind)).await {
+        // Only the lock this start made, by its age: the end may have lifted it and staff made a
+        // new one of the same kind since.
+        for (kind, made) in &owned {
+            if made.is_none() || created(app, gid, kind).await != *made {
+                continue;
+            }
+            if let Err(e) = lockdown::unlock_now(app, gid, Some(kind)).await {
                 tracing::warn!(?e, "panic: lifting a lock after an early end failed");
             }
         }
         drop_exemptions(app, gid, &exempted).await;
         return Ok(());
     }
+    // A lock from before panic may have been lifted while this ran, when `relock` still waited.
+    catch_up_waits(app, gid).await;
     let log = Log::new("Panic Mode Lockdown", ALERT)
         .text(&format!("{YES} **The server has been locked down.**"));
     // Panic mode runs: a failed log must not end the nuke run that started it.
@@ -697,14 +703,46 @@ pub(crate) async fn relock(
             tracing::warn!(?e, key, "panic: locking again failed");
         }
         if !saved {
+            // A failed lock waits for the next unlock; a part another lock holds waits for it.
+            own_lock(app, gid, wait, true).await;
             continue;
         }
+        let made = created(app, gid, &kind).await;
         own_lock(app, gid, key, true).await;
         // Panic may have ended between the check above and the lock, and its end did not see it.
         if !app.panic_runs.lock().unwrap().contains_key(&gid.get()) || !ends_later(app, gid).await {
-            if let Err(e) = lockdown::unlock_now(app, gid, Some(&kind)).await {
-                tracing::warn!(?e, "panic: lifting a lock after the end failed");
+            if made.is_some() && created(app, gid, &kind).await == made {
+                if let Err(e) = lockdown::unlock_now(app, gid, Some(&kind)).await {
+                    tracing::warn!(?e, "panic: lifting a lock after the end failed");
+                }
             }
+        }
+    }
+}
+
+/// When the active lock of exactly `kind` was saved, to know it again later; `None` on none.
+async fn created(app: &App, gid: Id<GuildMarker>, kind: &LockKind) -> Option<f64> {
+    tommybot_automod::store::lock_created(&app.pool, gid.get(), kind)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Takes each part panic waits for that no lock holds any more, at the end of `start`.
+pub(crate) async fn catch_up_waits(app: &App, gid: Id<GuildMarker>) {
+    let Some(waits) = held(app, gid).await else {
+        return;
+    };
+    for (kind, key, wait, waiting) in [
+        (LockKind::Role, ROLE_LOCK, ROLE_WAITS, waits.0),
+        (LockKind::Server, SERVER_LOCK, SERVER_WAITS, waits.1),
+    ] {
+        if !waiting || covered(app, gid, &kind).await {
+            continue;
+        }
+        own_lock(app, gid, wait, false).await;
+        if !take_lock(app, gid, kind.clone(), key).await {
+            own_lock(app, gid, wait, true).await;
         }
     }
 }

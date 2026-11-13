@@ -625,11 +625,8 @@ async fn relink_roles_now(
             moved = true;
         }
         if moved {
-            let r = store::save_lock(&app.pool, gid.get(), &snap).await;
-            let r = match r {
-                Ok(()) => store::lock_done(&app.pool, gid.get(), &snap).await,
-                e => e,
-            };
+            // Not `save_lock`: the lock keeps its state and its age, which tells it apart.
+            let r = store::update_lock(&app.pool, gid.get(), &snap).await;
             forget_locks(gid.get());
             r?;
         }
@@ -648,22 +645,22 @@ async fn relink_roles_now(
 /// A lock lifted during panic that covered a part panic does not hold is taken again by panic.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
     let before = crate::panic::held(app, gid).await;
-    let lifted = unlock_now(app, gid, which).await?;
+    let (n, lifted) = unlock_now(app, gid, which).await?;
     if let Some(waiting) = before {
         crate::panic::relock(app, gid, waiting, &lifted).await;
     }
-    Ok(lifted.len())
+    Ok(n)
 }
 
-/// [`unlock`] without panic taking anything back.
+/// [`unlock`] without panic taking anything back: how many locks it lifted, and their kinds.
 pub(crate) async fn unlock_now(
     app: &App,
     gid: Id<GuildMarker>,
     which: Option<&LockKind>,
-) -> Result<Vec<LockKind>> {
+) -> Result<(usize, Vec<LockKind>)> {
     if let Some(k) = which {
         if lock_thread(app, gid, k, false).await? {
-            return Ok(vec![k.clone()]);
+            return Ok((1, vec![k.clone()]));
         }
     }
     let _one = exclusive(app, gid).await;
@@ -768,7 +765,7 @@ pub(crate) async fn unlock_now(
         )
         .await;
     }
-    Ok(kinds)
+    Ok((lifted, kinds))
 }
 
 /// `lock MESSAGE ?t update`: adds the message as UPDATE n to the blind lock's notice, or, without a

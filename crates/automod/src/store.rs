@@ -1,6 +1,9 @@
 //! Postgres persistence (tables in crates/core/migrations/0200_automod.sql).
 //! Timers (raid/panic end, lock expiry) go through the shared `scheduled_jobs` table.
-use crate::{lockdown::Snapshot, strike::StrikeState};
+use crate::{
+    lockdown::{LockKind, Snapshot},
+    strike::StrikeState,
+};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
@@ -54,6 +57,30 @@ pub async fn save_lock(db: &PgPool, guild: u64, snap: &Snapshot) -> Result<()> {
 
 fn lock_key(snap: &Snapshot) -> String {
     format!("{:?}", snap.kind)
+}
+
+/// When the active lock of `kind` was saved (unix secs), to tell one lock from a later lock of the
+/// same kind. `None` when there is none.
+pub async fn lock_created(db: &PgPool, guild: u64, kind: &LockKind) -> Result<Option<f64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT extract(epoch from created_at)::float8 FROM lock_snapshots
+         WHERE guild_id=$1 AND kind=$2 AND state<>'unlocking'",
+    )
+    .bind(guild as i64)
+    .bind(format!("{:?}", Some(kind)))
+    .fetch_optional(db)
+    .await?)
+}
+
+/// Rewrites an active lock's snapshot and nothing else (not its state or age).
+pub async fn update_lock(db: &PgPool, guild: u64, snap: &Snapshot) -> Result<()> {
+    sqlx::query("UPDATE lock_snapshots SET snapshot=$3 WHERE guild_id=$1 AND kind=$2")
+        .bind(guild as i64)
+        .bind(lock_key(snap))
+        .bind(sqlx::types::Json(snap))
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 /// Every active lock of the guild, oldest first.

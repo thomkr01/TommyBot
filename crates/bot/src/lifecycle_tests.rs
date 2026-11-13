@@ -1042,6 +1042,33 @@ async fn panic_takes_back_what_an_older_lock_gave_up() {
         0,
         "the unlock gave the recreated role nothing back"
     );
+    // Server 1: the staff lock ran out while panic was still starting (relock waited then).
+    let (g1, gid1) = (t.g(1).get(), t.g(1));
+    t.server_config(1, t.owner(), json!({ "panic": panic }))
+        .await;
+    t.set(|m| {
+        m.members.insert((g1, bansync::tests::ME), vec![8]);
+        m.roles
+            .insert(g1, vec![(g1, false, SEND | (1 << 10), 0), (8, false, 0, 5)]);
+    });
+    crate::lockdown::lock(&t.app, gid1, LockKind::Server)
+        .await
+        .unwrap();
+    crate::panic::start(&t.app, gid1, &cfg).await.unwrap();
+    crate::lockdown::unlock_now(&t.app, gid1, Some(&LockKind::Server))
+        .await
+        .unwrap();
+    crate::panic::catch_up_waits(&t.app, gid1).await;
+    let p1 = pending(&t, 1, "panic_end").await[0].0.clone();
+    assert_eq!(
+        (p1["locked_server"].clone(), p1["waits_server"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(
+        crate::lockdown::active(&t.app, gid1).await.unwrap(),
+        [LockKind::Role, LockKind::Server]
+    );
+    t.app.panic_runs.lock().unwrap().remove(&g1);
     // An end the scheduler took (or that ran) is no longer "later".
     assert!(crate::panic::ends_later(&t.app, gid).await);
     t.exec("UPDATE scheduled_jobs SET locked_until = now() + interval '1 minute' WHERE guild_id = $1 AND kind = 'panic_end'").await;
