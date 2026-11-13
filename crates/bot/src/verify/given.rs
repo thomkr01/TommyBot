@@ -457,7 +457,7 @@ async fn on_roles(app: &App, e: &AuditLogEntry) -> Result<()> {
                 gid,
                 target,
                 actor,
-                "A verification role given by another bot was taken back",
+                "A role that skips verification, given by another bot, was taken back",
             )
             .await
         }

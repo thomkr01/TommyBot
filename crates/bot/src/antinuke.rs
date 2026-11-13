@@ -1437,6 +1437,8 @@ pub(crate) struct RevertSummary {
     pub recreated: usize,
     /// Roles recreated from an older backup without their dangerous permissions.
     pub stripped: usize,
+    /// Deleted channels and roles that did not come back (no backup holds them, or it failed).
+    pub missing: usize,
 }
 
 /// Undoes the actor's unreverted logged actions since `since_secs` (unix seconds) and marks them reverted.
@@ -1562,6 +1564,7 @@ pub(crate) async fn revert_actor(
         reinvite: plan.reinvite,
         recreated: back.changes,
         stripped: back.stripped,
+        missing: targets.iter().filter(|t| !back.back.contains(t)).count(),
     })
 }
 
@@ -2203,6 +2206,15 @@ pub(crate) fn report_log(
         )
         .line("Recreated", &format!("`{}`", sum.recreated))
         .line("Kicked, re-invite", &reinvite);
+    if sum.missing > 0 {
+        log = log.line(
+            "Not recreated",
+            &format!(
+                "`{}` deleted channels or roles did not come back: no backup holds them. Turn on Backups so anti-nuke can recreate them.",
+                sum.missing
+            ),
+        );
+    }
     if sum.stripped > 0 {
         log = log.line(
             "Older backup",

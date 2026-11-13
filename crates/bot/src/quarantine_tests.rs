@@ -1164,7 +1164,7 @@ async fn a_verification_role_from_another_bot_is_taken_back() {
     for x in [bot, human] {
         assert_eq!(saved(&t, 0, x).await, None, "nobody is punished");
     }
-    assert_eq!(t.calls("given by another bot was taken back"), 1);
+    assert_eq!(t.calls("given by another bot, was taken back"), 1);
     assert_eq!(t.calls("given without a verify permit, was taken back"), 2);
     t.cleanup().await;
 }
