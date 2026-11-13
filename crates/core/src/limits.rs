@@ -172,8 +172,13 @@ pub fn check(section: &str, doc: &Value, old: &Value) -> Result<(), String> {
     }
 }
 
+/// Cards the bot pulls inside their ranges when it reads them (`AutoSlowmodeCfg::clamped`,
+/// `HeatCfg::clamped`), so an old value there still works at the nearest end.
+const CLAMPED_ON_READ: [&str; 2] = ["automod.auto_slowmode.", "automod.heat."];
+
 /// Every stored number outside its range, as `section.path = value` (D70b): saved before the
 /// limits, so the save never refused it. A 0 window or count there switches its feature off.
+/// A value the bot clamps on read says what it is used as: `(used as 120)`.
 pub fn stored_outside(config: &Value) -> Vec<String> {
     let sections = [
         "antinuke", "joingate", "automod", "panic", "joinraid", "misc",
@@ -183,7 +188,23 @@ pub fn stored_outside(config: &Value) -> Vec<String> {
         .flat_map(|s| {
             outside(s, &config[*s], &Value::Null)
                 .into_iter()
-                .map(move |(p, v, _)| format!("{s}.{p} = {v}"))
+                .map(move |(p, v, _)| {
+                    let full = format!("{s}.{p}");
+                    let used = CLAMPED_ON_READ
+                        .iter()
+                        .any(|c| full.starts_with(c))
+                        .then(|| {
+                            let (lo, hi) = for_path(s, &p)
+                                .map(|(a, b)| (a as f64, b as f64))
+                                .or(float_for_path(s, &p))?;
+                            v.as_f64().map(|n| n.clamp(lo, hi))
+                        })
+                        .flatten();
+                    match used {
+                        Some(n) => format!("{full} = {v} (used as {n})"),
+                        None => format!("{full} = {v}"),
+                    }
+                })
         })
         .collect()
 }
@@ -225,6 +246,11 @@ mod tests {
         let c = json!({"panic": {"window_secs": 0, "executors": 0}, "joinraid": {"count": 10}});
         assert_eq!(stored_outside(&c), ["panic.window_secs = 0"]);
         assert!(stored_outside(&json!({})).is_empty());
+        let slow = json!({"automod": {"auto_slowmode": {"slowmode_secs": 21_600}}});
+        assert_eq!(
+            stored_outside(&slow),
+            ["automod.auto_slowmode.slowmode_secs = 21600 (used as 120)"]
+        );
     }
 
     #[test]

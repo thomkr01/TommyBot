@@ -499,6 +499,10 @@ Strike cap, multiplier, strike durations, mention lock count and window, the men
 
 **A range check refused a whole rollback.** (D69b, 11-13) Rollback ran the save's `limits::check`, so one old value outside today's range (`joinraid.count` 800) blocked the rollback a cleanup after a hacked admin needs. *Avoid:* a rollback calls `limits::clamp` first, which moves a number to the nearest end of its range and returns `section.path: old -> new`; the rollback logs and returns those (`clamped`, shown in the toast). Saves and imports still refuse, so a user typing a value learns the range. A non-number is still refused.
 
+**A lower limit makes old values look broken.** (#191, 11-13)
+Auto slowmode's maximum dropped from 6 hours to 2 minutes. A server with an older 21600 got the Overview warning "Settings outside their range", which says a 0 value switches the protection off, although the bot reads that card clamped and the value still works at 120.
+*Avoid:* `limits::stored_outside` marks values the bot clamps on read (`CLAMPED_ON_READ`) with `(used as N)`. When a card gets a `clamped()` on read, add its prefix there; when a range shrinks, check what Overview and the form say about older values.
+
 ## 5. Database and migrations
 
 **Two PRs used the same migration number.** (#64/#65)
