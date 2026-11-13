@@ -13,7 +13,7 @@ use tommybot_core::limits;
 
 pub(crate) type Res = Result<Json<Value>, ApiError>;
 
-/// Permissions granted by the user's permit roles.
+/// Permissions of the user's permit: the highest-ranked one, as the bot reads it (D72).
 pub(crate) async fn permit_perms(
     st: &AppState,
     s: &Sess,
@@ -26,9 +26,8 @@ pub(crate) async fn permit_perms(
         .iter()
         .filter_map(|r| r.parse().ok())
         .collect();
-    Ok(sqlx::query_scalar::<_, Vec<String>>(
-        "select p.perms from permits p join permit_roles r on r.permit_id = p.id where p.guild_id = $1 and r.role_id = any($2)")
-        .bind(guild).bind(&roles).fetch_all(&st.db).await?.concat())
+    let top = tommybot_core::permits::top_permit(&st.db, guild, &roles).await?;
+    Ok(top.map(|p| p.1).unwrap_or_default())
 }
 
 pub(crate) async fn is_discord_owner(
