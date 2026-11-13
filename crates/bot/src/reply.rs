@@ -322,6 +322,58 @@ fn reach_staff(kind: &str, reason: Option<&str>, tickets: bool) -> Option<&'stat
         .then_some("You can DM TommyBot to reach this server's staff.")
 }
 
+/// An automatic quarantine (anti-nuke, a rate limit, the Raider List, a rejoin) tells the member
+/// how to reach staff, while tickets are on (D27). Queued as a job, so the DM never holds back the
+/// quarantine or the revert after it; a raid wave queues none, so the bot stays off DM limits.
+/// Callers skip join and verification quarantines, which get the verification prompt.
+pub(crate) async fn queue_quarantine_dm(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) {
+    let Ok(cfg) = app.cfg(gid.get()).await else {
+        return;
+    };
+    let now = crate::automod::now_ms();
+    let raid = app
+        .raids
+        .lock()
+        .unwrap()
+        .get(&gid.get())
+        .is_some_and(|r| r.active(now))
+        || app
+            .voice_raids
+            .lock()
+            .unwrap()
+            .get(&gid.get())
+            .is_some_and(|r| r.active(now));
+    if !cfg.tickets.enabled || raid {
+        return;
+    }
+    let job = json!({ "user": user.get() });
+    if let Err(e) = jobs::enqueue(&app.pool, gid.get() as i64, QUARANTINE_DM, job, now_secs()).await
+    {
+        tracing::warn!(?e, "queueing the quarantine DM failed");
+    }
+}
+
+pub(crate) const QUARANTINE_DM: &str = "quarantine_dm";
+
+/// The `quarantine_dm` job: only a member still in a real quarantine, and never a bot. A failed
+/// DM is only logged, never retried.
+pub(crate) async fn quarantine_dm_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
+    let user = Id::new(p["user"].as_u64().context("job payload has no user")?);
+    if crate::antinuke::quarantine_kind(app, gid, user).await? != Some(false)
+        || crate::antinuke::is_bot(app, user).await
+    {
+        return Ok(());
+    }
+    let server = crate::verify::guild_name(app, gid).await;
+    let text = format!(
+        "You have been quarantined in {server}. You can DM TommyBot to reach this server's staff."
+    );
+    if !dm(app, user, &text).await {
+        tracing::warn!(user = user.get(), "quarantine DM failed");
+    }
+    Ok(())
+}
+
 /// What a punishment DM says, see [`dm_embed`]. `moderator` is None when staff is hidden.
 pub struct Notice<'a> {
     pub kind: &'a str,

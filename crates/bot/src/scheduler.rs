@@ -140,6 +140,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "confirm_expire" => crate::confirm::run_expire(app, &job.payload).await?,
         "raid_punish" => crate::joingate::punish_job(app, gid, &job.payload).await?,
+        crate::reply::QUARANTINE_DM => crate::reply::quarantine_dm_job(app, gid, &job.payload).await?,
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_blocked" => {
             let list = job.payload["list"].as_str().unwrap_or("VPN");

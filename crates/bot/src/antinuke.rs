@@ -825,6 +825,9 @@ pub(crate) async fn quarantine_actor(
     why: &str,
 ) -> Result<Contained> {
     let done = contain(app, gid, actor, None, Kind::Real).await?;
+    if done.applied == Applied::Quarantined {
+        crate::reply::queue_quarantine_dm(app, gid, actor).await;
+    }
     let case = open_case(app, gid, actor, why).await?;
     let log = Log::new("Anti Nuke", ALERT)
         .line("CASE", &format!("`{case}`"))
@@ -894,6 +897,9 @@ pub(crate) async fn requarantine_rejoin(
     // Not verified yet is not an anti-nuke matter.
     if on_join {
         return Ok(Rejoin::Verifying);
+    }
+    if done.applied == Applied::Quarantined {
+        crate::reply::queue_quarantine_dm(app, gid, user).await;
     }
     let log = Log::new("Anti Nuke", ALERT)
         .user("Member", user.get())
@@ -1428,7 +1434,10 @@ pub(crate) async fn revert_and_report(
                             applied: Applied::Failed,
                             bot_role: None,
                         }
-                    })
+                    });
+                if done.applied == Applied::Quarantined {
+                    crate::reply::queue_quarantine_dm(app, gid, actor).await;
+                }
             }
             NukeStep::Revert => {
                 sum = Some(revert_actor(app, gid, actor, since, Some(&cfg.backups)).await?)

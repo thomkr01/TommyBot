@@ -958,3 +958,59 @@ async fn a_verification_role_from_another_bot_is_taken_back() {
     assert_eq!(t.calls("given by another bot was taken back"), 1);
     t.cleanup().await;
 }
+
+/// D27: an automatic quarantine queues one DM telling the member how to reach staff, while tickets
+/// are on; none during a raid, none for a bot, and the job skips a join quarantine.
+#[tokio::test]
+async fn an_automatic_quarantine_tells_the_member_how_to_reach_staff() {
+    let Some(t) = T::new(49).await else { return };
+    let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "tickets": {"enabled": true}});
+    server(&t, 0, cfg).await;
+    let [member, bot, raider] = [1, 2, 3].map(|n| t.base * 10 + n);
+    t.set(|m| {
+        m.bots.push(bot);
+        for u in [member, bot, raider] {
+            m.members.insert((t.g(0).get(), u), vec![ROLE]);
+        }
+    });
+    let jobs = || async {
+        sqlx::query_as::<_, (Value,)>(
+            "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'quarantine_dm' ORDER BY id",
+        )
+        .bind(t.g(0).get() as i64)
+        .fetch_all(&t.app.pool)
+        .await
+        .unwrap()
+    };
+    let why = "command rate limit exceeded";
+    for u in [member, bot] {
+        crate::antinuke::quarantine_actor(&t.app, t.g(0), Id::new(u), why)
+            .await
+            .unwrap();
+    }
+    // A raid wave queues no DMs.
+    let raid = tommybot_automod::join::RaidDetector::restored(0, i64::MAX, String::new());
+    t.app.raids.lock().unwrap().insert(t.g(0).get(), raid);
+    crate::antinuke::quarantine_actor(&t.app, t.g(0), Id::new(raider), why)
+        .await
+        .unwrap();
+    t.app.raids.lock().unwrap().clear();
+    let queued = jobs().await;
+    assert_eq!(queued.len(), 2, "{queued:?}");
+    for (p,) in &queued {
+        crate::reply::quarantine_dm_job(&t.app, t.g(0), p).await.unwrap();
+    }
+    assert_eq!(t.calls("You can DM TommyBot to reach this server"), 1, "the member, not the bot");
+    // A join quarantine gets the verification prompt instead.
+    sqlx::query("UPDATE quarantines SET on_join = true WHERE guild_id = $1 AND user_id = $2")
+        .bind(t.g(0).get() as i64)
+        .bind(member as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    crate::reply::quarantine_dm_job(&t.app, t.g(0), &json!({"user": member}))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("You can DM TommyBot to reach this server"), 1);
+    t.cleanup().await;
+}
