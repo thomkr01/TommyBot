@@ -273,13 +273,20 @@ impl AntiNuke {
         }
         // Every window holding `at` is judged again: live entries counted after it got their
         // verdict before this one existed (a nuke split across a reconnect).
+        // The queue is sorted, so each window is two binary searches.
         let before = |w: Duration| {
-            q.iter()
-                .filter(|end| **end >= at && end.duration_since(at) < w)
+            let (from, to) = (
+                q.partition_point(|t| *t < at),
+                q.partition_point(|t| *t <= at + w),
+            );
+            q.range(from..to)
+                .filter(|end| end.duration_since(at) < w)
                 .map(|end| {
-                    q.iter()
-                        .filter(|t| *t <= end && end.duration_since(**t) < w)
-                        .count() as u32
+                    let upto = q.partition_point(|t| t <= end);
+                    let after = end
+                        .checked_sub(w)
+                        .map_or(0, |s| q.partition_point(|t| *t <= s));
+                    (upto - after) as u32
                 })
                 .max()
                 .unwrap_or(0)
