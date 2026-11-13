@@ -1528,10 +1528,25 @@ pub(crate) async fn contain(
     reason: Option<&str>,
     kind: Kind,
 ) -> Result<Contained> {
+    contain_with(app, gid, actor, reason, kind, true).await
+}
+
+/// [`contain`]; `hide` false leaves [`hide_channels`] to the caller, so a nuke's revert does not
+/// wait for one overwrite write per channel (`revert_and_report` hides after the revert).
+async fn contain_with(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    reason: Option<&str>,
+    kind: Kind,
+    hide: bool,
+) -> Result<Contained> {
     let member = app.http.guild_member(gid, actor).await?.model().await?;
     if !member.user.bot {
         quarantine_as(app, gid, actor, reason, kind).await?;
-        hide_channels_best_effort(app, gid, actor, &member.roles, kind).await;
+        if hide {
+            hide_channels_best_effort(app, gid, actor, &member.roles, kind).await;
+        }
         return Ok(Contained {
             applied: Applied::Quarantined,
             bot_role: None,
@@ -1561,7 +1576,7 @@ pub(crate) async fn contain(
         },
     )
     .await?;
-    if done.applied == Applied::Quarantined {
+    if hide && done.applied == Applied::Quarantined {
         hide_channels_best_effort(app, gid, actor, &member.roles, kind).await;
     }
     // Logged only once the bot stays: a kick deletes its managed role, leaving nothing to restore.
@@ -1981,7 +1996,7 @@ pub(crate) async fn revert_and_report(
         match step {
             // A failed quarantine (bot role too low) must not stop the revert.
             NukeStep::Contain => {
-                done = contain(app, gid, actor, None, Kind::Real)
+                done = contain_with(app, gid, actor, None, Kind::Real, false)
                     .await
                     .unwrap_or_else(|e| {
                         tracing::warn!(?e, "quarantine failed");
@@ -1992,7 +2007,16 @@ pub(crate) async fn revert_and_report(
                     })
             }
             NukeStep::Revert => {
-                sum = Some(revert_actor(app, gid, actor, since, Some(&cfg.backups)).await?)
+                let r = revert_actor(app, gid, actor, since, Some(&cfg.backups)).await;
+                // The overwrite part of the containment, after the channels are back (D14).
+                if done.applied == Applied::Quarantined {
+                    let m = async { anyhow::Ok(app.http.guild_member(gid, actor).await?.model().await?) };
+                    match m.await {
+                        Ok(m) => hide_channels_best_effort(app, gid, actor, &m.roles, Kind::Real).await,
+                        Err(e) => tracing::warn!(?e, "reading a nuker to hide channels failed"),
+                    }
+                }
+                sum = Some(r?)
             }
             NukeStep::Report => {
                 let sum = sum.as_ref().context("the revert runs before the report")?;
