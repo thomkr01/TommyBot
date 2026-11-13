@@ -81,17 +81,19 @@ fn discord_media(url: &str) -> bool {
             || (host.starts_with("images-ext-") && host.ends_with(".discordapp.net")))
 }
 
+/// An image within the download cap.
+fn scannable(a: &twilight_model::channel::Attachment) -> bool {
+    a.size <= MAX_BYTES as u64
+        && a.content_type
+            .as_deref()
+            .is_some_and(|t| t.starts_with("image/"))
+}
+
 /// Image URLs worth scanning: attachments (not on an edit, which cannot add any) and embed images,
 /// also of a forwarded message.
 fn image_urls(m: &Message, edit: bool) -> Vec<String> {
     let files = crate::automod::attachments(m)
-        .filter(|_| !edit)
-        .filter(|a| a.size <= MAX_BYTES as u64)
-        .filter(|a| {
-            a.content_type
-                .as_deref()
-                .is_some_and(|t| t.starts_with("image/"))
-        })
+        .filter(|a| !edit && scannable(a))
         .map(|a| a.proxy_url.clone());
     let forwarded = m.message_snapshots.iter().flat_map(|s| &s.message.embeds);
     let embeds = m.embeds.iter().chain(forwarded).flat_map(|e| {
@@ -120,8 +122,8 @@ impl Scanner {
     /// Queues the message's images (the caller checked the filter is on). Never waits.
     pub fn enqueue(&self, m: &Message, edit: bool, backlog: bool) {
         // Files are marked once their scan row is saved (in `scan`).
-        let fresh =
-            crate::automod::attachments(m).any(|a| !self.seen.contains((m.id.get(), a.id.get())));
+        let fresh = crate::automod::attachments(m)
+            .any(|a| scannable(a) && !self.seen.contains((m.id.get(), a.id.get())));
         let urls = image_urls(m, edit || !fresh);
         if urls.is_empty() {
             return;
@@ -133,12 +135,12 @@ impl Scanner {
             m.interaction_metadata.as_deref(),
         ) {
             (Some(u), _) => u,
-            (None, Some(meta)) => Message {
+            (None, Some(meta)) if !crate::automod::clicked(m) => Message {
                 author: meta.user.clone(),
                 member: None,
                 ..m.clone()
             },
-            (None, None) => m.clone(),
+            _ => m.clone(),
         };
         let job = Job {
             msg: Box::new(msg),
@@ -674,6 +676,11 @@ mod tests {
         assert!(s.take(0).is_none(), "same file again");
         s.enqueue(&hook(json!([file("1"), file("2")])), false, false);
         assert_eq!(s.take(0).unwrap().urls.len(), 2, "a new file came");
+        // A file the scan never queues (not an image) is no reason to fetch the seen ones again.
+        let pdf = json!({"id": "4", "filename": "a.pdf", "size": 10, "url": "https://cdn.discordapp.com/a.pdf",
+                         "proxy_url": "https://media.discordapp.net/a.pdf", "content_type": "application/pdf"});
+        s.enqueue(&hook(json!([file("1"), pdf])), false, false);
+        assert!(s.take(0).is_none(), "only a PDF is new");
         // A forward keeps the attachment id but is another message: scanned.
         let fwd = crate::automod::more_tests::msg(
             json!({"id": "101", "webhook_id": "9", "attachments": [file("1")]}),
@@ -725,6 +732,13 @@ mod tests {
         let j = s.take(0).unwrap();
         assert_eq!(j.msg.author.id.get(), 60);
         assert!(j.msg.interaction_metadata.is_some());
+        // A button click's message is not the clicker's: not credited to them.
+        let click = crate::automod::more_tests::msg(json!({"id": "99",
+            "attachments": [file], "interaction_metadata": {"id": "5", "type": 3,
+                "authorizing_integration_owners": {"0": "1"},
+                "user": {"id": "60", "username": "u", "discriminator": "0", "avatar": null}}}));
+        s.enqueue(&click, false, false);
+        assert_eq!(s.take(0).unwrap().msg.author.id.get(), 50);
         let file = json!({"id": "2", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
                           "proxy_url": "https://media.discordapp.net/b.png", "content_type": "image/png"});
         let user_app = crate::automod::more_tests::msg(json!({

@@ -44,6 +44,9 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
+    if app_message(m) {
+        new_text(m);
+    }
     match as_app_user(m) {
         Some(m) => check(app, &m, true, false).await,
         None => check(app, m, false, false).await,
@@ -52,17 +55,57 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<()> {
 
 /// A reply from an app the member installed on their own account says what the member wants it to,
 /// so it gets the instant filters (as on an edit) under the member's name. Server-installed bots stay
-/// exempt.
+/// exempt. A reply to a button click is not the clicker's words: it keeps the app as author and its
+/// metadata, so the filters only delete it (see [`clicked`]).
 pub(crate) fn as_app_user(m: &Message) -> Option<Message> {
     let meta = m.interaction_metadata.as_deref()?;
     let owners = &meta.authorizing_integration_owners;
-    (owners.user.is_some() && owners.guild.is_none()).then(|| Message {
-        author: meta.user.clone(),
-        member: None,
-        webhook_id: None,
-        interaction_metadata: None,
-        ..m.clone()
+    if owners.user.is_none() || owners.guild.is_some() {
+        return None;
+    }
+    Some(if clicked(m) {
+        Message {
+            member: None,
+            webhook_id: None,
+            ..m.clone()
+        }
+    } else {
+        Message {
+            author: meta.user.clone(),
+            member: None,
+            webhook_id: None,
+            interaction_metadata: None,
+            ..m.clone()
+        }
     })
+}
+
+/// Sent or updated because someone clicked a button or menu: whoever clicked did not write it.
+pub(crate) fn clicked(m: &Message) -> bool {
+    m.interaction_metadata
+        .as_ref()
+        .is_some_and(|i| i.kind == InteractionType::MessageComponent)
+}
+
+/// Sent by a webhook or an app (the caller leaves out TommyBot's own).
+pub(crate) fn app_message(m: &Message) -> bool {
+    m.webhook_id.is_some() || m.application_id.is_some() || m.interaction_metadata.is_some()
+}
+
+/// Remembers the text a webhook or app message was filtered on (content and embed text); true when
+/// it is new for that message, so an update that changes nothing is not filtered twice.
+pub(crate) fn new_text(m: &Message) -> bool {
+    use std::hash::{Hash, Hasher};
+    static READ: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, u64>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (filter_text(m), app_text(m)).hash(&mut h);
+    let mut read = READ.lock().unwrap();
+    // shortcut: past the cap every message is forgotten; its next update is filtered once more.
+    if read.len() >= 20_000 {
+        read.clear();
+    }
+    read.insert(m.id.get(), h.finish()) != Some(h.finish())
 }
 
 /// An edit can sneak in a link or word after the message passed, so only those filters run again.
@@ -109,11 +152,11 @@ async fn check_message(
     let cfg = app.cfg(gid.get()).await?;
     let am = &cfg.automod;
     // Heat panic's raiders are held even with automod off, also when a server app posts for them.
-    // Not for a button click's update: a held raider clicking a shared panel must not delete it.
+    // Not for a button click's message: a held raider clicking a shared panel must not delete it.
     let poster = m
         .interaction_metadata
         .as_ref()
-        .filter(|i| i.kind != InteractionType::MessageComponent)
+        .filter(|_| !clicked(m))
         .map_or(m.author.id, |i| i.user.id);
     if crate::panic::is_raider(app, gid, poster) {
         crate::http_err::best_effort(
@@ -138,8 +181,9 @@ async fn check_message(
         app.nsfw.enqueue(m, !new_files, false);
     }
     // Server-installed apps' replies are not spam (user-installed ones were rewritten above); the
-    // image scan above only logs theirs.
-    if m.interaction_metadata.is_some() {
+    // image scan above only logs theirs. A user-installed app's click reply kept its metadata.
+    let click = clicked(m);
+    if m.interaction_metadata.is_some() && !(click && as_app_user(m).is_some()) {
         return Ok(());
     }
     let wl = &cfg.whitelist;
@@ -339,7 +383,7 @@ async fn check_message(
         return Ok(());
     }
     // A tripped message with a scam link or QR code is deleted below, whichever path punishes.
-    if triggered && facts.malicious_link && m.webhook_id.is_none() {
+    if triggered && facts.malicious_link && m.webhook_id.is_none() && !click {
         crate::raiders::scam_hit(app, gid, m.author.id, m.id).await;
     }
     // A failed lock or log must not keep the spammer from being punished below.
@@ -363,6 +407,26 @@ async fn check_message(
         }
     }
     if !triggered {
+        return Ok(());
+    }
+    if click {
+        // Nobody wrote it whom a strike could reach: delete and log only.
+        crate::http_err::best_effort(
+            app.http.delete_message(m.channel_id, m.id).await,
+            "automod delete",
+        );
+        let factor = tripped_filter(&breakdown, f, bad_site).map_or("Automod", |t| t.1);
+        let what = (m.channel_id.get(), m.content.as_str());
+        let log = filter_log(
+            &m.author.name,
+            FilterAction::Delete,
+            factor,
+            what,
+            m.author.id.get(),
+        );
+        if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+            tracing::warn!(?e, "automod log failed");
+        }
         return Ok(());
     }
     if let Some(hook) = m.webhook_id {

@@ -277,6 +277,57 @@ async fn raiders_are_held_with_automod_off() {
     t.cleanup().await;
 }
 
+#[test]
+fn an_app_message_is_filtered_once_per_text() {
+    let m = |content: &str| msg(json!({"id": "910001", "webhook_id": "9", "content": content}));
+    assert!(new_text(&m("hi")), "the post");
+    assert!(!new_text(&m("hi")), "a preview update with the same text");
+    assert!(
+        new_text(&m("hi discord.gg/x")),
+        "a fill or edit with new text"
+    );
+    assert!(!new_text(&m("hi discord.gg/x")));
+}
+
+/// A user-installed app's reply to a button click is deleted for its text, but the clicker did not
+/// write it: no strike or timeout. A reply to a command is the member's post and is punished.
+#[tokio::test]
+async fn a_button_reply_is_deleted_but_punishes_nobody() {
+    let Some(t) = T::new(88).await else { return };
+    let gid = t.g(0);
+    let cfg = json!({"automod": {"enabled": true,
+        "filters": {"words": {"filter": {"enabled": true}, "strict": ["scam"]}}}});
+    t.server_config(0, t.owner(), cfg).await;
+    let reply = |id: &str, kind: u8, user: u64| {
+        let m = msg(
+            json!({"guild_id": gid.to_string(), "id": id, "content": "scam", "application_id": "3",
+            "author": {"id": "3", "username": "app", "discriminator": "0", "avatar": null, "bot": true},
+            "interaction_metadata": {"id": "6", "type": kind, "authorizing_integration_owners": {"1": user.to_string()},
+                "user": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": null}}}),
+        );
+        MessageCreate {
+            channel_type: None,
+            message: m,
+        }
+    };
+    let clicker = t.base + 5;
+    let _ = on_message(&t.app, &reply("100", 3, clicker)).await;
+    assert_eq!(t.calls("DELETE /channels/7/messages/100"), 1, "deleted");
+    assert_eq!(t.calls("PATCH"), 0, "nobody timed out");
+    let strikes: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM automod_strikes WHERE guild_id = $1")
+            .bind(gid.get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(strikes, 0, "no strike");
+    let _ = on_message(&t.app, &reply("101", 2, t.base + 6)).await;
+    assert!(t.calls("PATCH") >= 1, "a command reply strikes the member");
+    t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
 /// The catch channel's test mode only logs, so automod still sees the message.
 #[tokio::test]
 async fn catch_log_mode_leaves_the_message_to_automod() {

@@ -433,36 +433,26 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                     }
                 }
             }
-            note_deferred(app.me, m);
             automod::on_message(app, m).await?;
         }
+        // A webhook or app can change its text without edited_timestamp (a deferred fill, a button
+        // update): any new text is filtered, the same text never twice.
+        Event::MessageUpdate(m) if app_post(app, &m.0) => {
+            if automod::new_text(&m.0) {
+                automod::on_edit(app, &m.0).await?;
+            } else if !m.embeds.is_empty() {
+                scan_preview(app, &m.0).await?;
+            }
+        }
         // Discord also sends updates for link previews; only real edits are checked again.
-        Event::MessageUpdate(m)
-            if m.edited_timestamp.is_some()
-                && (!m.author.bot
-                    || m.webhook_id.is_some()
-                    || m.interaction_metadata.is_some()) =>
-        {
+        Event::MessageUpdate(m) if m.edited_timestamp.is_some() && !m.author.bot => {
             automod::on_edit(app, &m.0).await?;
         }
-        // A deferred app reply is filled in by an update that may have no edited_timestamp: it is
-        // a new post for the text filters and the image scan.
-        Event::MessageUpdate(m) if app_fill_in(&m.0) => automod::on_edit(app, &m.0).await?,
         // A link preview or GIF arrived after the post: only the image scan looks at it.
         Event::MessageUpdate(m)
-            if m.edited_timestamp.is_none()
-                && !m.embeds.is_empty()
-                && (!m.author.bot
-                    || m.webhook_id.is_some()
-                    || m.interaction_metadata.is_some()) =>
+            if m.edited_timestamp.is_none() && !m.embeds.is_empty() && !m.author.bot =>
         {
-            if let Some(gid) = m.guild_id {
-                let am = &app.cfg(gid.get()).await?.automod;
-                if am.enabled && am.filters.nsfw_images.enabled {
-                    app.nsfw
-                        .enqueue(&m.0, !automod::files_can_be_new(&m.0), false);
-                }
-            }
+            scan_preview(app, &m.0).await?;
         }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
@@ -583,50 +573,25 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
     Ok(())
 }
 
-/// Another app's "thinking" replies (Discord's LOADING flag), whose filling update is read once.
-static DEFERRED: std::sync::LazyLock<automod::Seen> = std::sync::LazyLock::new(Default::default);
-
-fn note_deferred(
-    me: Id<twilight_model::id::marker::UserMarker>,
-    m: &twilight_model::channel::Message,
-) {
-    let loading = m
-        .flags
-        .is_some_and(|f| f.contains(twilight_model::channel::message::MessageFlags::LOADING));
-    if loading && m.author.id != me {
-        DEFERRED.first((m.id.get(), 0));
-    }
+/// A webhook's or another app's message (not TommyBot's own).
+fn app_post(app: &App, m: &twilight_model::channel::Message) -> bool {
+    m.author.id != app.me && automod::app_message(m)
 }
 
-/// The update that fills a deferred reply (it may have no `edited_timestamp`), once per message.
-fn app_fill_in(m: &twilight_model::channel::Message) -> bool {
-    m.edited_timestamp.is_none() && DEFERRED.take((m.id.get(), 0))
+/// Only the image scan reads a preview update.
+async fn scan_preview(app: &App, m: &twilight_model::channel::Message) -> Result<()> {
+    if let Some(gid) = m.guild_id {
+        let am = &app.cfg(gid.get()).await?.automod;
+        if am.enabled && am.filters.nsfw_images.enabled {
+            app.nsfw.enqueue(m, !automod::files_can_be_new(m), false);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn deferred_app_replies_are_read_once() {
-        use serde_json::json;
-        let m = |id: &str, extra: serde_json::Value| {
-            let mut v = json!({"id": id, "application_id": "3"});
-            v.as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            crate::automod::more_tests::msg(v)
-        };
-        let me = Id::new(1);
-        note_deferred(me, &m("900001", json!({"flags": 128})));
-        assert!(app_fill_in(&m("900001", json!({}))), "the fill is read");
-        assert!(!app_fill_in(&m("900001", json!({}))), "only once");
-        // A reply that was never deferred, or TommyBot's own: its updates stay on the cheap path.
-        assert!(!app_fill_in(&m("900002", json!({}))));
-        let own = json!({"flags": 128, "author": {"id": "1", "username": "tb", "discriminator": "0", "avatar": null}});
-        note_deferred(me, &m("900003", own));
-        assert!(!app_fill_in(&m("900003", json!({}))));
-    }
 
     #[test]
     fn sees_follows_base_and_overwrites() {

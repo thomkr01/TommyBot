@@ -26,11 +26,6 @@ impl Seen {
         self.0.lock().unwrap().contains(&key)
     }
 
-    /// True when `key` was marked; unmarks it.
-    pub(crate) fn take(&self, key: (u64, u64)) -> bool {
-        self.0.lock().unwrap().remove(&key)
-    }
-
     pub(crate) fn forget(&self, keys: impl Iterator<Item = (u64, u64)>) {
         let mut s = self.0.lock().unwrap();
         for k in keys {
