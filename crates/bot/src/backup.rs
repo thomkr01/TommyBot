@@ -358,6 +358,7 @@ pub async fn recreate(
         apply_filters(&mut p, f);
     }
     let (sum, id_map) = execute(app, gid, (&image, &live), p, true).await;
+    crate::relink::relink(app, gid, &id_map).await;
     let back: HashSet<u64> = ids
         .iter()
         .copied()
@@ -469,7 +470,8 @@ pub async fn restore(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    let (mut sum, _) = execute(app, gid, (image, &live), p, respect_lock).await;
+    let (mut sum, id_map) = execute(app, gid, (image, &live), p, respect_lock).await;
+    crate::relink::relink(app, gid, &id_map).await;
     // Webhooks that did not exist in the image were made since (old images have no list).
     if let (Some(f), Some(old)) = (filters, &image.webhooks) {
         if f.restore && f.delete_webhooks {

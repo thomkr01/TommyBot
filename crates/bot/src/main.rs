@@ -32,6 +32,7 @@ mod qr;
 #[cfg(test)]
 mod quarantine_tests;
 mod raiders;
+mod relink;
 mod reply;
 mod reports;
 mod scheduler;
