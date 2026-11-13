@@ -49,14 +49,7 @@ pub(crate) async fn check(
         return Ok(());
     };
     // During a raid or lockdown the member bucket is kept for punishments.
-    let now = crate::automod::now_ms();
-    let raid = app
-        .raids
-        .lock()
-        .unwrap()
-        .get(&gid.get())
-        .is_some_and(|r| r.active(now));
-    if raid || !crate::lockdown::active(app, gid).await?.is_empty() {
+    if crate::lockdown::raid_or_lock(app, gid).await? {
         return Ok(());
     }
     // Quarantined members (also on the way in: rejoin, verification's quarantine on join) are left as is.

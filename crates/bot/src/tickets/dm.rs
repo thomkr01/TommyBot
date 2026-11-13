@@ -226,8 +226,22 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         let text = "That server has blacklisted you from sending a message there.";
         return say(app, dm, error(text)).await;
     }
+    let text = body(&m.content, app.me);
+    if filtered(app, &cfg, &text) {
+        let text = "Your message was not sent: it holds words or links that server does not allow.";
+        return say(app, dm, error(text)).await;
+    }
     let ch = match open_ticket(app, gid, m.author.id).await? {
         Some(ch) => ch,
+        // D27: no new tickets while a raid or lock is on, and a few an hour per member.
+        None if crate::lockdown::raid_or_lock(app, gid).await? => {
+            let text = "That server is in lockdown and does not take new tickets right now. Please try again later.";
+            return say(app, dm, error(text)).await;
+        }
+        None if opened_last_hour(app, gid, m.author.id).await? >= TICKETS_PER_HOUR => {
+            let text = "You opened too many tickets in that server in the last hour. Please try again later.";
+            return say(app, dm, error(text)).await;
+        }
         None if t.paused => {
             let reason = if t.pause_reason.is_empty() {
                 "No reason was provided."
@@ -246,7 +260,6 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
             None => return Ok(()),
         },
     };
-    let text = body(&m.content, app.me);
     let (files, linked) = download(app, &m.attachments).await;
     let (sent, got) = from_member(&s, &m.author, &text);
     let dm_msg = app
@@ -275,6 +288,41 @@ async fn send_mail(app: &App, m: &Message, gid: Id<GuildMarker>) -> Result<()> {
         return say(app, dm, error(text)).await;
     }
     remember(app, m.author.id, gid).await
+}
+
+/// New tickets one member may open in a server per hour (D27).
+const TICKETS_PER_HOUR: i64 = 3;
+
+async fn opened_last_hour(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM tickets WHERE guild_id = $1 AND user_id = $2
+         AND opened_at > now() - interval '1 hour'",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get() as i64)
+    .fetch_one(&app.pool)
+    .await?)
+}
+
+/// A ticket DM goes through the server's word, scam and invite filters (D27). The local word
+/// list is used even when words go to Discord's AutoMod, which never sees a DM.
+/// shortcut: no shortener lookup and no attachment scan; add them if scams move there.
+fn filtered(app: &App, cfg: &crate::app::GuildCfg, text: &str) -> bool {
+    use tommybot_automod::filters;
+    let am = &cfg.automod;
+    if !am.enabled {
+        return false;
+    }
+    let f = &am.filters;
+    let hosts = filters::hosts(text);
+    let words = f.words.filter.enabled && {
+        let forms = filters::word_forms(text);
+        filters::word_hits(&forms, &crate::automod::blacklist_words(f)) + f.words.regex.hits(&forms) > 0
+    };
+    words
+        || f.scam_links.enabled && filters::is_nitro_steam_scam(text)
+        || f.bad_sites.enabled && app.sites.phishing(&hosts)
+        || f.invites.enabled && crate::automod::is_invite(text, &hosts)
 }
 
 /// Opens the ticket channel, logs it and greets the member. `None` when the member was told why not.
@@ -526,5 +574,74 @@ mod tests {
         assert_eq!(line, "@everyone <@&4> @here");
         assert_eq!(am.roles, vec![Id::new(4)]);
         assert_eq!(am.parse, vec![MentionType::Everyone]);
+    }
+
+    /// D27: a ticket DM is filtered like a server message, and no new ticket opens during a raid
+    /// or lockdown or past the hourly limit. Every refusal comes before a channel is made.
+    #[tokio::test]
+    async fn ticket_dms_are_filtered_and_new_tickets_limited() {
+        let Some(t) = crate::bansync::tests::T::new(47).await else {
+            return;
+        };
+        const CAT: u64 = 600;
+        let cfg = json!({
+            "tickets": {"enabled": true, "category": CAT.to_string()},
+            "automod": {"enabled": true, "filters": {
+                "words": {"filter": {"enabled": true}, "strict": ["badword"]},
+                "invites": {"enabled": true}}},
+        });
+        t.server_config(0, t.owner(), cfg).await;
+        let gid = t.g(0);
+        let info = crate::hierarchy::GuildInfo {
+            owner: Id::new(t.owner()),
+            roles: Default::default(),
+            role_perms: Default::default(),
+            managed: Default::default(),
+            parents: Default::default(),
+            channels: [Id::new(CAT)].into(),
+            nsfw: Default::default(),
+            bot_top: 10,
+            fetched: std::time::Instant::now(),
+        };
+        t.app.guilds.lock().unwrap().insert(gid, std::sync::Arc::new(info));
+        let u = t.base * 10 + 1;
+        t.set(|m| {
+            m.members.insert((gid.get(), u), vec![]);
+        });
+        let dm = |text: &str| -> Message {
+            serde_json::from_value(json!({"id": "5", "channel_id": "77", "content": text,
+                "author": {"id": u.to_string(), "username": "m", "discriminator": "0", "avatar": null},
+                "timestamp": "2026-01-01T00:00:00.000000+00:00", "edited_timestamp": null, "tts": false,
+                "mention_everyone": false, "mentions": [], "mention_roles": [], "attachments": [],
+                "embeds": [], "components": [], "pinned": false, "type": 0}))
+            .unwrap()
+        };
+        let said = |what: &str| t.calls(what);
+        send_mail(&t.app, &dm("you are a badword"), gid).await.unwrap();
+        send_mail(&t.app, &dm("join discord.gg/abc"), gid).await.unwrap();
+        assert_eq!(said("words or links that server does not allow"), 2);
+        let raid = tommybot_automod::join::RaidDetector::restored(0, i64::MAX, String::new());
+        t.app.raids.lock().unwrap().insert(gid.get(), raid);
+        send_mail(&t.app, &dm("help"), gid).await.unwrap();
+        assert_eq!(said("does not take new tickets right now"), 1);
+        t.app.raids.lock().unwrap().clear();
+        for n in 1..=3 {
+            sqlx::query("INSERT INTO tickets (guild_id, number, user_id, closed_at) VALUES ($1, $2, $3, now())")
+                .bind(gid.get() as i64)
+                .bind(n)
+                .bind(u as i64)
+                .execute(&t.app.pool)
+                .await
+                .unwrap();
+        }
+        send_mail(&t.app, &dm("help"), gid).await.unwrap();
+        assert_eq!(said("too many tickets in that server"), 1);
+        assert_eq!(said(&format!("POST /guilds/{gid}/channels")), 0, "no ticket opened");
+        sqlx::query("DELETE FROM tickets WHERE guild_id = $1")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        t.cleanup().await;
     }
 }

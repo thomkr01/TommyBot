@@ -367,6 +367,10 @@ The NSFW scan row was saved as a hit before automod acted. A failed action left 
 **An early return in front of an unrelated protection.** (overlap deep dive g2b, 11-12)
 Heat panic's raider hold sat after "automod off", so with automod off raiders posted freely. The catch channel's test mode returned "handled", so automod skipped every message there. A restore job with no `joined_at` and a `?` on the member lookup gave main roles to a rejoined unverified member, and retried for a member who left. *Avoid:* before an early return, check that everything below it belongs to the switch or case it tests. A delayed role add carries its membership and treats 404 as done (`http_err::member`), and skips a member whose roles are held for verification (`sticky::pending`). A job that gives roles back to a quarantined member adds them to the quarantine's `saved_roles` instead of dropping them, so the release returns them.
 
+**A DM into the server skipped the server's protections.** (D27, 11-13)
+Ticket DMs are relayed into a staff channel, but they were never read by automod, and new tickets opened during a raid or lockdown and without any limit, so a raid could flood staff with scam links and slurs through the bot. Root cause: the filters hang off guild `MessageCreate`, and a DM has no guild.
+*Avoid:* text that the bot carries into a server goes through that server's filters. `tickets::dm::filtered` runs the word (local list, Discord's AutoMod never sees a DM), scam, phishing and invite filters before a ticket opens or a message is relayed; new tickets wait during a raid or lock (`lockdown::raid_or_lock`, shared with auto-dehoist) and are capped at 3 per member per hour. Not covered: shortener lookups and attachments.
+
 ## 4. Parsing and limits
 
 **Byte slicing panics on non-ASCII.** (e7edf56)

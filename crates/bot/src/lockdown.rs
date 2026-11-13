@@ -290,6 +290,18 @@ pub async fn active(app: &App, gid: Id<GuildMarker>) -> Result<Vec<LockKind>> {
         .collect())
 }
 
+/// A join raid is running or a lock is on: member edits and new tickets wait.
+pub async fn raid_or_lock(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
+    let now = crate::automod::now_ms();
+    let raid = app
+        .raids
+        .lock()
+        .unwrap()
+        .get(&gid.get())
+        .is_some_and(|r| r.active(now));
+    Ok(raid || !active(app, gid).await?.is_empty())
+}
+
 /// Join lock of the guild's stored snapshot, if it has one.
 pub async fn join_lock(app: &App, gid: Id<GuildMarker>) -> Result<Option<JoinLock>> {
     load_join_lock(&app.pool, gid.get()).await
