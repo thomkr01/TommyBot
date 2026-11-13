@@ -655,12 +655,12 @@ async fn strike_member(
     }
     // A failed timeout was logged as failed above, not as done.
     if failed.is_none() {
-        let log = timeout_log(
+        let log = heat_log(
+            am.strike.enabled,
             name,
             reason,
             (user.get(), ch.get()),
-            act.timeout_ms,
-            act.strike,
+            &act,
         );
         if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
             tracing::warn!(?e, "automod log failed");
@@ -1021,6 +1021,24 @@ pub(crate) fn timeout_log(
         .line("Channel", &channel(ch))
         .line("Duration", &format!("`{}`", duration(timeout_ms / 1000)))
         .line("Strike", &format!("`{strike}`"))
+}
+
+/// The automod log for a heat strike: a timeout, or with the auto timeouts off only the strike.
+fn heat_log(
+    timed: bool,
+    name: &str,
+    reason: &str,
+    (user, ch): (u64, u64),
+    act: &tommybot_automod::strike::StrikeAction,
+) -> Log {
+    if timed {
+        return timeout_log(name, reason, (user, ch), act.timeout_ms, act.strike);
+    }
+    Log::new(&format!("*{name} got a strike!*"), ORANGE)
+        .line("Reason", &format!("*{reason}*"))
+        .user("Member", user)
+        .line("Channel", &channel(ch))
+        .line("Strike", &format!("`{}`", act.strike))
 }
 
 fn action_color(action: FilterAction) -> u32 {

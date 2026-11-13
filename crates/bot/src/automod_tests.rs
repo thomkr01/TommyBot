@@ -582,3 +582,24 @@ fn the_local_filter_covers_what_discord_does_not() {
     f.words.use_discord_automod = false;
     assert_eq!(local_word_hits(guild, &f, &text), 2);
 }
+
+/// With the auto timeouts off a heat strike is logged as a strike, never as a timeout.
+#[test]
+fn strikes_off_logs_no_timeout() {
+    let act = tommybot_automod::strike::StrikeAction {
+        strike: 2,
+        timeout_ms: 60_000,
+        purge: false,
+        reset_heat: false,
+    };
+    let text = |timed| {
+        serde_json::to_string(&heat_log(timed, "x", "Message spam", (5, 7), &act).build()).unwrap()
+    };
+    let off = text(false);
+    assert!(off.contains("got a strike") && off.contains("`2`"), "{off}");
+    assert!(
+        !off.contains("timed out") && !off.contains("Duration"),
+        "{off}"
+    );
+    assert!(text(true).contains("timed out"));
+}
