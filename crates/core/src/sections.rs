@@ -38,7 +38,8 @@ pub struct AntinukeCfg {
     pub monitor_channel_perms: bool,
     /// May change a quarantined member's roles.
     pub quarantine_whitelist: Vec<Id<UserMarker>>,
-    /// Channels created or deleted in these categories never count (ticket bots).
+    /// Channels a bot creates or deletes in these categories never count (ticket bots), unless the
+    /// channel moved in from elsewhere in the last hour.
     pub ticket_categories: Vec<Id<ChannelMarker>>,
 }
 

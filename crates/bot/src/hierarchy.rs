@@ -180,6 +180,30 @@ impl App {
         m.insert(thread, parent);
     }
 
+    /// A channel's category as a gateway event shows it (D4). A snapshot (`GuildCreate`, a new
+    /// channel) sets the baseline; an update to another category is a move.
+    pub fn note_category(&self, channel: u64, parent: Option<u64>, snapshot: bool) {
+        let mut m = self.category_moves.lock().unwrap();
+        // shortcut: past the cap everything is dropped; a later update then counts as a move.
+        if m.len() > 200_000 {
+            m.clear();
+        }
+        let moved = moved(m.get(&channel), parent, snapshot, Instant::now());
+        m.insert(channel, (parent, moved));
+    }
+
+    /// The channel came from outside `cats` (or from where nobody saw) in the last hour.
+    pub fn moved_in(&self, channel: u64, cats: &[Id<ChannelMarker>]) -> bool {
+        self.category_moves
+            .lock()
+            .unwrap()
+            .get(&channel)
+            .and_then(|e| e.1)
+            .is_some_and(|(t, from)| {
+                t.elapsed() < MOVE_WINDOW && !from.is_some_and(|f| cats.iter().any(|c| c.get() == f))
+            })
+    }
+
     /// Remembers a created or deleted channel's category until its audit entry arrives.
     /// Channels without a category are noted too, so anti-nuke can tell "no category" from "not seen yet".
     pub fn note_parent(&self, c: &twilight_model::channel::Channel) {
@@ -192,9 +216,48 @@ impl App {
     }
 }
 
+/// How long a move into a category counts against it.
+const MOVE_WINDOW: Duration = Duration::from_secs(3600);
+
+/// The channel's first move in the last hour and the category it left: kept while the category
+/// stays or the move is recent, none for a snapshot, now for another move (from an unseen place
+/// with nothing seen before).
+fn moved(
+    prev: Option<&(Option<u64>, CategoryMove)>,
+    parent: Option<u64>,
+    snapshot: bool,
+    now: Instant,
+) -> CategoryMove {
+    match prev {
+        Some((old, m)) if *old == parent => *m,
+        _ if snapshot => None,
+        Some((_, Some((t, from)))) if now.duration_since(*t) < MOVE_WINDOW => Some((*t, *from)),
+        Some((old, _)) => Some((now, *old)),
+        None => Some((now, None)),
+    }
+}
+
+/// When a channel moved category and the category it left.
+pub(crate) type CategoryMove = Option<(Instant, Option<u64>)>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_into_another_category_is_remembered() {
+        let t = Instant::now();
+        assert_eq!(moved(None, Some(5), true, t), None, "new channel");
+        assert_eq!(moved(Some(&(Some(4), None)), Some(5), false, t), Some((t, Some(4))));
+        assert_eq!(moved(Some(&(Some(5), None)), Some(5), false, t), None, "a rename");
+        assert_eq!(moved(None, Some(5), false, t), Some((t, None)), "no baseline");
+        // Outside, then ticket category 4, then 5: the first move, from outside, still counts.
+        let first = Some((t, Some(1)));
+        let later = t + Duration::from_secs(5);
+        assert_eq!(moved(Some(&(Some(4), first)), Some(5), false, later), first);
+        let old = t + MOVE_WINDOW;
+        assert_eq!(moved(Some(&(Some(4), first)), Some(5), false, old), Some((old, Some(4))));
+    }
 
     #[test]
     fn top_position_picks_highest_known_role() {

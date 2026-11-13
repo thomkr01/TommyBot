@@ -372,8 +372,21 @@ pub async fn shutdown(app: &App) {
 async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
     // Before any await: each event runs in its own task, so an await here would let a later voice
     // update of the same member (or one after a GuildCreate) take the logger lock first.
-    if let Event::GuildCreate(g) = ev {
-        crate::welcome::seed_voice(app, g);
+    match ev {
+        Event::GuildCreate(g) => {
+            crate::welcome::seed_voice(app, g);
+            if let twilight_model::gateway::payload::incoming::GuildCreate::Available(g) = &**g {
+                for c in &g.channels {
+                    app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true);
+                }
+            }
+        }
+        // Before any await too: the delete of a channel just moved must see the move (D4).
+        Event::ChannelCreate(c) => app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true),
+        Event::ChannelUpdate(c) => {
+            app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), false)
+        }
+        _ => {}
     }
     // A voice member's channel before this event, read as the update is recorded.
     let voice = match ev {

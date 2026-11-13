@@ -402,7 +402,7 @@ pub fn schema() -> Vec<Value> {
         ),
         hp(
             ti(fg("Ticket categories", "ticket_categories", "categories"), "Ticket categories"),
-            "Channels a ticket bot creates or deletes in these categories never count.",
+            "Channels a bot (a ticket bot) creates or deletes in these categories never count. Members always count, and so does a channel moved in from elsewhere in the last hour.",
         ),
     ];
     for (a, title) in NUKE_CARDS {

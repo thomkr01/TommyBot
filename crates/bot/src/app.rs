@@ -168,11 +168,13 @@ pub struct App {
     pub panic: Mutex<PanicTracker>,
     pub panic_heat: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
-    /// Heat panic: accounts that tripped it and when it ends (unix secs). Lost on restart, it is short.
+    /// Heat panic: accounts that tripped it and when it ends (unix secs). Saved in `heat_panic`.
     pub heat_raiders: Mutex<HashMap<u64, (HashSet<u64>, i64)>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
     /// Category (None: no category) of each channel created or deleted, until its audit entry arrives.
     pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
+    /// Each channel's category as last seen, and when it last moved to another (D4).
+    pub category_moves: Mutex<HashMap<u64, (Option<u64>, crate::hierarchy::CategoryMove)>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
     pub nuke_runs: Mutex<crate::antinuke::NukeRuns>,
@@ -278,6 +280,7 @@ impl App {
             heat_raiders: Default::default(),
             guilds: Default::default(),
             channel_parents: Default::default(),
+            category_moves: Default::default(),
             nuke_runs: Default::default(),
             lock_ops: Default::default(),
             thread_parents: Default::default(),

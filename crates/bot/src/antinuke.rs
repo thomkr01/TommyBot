@@ -194,19 +194,17 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         return Ok(());
     }
     // Ticket bots open and close channels all day; the gateway event names the category first.
-    let exempt_categories: Vec<u64> = cfg
-        .antinuke
-        .ticket_categories
-        .iter()
-        .chain(&cfg.panic.whitelisted_categories)
-        .map(|c| c.get())
-        .collect();
+    // Only a bot is exempt, and not for a channel just moved in: a nuker moves channels into the
+    // category and deletes them (D4). Panic's Whitelisted Categories are panic-only.
+    let tickets = &cfg.antinuke.ticket_categories;
     if let (Action::ChannelCreate | Action::ChannelDelete, Some(t)) = (action, e.target_id) {
-        if exempt_categories.is_empty() {
+        if tickets.is_empty() {
             app.channel_parents.lock().unwrap().remove(&t.get());
         } else if parent_of(app, t.get())
             .await
-            .is_some_and(|p| exempt_categories.contains(&p))
+            .is_some_and(|p| tickets.iter().any(|c| c.get() == p))
+            && !app.moved_in(t.get(), tickets)
+            && is_bot(app, actor).await
         {
             return Ok(());
         }
@@ -239,6 +237,15 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         1,
     )
     .await
+}
+
+/// A failed lookup counts as not a bot, so the action is counted.
+async fn is_bot(app: &App, user: Id<UserMarker>) -> bool {
+    let read = async { anyhow::Ok(app.http.user(user).await?.model().await?.bot) };
+    read.await.unwrap_or_else(|e| {
+        tracing::warn!(?e, "reading a ticket category actor failed, counting it");
+        false
+    })
 }
 
 /// Logs, heats and counts `n` actions of one audit entry, and contains the actor at the limit.

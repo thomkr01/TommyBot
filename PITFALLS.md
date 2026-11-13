@@ -254,6 +254,10 @@ Auto Setup gives Admins and Moderators ban and kick without limits, and anti-nuk
 Anti-nuke heat at 100 % only counted towards panic, which needs 3 distinct accounts, so one nuker who spread actions over several cards below each limit was never stopped; and Quarantine On Limit off dropped the Panic step with the quarantine. Root cause: one switch or signal fed only the step next to it.
 *Avoid:* 100 % anti-nuke heat contains and reverts like a limit (`antinuke::breach`), and `nuke_plan(false)` still ends with Panic. When a switch turns one step off, check the steps after it still run.
 
+**A category exemption covered anyone who moved a channel there.** (overlap deep dive D4, 13-11)
+Ticket categories and panic's Whitelisted Categories exempted every channel create and delete in them, for any actor, so a nuker moved channels into the category and deleted them uncounted and never recreated. The panic list was only ever documented as "left unlocked by panic". Root cause: an exemption meant for one kind of actor (ticket bots) was keyed only on the place.
+*Avoid:* an exemption names who it is for: ticket categories exempt only a bot (`antinuke::is_bot`, a failed lookup counts), never a channel that moved in from outside them in the last hour (`App::note_category` before the first await of the gateway task, `moved_in`), and panic's list is panic-only. Searched: no other module reads `whitelisted_categories`.
+
 **The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
 `/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
 *Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).
