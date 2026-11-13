@@ -366,6 +366,47 @@ async fn a_copy_waits_for_a_temp_ban_that_is_ending() {
     t.cleanup().await;
 }
 
+/// FINAL review: the ban's own drop of the temp ban's unban job is best effort; when it fails,
+/// the copy does not count as done (a left job would disown and later lift it), and the retry
+/// finishes it.
+#[tokio::test]
+async fn a_copy_retries_when_the_temp_ban_job_cannot_be_dropped() {
+    let Some(t) = T::new(64).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    t.ban(1, 727, "temp ban");
+    t.ban(0, 727, "raiding");
+    enqueue(&t, 1, "unban", json!({"user": 727}), 3600).await;
+    t.link(1, 727, 0, "pending").await;
+    let g = t.g(1).get();
+    let ddl = format!(
+        "CREATE FUNCTION tb_keep_727_{g}() RETURNS trigger LANGUAGE plpgsql AS
+           $$ BEGIN RAISE EXCEPTION 'delete refused'; END $$;
+         CREATE TRIGGER tb_keep_727_{g} BEFORE DELETE ON scheduled_jobs FOR EACH ROW
+           WHEN (OLD.guild_id = {g} AND OLD.kind = 'unban' AND OLD.payload->>'user' = '727')
+           EXECUTE FUNCTION tb_keep_727_{g}();"
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(ddl))
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    let copy = json!({"user": 727, "source": t.g(0).get()});
+    let first = bansync::copy_job(&t.app, t.g(1), &copy).await;
+    let undo =
+        format!("DROP TRIGGER tb_keep_727_{g} ON scheduled_jobs; DROP FUNCTION tb_keep_727_{g}();");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(undo))
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    assert!(first.is_err());
+    assert_eq!(t.rows(727).await, [T::row(1, "pending", None)]);
+    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
+    assert_eq!(t.rows(727).await, [T::row(1, "banned", None)]);
+    assert!(pending(&t, 1, "unban").await.is_empty());
+    t.cleanup().await;
+}
+
 /// D26: a new timeout drops an older renewal; a renewal for a member who left retries hourly.
 #[tokio::test]
 async fn timeout_renewals_end_with_the_timeout() {
