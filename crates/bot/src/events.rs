@@ -561,15 +561,17 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         Event::GuildAuditLogEntryCreate(e) => {
             // The catch-up after a reconnect may have handled this entry already (D20).
             let g = e.0.guild_id.map(|g| g.get());
-            let new = g.is_none_or(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
+            let inflight = g.and_then(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
+            let new = g.is_none() || inflight.is_some();
             let nuke = if new {
                 antinuke::on_audit(app, &e.0).await
             } else {
                 Ok(())
             };
             if let (true, Some(g)) = (new, g) {
-                crate::welcome::handled_audit(app, g, e.0.id.get()).await;
+                crate::welcome::handled_audit(app, g, &e.0).await;
             }
+            drop(inflight);
             let ban = crate::bansync::on_ban(app, &e.0).await;
             let unban = crate::bansync::on_unban(app, &e.0).await;
             let allow = crate::raiders::on_unban(app, &e.0).await;

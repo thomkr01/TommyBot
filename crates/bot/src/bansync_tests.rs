@@ -1480,14 +1480,16 @@ async fn a_restart_reads_the_audit_entries_it_missed() {
     let e = |id: u64| json!({"id": id.to_string(), "action_type": 22, "target_id": "8", "user_id": "9", "changes": []});
     fresh.set(|m| m.audit = vec![e(9), e(3), e(7)]);
     // The live event for 7 came first: the catch-up skips it, and handles 9 once.
-    assert!(crate::welcome::saw_audit(&fresh.app, g.get(), 7));
+    let live = crate::welcome::saw_audit(&fresh.app, g.get(), 7);
+    assert!(live.is_some());
+    drop(live);
     crate::welcome::catch_up_audit(&fresh.app, g, 5)
         .await
         .unwrap();
     assert_eq!(last(&fresh), Some(9));
     assert_eq!(fresh.calls("audit-logs"), 1, "a short page is the end");
     assert!(
-        !crate::welcome::saw_audit(&fresh.app, g.get(), 9),
+        crate::welcome::saw_audit(&fresh.app, g.get(), 9).is_none(),
         "a live 9 is skipped"
     );
     assert_eq!(fresh.app.audit_done.lock().unwrap().get(&g.get()), Some(&9));
@@ -1694,23 +1696,30 @@ async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
         }
     };
     let app = &t.app;
-    assert!(crate::welcome::saw_audit(app, g, 20));
-    assert!(crate::welcome::saw_audit(app, g, 21));
+    let e20 = crate::welcome::saw_audit(app, g, 20).unwrap();
+    drop(crate::welcome::saw_audit(app, g, 21).unwrap());
     crate::welcome::done_audit(app, g, 21);
     crate::welcome::flush_audit(app).await;
     assert_eq!(saved(g).await, Some(19), "20 is still being handled");
+    drop(e20); // its handling ended (or its task panicked)
     crate::welcome::done_audit(app, g, 20);
     crate::welcome::flush_audit(app).await;
     assert_eq!(saved(g).await, Some(21));
-    // A task that never finished (a panic) stops holding the saved id after a minute.
-    let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(61);
+    // A leaked id stops holding the saved id after the safety expiry.
+    let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(1801);
     app.audit_inflight
         .lock()
         .unwrap()
         .entry(g)
         .or_default()
         .insert(22, long_ago);
-    crate::welcome::handled_audit(app, g, 23).await;
+    t.server_config(0, t.owner(), json!({"antinuke": {"enabled": true}}))
+        .await;
+    let e23: AuditLogEntry = serde_json::from_value(
+        json!({"id": "23", "action_type": 22, "user_id": "9", "target_id": "8", "changes": []}),
+    )
+    .unwrap();
+    crate::welcome::handled_audit(app, g, &e23).await;
     crate::welcome::flush_audit(app).await;
     assert_eq!(saved(g).await, Some(23));
     let handled: i64 = sqlx::query_scalar(
@@ -1721,13 +1730,21 @@ async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
     .await
     .unwrap();
     assert_eq!(handled, 1, "recorded, so no catch-up runs it again");
+    // Anti-nuke off there: nothing to record.
+    crate::welcome::handled_audit(app, h, &e23).await;
+    let off: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_handled WHERE guild_id = $1")
+        .bind(h as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(off, 0);
     // Two Readies before the catch-up: the floor stays at the first gap, and so does the save.
     app.last_audit.lock().unwrap().insert(h, 50);
     crate::welcome::note_ready(app);
     app.last_audit.lock().unwrap().insert(h, 80);
     crate::welcome::note_ready(app);
     assert_eq!(app.audit_floor.lock().unwrap().get(&h), Some(&50));
-    assert!(crate::welcome::saw_audit(app, h, 90));
+    drop(crate::welcome::saw_audit(app, h, 90).unwrap());
     crate::welcome::done_audit(app, h, 90);
     crate::welcome::flush_audit(app).await;
     assert_eq!(saved(h).await, Some(50), "the gap is not read yet");
