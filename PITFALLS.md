@@ -274,6 +274,9 @@ A bot whose adder could not be read (5xx, 429, the audit entry not written yet) 
 A Role lock saves each role's permissions and strips them, so sticky roles and verification saw a stripped Admin role as harmless and handed it out, and `strict_member_roles` and "enforce permits" did not see it either; when the lock ended the member held Administrator. Root cause: live role permissions are not the role's permissions while a lock holds them.
 *Avoid:* a check that judges a role dangerous reads `lockdown::unlocked_info` (live permissions OR the active locks' saved ones). Used by `sticky` (3 places), `verify::grant`, `antinuke::guard_perms` and `enforce_permits`. Staff detection from role permissions (`hierarchy` automod staff check, `slowmode`) still reads live permissions: during a lock staff look like members there.
 
+**A new delete type was not watched.** (overlap deep dive D19, 13-11)
+Deleting threads and forum posts (audit type 112) was not an anti-nuke action at all, so a forum could be wiped without a count. *Avoid:* the "Thread & forum post deletions" card (`Action::ThreadDelete`, opt-in like the other later cards, nothing to restore). A new action needs the enum, `ALL`, `watched()`, the dashboard's `NUKE_CARDS` and the UI's `NUKE_WORDS`.
+
 **The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
 `/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
 *Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).

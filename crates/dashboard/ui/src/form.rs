@@ -160,12 +160,13 @@ fn action_desc(a: &str) -> &'static str {
 }
 
 /// (anti-nuke action, verb, things, per-second noun) for the limit sentences.
-const NUKE_WORDS: [(&str, &str, &str, &str); 16] = [
+const NUKE_WORDS: [(&str, &str, &str, &str); 17] = [
     ("Ban", "kick/ban", "members", "removal"),
     ("RoleCreate", "create", "roles", "creation"),
     ("RoleDelete", "delete", "roles", "deletion"),
     ("ChannelCreate", "create", "channels", "creation"),
     ("ChannelDelete", "delete", "channels", "deletion"),
+    ("ThreadDelete", "delete", "threads or forum posts", "deletion"),
     ("WebhookCreate", "create", "webhooks", "creation"),
     ("WebhookDelete", "delete", "webhooks", "deletion"),
     ("EmojiCreate", "create", "emojis", "creation"),

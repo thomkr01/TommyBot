@@ -1199,6 +1199,7 @@ mod tests {
             NukeAction::GuildUpdate,
             NukeAction::VoiceDisconnect,
             NukeAction::VoiceMove,
+            NukeAction::ThreadDelete,
         ] {
             assert!(c.limit(a).is_none(), "{a:?}");
             let on: AntinukeCfg =

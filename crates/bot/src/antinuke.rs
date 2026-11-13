@@ -69,6 +69,7 @@ fn watched(e: &AuditLogEntry) -> Option<Action> {
             Action::Timeout
         }
         A::ChannelUpdate => Action::ChannelUpdate,
+        A::ThreadDelete => Action::ThreadDelete,
         A::RoleUpdate if changed(|c| matches!(c, AuditLogChange::Name { .. })) => {
             Action::RoleUpdate
         }
@@ -2181,6 +2182,7 @@ mod tests {
                 vec![Inverse::DeleteScheduledEvent { id: 3 }],
             ),
             (132, Action::SoundboardDelete, vec![]),
+            (112, Action::ThreadDelete, vec![]),
         ] {
             let e = entry(t, json!([]));
             assert_eq!(watched(&e), Some(a), "{t}");

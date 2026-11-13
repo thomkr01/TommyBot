@@ -228,6 +228,7 @@ const NUKE_CARDS: &[(&str, &str)] = &[
     ("RoleDelete", "Role deletions"),
     ("ChannelCreate", "Channel creations"),
     ("ChannelDelete", "Channel deletions"),
+    ("ThreadDelete", "Thread & forum post deletions"),
     ("WebhookCreate", "Webhook creations"),
     ("WebhookDelete", "Webhook deletions"),
     ("Timeout", "Member timeouts"),

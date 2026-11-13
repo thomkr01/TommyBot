@@ -46,10 +46,12 @@ pub enum Action {
     GuildUpdate,
     VoiceDisconnect,
     VoiceMove,
+    /// Threads and forum posts.
+    ThreadDelete,
 }
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 28] = [
         Action::ChannelCreate,
         Action::ChannelDelete,
         Action::RoleCreate,
@@ -77,6 +79,7 @@ impl Action {
         Action::GuildUpdate,
         Action::VoiceDisconnect,
         Action::VoiceMove,
+        Action::ThreadDelete,
     ];
 
     /// Defaults (per minute, per hour, heat %); None: watched only when configured.
@@ -104,6 +107,7 @@ impl Action {
             Action::SoundboardDelete => (3, 10, 15),
             Action::ScheduledEventCreate => (3, 10, 10),
             Action::VoiceDisconnect | Action::VoiceMove => (10, 30, 5),
+            Action::ThreadDelete => (3, 10, 15),
         })
     }
 
@@ -127,6 +131,7 @@ impl Action {
                 | Action::GuildUpdate
                 | Action::VoiceDisconnect
                 | Action::VoiceMove
+                | Action::ThreadDelete
         )
     }
 
@@ -138,6 +143,7 @@ impl Action {
                 | Action::SoundboardDelete
                 | Action::VoiceDisconnect
                 | Action::VoiceMove
+                | Action::ThreadDelete
         )
     }
 
@@ -862,6 +868,7 @@ mod tests {
             Action::GuildUpdate,
             Action::VoiceDisconnect,
             Action::VoiceMove,
+            Action::ThreadDelete,
         ] {
             assert!(a.opt_in(), "{a:?}");
         }
