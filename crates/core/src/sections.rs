@@ -430,11 +430,6 @@ impl Patterns {
         self.set.matches(text).iter().count()
     }
 
-    /// Indices of the patterns that match `text`.
-    pub fn matched(&self, text: &str) -> Vec<usize> {
-        self.set.matches(text).into_iter().collect()
-    }
-
     pub fn as_slice(&self) -> &[String] {
         &self.list
     }

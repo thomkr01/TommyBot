@@ -462,9 +462,8 @@ fn fits(list: &[String], len: usize, max: usize) -> Vec<bool> {
         .collect()
 }
 
-/// Per word and per regex pattern: true when it fits in Discord's keyword rule. The rest stays
-/// with the local filter.
-pub fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) {
+/// Per word and per regex pattern: true when it fits in Discord's keyword rule.
+fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) {
     (
         fits(words, MAX_KEYWORD_LEN, MAX_KEYWORDS),
         fits(regex, MAX_REGEX_LEN, MAX_REGEX),

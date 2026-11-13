@@ -214,9 +214,13 @@ async fn check_message(
     let mut checked = hosts.clone();
     // Every filter that reads where a shortener points.
     if f.nsfw_crawl_shorteners || f.invites.enabled || f.bad_sites.enabled || f.nsfw_links.enabled {
-        for u in filters::shortener_urls(&linked).into_iter().take(3) {
-            checked.extend(app.sites.unshorten(u).await);
-        }
+        // At most 12 s for the whole message, however many links and hops.
+        let unroll = async {
+            for u in filters::shortener_urls(&linked).into_iter().take(3) {
+                checked.extend(app.sites.unshorten(u).await);
+            }
+        };
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(12), unroll).await;
     }
     let bad_site = f.bad_sites.enabled && app.sites.phishing(&checked);
     let (upper_chars, lower_chars) = filters::case_counts(content);
@@ -262,7 +266,10 @@ async fn check_message(
         blacklisted_link: f.links.enabled
             && filters::any_on_domains(&hosts, &f.blacklisted_domains),
         blacklisted_words: if f.words.filter.enabled {
-            local_word_hits(gid.get(), f, content, &filters::word_forms(&linked))
+            // A message that reached the bot was not blocked by Discord's rule (webhooks, apps,
+            // forwards, polls, exempt members, a tampered rule): every word counts here.
+            let forms = filters::word_forms(&linked);
+            filters::word_hits(&forms, &blacklist_words(f)) + f.words.regex.hits(&forms)
         } else {
             0
         },
@@ -514,7 +521,7 @@ async fn check_message(
         .0
         .claim_rank(now, rank);
     let Some(window) = window else {
-        acted_unclaim(msg_key, acted);
+        acted_unclaim(msg_key, rank, acted);
         return delete_only().await;
     };
     if m.webhook_id.is_some() {
@@ -555,9 +562,9 @@ async fn check_message(
     if r.as_ref()
         .is_err_and(|e| e.downcast_ref::<Punished>().is_none())
     {
-        acted_unclaim(msg_key, acted);
+        acted_unclaim(msg_key, rank, acted);
         if let Some((s, _)) = app.heat.lock().unwrap().get_mut(&key) {
-            s.unclaim(window);
+            s.unclaim((now, rank), window);
         }
     }
     r
@@ -595,9 +602,13 @@ fn acted_claim(key: (u64, u64), rank: u8) -> Option<Option<u8>> {
     Some(prev)
 }
 
-fn acted_unclaim(key: (u64, u64), prev: Option<Option<u8>>) {
+/// Gives back this pass's claim of `rank`, unless another pass claimed since.
+fn acted_unclaim(key: (u64, u64), rank: u8, prev: Option<Option<u8>>) {
     let Some(prev) = prev else { return };
     let mut a = ACTED.lock().unwrap();
+    if a.get(&key) != Some(&rank) {
+        return;
+    }
     match prev {
         Some(r) => a.insert(key, r),
         None => a.remove(&key),
@@ -1133,53 +1144,9 @@ fn action_color(action: FilterAction) -> u32 {
     }
 }
 
-/// Guilds whose Discord AutoMod keyword rule was synced in this process and not changed since.
-/// Any other guild with "Use Discord AutoMod" on gets every word from the local filter.
-static SYNCED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
-    std::sync::LazyLock::new(Default::default);
-
-/// Blacklisted word hits the local filter counts on `forms` (the cured text). With "Use Discord
-/// AutoMod" on and the rule synced, a message whose plain `raw` text hits a word in the rule was
-/// Discord's to block (it reaches us only from someone Discord exempts), so then only the words and
-/// patterns left out of the rule count. A lookalike Discord's exact keywords miss still counts.
-fn local_word_hits(guild: u64, f: &FiltersCfg, raw: &str, forms: &str) -> usize {
-    let words = blacklist_words(f);
-    let regex = &f.words.regex;
-    let all = || filters::word_hits(forms, &words) + regex.hits(forms);
-    if !f.words.use_discord_automod || !SYNCED.lock().unwrap().contains(&guild) {
-        return all();
-    }
-    let (w_ok, r_ok) = tommybot_automod::discord_api::on_discord(&words, regex.as_slice());
-    let pick = |ok: bool| -> Vec<String> {
-        words
-            .iter()
-            .zip(&w_ok)
-            .filter(|(w, o)| **o == ok && !w.is_empty())
-            .map(|(w, _)| w.clone())
-            .collect()
-    };
-    let (synced, left) = (pick(true), pick(false));
-    let hits = |text: &str, list: &[String], on: bool| {
-        let w = if list.is_empty() {
-            0
-        } else {
-            filters::word_hits(text, list)
-        };
-        w + regex
-            .matched(text)
-            .into_iter()
-            .filter(|&i| r_ok[i] == on)
-            .count()
-    };
-    if hits(raw, &synced, true) == 0 {
-        return all();
-    }
-    hits(forms, &left, false)
-}
-
 /// Keeps the native Discord AutoMod keyword rule in step with the saved word lists.
 /// Only runs while the guild opted in; turning it off is done from the rule list (`Api::set_rule_enabled`).
-/// A failed sync alerts the mod log, and the local filter covers every word until one works.
+/// A failed sync alerts the mod log; the local filter reads every word anyway.
 pub async fn sync_discord_rule(app: &App, guild: u64) {
     let run = async {
         let cfg = app.cfg(guild).await?;
@@ -1189,49 +1156,21 @@ pub async fn sync_discord_rule(app: &App, guild: u64) {
                 .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice())
                 .await?;
         }
-        anyhow::Ok(f.words.use_discord_automod)
+        anyhow::Ok(())
     };
-    let e = match run.await {
-        Ok(on) => {
-            let mut s = SYNCED.lock().unwrap();
-            if on {
-                s.insert(guild);
-            } else {
-                s.remove(&guild);
-            }
-            return;
-        }
-        Err(e) => e,
-    };
+    let Err(e) = run.await else { return };
     tracing::warn!(?e, guild, "syncing the Discord AutoMod rule failed");
-    SYNCED.lock().unwrap().remove(&guild);
     let log = Log::new("Discord AutoMod Sync Failed", RED)
         .line("Error", &crate::http_err::why(&e))
-        .text("TommyBot's own word filter checks every blacklisted word until a sync works.");
+        .text("TommyBot's own word filter still checks every blacklisted word.");
     if let Err(e) = send_log(app, guild, LogKind::AutoMod, log).await {
         tracing::warn!(?e, guild, "could not log the failed Discord AutoMod sync");
     }
 }
 
-/// At startup (each guild's create): a guild with the sync on is synced once, one guild per second,
-/// so the local filter trusts the rule only after it was checked in this process.
-pub(crate) async fn sync_at_start(app: &App, guild: u64) {
-    static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let on = app
-        .cfg(guild)
-        .await
-        .is_ok_and(|c| c.automod.filters.words.use_discord_automod);
-    if !on || SYNCED.lock().unwrap().contains(&guild) {
-        return;
-    }
-    let _turn = GATE.lock().await;
-    sync_discord_rule(app, guild).await;
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-}
-
-/// Someone changed or deleted the bot's keyword rule in Discord: the local filter reads every word
-/// again, and the rule is synced back (at most once a minute per guild, so a rule Discord stores
-/// differently cannot loop). The bot's own update matches the lists and changes nothing.
+/// Someone changed or deleted the bot's keyword rule in Discord: it is synced back (at most once a
+/// minute per guild, so a rule Discord stores differently cannot loop). The bot's own update
+/// matches the lists and changes nothing.
 pub(crate) async fn on_rule_change(
     app: &App,
     rule: &twilight_model::guild::auto_moderation::AutoModerationRule,
@@ -1243,7 +1182,6 @@ pub(crate) async fn on_rule_change(
     }
     let guild = rule.guild_id.get();
     let Ok(cfg) = app.cfg(guild).await else {
-        SYNCED.lock().unwrap().remove(&guild);
         return;
     };
     let f = &cfg.automod.filters;
@@ -1261,7 +1199,6 @@ pub(crate) async fn on_rule_change(
     if !deleted && same {
         return;
     }
-    SYNCED.lock().unwrap().remove(&guild);
     static LAST: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, i64>>> =
         std::sync::LazyLock::new(Default::default);
     let now = now_ms();

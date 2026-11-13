@@ -561,26 +561,42 @@ fn a_timeout_without_duration_uses_the_strike_length_with_strikes_off() {
     );
 }
 
-/// With "Use Discord AutoMod" on, the local filter reads every word until a sync worked in this
-/// process. Once synced, a message whose plain text hits a synced word counts only the words left
-/// out of the rule, while a lookalike Discord's exact keywords miss still counts.
+/// Giving back a failed pass's message claim restores the old rank, but never erases a stronger
+/// claim another pass made meanwhile.
 #[test]
-fn the_local_filter_covers_what_discord_does_not() {
-    let mut f = FiltersCfg::default();
-    f.words.use_discord_automod = true;
-    let long = "x".repeat(61);
-    f.words.strict = vec!["darn".into(), long.clone()];
-    let text = format!("darn {long}");
-    let hits =
-        |f: &FiltersCfg, raw: &str| local_word_hits(4_242, f, raw, &filters::word_forms(raw));
-    assert_eq!(hits(&f, &text), 2, "not synced yet: every word");
-    SYNCED.lock().unwrap().insert(4_242);
-    assert_eq!(hits(&f, &text), 1, "Discord's word left to Discord");
-    assert_eq!(hits(&f, "ｄａｒｎ"), 1, "a lookalike Discord misses");
-    assert_eq!(hits(&f, "fine"), 0);
-    f.words.use_discord_automod = false;
-    assert_eq!(hits(&f, &text), 2);
-    SYNCED.lock().unwrap().remove(&4_242);
+fn acted_unclaim_keeps_a_newer_claim() {
+    let key = (9_990_001, 1);
+    let prev = acted_claim(key, STRIKE_RANK).unwrap();
+    acted_unclaim(key, STRIKE_RANK, Some(prev));
+    assert!(!ACTED.lock().unwrap().contains_key(&key), "given back");
+    let prev = acted_claim(key, STRIKE_RANK).unwrap();
+    assert!(
+        acted_claim(key, 4).is_some(),
+        "a stronger pass claims meanwhile"
+    );
+    acted_unclaim(key, STRIKE_RANK, Some(prev));
+    assert_eq!(
+        ACTED.lock().unwrap().get(&key),
+        Some(&4),
+        "the newer claim stays"
+    );
+}
+
+/// With "Use Discord AutoMod" on, a message that reached the bot was not blocked by Discord, so
+/// the local filter still counts its words.
+#[tokio::test]
+async fn synced_words_still_count_locally() {
+    let Some(t) = T::new(32).await else { return };
+    let cfg = json!({"automod": {"enabled": true, "filters": {"words": {
+        "filter": {"enabled": true, "action": "delete"}, "strict": ["darn"],
+        "use_discord_automod": true}}}});
+    t.server_config(0, t.owner(), cfg).await;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), t.base + 6), vec![]);
+    });
+    let _ = on_message(&t.app, &post(&t, "100", t.base + 6, "darn it")).await;
+    assert_eq!(t.calls("DELETE /channels/7/messages/100"), 1);
+    done(t).await;
 }
 
 /// With the auto timeouts off a heat strike is logged as a strike, never as a timeout.

@@ -520,10 +520,13 @@ impl HeatState {
         Some(prev)
     }
 
-    /// Gives back a claim whose punishment did not land.
-    pub fn unclaim(&mut self, (ms, rank): (i64, u8)) {
-        self.punished_ms = ms;
-        self.punished_rank = rank;
+    /// Gives back `mine` (this pass's (now, rank)) whose punishment did not land, restoring `prev`;
+    /// a newer claim made since stays.
+    pub fn unclaim(&mut self, mine: (i64, u8), (ms, rank): (i64, u8)) {
+        if (self.punished_ms, self.punished_rank) == mine {
+            self.punished_ms = ms;
+            self.punished_rank = rank;
+        }
     }
 }
 
@@ -701,9 +704,15 @@ mod tests {
         assert!(s.claim_rank(now, STRIKE_RANK).is_none());
         let prev = s.claim_rank(now, STRIKE_RANK + 2);
         assert!(prev.is_none(), "equal rank");
-        let prev = s.claim_rank(now + PUNISH_GRACE_MS, 1).unwrap();
-        s.unclaim(prev);
+        let later = now + PUNISH_GRACE_MS;
+        let prev = s.claim_rank(later, 1).unwrap();
+        s.unclaim((later, 1), prev);
         assert_eq!((s.punished_ms, s.punished_rank), (now, STRIKE_RANK + 2));
+        // A newer claim made while this pass failed is kept.
+        let prev = s.claim_rank(later, 1).unwrap();
+        assert!(s.claim_rank(later + 1, 3).is_some());
+        s.unclaim((later, 1), prev);
+        assert_eq!((s.punished_ms, s.punished_rank), (later + 1, 3));
     }
 
     #[test]
