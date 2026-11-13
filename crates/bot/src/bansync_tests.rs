@@ -757,7 +757,13 @@ async fn a_ban_is_held_then_copied_once_and_never_shared_on() {
 async fn a_ban_without_a_ban_permit_is_only_an_alert() {
     let Some(t) = T::new(207).await else { return };
     let o = t.owner();
-    t.server(0, o, "off").await;
+    // share_verify: TommyBot's own bans without a case are shared too (used below).
+    t.server_cfg(
+        0,
+        o,
+        json!({"enabled": true, "receive": "off", "share_verify": true}),
+    )
+    .await;
     t.server(1, o, "ban").await;
     for (user, actor) in [(530, Some(78)), (531, None)] {
         t.ban(0, user, "raiding");
@@ -774,6 +780,15 @@ async fn a_ban_without_a_ban_permit_is_only_an_alert() {
         );
         assert_eq!(t.banned(1, user), None, "user {user}: alert only");
     }
+    // TommyBot banning again without a case (an anti-nuke restore) keeps the open alert an alert.
+    share_job(&t.app, t.g(0), &t.share(530, Some(ME)))
+        .await
+        .unwrap();
+    for (to, p, _) in t.take("ban_sync_copy").await {
+        copy_job(&t.app, t.g(to), &p).await.unwrap();
+    }
+    assert_eq!(t.rows(530).await, [T::row(1, "alerted", None)]);
+    assert_eq!(t.banned(1, 530), None, "still alert only");
     // The owner's own Discord ban is still copied as a ban.
     t.ban(0, 532, "raiding");
     share_job(&t.app, t.g(0), &t.share(532, Some(o)))

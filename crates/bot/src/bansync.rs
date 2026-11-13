@@ -609,7 +609,11 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy) -> Result<(bool, bool)
              source_case = excluded.source_case, origin = excluded.origin, reason = excluded.reason,
              expires_at = excluded.expires_at, state = excluded.state, skip_reason = excluded.skip_reason,
              actor_id = excluded.actor_id, mod_id = excluded.mod_id, banned_at = excluded.banned_at,
-             alert_only = excluded.alert_only, case_no = NULL, created_at = now(), done_at = NULL, over_reason = NULL, temp_end = NULL
+             -- An open alert-only alert stays one: a bot re-ban (anti-nuke restore, nuke revert)
+             -- or an import must not turn it into a ban nobody chose (review of 3924).
+             alert_only = excluded.alert_only
+                 OR (ban_sync_links.state = 'alerted' AND ban_sync_links.alert_only),
+             case_no = NULL, created_at = now(), done_at = NULL, over_reason = NULL, temp_end = NULL
          WHERE ban_sync_links.state IN ('lifted', 'cancelled', 'skipped', 'alerted')",
     )
     .bind(to.get() as i64)
