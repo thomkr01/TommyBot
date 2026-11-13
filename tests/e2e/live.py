@@ -277,7 +277,8 @@ def panic():
     since = snowflake_now()
     try:
         attack_channels(4, attacker)
-        locked = wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n > 0)
+        # Under the bot's rate limits (it shares the token with this script) the lock can take ~55 s.
+        locked = wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n > 0, tries=60)
         time.sleep(3)
         anti = titled("anti_nuke", since, "Anti Nuke Report:")
         trig = titled("panic", since, "Panic Mode Triggered! [Anti Nuke]")
