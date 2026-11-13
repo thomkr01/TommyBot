@@ -464,24 +464,13 @@ pub async fn permit_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Ve
     .await
 }
 
-/// What makes a permit's role a guarded one (D16): handing it out takes the role back and
-/// quarantines the actor unless they are Owner, Extra Owner or Trusted Admin. Moderation commands,
-/// quarantine and verify, dashboard access, and the anti-nuke or quarantine whitelist. A permit
-/// with none of these (a link whitelist, say) is only logged. Edit these lists to widen or narrow.
-pub const GUARDED_PERMS: &[&str] = &[
-    "ban",
-    "kick",
-    "timeout",
-    "warn",
-    "purge",
-    "slowmode",
-    "sanitize",
-    "quarantine",
-    "verify",
-    "dashboard_view",
-    "dashboard_edit",
-];
-pub const GUARDED_WHITELIST: &[&str] = &["antinuke", "quarantine", "all"];
+/// The permits whose role anyone may hand out (D16): they give no moderation, dashboard,
+/// lockdown, backup, revert or anti-nuke rights. Every other permit's role is guarded: handing it
+/// out takes the role back and quarantines the actor unless they are Owner, Extra Owner or
+/// Trusted Admin. A permit key not listed here (a new one too) is guarded.
+pub const WEAK_PERMS: &[&str] = &["cases", "mod_stats", "reports", "notes_view", "notes_manage", "tickets"];
+/// Whitelist flags of the same kind: automod-style exemptions, not anti-nuke ones.
+pub const WEAK_WHITELIST: &[&str] = &["automod", "words", "links", "reports"];
 
 /// Roles of the guild's permits that hold `perm` (staff for tickets).
 pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx::Result<Vec<i64>> {

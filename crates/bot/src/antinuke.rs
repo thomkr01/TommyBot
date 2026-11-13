@@ -747,17 +747,17 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
 }
 
 /// Which of `roles` carry a permit in the guild, and whether one of their permits is guarded
-/// (`permits::GUARDED_PERMS`, `GUARDED_WHITELIST`).
+/// (any perm or flag outside `permits::WEAK_PERMS`, `WEAK_WHITELIST`).
 async fn permit_roles_in(pool: &PgPool, guild: i64, roles: &[i64]) -> Result<Vec<(i64, bool)>> {
     Ok(sqlx::query_as(
-        "SELECT r.role_id, bool_or(p.perms && $3 OR p.whitelist && $4) FROM permit_roles r
+        "SELECT r.role_id, bool_or(NOT (p.perms <@ $3 AND p.whitelist <@ $4)) FROM permit_roles r
          JOIN permits p ON p.id = r.permit_id
          WHERE r.guild_id = $1 AND r.role_id = ANY($2) GROUP BY r.role_id",
     )
     .bind(guild)
     .bind(roles)
-    .bind(permits::GUARDED_PERMS)
-    .bind(permits::GUARDED_WHITELIST)
+    .bind(permits::WEAK_PERMS)
+    .bind(permits::WEAK_WHITELIST)
     .fetch_all(pool)
     .await?)
 }
@@ -3051,7 +3051,15 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        for (p, r) in [(id, 7), (weak, 8), (weak, 7)] {
+        // The D16 attack: one narrow anti-nuke whitelist is enough to guard the role.
+        let (narrow,): (i64,) = sqlx::query_as(
+            "INSERT INTO permits (guild_id, name, rank, whitelist) VALUES ($1, 'Deleters', 1, '{wl_channel_delete}') RETURNING id",
+        )
+        .bind(g)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for (p, r) in [(id, 7), (weak, 8), (weak, 7), (narrow, 9)] {
             sqlx::query(
                 "INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, $3)",
             )
@@ -3062,10 +3070,10 @@ mod tests {
             .await
             .unwrap();
         }
-        let mut got = permit_roles_in(&pool, g, &[5, 7, 8]).await.unwrap();
+        let mut got = permit_roles_in(&pool, g, &[5, 7, 8, 9]).await.unwrap();
         got.sort();
         // 7 is guarded through its ban permit; 8 carries only a link whitelist.
-        assert_eq!(got, vec![(7, true), (8, false)]);
+        assert_eq!(got, vec![(7, true), (8, false), (9, true)]);
         assert!(permit_roles_in(&pool, g + 1, &[7])
             .await
             .unwrap()
