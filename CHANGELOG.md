@@ -5,7 +5,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 ## [Unreleased]
 
 ### Removed
-- Ban Sync is removed from the bot, the dashboard, MCP and the security score (Thomas 11-13). Bans already copied stay as normal bans. Migration 3924 drops `ban_sync_links`, its MCP view, queued Ban Sync jobs and the handover's `ban_sync_was_on`. An old export that still has a `ban_sync` section imports without it. The Raider List and the owner-change protection (D47) stay.
+- Ban Sync is removed from the bot, the dashboard, MCP and the security score (Thomas 11-13). Bans already copied stay as normal bans. Migration 3924 removes queued Ban Sync jobs. `ban_sync_links`, its MCP view and the handover's `ban_sync_was_on` stay one release so an image rollback keeps the owner-change protection; a later migration drops them. An old export that still has a `ban_sync` section imports without it. The Raider List and the owner-change protection (D47) stay.
 
 ### Fixed
 - With anti-nuke off, a permit role given by someone who is not an Owner, Extra Owner or Trusted Admin is still taken back; nobody is punished.
