@@ -1181,6 +1181,30 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// [`on_owner`] from a gateway event. A failure queues `owner_check`, which runs it again (each
+/// failed try waits for the job lease, up to `jobs::MAX_ATTEMPTS`), so the reset is not left to the
+/// next guild event (R-h3 round 2, 3). Meanwhile the dashboard keeps the owner-only writes closed.
+pub async fn owner_seen(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) -> Result<()> {
+    if let Err(e) = on_owner(app, gid, owner).await {
+        tracing::warn!(?e, %gid, "owner change not processed, retrying as a job");
+        sqlx::query(
+            "INSERT INTO scheduled_jobs (guild_id, kind, payload, run_at)
+             SELECT $1, 'owner_check', '{}', now() + interval '30 seconds'
+             WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'owner_check')",
+        )
+        .bind(gid.get() as i64)
+        .execute(&app.pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Job `owner_check`: reads the owner from Discord now (not the cache) and runs [`on_owner`].
+pub async fn owner_check_job(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+    let owner = app.http.guild(gid).await?.model().await?.owner_id;
+    on_owner(app, gid, owner).await
+}
+
 /// Keeps `guild_owners` current (GuildCreate, GuildUpdate). A new owner takes the server out of
 /// its old group at once: its pending copies are cancelled and both owners hear about it.
 /// The server's sync becomes the new owner's own (D47): Ban Sync is switched off, so it is in no

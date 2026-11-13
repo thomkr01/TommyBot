@@ -30,16 +30,32 @@ pub(crate) async fn permit_perms(
     Ok(top.map(|p| p.1).unwrap_or_default())
 }
 
+/// The Discord owner, checked fresh against Discord and against what the bot recorded: owner-only
+/// writes (Ban Sync, Extra Owners, Keep, purge) need the bot to have processed an ownership
+/// change, so it has paused the previous owner's staff first (D47).
 pub(crate) async fn is_discord_owner(
     st: &AppState,
     s: &Sess,
     guild: i64,
 ) -> Result<bool, ApiError> {
+    Ok(owner_state(st, s, guild, true).await? == Some(true))
+}
+
+/// None: not the owner. Some(true): the owner, and the bot's `guild_owners` agrees. Some(false):
+/// Discord says this user is the owner, but the bot has not processed the change yet (a failed
+/// `on_owner`); a retry is queued. Only the memoized owner is checked fresh, so other users cost
+/// no Discord call.
+async fn owner_state(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+    always_fresh: bool,
+) -> Result<Option<bool>, ApiError> {
     if st.discord.guild_owner(guild).await? != s.user_id.to_string() {
-        return Ok(false);
+        return Ok(None);
     }
-    // The Discord owner is memoized for 30 s, but the bot moves guild_owners and records the
-    // handover within a second, so a stale memo never keeps the previous owner at Owner level (D47).
+    // The memo is 30 s old at most, but the bot moves guild_owners and records the handover within
+    // a second, so a stale memo never keeps the previous owner at Owner level.
     let (other_owner, was_owner): (bool, bool) = sqlx::query_as(
         "select exists(select 1 from guild_owners where guild_id = $1 and owner_id <> $2),
                 exists(select 1 from owner_handovers where guild_id = $1 and old_owner = $2)",
@@ -48,7 +64,29 @@ pub(crate) async fn is_discord_owner(
     .bind(s.user_id)
     .fetch_one(&st.db)
     .await?;
-    Ok(!other_owner && !was_owner)
+    if was_owner {
+        return Ok(None);
+    }
+    if !other_owner && !always_fresh {
+        return Ok(Some(true));
+    }
+    // Fail closed: Discord must confirm it now, and a lookup error is "not the owner".
+    let fresh = st.discord.guild_owner_fresh(guild).await.ok();
+    if fresh.as_deref() != Some(s.user_id.to_string().as_str()) {
+        return Ok(None);
+    }
+    if !other_owner {
+        return Ok(Some(true));
+    }
+    sqlx::query(
+        "insert into scheduled_jobs (guild_id, kind, payload, run_at)
+         select $1, 'owner_check', '{}', now()
+         where not exists (select 1 from scheduled_jobs where guild_id = $1 and kind = 'owner_check')",
+    )
+    .bind(guild)
+    .execute(&st.db)
+    .await?;
+    Ok(Some(false))
 }
 
 /// Re-resolved on every request, including writes (spec 3.1).
@@ -62,7 +100,9 @@ pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Leve
         .fetch_one(&st.db)
         .await
     };
-    let discord_owner = is_discord_owner(st, s, guild).await?;
+    // The real owner keeps Owner level while the bot catches up on a change (R-h3 round 2, 3);
+    // the owner-only writes still wait for it.
+    let discord_owner = owner_state(st, s, guild, false).await?.is_some();
     let (mut extra_owner, mut trusted_admin) =
         (flag("extra_owners").await?, flag("trusted_admins").await?);
     // A banned or departed EO/TA keeps the table row, so the list alone never grants access.
@@ -1438,10 +1478,11 @@ pub(crate) mod g3_handler_tests {
         };
         {
             let mut m = discord.memo.lock().unwrap();
+            // Dated ahead, so the 2 s fresh owner read still hits it on a slow test run.
             m.insert(
                 format!("/guilds/{g}"),
                 (
-                    Instant::now(),
+                    Instant::now() + std::time::Duration::from_secs(60),
                     Some(json!({"owner_id": "7", "name": "T", "roles": []})),
                 ),
             );
@@ -1672,6 +1713,43 @@ pub(crate) mod g3_handler_tests {
         };
         wipe().await;
         assert!(is_discord_owner(&st, &s, g).await.unwrap());
+        // R-h3 round 2, 3: the bot still names user 8 (its on_owner failed) but Discord says 7 owns
+        // it: 7 keeps Owner level, the owner-only writes wait, and a retry is queued.
+        sqlx::query("insert into guild_owners (guild_id, owner_id) values ($1, 8)")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        sqlx::query("delete from scheduled_jobs where guild_id = $1")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        assert_eq!(level_of(&st, &s, g).await.unwrap(), Level::Owner);
+        assert!(!is_discord_owner(&st, &s, g).await.unwrap());
+        let _ = level_of(&st, &s, g).await.unwrap();
+        let queued: i64 = sqlx::query_scalar(
+            "select count(*) from scheduled_jobs where guild_id = $1 and kind = 'owner_check'",
+        )
+        .bind(g)
+        .fetch_one(&st.db)
+        .await
+        .unwrap();
+        assert_eq!(queued, 1, "one retry, not one per request");
+        sqlx::query("delete from scheduled_jobs where guild_id = $1")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        // S1: the memo (10 s old) still names 7, but no fresh answer confirms it.
+        st.discord.memo.lock().unwrap().insert(
+            format!("/guilds/{g}"),
+            (
+                Instant::now() - std::time::Duration::from_secs(10),
+                Some(json!({"owner_id": "7", "name": "T", "roles": []})),
+            ),
+        );
+        wipe().await;
         for sql in [
             "insert into guild_owners (guild_id, owner_id) values ($1, 8)",
             "insert into owner_handovers (guild_id, old_owner, new_owner) values ($1, 7, 8)",

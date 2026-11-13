@@ -493,7 +493,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::GuildUpdate(g) => {
             app.invalidate_guild(g.id);
-            crate::bansync::on_owner(app, g.id, g.owner_id).await?
+            crate::bansync::owner_seen(app, g.id, g.owner_id).await?
         }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::GuildDelete(g) => crate::welcome::on_guild_delete(app, g).await?,

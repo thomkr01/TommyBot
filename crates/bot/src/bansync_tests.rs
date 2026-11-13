@@ -1614,3 +1614,28 @@ async fn a_section_on_defaults_is_posted_to_the_log() {
     assert_eq!(t.calls(&format!("POST /channels/{log}/messages")), 1);
     t.cleanup().await;
 }
+
+/// R-h3 round 2, 3: the retry job reads the owner from Discord and runs the reset.
+#[tokio::test]
+async fn the_owner_check_job_runs_the_reset_with_the_live_owner() {
+    let Some(t) = T::new(206).await else { return };
+    let (o, new) = (t.owner(), t.base + 8);
+    t.server(0, o, "ban").await;
+    t.exec("INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, $1 + 1)")
+        .await;
+    t.set(|m| {
+        m.owners.insert(t.g(0).get(), new);
+    });
+    owner_check_job(&t.app, t.g(0)).await.unwrap();
+    assert_eq!(
+        t.count("SELECT count(*) FROM extra_owners WHERE guild_id = $1")
+            .await,
+        0
+    );
+    assert_eq!(
+        t.count("SELECT count(*) FROM guild_owners WHERE guild_id = $1 AND owner_id = $1 + 8")
+            .await,
+        1
+    );
+    t.cleanup().await;
+}
