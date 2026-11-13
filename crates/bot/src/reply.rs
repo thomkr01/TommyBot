@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tommybot_core::jobs;
 use tommybot_logging::embed::{duration, Log, ARROW, BLUE, GREEN, NO, YES};
-use tommybot_logging::emoji::{DETAILS, MODERATOR, PANIC, REASON, UNSET};
+use tommybot_logging::emoji::{DETAILS, MODERATOR, PANIC, REASON, UNSET, WARNING};
 use tommybot_logging::LogKind;
 use twilight_model::channel::message::{Component, Embed};
 use twilight_model::id::{
@@ -413,6 +413,21 @@ pub async fn alert_owner(app: &App, gid: Id<GuildMarker>, what: &str) {
         });
     let text = format!("{PANIC} **{what}** on your server. TommyBot is handling it.{logs}");
     dm(app, info.owner, &text).await;
+}
+
+/// Tells the owner that settings could not be read and run on their defaults (a newer version
+/// saved them, or they are damaged). Once a day per server.
+pub async fn fallback_alert(app: &App, gid: Id<GuildMarker>, sections: &[&str]) {
+    static LAST: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
+    if !alert_due(&mut LAST.lock().unwrap(), gid.get(), now_secs(), 86_400) {
+        return;
+    }
+    let list = sections.join(", ");
+    let name = crate::bansync::md(&crate::verify::guild_name(app, gid).await);
+    let text = format!(
+        "{WARNING} TommyBot could not read these settings of **{name}** and uses their defaults until they are saved again: {list}. Defaults are off for most systems, Anti-nuke too. This happens after a rollback to an older TommyBot version; update it again, or open the dashboard and save these settings."
+    );
+    dm_owner(app, gid, &text).await;
 }
 
 /// DMs the server owner right away, without [`alert_owner`]'s 10-minute limit.

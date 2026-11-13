@@ -6,6 +6,7 @@ mod cache;
 mod config;
 pub mod embed;
 pub mod emoji;
+pub mod lenient;
 mod render;
 
 use cache::{CachedMessage, MessageCache};

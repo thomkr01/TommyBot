@@ -177,6 +177,7 @@ impl LogEvent {
 /// A custom logging type: every event in `events` goes to `channel`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CustomLog {
+    #[serde(deserialize_with = "crate::lenient::list")]
     pub events: Vec<LogEvent>,
     pub channel: Id<ChannelMarker>,
 }
@@ -187,8 +188,10 @@ pub struct CustomLog {
 pub struct LogConfig {
     /// Receives every log type without its own route (`#tommybot-logs`).
     pub fallback: Option<Id<ChannelMarker>>,
+    #[serde(deserialize_with = "crate::lenient::map")]
     pub routes: HashMap<LogKind, Id<ChannelMarker>>,
     /// One channel per Discord event type.
+    #[serde(deserialize_with = "crate::lenient::map")]
     pub events: HashMap<LogEvent, Id<ChannelMarker>>,
     /// Custom logging types. The first one that lists an event wins.
     pub custom: Vec<CustomLog>,

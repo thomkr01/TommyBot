@@ -320,6 +320,7 @@ pub struct RuleSpec {
     pub timeout_s: u32,
     pub exempt_roles: Vec<String>,
     pub exempt_channels: Vec<String>,
+    #[serde(deserialize_with = "tommybot_logging::lenient::list")]
     pub bot_actions: Vec<BotAction>,
     /// Submode of the Lock bot action, see `DiscordAutomodCfg::locks`.
     pub lock: String,

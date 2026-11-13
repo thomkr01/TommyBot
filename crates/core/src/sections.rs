@@ -16,7 +16,9 @@ use twilight_model::id::{
 pub struct AntinukeCfg {
     /// Master switch; off until a saved config turns it on.
     pub enabled: bool,
-    /// Per action; actions left out use [`NukeAction::default_limit`].
+    /// Per action; actions left out use [`NukeAction::default_limit`]. An action this version
+    /// does not know is skipped, not the whole section (D48).
+    #[serde(deserialize_with = "tommybot_logging::lenient::map")]
     pub limits: HashMap<NukeAction, LimitCfg>,
     /// Quarantined members are moved to this role (none: all roles removed).
     pub quarantine_role: Option<Id<RoleMarker>>,
@@ -884,6 +886,7 @@ pub enum BanSyncReceive {
 pub struct RaiderListCfg {
     pub enabled: bool,
     pub action: RaiderAction,
+    #[serde(deserialize_with = "tommybot_logging::lenient::list")]
     pub categories: Vec<RaiderCategory>,
     /// What to do for listed users already in the server: only alert, or nothing.
     pub scan_members: bool,
