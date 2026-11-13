@@ -252,6 +252,7 @@ pub(crate) async fn audit(
         st,
         guild,
         &c,
+        None,
         format!(
             "{} (<@{}>) {what} from the dashboard",
             s.username, s.user_id
@@ -289,21 +290,27 @@ async fn problems(st: &AppState, guild: i64) -> Result<Vec<Problem>, ApiError> {
         .call(Method::GET, &format!("/guilds/{guild}/channels"), None)
         .await?;
     let num = |v: &Value| v.as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let bot = st.discord.bot_id().await?;
+    let me = bot.as_str();
+    let tickets = c["tickets"]["category"].as_str().filter(|t| !t.is_empty());
     let overwrites: Vec<Overwrite> = channels
         .as_array()
         .into_iter()
         .flatten()
         .flat_map(|c| {
+            // A ticket's member and the bot itself are let in on purpose.
+            let ticket = tickets.is_some() && c["parent_id"].as_str() == tickets;
             c["permission_overwrites"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|o| o["type"] == 0)
+                .filter(move |o| o["type"] == 0 || (o["type"] == 1 && !ticket && o["id"] != me))
                 .map(|o| Overwrite {
                     channel: num(&c["id"]),
                     role: num(&o["id"]),
                     allow: num(&o["allow"]),
                     deny: num(&o["deny"]),
+                    member: o["type"] == 1,
                 })
         })
         .collect();
@@ -431,7 +438,9 @@ async fn set_bot_actions(
     rule: &str,
     spec: &RuleSpec,
 ) -> Result<(), ApiError> {
-    let (version, mut config) = crate::store::current(&st.db, guild).await?;
+    // Under the config lock: the Discord rule already exists, so a save in between must not 409 this away.
+    let mut tx = st.db.begin().await?;
+    let (version, mut config) = crate::store::locked(&mut tx, guild).await?;
     // Mention scopes live next to the bot actions; Discord's own scope is on the rule.
     let scope = (spec.trigger == "mention" && matches!(spec.scope.as_str(), "user" | "server"))
         .then(|| MentionScope {
@@ -465,11 +474,9 @@ async fn set_bot_actions(
             None => changed |= slot.as_object_mut().and_then(|m| m.remove(rule)).is_some(),
         }
     }
-    if !changed {
-        return Ok(());
+    if changed {
+        crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
     }
-    let mut tx = st.db.begin().await?;
-    crate::store::commit(&mut tx, guild, version, &config, s.user_id).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -622,6 +629,67 @@ async fn delete_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Bot actions are saved after the
+    /// Discord rule exists, so saves running at the same time must all land, none refused with 409.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bot_actions_of_parallel_rules_all_land() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_860_000_000 + std::process::id() as i64;
+        let st = AppState {
+            db: db.clone(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::new(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api: String::new(),
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        let s = Sess {
+            id: String::new(),
+            user_id: 7,
+            username: "t".into(),
+            access_token: String::new(),
+            stepped_up: true,
+            csrf: String::new(),
+        };
+        let mut runs = tokio::task::JoinSet::new();
+        for rule in 1..=8 {
+            let (st, s) = (st.clone(), s.clone());
+            runs.spawn(async move {
+                let spec = RuleSpec {
+                    bot_actions: vec![BotAction::Warn],
+                    ..Default::default()
+                };
+                set_bot_actions(&st, &s, g, &rule.to_string(), &spec).await
+            });
+        }
+        for r in runs.join_all().await {
+            r.unwrap();
+        }
+        let (v, c) = crate::store::current(&db, g).await.unwrap();
+        assert_eq!(v, 8);
+        assert_eq!(
+            c["discord_automod"]["actions"].as_object().unwrap().len(),
+            8
+        );
+        sqlx::query("delete from guild_config where guild_id = $1")
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn rule_ids_must_be_snowflakes() {

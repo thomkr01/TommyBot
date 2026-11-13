@@ -212,11 +212,50 @@ pub struct Put {
     value: Value,
 }
 
-pub(crate) async fn log_change(st: &AppState, guild: i64, config: &Value, text: String) {
-    if let Some(ch) = config["logging"]["config_changes"]
+/// Where `log_change` posts: the config's channel, and with `version` also that of the version before.
+async fn change_log_channels(
+    db: &sqlx::PgPool,
+    guild: i64,
+    config: &Value,
+    version: Option<i32>,
+) -> Vec<String> {
+    let mut before = None;
+    if let Some(v) = version {
+        before = sqlx::query_scalar(
+            "select config->'logging'->>'config_changes' from guild_config where guild_id = $1 and version = $2",
+        )
+        .bind(guild)
+        .bind(v - 1)
+        .fetch_optional(db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("config-changes log channel of v{} not read: {e:#}", v - 1);
+            None
+        })
+        .flatten();
+    }
+    let mut channels: Vec<String> = config["logging"]["config_changes"]
         .as_str()
         .map(String::from)
-    {
+        .into_iter()
+        .chain(before)
+        .filter(|c| !c.is_empty())
+        .collect();
+    channels.dedup();
+    channels
+}
+
+/// Posts to the config-changes log. `version` is the config version this change saved, if any: then the
+/// channel of the version before gets it too, so a save that clears or moves the log is still seen there.
+pub(crate) async fn log_change(
+    st: &AppState,
+    guild: i64,
+    config: &Value,
+    version: Option<i32>,
+    text: String,
+) {
+    for ch in change_log_channels(&st.db, guild, config, version).await {
+        let text = text.clone();
         let d = st.discord.clone();
         tokio::spawn(async move {
             match d.private_channel_of(guild, &ch).await {
@@ -380,6 +419,7 @@ pub async fn put_section(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) changed `{section}` -> config v{version}",
             s.username, s.user_id
@@ -432,14 +472,14 @@ pub async fn put_permits(
     }
     store::write_permits(&mut tx, guild, &b.value).await?;
     keep_exemptions(&mut tx, guild, level, &old).await?;
-    let (_, mut config) = store::current(&st.db, guild).await?;
-    config["permits"] = store::read_permits(&mut tx, guild).await?;
+    let (_, config) = store::current(&st.db, guild).await?;
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
     log_change(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) changed `permits` -> config v{version}",
             s.username, s.user_id
@@ -526,9 +566,14 @@ pub async fn diff_versions(
     Path((guild, from, to)): Path<(i64, i32, i32)>,
 ) -> Res {
     require(&st, &s, guild, Level::Viewer, false).await?;
+    let mut new = version(&st, guild, to).await?;
+    // "Diff vs current" shows what a rollback changes, and a rollback compares with the live permits.
+    if to == store::current(&st.db, guild).await?.0 {
+        new["permits"] = store::read_permits(&mut *st.db.acquire().await?, guild).await?;
+    }
     Ok(Json(json!(diff::diff(
         &version(&st, guild, from).await?,
-        &version(&st, guild, to).await?
+        &new
     ))))
 }
 
@@ -554,6 +599,14 @@ pub async fn rollback(
         ));
     }
     discord_owner_for(&st, &s, guild, owner_only_changed(&old, &now)).await?;
+    // The same checks as a save: an old version may hold a value the bot would now read as off.
+    for k in access::SECTIONS {
+        if let Some(v) = old.get(*k).filter(|v| Some(*v) != now.get(*k)) {
+            validate(k, v)?;
+            limits::check(k, v, &now[*k]).map_err(ApiError::BadRequest)?;
+        }
+    }
+    web_mode_ok(&old, &now)?;
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
     if let Some(p) = old.get("permits") {
@@ -574,6 +627,7 @@ pub async fn rollback(
         &st,
         guild,
         &old,
+        Some(version),
         format!(
             "{} (<@{}>) rolled config back to v{v} -> v{version}",
             s.username, s.user_id
@@ -731,12 +785,7 @@ pub async fn import(
     let (min, step_up) = import_bar(&new, &now);
     let level = require(&st, &s, guild, min, step_up).await?;
     discord_owner_for(&st, &s, guild, owner_only_changed(&new, &now)).await?;
-    let web = ["verification", "lockdown"]
-        .iter()
-        .any(|k| new.get(*k) != now.get(*k));
-    if let Some(e) = tommybot_automod::join::web_mode_error(&new).filter(|_| web) {
-        return Err(ApiError::BadRequest(e.into()));
-    }
+    web_mode_ok(&new, &now)?;
     if !b.apply {
         return Ok(Json(
             json!({"diff": diff::diff(&now, &new), "cleared": cleared}),
@@ -752,6 +801,7 @@ pub async fn import(
         &st,
         guild,
         &new,
+        Some(version),
         format!(
             "{} (<@{}>) imported settings from another server -> config v{version}",
             s.username, s.user_id
@@ -831,7 +881,9 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "antinuke" => serde_json::from_value::<AntinukeCfg>(v).map(drop),
         "automod" => serde_json::from_value::<AutomodCfg>(v).map(drop),
         "joingate" => serde_json::from_value::<tommybot_automod::join::GateCfg>(v).map(drop),
-        "verification" => serde_json::from_value::<tommybot_automod::join::VerifyCfg>(v).map(drop),
+        "verification" => {
+            serde_json::from_value::<tommybot_core::sections::VerificationCfg>(v).map(drop)
+        }
         "joinraid" => serde_json::from_value::<tommybot_automod::join::RaidCfg>(v).map(drop),
         "backups" => serde_json::from_value::<BackupsCfg>(v).map(drop),
         "panic" => serde_json::from_value::<PanicCfg>(v).map(drop),
@@ -853,6 +905,17 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
 }
 
+/// Web verification's rules, checked only when a whole-config write changes verification or lockdown.
+fn web_mode_ok(new: &Value, now: &Value) -> Result<(), ApiError> {
+    let web = ["verification", "lockdown"]
+        .iter()
+        .any(|k| new.get(*k) != now.get(*k));
+    match tommybot_automod::join::web_mode_error(new).filter(|_| web) {
+        Some(e) => Err(ApiError::BadRequest(e.into())),
+        None => Ok(()),
+    }
+}
+
 /// No negative heat weights. Max and decay have their ranges in `limits`.
 fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
     let weights = serde_json::to_value(h).unwrap_or_default();
@@ -871,6 +934,50 @@ fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
 mod logging_validate_tests {
     use super::*;
     use serde_json::json;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Only a save also reaches the channel
+    /// of the version before; other events go to the current channel alone.
+    #[tokio::test]
+    async fn change_log_goes_to_the_old_channel_only_for_the_save_that_moved_it() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_880_000_000 + std::process::id() as i64;
+        let cfg = |ch: Option<&str>| json!({"logging": {"config_changes": ch}});
+        for (v, ch) in [(1, Some("11")), (2, Some("22")), (3, None)] {
+            sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
+                .bind(g)
+                .bind(v)
+                .bind(cfg(ch))
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let (moved, none) = (cfg(Some("22")), cfg(None));
+        let at = |c, v| change_log_channels(&db, g, c, v);
+        assert_eq!(at(&moved, Some(2)).await, ["22", "11"], "moved");
+        assert_eq!(at(&none, Some(3)).await, ["22"], "cleared");
+        assert!(at(&none, None).await.is_empty(), "no save: current only");
+        assert_eq!(at(&moved, None).await, ["22"]);
+        sqlx::query("delete from guild_config where guild_id = $1")
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn verification_is_checked_with_the_bots_type() {
+        // `channel` and `roles` are only in the bot's VerificationCfg; a bad one made the bot read it all as off.
+        assert!(validate("verification", &json!({"channel": "not an id"})).is_err());
+        assert!(validate("verification", &json!({"roles": "6"})).is_err());
+        assert!(validate(
+            "verification",
+            &json!({"enabled": true, "channel": "5", "roles": ["6"]})
+        )
+        .is_ok());
+    }
 
     #[test]
     fn imports_refuse_new_numbers_outside_their_range() {
@@ -1103,5 +1210,234 @@ mod logging_validate_tests {
         assert!(bad(json!({"events": ["member_kick"], "channel": null})));
         assert!(bad(json!({"events": [], "channel": "5"})));
         assert!(!bad(json!({"events": ["member_kick"], "channel": "5"})));
+    }
+}
+
+/// Handler tests on a scratch Postgres (they return early without DATABASE_URL). Discord is never
+/// called: the guild and member lookups are pre-filled in the memo, user 7 owns the server.
+#[cfg(test)]
+mod g3_handler_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Instant;
+
+    async fn setup(base: i64) -> Option<(AppState, Sess, i64)> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = base + std::process::id() as i64;
+        let discord = crate::discord::Discord {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            bot_token: String::new(),
+            redirect_uri: String::new(),
+            api: "http://127.0.0.1:1".into(),
+            memo: Default::default(),
+        };
+        {
+            let mut m = discord.memo.lock().unwrap();
+            m.insert(
+                format!("/guilds/{g}"),
+                (
+                    Instant::now(),
+                    Some(json!({"owner_id": "7", "name": "T", "roles": []})),
+                ),
+            );
+            m.insert(
+                format!("/guilds/{g}/members/7"),
+                (Instant::now(), Some(json!({"roles": []}))),
+            );
+        }
+        let st = AppState {
+            db,
+            discord,
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        let s = Sess {
+            id: String::new(),
+            user_id: 7,
+            username: "owner".into(),
+            access_token: String::new(),
+            stepped_up: true,
+            csrf: String::new(),
+        };
+        Some((st, s, g))
+    }
+
+    async fn put_version(st: &AppState, g: i64, v: i32, c: Value) {
+        sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
+            .bind(g)
+            .bind(v)
+            .bind(c)
+            .execute(&st.db)
+            .await
+            .unwrap();
+    }
+
+    async fn cleanup(st: &AppState, g: i64) {
+        for t in ["guild_config", "trusted_admins", "extra_owners"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn tas(st: &AppState, g: i64) -> Vec<i64> {
+        sqlx::query_scalar("select user_id from trusted_admins where guild_id = $1")
+            .bind(g)
+            .fetch_all(&st.db)
+            .await
+            .unwrap()
+    }
+
+    fn body<T: serde::de::DeserializeOwned>(v: Value) -> Json<T> {
+        Json(serde_json::from_value(v).unwrap())
+    }
+
+    /// D65. TA 55 is removed in Discord, which (since the fix, see the bot's
+    /// `trusted_admin_removal_is_a_config_version`) appends v3 with the live permits. A Permits
+    /// page or History page still holding v2 cannot write 55 back.
+    #[tokio::test]
+    async fn stale_permits_save_and_rollback_do_not_bring_back_a_removed_ta() {
+        let Some((st, s, g)) = setup(9_880_000_000).await else {
+            return;
+        };
+        let with = |p: &str, ta: Value| json!({"misc": {"prefix": p}, "permits": {"eo": [], "ta": ta, "custom": []}});
+        put_version(&st, g, 1, with("a!", json!(["55"]))).await;
+        put_version(&st, g, 2, with("b!", json!(["55"]))).await;
+        // The Discord removal as the bot now does it: row gone, v3 with the live permits.
+        put_version(&st, g, 3, with("b!", json!([]))).await;
+        let stale = put_permits(
+            State(st.clone()),
+            s.clone(),
+            Path(g),
+            body(json!({"expected_version": 2, "value": {"eo": [], "ta": ["55"], "custom": []}})),
+        )
+        .await;
+        assert!(matches!(stale, Err(ApiError::Conflict(3))), "{stale:?}");
+        let back = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 1)),
+            body(json!({"expected_version": 2})),
+        )
+        .await;
+        assert!(matches!(back, Err(ApiError::Conflict(3))), "{back:?}");
+        assert!(tas(&st, g).await.is_empty(), "55 was written back");
+        cleanup(&st, g).await;
+    }
+
+    /// D65 History. "Diff vs current" compares with the live permit tables, so a table change
+    /// the newest version's copy does not hold (TA removed) shows up in what a rollback changes.
+    #[tokio::test]
+    async fn diff_vs_current_shows_the_live_permits() {
+        let Some((st, s, g)) = setup(9_881_000_000).await else {
+            return;
+        };
+        let with = |p: &str| json!({"misc": {"prefix": p}, "permits": {"eo": [], "ta": ["55"], "custom": []}});
+        put_version(&st, g, 1, with("a!")).await;
+        put_version(&st, g, 2, with("b!")).await;
+        // trusted_admins has no row: 55 was removed without a version (as before the fix).
+        let Json(d) = diff_versions(State(st.clone()), s.clone(), Path((g, 1, 2)))
+            .await
+            .unwrap();
+        let text = d.to_string();
+        assert!(
+            text.contains("permits"),
+            "rollback to v1 re-adds TA 55 unseen: {text}"
+        );
+        cleanup(&st, g).await;
+    }
+
+    /// D69 + D70. A rollback runs the save checks: an old version whose verification the bot cannot
+    /// parse, or whose panic window is 0, is refused; an in-range one still rolls back.
+    #[tokio::test]
+    async fn rollback_refuses_what_a_save_refuses() {
+        let Some((st, s, g)) = setup(9_882_000_000).await else {
+            return;
+        };
+        put_version(
+            &st,
+            g,
+            1,
+            json!({"verification": {"enabled": true, "channel": "not an id"}}),
+        )
+        .await;
+        put_version(&st, g, 2, json!({"panic": {"window_secs": 0}})).await;
+        put_version(
+            &st,
+            g,
+            3,
+            json!({"automod": {"strike": {"strike_timeout_ms": 0}}}),
+        )
+        .await;
+        put_version(&st, g, 4, json!({"panic": {"window_secs": 600}})).await;
+        put_version(&st, g, 5, json!({})).await;
+        for v in [1, 2, 3] {
+            let r = rollback(
+                State(st.clone()),
+                s.clone(),
+                Path((g, v)),
+                body(json!({"expected_version": 5})),
+            )
+            .await;
+            assert!(matches!(r, Err(ApiError::BadRequest(_))), "v{v}: {r:?}");
+        }
+        let ok = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 4)),
+            body(json!({"expected_version": 5})),
+        )
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        cleanup(&st, g).await;
+    }
+
+    /// D70. A section save refuses 0 for a window or count that would switch its feature off,
+    /// and `panic.executors` 0 (off on purpose) still saves.
+    #[tokio::test]
+    async fn section_save_refuses_zero_windows() {
+        let Some((st, s, g)) = setup(9_883_000_000).await else {
+            return;
+        };
+        let save = |sec: &'static str, value: Value| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                put_section(
+                    State(st),
+                    s,
+                    Path((g, sec.to_string())),
+                    body(json!({"expected_version": 0, "value": value})),
+                )
+                .await
+            }
+        };
+        for (sec, v) in [
+            ("panic", json!({"window_secs": 0})),
+            (
+                "automod",
+                json!({"auto_lockdown": {"mention_window_ms": 0}}),
+            ),
+            ("automod", json!({"strike": {"cap": 0}})),
+            ("joinraid", json!({"span_ms": 0})),
+        ] {
+            let r = save(sec, v.clone()).await;
+            assert!(
+                matches!(r, Err(ApiError::BadRequest(_))),
+                "{sec} {v}: {r:?}"
+            );
+        }
+        let off = save("panic", json!({"executors": 0})).await;
+        assert!(off.is_ok(), "{off:?}");
+        cleanup(&st, g).await;
     }
 }

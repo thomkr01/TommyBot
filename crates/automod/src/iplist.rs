@@ -1,5 +1,5 @@
 //! Tor exit, VPN and hosting-network IP ranges for web verification (downloaded, refreshed on a timer).
-use crate::sites::{client, is_public};
+use crate::sites::{client, is_public, read_capped, ShrinkGuard};
 use std::{
     net::{IpAddr, Ipv6Addr},
     sync::RwLock,
@@ -134,6 +134,7 @@ pub struct IpLists {
     vpn: RwLock<IpList>,
     hosting: RwLock<IpList>,
     http: reqwest::Client,
+    shrink: ShrinkGuard,
 }
 
 impl Default for IpLists {
@@ -143,6 +144,7 @@ impl Default for IpLists {
             vpn: Default::default(),
             hosting: Default::default(),
             http: client(),
+            shrink: Default::default(),
         }
     }
 }
@@ -171,13 +173,16 @@ impl IpLists {
 
     /// Re-downloads every list. `TOR_LIST_URL` / `VPN_LIST_URL` / `HOSTING_LIST_URL` (space-separated URLs)
     /// override the sources, empty disables one. A failed, broken or much smaller download keeps the old list.
-    pub async fn refresh(&self) {
-        for (var, default, slot) in [
+    /// True when every list that is on holds entries afterwards.
+    pub async fn refresh(&self) -> bool {
+        let slots = [
             ("TOR_LIST_URL", TOR_URL, &self.tor),
             ("VPN_LIST_URL", VPN_URLS, &self.vpn),
             ("HOSTING_LIST_URL", DC_URLS, &self.hosting),
-        ] {
-            let urls = std::env::var(var).unwrap_or_else(|_| default.into());
+        ];
+        let urls = |var, default: &str| std::env::var(var).unwrap_or_else(|_| default.into());
+        for (var, default, slot) in slots {
+            let urls = urls(var, default);
             if urls.trim().is_empty() {
                 *slot.write().unwrap() = IpList::default();
                 continue;
@@ -204,33 +209,27 @@ impl IpLists {
             match IpList::parse(&text) {
                 Ok(new) => {
                     let old = slot.read().unwrap().len();
-                    if new.len() * 2 < old {
-                        tracing::warn!(
-                            var,
-                            old,
-                            new = new.len(),
-                            "IP list shrank by over half, keeping the old one"
-                        );
-                        continue;
+                    if self.shrink.accept(var, old, new.len()) {
+                        *slot.write().unwrap() = new;
                     }
-                    *slot.write().unwrap() = new;
                 }
                 Err(e) => tracing::warn!(e, var, "IP list refused, keeping the old one"),
             }
         }
+        // `loaded()` is true once any list is, so say which one is still missing.
+        let mut all = true;
+        for (var, default, slot) in slots {
+            if !urls(var, default).trim().is_empty() && slot.read().unwrap().is_empty() {
+                tracing::warn!(var, "IP list is empty, addresses on it are let through");
+                all = false;
+            }
+        }
+        all
     }
 
     async fn download(&self, url: &str) -> anyhow::Result<String> {
-        let mut r = self.http.get(url).send().await?.error_for_status()?;
-        anyhow::ensure!(
-            r.content_length().is_none_or(|l| l <= MAX_BYTES as u64),
-            "list too big"
-        );
-        let mut buf = Vec::new();
-        while let Some(c) = r.chunk().await? {
-            buf.extend_from_slice(&c);
-            anyhow::ensure!(buf.len() <= MAX_BYTES, "list too big");
-        }
+        let r = self.http.get(url).send().await?.error_for_status()?;
+        let buf = read_capped(r, MAX_BYTES).await?;
         Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 

@@ -5,7 +5,6 @@ pub mod deleted;
 
 use anyhow::Result;
 use image::{GrayImage, Luma, Rgb, RgbImage};
-use serde::Deserialize;
 use std::collections::HashMap;
 use tommybot_automod::join::{
     account_created_ms, effective_mode, must_verify, CaptchaCfg, FailAction, VerifyCfg, VerifyMode,
@@ -44,17 +43,7 @@ use crate::{
     events::send_log,
 };
 
-#[derive(Default, Deserialize)]
-#[serde(default)]
-pub struct VerificationCfg {
-    pub enabled: bool,
-    /// Where `verifysetup` posts the button.
-    pub channel: Option<Id<ChannelMarker>>,
-    /// Roles handed out on a pass.
-    pub roles: Vec<Id<RoleMarker>>,
-    #[serde(flatten)]
-    pub verify: VerifyCfg,
-}
+pub use tommybot_core::sections::VerificationCfg;
 
 use tommybot_logging::embed::{verify_panel, VERIFY_HELP as HELP, VERIFY_START as START};
 // The enter and code ids end in the guild id: a DM interaction has no guild of its own.

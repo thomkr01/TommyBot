@@ -266,10 +266,7 @@ async fn fix(
         let failed = crate::sections::quarantine_channels(&st, guild, role, &c)
             .await
             .ok_or_else(|| anyhow::anyhow!("could not list the channels"))?;
-        log_change(
-            &st,
-            guild,
-            &c,
+        log_change(&st, guild, &c, None,
             format!(
                 "{} (<@{}>) denied the quarantine role in every channel from the security score ({failed} failed)",
                 s.username, s.user_id
@@ -297,6 +294,7 @@ async fn fix(
             &st,
             guild,
             &c,
+            None,
             format!(
                 "{} (<@{}>) set `{key}` to `{value}` from the security score",
                 s.username, s.user_id
@@ -350,10 +348,7 @@ async fn fix(
                 Some(json!(body)),
             )
             .await?;
-        log_change(
-            &st,
-            guild,
-            &c,
+        log_change(&st, guild, &c, None,
             format!(
                 "{} (<@{}>) moved role `{}` right below the bot from the security score, backup #{backup}",
                 s.username, s.user_id, q.name
@@ -460,7 +455,7 @@ async fn fix(
     if !failed.is_empty() {
         text.push_str(&format!("\nFailed: {}", failed.join(", ")));
     }
-    log_change(&st, guild, &c, text).await;
+    log_change(&st, guild, &c, None, text).await;
     if !failed.is_empty() {
         return Err(ApiError::BadRequest(format!(
             "Fixed {}, but could not fix: {}. Backup #{backup} holds the state before.",
@@ -514,10 +509,7 @@ async fn make_private(
             )
             .await?;
     }
-    log_change(
-        st,
-        guild,
-        config,
+    log_change(st, guild, config, None,
         format!(
             "{} (<@{}>) made the log channel <#{}> private from the security score, backup #{backup}",
             s.username, s.user_id, ch.id
@@ -732,6 +724,7 @@ async fn revert(
             &st,
             guild,
             &c,
+            None,
             format!(
                 "{} (<@{}>) reverted {done} action(s)",
                 s.username, s.user_id
@@ -852,6 +845,7 @@ async fn claim_key(
     .bind(user)
     .execute(&mut *tx)
     .await?;
+    crate::store::bump(&mut tx, guild, user).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -887,6 +881,7 @@ async fn rescue_claim(State(st): State<AppState>, s: Sess, Json(b): Json<Claim>)
         &st,
         guild,
         &config,
+        None,
         format!("{} (<@{}>) {what}", s.username, s.user_id),
     )
     .await;
@@ -1060,5 +1055,41 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+    }
+
+    /// D65 rescue. A claim is a config version holding the new Extra Owner, so a page that loaded
+    /// the version before cannot save (or roll back) a permits copy without them.
+    #[tokio::test]
+    async fn claim_is_a_config_version() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_101_000_000 + std::process::id() as i64;
+        sqlx::query("insert into guild_config (guild_id, version, config) values ($1, 1, $2)")
+            .bind(g)
+            .bind(json!({"misc": {"prefix": "x!"}, "permits": {"eo": [], "ta": [], "custom": []}}))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("insert into rescue_key (guild_id, key_hash) values ($1, $2) on conflict (guild_id) do update set key_hash = $2").bind(g).bind(hash("k")).execute(&db).await.unwrap();
+        claim_key(&db, g, 5, (Some("k"), None)).await.unwrap();
+        let (v, c) = crate::store::current(&db, g).await.unwrap();
+        assert_eq!(v, 2, "the claim made no version");
+        assert_eq!(c["permits"]["eo"], json!(["5"]));
+        assert_eq!(c["misc"]["prefix"], "x!");
+        let mut tx = db.begin().await.unwrap();
+        let stale = crate::store::commit(&mut tx, g, 1, &json!({}), 7).await;
+        assert!(matches!(stale, Err(ApiError::Conflict(2))), "{stale:?}");
+        tx.rollback().await.unwrap();
+        for t in ["guild_config", "extra_owners"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
     }
 }

@@ -213,21 +213,21 @@ async fn auto_setup(
         }
         member = Some(id);
     }
-    let mut permits = store::read_permits(&mut *st.db.acquire().await?, guild).await?;
-    let staff = empty(&permits["custom"]);
+    let staff = empty(&store::read_permits(&mut *st.db.acquire().await?, guild).await?["custom"]);
+    let mut custom = vec![];
     if staff {
-        let mut custom = vec![];
         for (name, rank, perms, whitelist) in STAFF {
             let id = create(&st, guild, None, "roles", json!({"name": name})).await?;
             custom.push(json!({"name": name, "rank": rank, "perms": perms, "whitelist": whitelist, "roles": [id]}));
         }
-        permits["custom"] = json!(custom);
-        config["permits"] = permits;
     }
     let logs = log_channels(&st, guild, &mut config, b.logs.as_deref()).await?;
     let mut tx = st.db.begin().await?;
     if staff {
-        store::write_permits(&mut tx, guild, &config["permits"]).await?;
+        // Read again after the Discord calls, so an EO/TA change made meanwhile is kept.
+        let mut permits = store::read_permits(&mut tx, guild).await?;
+        permits["custom"] = json!(custom);
+        store::write_permits(&mut tx, guild, &permits).await?;
     }
     let version = store::commit(&mut tx, guild, b.expected_version, &config, s.user_id).await?;
     tx.commit().await?;
@@ -236,6 +236,7 @@ async fn auto_setup(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) ran auto-setup -> config v{version}",
             s.username, s.user_id
@@ -365,6 +366,7 @@ async fn catch_channel(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) set up the catch channel -> config v{version}",
             s.username, s.user_id
@@ -408,6 +410,7 @@ async fn tickets_setup(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) set up tickets -> config v{version}",
             s.username, s.user_id
@@ -689,6 +692,7 @@ async fn log_setup(
         &st,
         guild,
         &config,
+        Some(version),
         format!(
             "{} (<@{}>) created the log channels -> config v{version}",
             s.username, s.user_id

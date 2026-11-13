@@ -504,9 +504,16 @@ async fn accept_appeal(
     tx: &mut sqlx::PgConnection,
 ) -> Result<(), ApiError> {
     // Lifting a punishment takes its permit ("ban" or "timeout"), not just Review Appeals (spec 2).
-    if api::level_of(st, s, guild).await? < Level::Admin && !has_perm(st, s, guild, kind).await? {
+    let level = api::level_of(st, s, guild).await?;
+    if level < Level::Admin && !has_perm(st, s, guild, kind).await? {
         return Err(ApiError::Forbidden(
             "accepting needs the ban or timeout permit",
+        ));
+    }
+    // Panic mode's mod command lock holds here too: only owners, Extra Owners and Trusted Admins may lift.
+    if level < Level::Admin && mod_lock(&mut *tx, guild).await? {
+        return Err(ApiError::Forbidden(
+            "panic mode has locked mod commands; only owners and Trusted Admins can accept now",
         ));
     }
     let inverse = if kind == "ban" {
@@ -565,6 +572,17 @@ async fn accept_appeal(
         tommybot_core::raiders::allow(&mut *tx, guild, user, s.user_id).await?;
     }
     Ok(())
+}
+
+/// Whether a running panic mode locked mod commands (its pending `panic_end` job says so).
+async fn mod_lock(c: &mut sqlx::PgConnection, guild: i64) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        "select exists(select 1 from scheduled_jobs where guild_id = $1 and kind = 'panic_end'
+         and (payload->>'lock_mod_commands')::boolean)",
+    )
+    .bind(guild)
+    .fetch_one(c)
+    .await?)
 }
 
 async fn add_blacklist(
@@ -637,6 +655,37 @@ async fn blacklist_purge(State(st): State<AppState>, s: Sess, Path(guild): Path<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn mod_lock_follows_the_panic_end_job() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_850_000_000 + std::process::id() as i64;
+        let mut c = db.acquire().await.unwrap();
+        assert!(!mod_lock(&mut c, g).await.unwrap());
+        for (lock, want) in [(false, false), (true, true)] {
+            sqlx::query("delete from scheduled_jobs where guild_id = $1")
+                .bind(g)
+                .execute(&mut *c)
+                .await
+                .unwrap();
+            sqlx::query("insert into scheduled_jobs (guild_id, kind, payload, run_at) values ($1, 'panic_end', $2, now())")
+                .bind(g)
+                .bind(serde_json::json!({"lock_mod_commands": lock, "unlock": true}))
+                .execute(&mut *c)
+                .await
+                .unwrap();
+            assert_eq!(mod_lock(&mut c, g).await.unwrap(), want);
+        }
+        sqlx::query("delete from scheduled_jobs where guild_id = $1")
+            .bind(g)
+            .execute(&mut *c)
+            .await
+            .unwrap();
+    }
 
     fn field(options: &[&str], multi: bool, required: bool) -> AppealField {
         AppealField {

@@ -83,6 +83,6 @@ pub(super) async fn report(
         "{} (<@{}>) reported <@{user}> (case #{no}) to the Raider List as {}",
         s.username, s.user_id, b.category
     );
-    log_change(&st, guild, &config, text).await;
+    log_change(&st, guild, &config, None, text).await;
     Ok(Json(json!({"ok": true})))
 }
