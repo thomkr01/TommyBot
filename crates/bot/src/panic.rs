@@ -347,7 +347,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     {
         return Ok(());
     }
-    let _started = Started(app, gid, token);
+    let started = Started(app, gid, token);
     // An end that failed waits for its retry with its locks still on: a new start would replace its
     // job, and with it the claim on those locks, which then never lift. That panic runs on.
     let pending: Result<bool, _> = sqlx::query_scalar(
@@ -544,6 +544,8 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
         return Ok(());
     }
     // A lock from before panic may have been lifted while this ran, when `relock` still waited.
+    // Start is done here, so a lock lifted from now on reaches `relock` and nothing is missed.
+    drop(started);
     catch_up_waits(app, gid).await;
     let log = Log::new("Panic Mode Lockdown", ALERT)
         .text(&format!("{YES} **The server has been locked down.**"));
@@ -696,27 +698,56 @@ pub(crate) async fn relock(
         if !waiting || !lifted.iter().any(|l| l.overlaps(&kind)) {
             continue;
         }
-        own_lock(app, gid, wait, false).await;
-        // Marked only once saved: a second unlock at the same time must not clear the first's mark.
-        let mut saved = false;
-        if let Err(e) = lockdown::lock_saving(app, gid, kind.clone(), None, &mut saved).await {
-            tracing::warn!(?e, key, "panic: locking again failed");
-        }
-        if !saved {
-            // A failed lock waits for the next unlock; a part another lock holds waits for it.
+        take_waited(app, gid, kind, key, wait).await;
+    }
+}
+
+/// Takes a part panic waits for. Marked only once saved: a second unlock at the same time must not
+/// clear the first's mark. A refused or failed lock keeps waiting, unless panic's own lock holds
+/// the part already (a second relock at the same time). A lock that an end of panic missed
+/// meanwhile is lifted again at once. Only logged on failure.
+async fn take_waited(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: LockKind,
+    key: &'static str,
+    wait: &'static str,
+) {
+    own_lock(app, gid, wait, false).await;
+    let mut saved = false;
+    if let Err(e) = lockdown::lock_saving(app, gid, kind.clone(), None, &mut saved).await {
+        tracing::warn!(?e, key, "panic: locking again failed");
+    }
+    if !saved {
+        if !owns(app, gid, key).await {
             own_lock(app, gid, wait, true).await;
-            continue;
         }
-        let made = created(app, gid, &kind).await;
-        own_lock(app, gid, key, true).await;
-        // Panic may have ended between the check above and the lock, and its end did not see it.
-        let ended =
-            !app.panic_runs.lock().unwrap().contains_key(&gid.get()) || !ends_later(app, gid).await;
-        if ended && made.is_some() && created(app, gid, &kind).await == made {
-            if let Err(e) = lockdown::unlock_now(app, gid, Some(&kind)).await {
-                tracing::warn!(?e, "panic: lifting a lock after the end failed");
-            }
+        return;
+    }
+    let made = created(app, gid, &kind).await;
+    own_lock(app, gid, key, true).await;
+    let ended =
+        !app.panic_runs.lock().unwrap().contains_key(&gid.get()) || !ends_later(app, gid).await;
+    if ended && made.is_some() && created(app, gid, &kind).await == made {
+        if let Err(e) = lockdown::unlock_now(app, gid, Some(&kind)).await {
+            tracing::warn!(?e, "panic: lifting a lock after the end failed");
         }
+    }
+}
+
+/// Whether the `panic_end` job says panic holds the lock under `key`. A failed read says yes, so
+/// nothing waits twice.
+async fn owns(app: &App, gid: Id<GuildMarker>, key: &str) -> bool {
+    let p: Result<Option<Value>, _> = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await;
+    match p {
+        Ok(Some(p)) => p[key].as_bool().unwrap_or(false),
+        Ok(None) => false,
+        Err(_) => true,
     }
 }
 
@@ -740,10 +771,7 @@ pub(crate) async fn catch_up_waits(app: &App, gid: Id<GuildMarker>) {
         if !waiting || covered(app, gid, &kind).await {
             continue;
         }
-        own_lock(app, gid, wait, false).await;
-        if !take_lock(app, gid, kind.clone(), key).await {
-            own_lock(app, gid, wait, true).await;
-        }
+        take_waited(app, gid, kind, key, wait).await;
     }
 }
 
