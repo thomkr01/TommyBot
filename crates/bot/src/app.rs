@@ -264,6 +264,9 @@ impl CfgCache {
 /// Active panic mode for one guild. Its end is a `panic_end` job, so `panic::restore` rebuilds this at boot.
 pub struct PanicRun {
     pub lock_mod_commands: bool,
+    /// Non-zero while `panic::start` runs (its token): it takes panic's locks itself, so
+    /// `panic::relock` waits.
+    pub starting: u64,
 }
 
 /// Anyone may run the public commands, so each member gets one per this many ms.

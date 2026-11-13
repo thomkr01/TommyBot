@@ -279,7 +279,11 @@ def panic():
         attack_channels(4, attacker)
         # Under the bot's rate limits (it shares the token with this script) the lock can take ~55 s.
         locked = wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n > 0, tries=60)
-        time.sleep(3)
+        # Panic takes two locks (role, then server) before its logs, so wait for the last log.
+        for _ in range(30):
+            if titled("panic", since, "Panic Mode Lockdown"):
+                break
+            time.sleep(2)
         anti = titled("anti_nuke", since, "Anti Nuke Report:")
         trig = titled("panic", since, "Panic Mode Triggered! [Anti Nuke]")
         rep = titled("panic", since, "Panic Mode Report:")
@@ -1302,6 +1306,82 @@ def h_panic_cat():
     return check(True, f"h_panic_cat: child channel can send during panic={during.get('child', {}).get('can_send')}, "
                        f"category overwrite during={during.get('cat', {}).get('overwrite')}")
 
+def panic_write():
+    """Panic stops all writing (live 13-11 follow-up): during panic every main role (or @everyone)
+    cannot send in #general, a synced child of a whitelisted category still can, and after the end
+    role permissions and overwrites are exactly as before."""
+    attacker, user, role, perms = attacker_setup()
+    old = {s: section(s) for s in ("backups", "panic", "antinuke")}
+    main = [str(r) for r in ((section("lockdown") or {}).get("main_roles") or [])] or [GUILD]
+    roles = lambda: {r["id"]: int(r["permissions"]) for r in call("GET", f"/guilds/{GUILD}/roles")}
+    def ows(chan):
+        c = call("GET", f"/channels/{chan}")
+        return sorted((o["id"], int(o["allow"]), int(o["deny"])) for o in c["permission_overwrites"])
+    def can_send(chan, r):
+        rp, ow = roles(), {o[0]: o[1:] for o in ows(chan)}
+        p = rp[GUILD] | rp[r]
+        a, d = ow.get(GUILD, (0, 0))
+        p = (p & ~d) | a
+        if r != GUILD:
+            a, d = ow.get(r, (0, 0))
+            p = (p & ~d) | a
+        return bool(p & (1 << 11))
+    cat = call("POST", f"/guilds/{GUILD}/channels", body={"name": "pw-cat", "type": 4})["id"]
+    child = call("POST", f"/guilds/{GUILD}/channels", body={"name": "pw-cat-child", "parent_id": cat})["id"]
+    general = text_channel("general")
+    # Only what panic touches: the main roles and their overwrites. The attacker's role and the
+    # Quarantine role's deny on new channels are the test's and anti-nuke's.
+    mine = lambda chan: [o for o in ows(chan) if o[0] in main]
+    snap = lambda: {"roles": {r: p for r, p in roles().items() if r in main},
+                    "cat": mine(cat), "child": mine(child), "general": mine(general)}
+    sends = lambda: {r: {"general": can_send(general, r), "child": can_send(child, r)} for r in main}
+    before, before_send = snap(), sends()
+    antinuke_on()
+    set_config("backups", {"enabled": False})
+    set_config("panic", {"executors": 1, "window_secs": 600, "duration_secs": 60, "lock_on_trigger": True,
+                         "unlock_when_ending": True, "whitelisted_categories": [cat]})
+    since = snowflake_now()
+    during_send, after, ended, end = {}, {}, [], ""
+    try:
+        attack_channels(4, attacker)
+        for _ in range(60):
+            end = sql(f"select payload from scheduled_jobs where guild_id = {GUILD} and kind = 'panic_end'")
+            if end and '"locked_server": true' in end:
+                break
+            time.sleep(2)
+        time.sleep(5)
+        during_send = sends()
+        waited = 0
+        while not ended and waited < 150:
+            time.sleep(5)
+            waited += 5
+            ended = titled("panic", since, "Panic Mode Ended")
+        time.sleep(5)
+        after = snap()
+    finally:
+        if int(sql(f"select count(*) from lock_snapshots where guild_id = {GUILD}")):
+            sql(f"insert into scheduled_jobs (guild_id, kind, run_at) values ({GUILD}, 'unlock', now())")
+            wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n == 0)
+        for s_, v in old.items():
+            restore_section(s_, v)
+        for c in (child, cat):
+            call("DELETE", f"/channels/{c}", soft=True)
+        clean_nuke_channels()
+        free_attacker(user, perms)
+        print("cleaned: pw-cat, pw-cat-child, panic/backups/antinuke sections, attacker freed")
+    print(f"panic_write: main roles {main}")
+    print(f"panic_write: panic_end payload {end}")
+    print(f"panic_write: can send before {before_send}")
+    print(f"panic_write: can send during {during_send}")
+    diff = {k: (before[k], after.get(k)) for k in before if before[k] != after.get(k)}
+    print(f"panic_write: changed after the end {diff}")
+    ok = (all(before_send[r]["general"] for r in main)
+          and not any(v["general"] for v in during_send.values())
+          and all(v["child"] for v in during_send.values())
+          and bool(ended) and not diff)
+    return check(ok, "panic_write: nobody in the main roles writes in #general during panic, the "
+                     "whitelisted category stays open, and everything is back after the end")
+
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
              "purge": purge, "emojis": emojis, "edit": edit, "restart": restart, "panic": panic,
              "verify_delete": verify_delete, "dm_timing": dm_timing,
@@ -1313,7 +1393,8 @@ SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": n
              "g1_stale": g1_stale, "g1_verify_channel": g1_verify_channel, "g1_deleted_role": g1_deleted_role,
              "g2a_panic_lock": g2a_panic_lock, "g2a_timer": g2a_timer, "g2a_renew_404": g2a_renew_404,
              "g2a_reban_reason": g2a_reban_reason,
-             "h_d58": h_d58, "h_d16": h_d16, "h_d20": h_d20, "h_panic_cat": h_panic_cat}
+             "h_d58": h_d58, "h_d16": h_d16, "h_d20": h_d20, "h_panic_cat": h_panic_cat,
+             "panic_write": panic_write}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]

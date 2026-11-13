@@ -349,6 +349,7 @@ pub async fn recreate(
     }
     let (sum, id_map) = execute(app, gid, (&image, &live), p, true).await;
     crate::relink::relink(app, gid, &id_map, &image).await;
+    crate::lockdown::relink_roles(app, gid, &id_map).await;
     let back: HashSet<u64> = ids
         .iter()
         .copied()
@@ -462,6 +463,7 @@ pub async fn restore(
     }
     let (mut sum, id_map) = execute(app, gid, (image, &live), p, respect_lock).await;
     crate::relink::relink(app, gid, &id_map, image).await;
+    crate::lockdown::relink_roles(app, gid, &id_map).await;
     // Webhooks that did not exist in the image were made since (old images have no list).
     if let (Some(f), Some(old)) = (filters, &image.webhooks) {
         if f.restore && f.delete_webhooks {
@@ -875,6 +877,7 @@ mod tests {
             g.get(),
             crate::app::PanicRun {
                 lock_mod_commands: false,
+                starting: 0,
             },
         );
         assert!(run(Level::ExtraOwner, load(true))

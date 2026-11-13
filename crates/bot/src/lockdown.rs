@@ -115,25 +115,43 @@ pub async fn lock_saving(
     secs: Option<i64>,
     saved: &mut bool,
 ) -> Result<bool> {
+    lock_marked(app, gid, kind, secs, saved, None).await
+}
+
+/// [`lock_saving`] that, with `panic_key`, marks the lock as panic's own (`panic::own_lock`) right
+/// after its snapshot is saved, while no other lock or unlock of the guild can run: an unlock or a
+/// second lock then always sees the mark.
+pub async fn lock_marked(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: LockKind,
+    secs: Option<i64>,
+    saved: &mut bool,
+    panic_key: Option<&str>,
+) -> Result<bool> {
     if lock_thread(app, gid, &kind, true).await? {
         return Ok(true);
     }
     // Held until the lock is applied: a second lock waits, then sees this one as active.
     let _one = exclusive(app, gid).await;
-    let active = store::locks(&app.pool, gid.get()).await?;
-    if active
-        .iter()
-        .filter_map(|s| s.kind.as_ref())
-        .any(|k| k.overlaps(&kind))
-    {
+    let active: Vec<LockKind> = store::locks(&app.pool, gid.get())
+        .await?
+        .into_iter()
+        .filter_map(|s| s.kind)
+        .collect();
+    // A combined lock takes the parts no active lock has; its timer names what it took.
+    let Some(kind) = kind.rest(&active) else {
         return Ok(false);
-    }
+    };
     let plan = plan_now(app, gid, &kind).await?;
     // Saved first so a failure halfway can still be unlocked exactly, or finished after a restart.
     let r = store::save_lock(&app.pool, gid.get(), &plan.snapshot).await;
     forget_locks(gid.get());
     r?;
     *saved = true;
+    if let Some(key) = panic_key {
+        crate::panic::own_lock(app, gid, key, true).await;
+    }
     if let Some(d) = secs {
         let job = serde_json::json!({ "lock": kind });
         tommybot_core::jobs::enqueue(&app.pool, gid.get() as i64, "unlock", job, now_secs() + d)
@@ -564,19 +582,107 @@ async fn forget_timers(app: &App, gid: Id<GuildMarker>, kind: &LockKind) {
         tracing::warn!(?e, "dropping the timed unlock failed");
     }
     if kind.overlaps(&LockKind::Role) {
-        crate::panic::own_lock(app, gid, false).await;
+        crate::panic::own_lock(app, gid, crate::panic::ROLE_LOCK, false).await;
+    }
+    if kind.overlaps(&LockKind::Server) {
+        crate::panic::own_lock(app, gid, crate::panic::SERVER_LOCK, false).await;
     }
 }
 
+/// A role a restore made again (old id -> new id) under an active lock comes with the backup's
+/// permissions, so it would be the one main role still writing. Locks it as the lock locked the
+/// old one and moves the snapshot's entry to the new id, so the unlock gives it back. Only logged.
+pub async fn relink_roles(
+    app: &App,
+    gid: Id<GuildMarker>,
+    map: &std::collections::HashMap<u64, u64>,
+) {
+    if let Err(e) = relink_roles_now(app, gid, map).await {
+        tracing::warn!(?e, "locking recreated roles failed");
+    }
+}
+
+async fn relink_roles_now(
+    app: &App,
+    gid: Id<GuildMarker>,
+    map: &std::collections::HashMap<u64, u64>,
+) -> Result<()> {
+    let _one = exclusive(app, gid).await;
+    let locks = store::locks(&app.pool, gid.get()).await?;
+    if !locks
+        .iter()
+        .any(|s| s.role_perms.iter().any(|(r, _)| map.contains_key(r)))
+    {
+        return Ok(());
+    }
+    let live: Vec<(u64, u64)> = app
+        .http
+        .roles(gid)
+        .await?
+        .models()
+        .await?
+        .iter()
+        .map(|r| (r.id.get(), r.permissions.bits()))
+        .collect();
+    // Every lock's entry moves to the new id first, so a failed PATCH or a crash still leaves an
+    // unlock that knows the role; then one PATCH per role takes what all its locks take.
+    let mut strip: std::collections::HashMap<u64, (u64, u64)> = Default::default();
+    for mut snap in locks {
+        let takes = snap.takes();
+        let mut moved = false;
+        for entry in snap.role_perms.iter_mut() {
+            let Some(&new) = map.get(&entry.0) else {
+                continue;
+            };
+            let Some(&(_, now)) = live.iter().find(|(r, _)| *r == new) else {
+                continue;
+            };
+            *entry = (new, now);
+            strip.entry(new).or_insert((now, 0)).1 |= takes;
+            moved = true;
+        }
+        if moved {
+            // Not `save_lock`: the lock keeps its state and its age, which tells it apart.
+            let r = store::update_lock(&app.pool, gid.get(), &snap).await;
+            forget_locks(gid.get());
+            r?;
+        }
+    }
+    for (role, (now, takes)) in strip {
+        let op = Op::SetRolePerms {
+            role,
+            perms: now & !takes,
+        };
+        exec(app, gid, &op, &Snapshot::default()).await?;
+    }
+    Ok(())
+}
+
 /// Lifts the active locks that overlap `which`, or all of them; returns how many were lifted.
+/// A lock lifted during panic that covered a part panic does not hold is taken again by panic.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
+    let before = crate::panic::held(app, gid).await;
+    let (n, lifted) = unlock_now(app, gid, which).await?;
+    if let Some(waiting) = before {
+        crate::panic::relock(app, gid, waiting, &lifted).await;
+    }
+    Ok(n)
+}
+
+/// [`unlock`] without panic taking anything back: how many locks it lifted, and their kinds.
+pub(crate) async fn unlock_now(
+    app: &App,
+    gid: Id<GuildMarker>,
+    which: Option<&LockKind>,
+) -> Result<(usize, Vec<LockKind>)> {
     if let Some(k) = which {
         if lock_thread(app, gid, k, false).await? {
-            return Ok(1);
+            return Ok((1, vec![k.clone()]));
         }
     }
     let _one = exclusive(app, gid).await;
     let (mut lifted, mut failed) = (0, 0);
+    let mut kinds = vec![];
     for snap in store::locks(&app.pool, gid.get()).await? {
         let hit = match (which, &snap.kind) {
             (Some(w), Some(k)) => w.overlaps(k),
@@ -651,6 +757,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
         if let Some(k) = &snap.kind {
             forget_timers(app, gid, k).await;
         }
+        kinds.extend(snap.kind.clone());
         lifted += 1;
     }
     if failed > 0 {
@@ -675,7 +782,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
         )
         .await;
     }
-    Ok(lifted)
+    Ok((lifted, kinds))
 }
 
 /// `lock MESSAGE ?t update`: adds the message as UPDATE n to the blind lock's notice, or, without a
@@ -989,11 +1096,14 @@ pub async fn command(
     }
     let start = Instant::now();
     if lift {
-        // Lifting a lock needs the same permit as setting it.
-        let lifts = match &kind {
-            Some(k) => vec![k.clone()],
-            None => active(app, gid).await?,
-        };
+        // Lifting a lock needs the same permit as setting it, for every lock `unlock` lifts: a
+        // named kind lifts each active lock that overlaps it, also a combined one.
+        let lifts: Vec<LockKind> = active(app, gid)
+            .await?
+            .into_iter()
+            .filter(|a| kind.as_ref().is_none_or(|k| k.overlaps(a)))
+            .chain(kind.clone())
+            .collect();
         if let Some(p) = lifts.iter().find_map(|k| missing(actor, k)) {
             return Ok(fail(
                 lift,
@@ -1026,10 +1136,14 @@ pub async fn command(
             format!("Cannot lock {name}: you lack the {p} permit"),
         ));
     }
+    // The reply names what the lock takes: a combined lock skips the parts already locked.
+    let took = kind
+        .rest(&active(app, gid).await?)
+        .unwrap_or_else(|| kind.clone());
     Ok(if lock_for(app, gid, kind.clone(), duration_s).await? {
         finished(
-            Some(&kind),
-            type_name(&kind),
+            Some(&took),
+            type_name(&took),
             lift,
             start.elapsed(),
             actor_id,
@@ -1098,7 +1212,7 @@ mod tests {
             .unwrap();
             rows
         };
-        crate::panic::own_lock(&app, gid, true).await;
+        crate::panic::own_lock(&app, gid, crate::panic::ROLE_LOCK, true).await;
         assert_eq!(jobs().await[2].1["locked"], true);
         forget_timers(&app, gid, &LockKind::Role).await;
         let left = jobs().await;

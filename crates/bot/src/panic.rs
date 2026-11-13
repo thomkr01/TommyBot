@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{panic_end_plan, panic_plan, PanicStep};
-use tommybot_automod::lockdown::LockKind;
+use tommybot_automod::lockdown::{self as lockdown_bits, LockKind};
 use tommybot_core::{jobs, sections::PanicCfg};
 use tommybot_logging::emoji::{PANIC, QUARANTINED};
 use tommybot_logging::{
@@ -113,15 +113,16 @@ pub(crate) async fn note_heat(app: &App, gid: Id<GuildMarker>, user: Id<UserMark
     }
 }
 
-async fn put_everyone(
+async fn put_role(
     app: &App,
     gid: Id<GuildMarker>,
     channel: Id<ChannelMarker>,
+    role: u64,
     allow: Permissions,
     deny: Permissions,
 ) -> Result<()> {
     let o = PermissionOverwrite {
-        id: Id::new(gid.get()),
+        id: Id::new(role),
         kind: PermissionOverwriteType::Role,
         allow: Some(allow),
         deny: Some(deny),
@@ -131,35 +132,103 @@ async fn put_everyone(
     Ok(())
 }
 
-/// Lets @everyone keep sending in a whitelisted category while the server is locked. Returns the
-/// overwrite it replaced, for [`unexempt`].
-async fn exempt(app: &App, gid: Id<GuildMarker>, category: Id<ChannelMarker>) -> Result<Value> {
+/// The bits panic's server lock will take from each main role (@everyone when none are set),
+/// read before the lock. A role an earlier lock already stripped has nothing left to take. Never a
+/// bit the role lock takes too (Mention @everyone): a category allow would beat that lock.
+fn taken(
+    roles: &[twilight_model::guild::Role],
+    main: &[u64],
+    gid: u64,
+    voice: bool,
+) -> Vec<(u64, u64, bool)> {
+    let mask = (lockdown_bits::SILENCE | if voice { lockdown_bits::VOICE } else { 0 })
+        & !lockdown_bits::DANGEROUS;
+    roles
+        .iter()
+        .map(|r| (r.id.get(), r.permissions.bits() & mask, r.managed))
+        .filter(|(id, bits, _)| {
+            *bits != 0 && (main.contains(id) || (main.is_empty() && *id == gid))
+        })
+        .collect()
+}
+
+/// The bits to allow for `role` on a category so it can do there what the server lock took
+/// (`taken`) and nothing more: never a bit the category already allows or denies the role, nor
+/// one `others_deny` (what other overwrites deny there) holds. A role allow beats every role deny,
+/// so giving such a bit would let a muted member write; the category stays locked for it instead.
+fn give_back(taken: u64, role_ow: (u64, u64), others_deny: u64) -> u64 {
+    taken & !role_ow.0 & !role_ow.1 & !others_deny
+}
+
+/// One exemption to make: the overwrite `role` has on `category` now (`saved`, for [`unexempt`]),
+/// and the one to put.
+struct Exemption {
+    category: Id<ChannelMarker>,
+    role: u64,
+    allow: Permissions,
+    deny: Permissions,
+    saved: Value,
+}
+
+/// What a whitelisted category needs so each main role can do there what panic's server lock
+/// takes. Changes nothing; [`start`] saves each one in the `panic_end` job before it puts it.
+async fn exemptions(
+    app: &App,
+    gid: Id<GuildMarker>,
+    category: Id<ChannelMarker>,
+    taken: &[(u64, u64, bool)],
+    quarantine_role: Option<u64>,
+) -> Result<Vec<Exemption>> {
     let ch = app.http.channel(category).await?.model().await?;
-    let old = ch
+    anyhow::ensure!(ch.guild_id == Some(gid), "category is not in this server");
+    let ows: Vec<_> = ch
         .permission_overwrites
         .unwrap_or_default()
         .into_iter()
-        .find(|o| o.kind == ModelOverwriteType::Role && o.id.get() == gid.get());
-    let (allow, deny) = old
-        .as_ref()
-        .map_or((Permissions::empty(), Permissions::empty()), |o| {
-            (o.allow, o.deny)
+        .filter(|o| o.kind == ModelOverwriteType::Role)
+        .collect();
+    let mut out = vec![];
+    for &(role, bits, managed) in taken {
+        let old = ows.iter().find(|o| o.id.get() == role);
+        // Quarantine keeps managed roles, so their allow would meet the Quarantine deny.
+        let quarantine_role = quarantine_role.filter(|_| !managed);
+        let (allow, deny) = old.map_or((0, 0), |o| (o.allow.bits(), o.deny.bits()));
+        // @everyone's allow comes before every role deny, so only a role's allow needs them.
+        // Quarantined members lose their other roles, so the Quarantine role's deny never meets
+        // a main role's allow.
+        let others_deny = if role == gid.get() {
+            0
+        } else {
+            ows.iter()
+                .filter(|o| o.id.get() != role && Some(o.id.get()) != quarantine_role)
+                .fold(0, |d, o| d | o.deny.bits())
+        };
+        let add = give_back(bits, (allow, deny), others_deny);
+        if add == 0 {
+            if give_back(bits, (allow, deny), 0) != 0 {
+                tracing::info!(
+                    category = category.get(),
+                    role,
+                    "panic: category stays locked for a main role, another role denies there"
+                );
+            }
+            continue;
+        }
+        out.push(Exemption {
+            category,
+            role,
+            allow: Permissions::from_bits_retain(allow | add),
+            deny: Permissions::from_bits_retain(deny),
+            saved: json!({
+                "channel": category.get(), "role": role, "allow": allow, "deny": deny, "had": old.is_some()
+            }),
         });
-    put_everyone(
-        app,
-        gid,
-        category,
-        allow | Permissions::SEND_MESSAGES,
-        deny - Permissions::SEND_MESSAGES,
-    )
-    .await?;
-    Ok(json!({
-        "channel": category.get(), "allow": allow.bits(), "deny": deny.bits(), "had": old.is_some()
-    }))
+    }
+    Ok(out)
 }
 
-/// `channels` with panic's Send exemptions undone as [`unexempt`] would: the @everyone overwrite
-/// each whitelisted category had before (or none), from the pending `panic_end` job.
+/// `channels` with panic's category exemptions undone as [`unexempt`] would: the overwrite each
+/// main role had on a whitelisted category before (or none), from the pending `panic_end` job.
 /// shortcut: only the category itself; a child channel synced to it is read live.
 pub(crate) async fn unexempted(
     app: &App,
@@ -182,13 +251,14 @@ pub(crate) async fn unexempted(
         else {
             continue;
         };
+        let role = exempt_role(gid, saved);
         let all = c.permission_overwrites.get_or_insert_with(Vec::new);
-        all.retain(|o| o.id.get() != gid.get());
+        all.retain(|o| o.id.get() != role);
         if saved["had"].as_bool().unwrap_or(false) {
             let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
             all.push(
                 twilight_model::channel::permission_overwrite::PermissionOverwrite {
-                    id: gid.cast(),
+                    id: Id::new(role),
                     kind: ModelOverwriteType::Role,
                     allow: bits("allow"),
                     deny: bits("deny"),
@@ -199,22 +269,42 @@ pub(crate) async fn unexempted(
     Ok(())
 }
 
+/// The role a saved exemption is for; jobs from before roles were saved only exempted @everyone.
+fn exempt_role(gid: Id<GuildMarker>, saved: &Value) -> u64 {
+    saved["role"].as_u64().unwrap_or(gid.get())
+}
+
 async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> {
     let channel = Id::new(
         saved["channel"]
             .as_u64()
             .context("saved overwrite has no channel")?,
     );
+    let role = exempt_role(gid, saved);
     if saved["had"].as_bool().unwrap_or(false) {
         let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
-        put_everyone(app, gid, channel, bits("allow"), bits("deny")).await
+        put_role(app, gid, channel, role, bits("allow"), bits("deny")).await
     } else {
         crate::verify::given::mark_own(gid, channel.get());
         app.http
             .delete_channel_permission(channel)
-            .role(Id::new(gid.get()))
+            .role(Id::new(role))
             .await?;
         Ok(())
+    }
+}
+
+/// Marks panic's start as done however `start` returns, so [`relock`] works for the rest of it.
+struct Started<'a>(&'a App, Id<GuildMarker>, u64);
+
+impl Drop for Started<'_> {
+    fn drop(&mut self) {
+        // Only this start's run: an early end and a new start may have replaced it.
+        if let Some(run) = self.0.panic_runs.lock().unwrap().get_mut(&self.1.get()) {
+            if run.starting == self.2 {
+                run.starting = 0;
+            }
+        }
     }
 }
 
@@ -242,8 +332,11 @@ async fn end_payload(app: &App, gid: Id<GuildMarker>, payload: Value) -> Result<
 pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()> {
     // The check and the insert are one step: two trips at once must not start it twice, or the
     // second saves the already exempted overwrites and the categories stay open after panic ends.
+    static STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let token = STARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let run = PanicRun {
         lock_mod_commands: cfg.lock_mod_commands,
+        starting: token,
     };
     if app
         .panic_runs
@@ -254,10 +347,27 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     {
         return Ok(());
     }
+    let started = Started(app, gid, token);
+    // An end that failed waits for its retry with its locks still on: a new start would replace its
+    // job, and with it the claim on those locks, which then never lift. That panic runs on.
+    let pending: Result<bool, _> = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end')",
+    )
+    .bind(gid.get() as i64)
+    .fetch_one(&app.pool)
+    .await;
+    match pending {
+        Ok(false) => {}
+        Ok(true) => return Ok(()),
+        Err(e) => {
+            app.panic_runs.lock().unwrap().remove(&gid.get());
+            return Err(e.into());
+        }
+    }
     let ends = crate::app::now_secs() + cfg.duration_secs as i64;
     // The dashboard reads the mod command lock from this job, so it exists before the category calls.
     // No unlock until the end: nothing is locked before the full payload is saved.
-    let payload = |exempted: &[Value], unlock: bool| json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": unlock, "exempt": exempted, "locked": false});
+    let payload = |exempted: &[Value], unlock: bool| json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": unlock, "exempt": exempted, "locked": false, "locked_server": false});
     if let Err(e) = jobs::replace(
         &app.pool,
         gid.get() as i64,
@@ -272,17 +382,49 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     }
     let mut exempted = vec![];
     let mut saved = Ok(());
-    for &c in &cfg.whitelisted_categories {
-        match exempt(app, gid, c).await {
-            Ok(one) => {
-                exempted.push(one);
-                // After each one, so a crash leaves a job that closes every category opened so far.
-                saved = end_payload(app, gid, payload(&exempted, false)).await;
-                if saved.is_err() {
-                    break;
-                }
+    // Only a lock panic makes takes anything a category needs back.
+    let categories = if cfg.lock_on_trigger {
+        cfg.whitelisted_categories.as_slice()
+    } else {
+        &[]
+    };
+    let taken = if categories.is_empty() {
+        vec![]
+    } else {
+        match lock_targets(app, gid).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "panic: reading roles for the category exemptions failed"
+                );
+                vec![]
             }
-            Err(e) => tracing::warn!(?e, channel = c.get(), "panic: exempting category failed"),
+        }
+    };
+    let quarantine_role = match app.cfg(gid.get()).await {
+        Ok(c) => c.antinuke.quarantine_role.map(|r| r.get()),
+        Err(_) => None,
+    };
+    'categories: for &c in categories {
+        let todo = match exemptions(app, gid, c, &taken, quarantine_role).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(?e, channel = c.get(), "panic: reading a category failed");
+                continue;
+            }
+        };
+        for one in todo {
+            // Saved before the change, so a crash or a lost answer still leaves a job that puts
+            // the overwrite back; putting back one that never changed does no harm.
+            exempted.push(one.saved.clone());
+            saved = end_payload(app, gid, payload(&exempted, false)).await;
+            if saved.is_err() {
+                break 'categories;
+            }
+            if let Err(e) = put_role(app, gid, one.category, one.role, one.allow, one.deny).await {
+                tracing::warn!(?e, channel = c.get(), "panic: exempting category failed");
+            }
         }
     }
     if saved.is_ok() {
@@ -309,19 +451,32 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
         return Err(e);
     }
     crate::reply::alert_owner(app, gid, "Panic mode started").await;
+    let mut owned = vec![];
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
             // A failed step is logged, so the report below is still sent.
             // Panic's end lifts only a lock this call saved, also one an error left half applied;
             // a lock from before panic, or one staff make after a failed lock, stays.
+            // Two locks, so one staff already made (say a server lock) leaves the other to panic.
+            // The role lock takes dangerous perms, the server lock takes writing from main roles.
             PanicStep::LockServer => {
-                let mut saved = false;
-                let r = lockdown::lock_saving(app, gid, LockKind::Role, None, &mut saved).await;
-                if let Err(e) = r {
-                    tracing::warn!(?e, "panic: locking the server failed");
-                }
-                if saved {
-                    own_lock(app, gid, true).await;
+                for (kind, key) in [(LockKind::Role, ROLE_LOCK), (LockKind::Server, SERVER_LOCK)] {
+                    let saved = take_lock(app, gid, kind.clone(), key).await;
+                    let wait = if key == ROLE_LOCK {
+                        ROLE_WAITS
+                    } else {
+                        SERVER_WAITS
+                    };
+                    if !saved && covered(app, gid, &kind).await {
+                        own_lock(app, gid, wait, true).await;
+                    }
+                    if saved {
+                        let made = created(app, gid, &kind).await;
+                        owned.push((kind, made));
+                    } else if key == SERVER_LOCK {
+                        // A lock staff made first covers writing, so the categories close with it.
+                        drop_exemptions(app, gid, &exempted).await;
+                    }
                 }
             }
             PanicStep::PingWarnedRoles => {
@@ -372,6 +527,26 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             PanicStep::UnlockServer => {}
         }
     }
+    // Staff can end panic from the dashboard while this ran (D74): its end then read flags this
+    // call had not set yet, or never saw these locks. Whatever the end missed is lifted here.
+    if !ends_later(app, gid).await {
+        // Only the lock this start made, by its age: the end may have lifted it and staff made a
+        // new one of the same kind since.
+        for (kind, made) in &owned {
+            if made.is_none() || created(app, gid, kind).await != *made {
+                continue;
+            }
+            if let Err(e) = lockdown::unlock_now(app, gid, Some(kind)).await {
+                tracing::warn!(?e, "panic: lifting a lock after an early end failed");
+            }
+        }
+        drop_exemptions(app, gid, &exempted).await;
+        return Ok(());
+    }
+    // A lock from before panic may have been lifted while this ran, when `relock` still waited.
+    // Start is done here, so a lock lifted from now on reaches `relock` and nothing is missed.
+    drop(started);
+    catch_up_waits(app, gid).await;
     let log = Log::new("Panic Mode Lockdown", ALERT)
         .text(&format!("{YES} **The server has been locked down.**"));
     // Panic mode runs: a failed log must not end the nuke run that started it.
@@ -459,14 +634,218 @@ pub(crate) fn report(case: Option<&(String, Value)>, b: &Backup) -> Log {
     )
 }
 
-/// Records in the `panic_end` job whether the server lock is panic's own, so its end lifts only
-/// that one. Only logged on failure.
-pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, locked: bool) {
+/// `panic_end` payload key: panic's own role lock.
+pub(crate) const ROLE_LOCK: &str = "locked";
+/// `panic_end` payload key: panic's own server (writing) lock.
+pub(crate) const SERVER_LOCK: &str = "locked_server";
+
+/// The main roles (or @everyone) with the bits panic's server lock would take from them now, and
+/// whether the role is managed.
+async fn lock_targets(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(u64, u64, bool)>> {
+    let cfg = app.cfg(gid.get()).await?;
+    let main: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
+    let roles = app.http.roles(gid).await?.models().await?;
+    Ok(taken(&roles, &main, gid.get(), cfg.lockdown_prefs.voice))
+}
+
+/// `panic_end` payload keys: a lock from before panic held this part when panic started, so
+/// panic takes it once that lock is lifted ([`relock`]).
+const ROLE_WAITS: &str = "waits_role";
+const SERVER_WAITS: &str = "waits_server";
+
+/// While panic runs with its lock on: which parts it waits to take ([`ROLE_WAITS`],
+/// [`SERVER_WAITS`]). `None` when panic does not run, does not lock, or the job cannot be read.
+pub(crate) async fn held(app: &App, gid: Id<GuildMarker>) -> Option<(bool, bool)> {
+    if !app.panic_runs.lock().unwrap().contains_key(&gid.get()) {
+        return None;
+    }
+    if !app.cfg(gid.get()).await.ok()?.panic.lock_on_trigger {
+        return None;
+    }
+    let p: Value = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await
+    .ok()??;
+    let flag = |k: &str| p[k].as_bool().unwrap_or(false);
+    Some((flag(ROLE_WAITS), flag(SERVER_WAITS)))
+}
+
+/// After an unlock during panic: takes a part panic waits for (a lock from before panic held it)
+/// once an unlock lifted the lock that held it, say a timed one whose timer ran. Once only: a
+/// lock of panic's own that staff lift stays lifted. Only logged on failure.
+pub(crate) async fn relock(
+    app: &App,
+    gid: Id<GuildMarker>,
+    waits: (bool, bool),
+    lifted: &[LockKind],
+) {
+    if !app
+        .panic_runs
+        .lock()
+        .unwrap()
+        .get(&gid.get())
+        .is_some_and(|r| r.starting == 0)
+    {
+        return;
+    }
+    for (kind, key, wait, waiting) in [
+        (LockKind::Role, ROLE_LOCK, ROLE_WAITS, waits.0),
+        (LockKind::Server, SERVER_LOCK, SERVER_WAITS, waits.1),
+    ] {
+        if !waiting || !lifted.iter().any(|l| l.overlaps(&kind)) {
+            continue;
+        }
+        take_waited(app, gid, kind, key, wait).await;
+    }
+}
+
+/// Takes a part panic waits for. Marked once saved, inside the guild's lock mutex, so a second
+/// take at the same time sees the mark. A refused or failed lock keeps waiting, unless panic's own lock holds
+/// the part already (a second relock at the same time). A lock that an end of panic missed
+/// meanwhile is lifted again at once. Only logged on failure.
+async fn take_waited(
+    app: &App,
+    gid: Id<GuildMarker>,
+    kind: LockKind,
+    key: &'static str,
+    wait: &'static str,
+) {
+    own_lock(app, gid, wait, false).await;
+    let mut saved = false;
+    let r = lockdown::lock_marked(app, gid, kind.clone(), None, &mut saved, Some(key)).await;
+    if let Err(e) = r {
+        tracing::warn!(?e, key, "panic: locking again failed");
+    }
+    if !saved {
+        if !owns(app, gid, key).await {
+            own_lock(app, gid, wait, true).await;
+        }
+        return;
+    }
+    let made = created(app, gid, &kind).await;
+    let ended =
+        !app.panic_runs.lock().unwrap().contains_key(&gid.get()) || !ends_later(app, gid).await;
+    if ended && made.is_some() && created(app, gid, &kind).await == made {
+        if let Err(e) = lockdown::unlock_now(app, gid, Some(&kind)).await {
+            tracing::warn!(?e, "panic: lifting a lock after the end failed");
+        }
+    }
+}
+
+/// Whether the `panic_end` job says panic holds the lock under `key`. A failed read says yes, so
+/// nothing waits twice.
+async fn owns(app: &App, gid: Id<GuildMarker>, key: &str) -> bool {
+    let p: Result<Option<Value>, _> = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await;
+    match p {
+        Ok(Some(p)) => p[key].as_bool().unwrap_or(false),
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
+/// When the active lock of exactly `kind` was saved, to know it again later; `None` on none.
+async fn created(app: &App, gid: Id<GuildMarker>, kind: &LockKind) -> Option<f64> {
+    tommybot_automod::store::lock_created(&app.pool, gid.get(), kind)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Takes each part panic waits for that no lock holds any more, at the end of `start`.
+pub(crate) async fn catch_up_waits(app: &App, gid: Id<GuildMarker>) {
+    let Some(waits) = held(app, gid).await else {
+        return;
+    };
+    for (kind, key, wait, waiting) in [
+        (LockKind::Role, ROLE_LOCK, ROLE_WAITS, waits.0),
+        (LockKind::Server, SERVER_LOCK, SERVER_WAITS, waits.1),
+    ] {
+        if !waiting || covered(app, gid, &kind).await {
+            continue;
+        }
+        take_waited(app, gid, kind, key, wait).await;
+    }
+}
+
+/// Whether an active lock already holds `kind`'s part (so panic's own lock of it was refused).
+async fn covered(app: &App, gid: Id<GuildMarker>, kind: &LockKind) -> bool {
+    lockdown::active(app, gid)
+        .await
+        .is_ok_and(|a| a.iter().any(|k| k.overlaps(kind)))
+}
+
+/// One of panic's locks, with its owner flag marked before and after (see [`start`]).
+async fn take_lock(app: &App, gid: Id<GuildMarker>, kind: LockKind, key: &'static str) -> bool {
+    own_lock(app, gid, key, true).await;
+    let mut saved = false;
+    let r = lockdown::lock_marked(app, gid, kind, None, &mut saved, Some(key)).await;
+    if let Err(e) = r {
+        tracing::warn!(?e, key, "panic: locking the server failed");
+    }
+    if !saved {
+        own_lock(app, gid, key, false).await;
+    }
+    saved
+}
+
+/// Whether the `panic_end` job is still waiting: neither gone (an early end ran) nor taken by the
+/// scheduler (an early end runs now). A failed read counts as waiting, so nothing is lifted.
+pub(crate) async fn ends_later(app: &App, gid: Id<GuildMarker>) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'
+                       AND (locked_until IS NULL OR locked_until < now()))",
+    )
+    .bind(gid.get() as i64)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap_or(true)
+}
+
+/// Puts the categories back at once when panic's server lock was not made, and empties the job's
+/// list. Only logged on failure; the end puts back what is still listed.
+async fn drop_exemptions(app: &App, gid: Id<GuildMarker>, exempted: &[Value]) {
+    if exempted.is_empty() {
+        return;
+    }
+    let mut all = true;
+    for one in exempted {
+        if let Err(e) = unexempt(app, gid, one).await {
+            tracing::warn!(?e, "panic: putting a category back failed");
+            all = false;
+        }
+    }
+    if !all {
+        return;
+    }
     let r = sqlx::query(
-        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object('locked', $2::bool)
+        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object('exempt', '[]'::jsonb)
          WHERE guild_id = $1 AND kind = 'panic_end'",
     )
     .bind(gid.get() as i64)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(?e, "panic: emptying the exemptions failed");
+    }
+}
+
+/// Records in the `panic_end` job whether the lock under `key` ([`ROLE_LOCK`], [`SERVER_LOCK`]) is
+/// panic's own, so its end lifts only that one. Only logged on failure.
+pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, key: &str, locked: bool) {
+    let r = sqlx::query(
+        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object($2::text, $3::bool)
+         WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .bind(key)
     .bind(locked)
     .execute(&app.pool)
     .await;
@@ -478,16 +857,35 @@ pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, locked: bool) {
 /// Ends panic mode for a guild; runs from the `panic_end` job, whose payload says what to put back.
 pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()> {
     app.panic_runs.lock().unwrap().remove(&gid.get());
+    // The job as it is now: a staff unlock after the scheduler read it cleared panic's claim.
+    let now: Option<Value> = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await?;
+    let payload = now.as_ref().unwrap_or(payload);
     for saved in payload["exempt"].as_array().into_iter().flatten() {
         if let Err(e) = unexempt(app, gid, saved).await {
             tracing::warn!(?e, "panic: restoring category overwrite failed");
         }
     }
-    // Jobs from before `locked` existed unlock as they did.
-    let ours = payload["locked"].as_bool().unwrap_or(true);
-    for step in panic_end_plan(ours && payload["unlock"].as_bool().unwrap_or(false)) {
+    // Jobs from before `locked` existed unlock the role lock as they did, and had no server lock.
+    let role = payload[ROLE_LOCK].as_bool().unwrap_or(true);
+    let server = payload[SERVER_LOCK].as_bool().unwrap_or(false);
+    for step in panic_end_plan((role || server) && payload["unlock"].as_bool().unwrap_or(false)) {
         if step == PanicStep::UnlockServer {
-            lockdown::unlock(app, gid, Some(&LockKind::Role)).await?;
+            // Both are tried, so a failed role unlock does not leave everyone muted.
+            let r = match role {
+                true => lockdown::unlock(app, gid, Some(&LockKind::Role))
+                    .await
+                    .map(drop),
+                false => Ok(()),
+            };
+            if server {
+                lockdown::unlock(app, gid, Some(&LockKind::Server)).await?;
+            }
+            r?;
         }
     }
     send_log(app, gid.get(), LogKind::Panic, end_log(payload)).await
@@ -524,6 +922,7 @@ pub async fn restore(app: &App) -> Result<()> {
             guild as u64,
             PanicRun {
                 lock_mod_commands: payload["lock_mod_commands"].as_bool().unwrap_or(false),
+                starting: 0,
             },
         );
     }
@@ -601,6 +1000,29 @@ mod tests {
             .execute(&app.pool)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn the_lock_takes_writing_from_main_roles_and_a_category_gets_only_that_back() {
+        let role = |id: u64, bits: u64| -> twilight_model::guild::Role {
+            serde_json::from_value(json!({"id": id.to_string(), "name": "r", "color": 0, "colors": {"primary_color": 0},
+                "hoist": false, "managed": false, "mentionable": false, "permissions": bits.to_string(), "position": 0, "flags": 0}))
+            .unwrap()
+        };
+        let (send, view, react) = (1u64 << 11, 1u64 << 10, 1u64 << 6);
+        let roles = [
+            role(9, view | send | react | (1 << 17)),
+            role(5, view | send),
+            role(6, view),
+        ];
+        // No main roles: @everyone (the guild id) is the one locked.
+        assert_eq!(taken(&roles, &[], 9, false), [(9, send | react, false)]);
+        // Main roles set: only those, and a role with nothing to lose is skipped.
+        assert_eq!(taken(&roles, &[5, 6], 9, false), [(5, send, false)]);
+        // Already allowed, denied on the role or denied to @everyone: never given.
+        assert_eq!(give_back(send | react, (0, 0), 0), send | react);
+        assert_eq!(give_back(send | react, (0, react), 0), send);
+        assert_eq!(give_back(send | react, (send, 0), react), 0);
     }
 
     fn text(l: Log) -> String {
