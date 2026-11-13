@@ -279,7 +279,11 @@ def panic():
         attack_channels(4, attacker)
         # Under the bot's rate limits (it shares the token with this script) the lock can take ~55 s.
         locked = wait_for(f"select count(*) from lock_snapshots where guild_id = {GUILD}", lambda n: n > 0, tries=60)
-        time.sleep(3)
+        # Panic takes two locks (role, then server) before its logs, so wait for the last log.
+        for _ in range(30):
+            if titled("panic", since, "Panic Mode Lockdown"):
+                break
+            time.sleep(2)
         anti = titled("anti_nuke", since, "Anti Nuke Report:")
         trig = titled("panic", since, "Panic Mode Triggered! [Anti Nuke]")
         rep = titled("panic", since, "Panic Mode Report:")
