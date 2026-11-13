@@ -61,6 +61,8 @@ pub async fn on_ready(
 ) -> Result<()> {
     tracing::info!(guilds = ev.guilds.len(), "gateway ready");
     let ids: Vec<i64> = ev.guilds.iter().map(|g| g.id.get() as i64).collect();
+    // Before the first await: a second `Ready` meanwhile adds to the floor, never replaces it.
+    let floor = std::mem::take(&mut *app.audit_floor.lock().unwrap());
     sqlx::query(
         "INSERT INTO guild_left (guild_id) SELECT DISTINCT guild_id FROM guild_config \
          WHERE guild_id <> ALL($1) ON CONFLICT DO NOTHING",
@@ -74,21 +76,34 @@ pub async fn on_ready(
         .execute(&app.pool)
         .await?;
     // A new session (not a resume) or a restart gets no replay of the audit entries made in the
-    // gap: anti-nuke reads them from the audit log (D20). The floor was taken before this task ran.
-    let floor = std::mem::take(&mut *app.audit_floor.lock().unwrap());
-    let todo: Vec<(u64, u64)> = floor
+    // gap: anti-nuke reads them from the audit log (D20). The floor was noted before this task ran.
+    let (todo, gone): (Vec<(u64, u64)>, Vec<_>) = floor
         .into_iter()
-        .filter(|(g, _)| ids.contains(&(*g as i64)))
-        .collect();
+        .partition(|(g, _)| ids.contains(&(*g as i64)));
+    {
+        let mut pinned = app.audit_pinned.lock().unwrap();
+        for (g, _) in gone {
+            pinned.remove(&g);
+        }
+    }
     catch_up_retrying(app, todo).await;
     Ok(())
 }
 
 /// In the gateway loop, before the `Ready` task is spawned: where each guild's catch-up starts.
 /// Taken later, a live entry right after `Ready` could raise it past the gap (D20).
+/// A gap not read yet (its catch-up still retrying, or failed) keeps its older start, here and in
+/// what `flush_audit` saves (`audit_pinned`), so neither a reconnect nor a restart skips it.
 pub fn note_ready(app: &App) {
     let seen = app.last_audit.lock().unwrap().clone();
-    *app.audit_floor.lock().unwrap() = seen;
+    let mut pinned = app.audit_pinned.lock().unwrap();
+    let mut floor = app.audit_floor.lock().unwrap();
+    for (g, last) in seen {
+        let start = pinned.get(&g).map_or(last, |p| (*p).min(last));
+        let f = floor.entry(g).or_insert(start);
+        *f = (*f).min(start);
+        pinned.insert(g, *f);
+    }
 }
 
 /// True the first time an audit entry is seen this run, false for one already handled: the live
@@ -100,10 +115,17 @@ pub fn saw_audit(app: &App, guild: u64, id: u64) -> bool {
     if ids.contains(&id) {
         return false;
     }
-    if ids.len() >= 1000 {
+    // Larger than a whole catch-up plus the live entries meanwhile (CATCH_UP_MAX + 100).
+    if ids.len() >= 2500 {
         ids.pop_front();
     }
     ids.push_back(id);
+    app.audit_inflight
+        .lock()
+        .unwrap()
+        .entry(guild)
+        .or_default()
+        .insert(id);
     let mut last = app.last_audit.lock().unwrap();
     let l = last.entry(guild).or_default();
     *l = (*l).max(id);
@@ -113,6 +135,9 @@ pub fn saw_audit(app: &App, guild: u64, id: u64) -> bool {
 /// After anti-nuke handled an entry: queues its id for `audit_seen`. The write is batched by
 /// `flush_audit`, so a nuke's entries never wait on that row's lock (D20).
 pub fn done_audit(app: &App, guild: u64, id: u64) {
+    if let Some(f) = app.audit_inflight.lock().unwrap().get_mut(&guild) {
+        f.remove(&id);
+    }
     let mut m = app.audit_done.lock().unwrap();
     let d = m.entry(guild).or_default();
     *d = (*d).max(id);
@@ -123,6 +148,25 @@ pub fn done_audit(app: &App, guild: u64, id: u64) {
 pub async fn flush_audit(app: &App) {
     let done = std::mem::take(&mut *app.audit_done.lock().unwrap());
     for (guild, id) in done {
+        // Never past an older entry still being handled, nor past an unread gap: a restart
+        // reads from here, and `action_log.audit_id` skips what was already counted.
+        let inflight = app
+            .audit_inflight
+            .lock()
+            .unwrap()
+            .get(&guild)
+            .and_then(|f| f.first().copied());
+        let pinned = app.audit_pinned.lock().unwrap().get(&guild).copied();
+        let safe = [Some(id), inflight.map(|i| i - 1), pinned]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(id);
+        if safe < id {
+            // Kept for the next flush, once the older entry is done or the gap read.
+            done_audit(app, guild, id);
+        }
+        let id = safe;
         let kept = sqlx::query(
             "INSERT INTO audit_seen (guild_id, last_id) VALUES ($1, $2)
              ON CONFLICT (guild_id) DO UPDATE SET last_id = GREATEST(audit_seen.last_id, EXCLUDED.last_id)",
@@ -241,16 +285,38 @@ pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -
         )
         .await;
     }
-    for mut e in missed(all, last) {
+    let entries = missed(all, last);
+    // Counted before a crash that lost the saved id: `action_log` has them.
+    let ids: Vec<i64> = entries.iter().map(|e| e.id.get() as i64).collect();
+    let counted: Vec<i64> = sqlx::query_scalar(
+        "SELECT audit_id FROM action_log WHERE guild_id = $1 AND audit_id = ANY($2)",
+    )
+    .bind(gid.get() as i64)
+    .bind(&ids)
+    .fetch_all(&app.pool)
+    .await?;
+    let mut stale = 0;
+    for mut e in entries {
         e.guild_id = Some(gid);
         if !saw_audit(app, gid.get(), e.id.get()) {
             continue;
         }
-        if let Err(err) = crate::antinuke::on_audit(app, &e).await {
+        if counted.contains(&(e.id.get() as i64)) {
+            done_audit(app, gid.get(), e.id.get());
+            continue;
+        }
+        stale += usize::from(crate::antinuke::too_old(&e));
+        if let Err(err) = crate::antinuke::on_replayed(app, &e).await {
             tracing::warn!(?err, "anti-nuke on a missed audit entry failed");
         }
         done_audit(app, gid.get(), e.id.get());
     }
+    if stale > 0 {
+        let why =
+            format!("{stale} entries from the outage were older than an hour and were not counted");
+        gap_alert(app, gid, &why).await;
+    }
+    app.audit_pinned.lock().unwrap().remove(&gid.get());
     Ok(())
 }
 

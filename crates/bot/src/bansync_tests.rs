@@ -1612,11 +1612,12 @@ async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
         .unwrap();
     t.set(|m| m.fail_member = false);
     assert_eq!(t.calls("PUT /channels/30/permissions/50"), 4);
-    let held: i64 = sqlx::query_scalar("SELECT count(*) FROM quarantines WHERE guild_id = $1 AND user_id = 10")
-        .bind(g.get() as i64)
-        .fetch_one(&t.app.pool)
-        .await
-        .unwrap();
+    let held: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM quarantines WHERE guild_id = $1 AND user_id = 10")
+            .bind(g.get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
     assert_eq!(held, 0);
     // A deny the quarantine did not put there is not the hold's matter.
     let _ = crate::antinuke::hold_overwrite(&t.app, &lift(14, "52", "1"), Id::new(9)).await;
@@ -1667,4 +1668,54 @@ async fn discord_permissions_make_nobody_staff() {
         crate::slowmode::exempt(&t.app, g, Id::new(2)).await,
         "the owner"
     );
+}
+
+/// D20: the saved last audit id never passes an older entry still being handled, nor a gap whose
+/// catch-up has not succeeded; a second `Ready` keeps the first gap's start.
+#[tokio::test]
+async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
+    let Some(t) = T::new(105).await else {
+        return;
+    };
+    let (g, h) = (t.g(0).get(), t.g(1).get());
+    let saved = |guild: u64| {
+        let pool = t.app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT last_id FROM audit_seen WHERE guild_id = $1")
+                .bind(guild as i64)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let app = &t.app;
+    assert!(crate::welcome::saw_audit(app, g, 20));
+    assert!(crate::welcome::saw_audit(app, g, 21));
+    crate::welcome::done_audit(app, g, 21);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(19), "20 is still being handled");
+    crate::welcome::done_audit(app, g, 20);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(21));
+    // Two Readies before the catch-up: the floor stays at the first gap, and so does the save.
+    app.last_audit.lock().unwrap().insert(h, 50);
+    crate::welcome::note_ready(app);
+    app.last_audit.lock().unwrap().insert(h, 80);
+    crate::welcome::note_ready(app);
+    assert_eq!(app.audit_floor.lock().unwrap().get(&h), Some(&50));
+    assert!(crate::welcome::saw_audit(app, h, 90));
+    crate::welcome::done_audit(app, h, 90);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(h).await, Some(50), "the gap is not read yet");
+    t.set(|m| m.audit = vec![]);
+    crate::welcome::catch_up_audit(app, Id::new(h), 50)
+        .await
+        .unwrap();
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(h).await, Some(90));
+    sqlx::query("DELETE FROM audit_seen WHERE guild_id = ANY($1)")
+        .bind(vec![g as i64, h as i64])
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
 }

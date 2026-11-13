@@ -152,7 +152,24 @@ fn whitelist_flag(a: Action) -> &'static str {
     }
 }
 
+/// A live audit entry: counted now, whatever the host clock says of its snowflake.
 pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
+    on_audit_as(app, e, false).await
+}
+
+/// An entry the catch-up read after a gap (D20): counted at its own time.
+pub(crate) async fn on_replayed(app: &App, e: &AuditLogEntry) -> Result<()> {
+    on_audit_as(app, e, true).await
+}
+
+/// A replayed entry anti-nuke watches that is past the hour window: logged, not counted.
+pub(crate) fn too_old(e: &AuditLogEntry) -> bool {
+    watched(e).is_some() && replay_age(e.id.get(), true) >= HOUR
+}
+
+const HOUR: Duration = Duration::from_secs(3600);
+
+async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()> {
     let (Some(gid), Some(actor)) = (e.guild_id, e.user_id) else {
         return Ok(());
     };
@@ -209,7 +226,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         A::RoleCreate => keep(guard_perms(app, &cfg, e, actor).await),
         _ => {}
     }
-    let counted = count_audit(app, &cfg, gid, actor, e).await;
+    let counted = count_audit(app, &cfg, gid, actor, e, replayed).await;
     counted.and(failed)
 }
 
@@ -220,6 +237,7 @@ async fn count_audit(
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
     e: &AuditLogEntry,
+    replayed: bool,
 ) -> Result<()> {
     if matches!(e.action_type, A::MemberDisconnect | A::MemberMove) {
         return crate::voice_nuke::note(app, cfg, gid, e).await;
@@ -230,11 +248,9 @@ async fn count_audit(
     if cfg.antinuke.limit(action).is_none() {
         return Ok(());
     }
-    // An entry read after downtime counts at its own time; past the hour window it cannot trip.
-    let ago = replay_age(e.id.get());
-    if ago >= Duration::from_secs(3600) {
-        return Ok(());
-    }
+    // An entry read after downtime counts at its own time; past the hour window it cannot trip,
+    // but is still logged (counted 0) for /revert and the Revert Center.
+    let ago = replay_age(e.id.get(), replayed);
     // Ticket bots open and close channels all day; the gateway event names the category first.
     // Only a bot is exempt, and not for a channel just moved in: a nuker moves channels into the
     // category and deletes them (D4). Panic's Whitelisted Categories are panic-only.
@@ -285,18 +301,19 @@ async fn count_audit(
         exempt,
         1,
         ago,
+        Some(e.id.get()),
     )
     .await
 }
 
-/// How long ago an audit entry was made, by its snowflake. Zero for a live entry (under 30 s, so
-/// clock skew with Discord never shifts live counting); more for one read after downtime (D20).
-fn replay_age(id: u64) -> Duration {
+/// How long ago a replayed audit entry was made, by its snowflake (D20). A live one is zero:
+/// a host clock that runs fast must never make live entries look old.
+fn replay_age(id: u64, replayed: bool) -> Duration {
     let ms = crate::automod::now_ms() - crate::voice_nuke::created_ms(id);
-    if ms < 30_000 {
-        Duration::ZERO
+    if replayed {
+        Duration::from_millis(ms.max(0) as u64)
     } else {
-        Duration::from_millis(ms as u64)
+        Duration::ZERO
     }
 }
 
@@ -347,6 +364,7 @@ pub(crate) async fn count(
         exempt,
         n,
         Duration::ZERO,
+        None,
     )
     .await
 }
@@ -365,6 +383,7 @@ pub(crate) async fn count_at(
     exempt: bool,
     n: u32,
     ago: Duration,
+    audit: Option<u64>,
 ) -> Result<()> {
     let Some((_, heat)) = cfg.antinuke.limit(action) else {
         return Ok(());
@@ -379,14 +398,15 @@ pub(crate) async fn count_at(
         };
         // `counted` puts the window back after a restart (`seed_windows`): `n` on the first row.
         for (k, i) in rows.into_iter().enumerate() {
-            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse, counted, created_at) VALUES ($1,$2,$3,$4,$5,$6, now() - make_interval(secs => $7))")
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse, counted, created_at, audit_id) VALUES ($1,$2,$3,$4,$5,$6, now() - make_interval(secs => $7), $8)")
                 .bind(gid.get() as i64)
                 .bind(actor.get() as i64)
                 .bind(format!("{action:?}"))
                 .bind(target.map(|t| t as i64))
                 .bind(i.map(|i| json!(i)))
-                .bind(if k == 0 { n as i32 } else { 0 })
+                .bind(if k == 0 && ago < HOUR { n as i32 } else { 0 })
                 .bind(ago.as_secs_f64())
+                .bind(audit.map(|a| a as i64))
                 .execute(&app.pool)
                 .await?;
         }
@@ -2468,7 +2488,10 @@ async fn hold_whitelisted(
     match app.whitelisted(gid, actor, "quarantine").await {
         Ok(w) => (w, false),
         Err(e) => {
-            tracing::warn!(?e, "quarantine whitelist lookup failed, undoing without punishment");
+            tracing::warn!(
+                ?e,
+                "quarantine whitelist lookup failed, undoing without punishment"
+            );
             (false, true)
         }
     }
@@ -2485,7 +2508,10 @@ async fn hold_unsure_log(
         .user("Responsible", actor.get())
         .user("Member", target.get())
         .text(&format!("**{what}**"))
-        .line("Action", "undone where it can be; not quarantined: their permits could not be read");
+        .line(
+            "Action",
+            "undone where it can be; not quarantined: their permits could not be read",
+        );
     send_log(app, gid.get(), LogKind::AntiNuke, log).await
 }
 
@@ -3127,6 +3153,13 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn only_a_replayed_entry_has_an_age() {
+        // An entry from 2015: live, it still counts now (a fast host clock changes nothing).
+        assert_eq!(replay_age(1 << 22, false), Duration::ZERO);
+        assert!(replay_age(1 << 22, true) > HOUR);
     }
 
     #[test]

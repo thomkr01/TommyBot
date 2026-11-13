@@ -183,6 +183,10 @@ pub struct App {
     pub audit_done: Mutex<HashMap<u64, u64>>,
     /// `last_audit` as it stood when `Ready` came in: where the catch-up starts (D20).
     pub audit_floor: Mutex<HashMap<u64, u64>>,
+    /// Audit ids being handled now: `flush_audit` saves nothing past the oldest (D20).
+    pub audit_inflight: Mutex<HashMap<u64, std::collections::BTreeSet<u64>>>,
+    /// Start of a gap whose catch-up has not succeeded: saved and re-read until it does (D20).
+    pub audit_pinned: Mutex<HashMap<u64, u64>>,
     /// Each channel's category as last seen, and when it last moved to another (D4).
     pub category_moves: Mutex<HashMap<u64, (Option<u64>, crate::hierarchy::CategoryMove)>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
@@ -305,6 +309,8 @@ impl App {
             audit_recent: Default::default(),
             audit_done: Default::default(),
             audit_floor: Default::default(),
+            audit_inflight: Default::default(),
+            audit_pinned: Default::default(),
             levels: Default::default(),
             nuke_runs: Default::default(),
             lock_ops: Default::default(),

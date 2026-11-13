@@ -468,7 +468,14 @@ pub async fn permit_roles(pool: &sqlx::PgPool, guild_id: i64) -> sqlx::Result<Ve
 /// lockdown, backup, revert or anti-nuke rights. Every other permit's role is guarded: handing it
 /// out takes the role back and quarantines the actor unless they are Owner, Extra Owner or
 /// Trusted Admin. A permit key not listed here (a new one too) is guarded.
-pub const WEAK_PERMS: &[&str] = &["cases", "mod_stats", "reports", "notes_view", "notes_manage", "tickets"];
+pub const WEAK_PERMS: &[&str] = &[
+    "cases",
+    "mod_stats",
+    "reports",
+    "notes_view",
+    "notes_manage",
+    "tickets",
+];
 /// Whitelist flags of the same kind: automod-style exemptions, not anti-nuke ones.
 pub const WEAK_WHITELIST: &[&str] = &["automod", "words", "links", "reports"];
 

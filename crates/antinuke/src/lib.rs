@@ -673,8 +673,14 @@ mod tests {
         );
         // Split across a reconnect: two live, then two replayed before them, trip together.
         let (mut b, s) = (engine(3, 50), Duration::from_secs);
-        assert!(matches!(b.on_actions_at(1, 2, Action::Ban, false, t0, s(0), 1), Verdict::Allow(_)));
-        assert!(matches!(b.on_actions_at(1, 2, Action::Ban, false, t0, s(0), 1), Verdict::Allow(_)));
+        assert!(matches!(
+            b.on_actions_at(1, 2, Action::Ban, false, t0, s(0), 1),
+            Verdict::Allow(_)
+        ));
+        assert!(matches!(
+            b.on_actions_at(1, 2, Action::Ban, false, t0, s(0), 1),
+            Verdict::Allow(_)
+        ));
         assert!(matches!(
             b.on_actions_at(1, 2, Action::Ban, false, t0, s(20), 1),
             Verdict::Quarantine(c) if c.minute == 3
