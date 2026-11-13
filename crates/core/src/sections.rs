@@ -929,17 +929,18 @@ impl RaiderCategory {
     pub const ALL: [RaiderCategory; 4] = [Self::Nuke, Self::Raid, Self::Scam, Self::Spam];
 }
 
-/// Live ids a backup restore must never delete: every role and channel the config names (the
-/// quarantine role, log, ticket and verification channels, Auto Setup's roles), the permit roles
-/// and the open tickets' channels. They can be newer than the backup, and a nuke does not make
-/// them (N2). Shared by the bot's restore and the dashboard's preview.
+/// Live ids a backup restore must never delete: what the bot made or set up and a nuke does not
+/// make (N2): the quarantine role, the log channels, the ticket category, log channel and open
+/// tickets' channels, anti-nuke's ticket categories, the verification channel and roles, and the
+/// permit roles (Auto Setup's roles among them). They can be newer than the backup. A fixed list:
+/// any other config field (most are Editor level) must not shield a nuker's role or channel.
+/// Shared by the bot's restore and the dashboard's preview.
 pub async fn restore_keep(
     pool: &sqlx::PgPool,
     guild: i64,
     config: &serde_json::Value,
 ) -> sqlx::Result<std::collections::HashSet<u64>> {
-    let mut keep = std::collections::HashSet::new();
-    config_ids(config, &mut keep);
+    let mut keep = config_ids(config);
     let open: Vec<i64> = sqlx::query_scalar(
         "SELECT channel_id FROM tickets WHERE guild_id = $1 AND closed_at IS NULL AND channel_id IS NOT NULL",
     )
@@ -951,16 +952,36 @@ pub async fn restore_keep(
     Ok(keep)
 }
 
-/// Every snowflake string in the config (17 to 20 digits): ids are stored as strings.
-fn config_ids(v: &serde_json::Value, out: &mut std::collections::HashSet<u64>) {
-    match v {
-        serde_json::Value::String(s) if (17..=20).contains(&s.len()) => {
-            out.extend(s.parse::<u64>().ok());
+/// The config fields `restore_keep` keeps: an id, a list of ids, or a map's values.
+const KEEP_FIELDS: [&str; 10] = [
+    "/antinuke/quarantine_role",
+    "/antinuke/ticket_categories",
+    "/logging/fallback",
+    "/logging/routes",
+    "/logging/events",
+    "/logging/custom",
+    "/tickets/category",
+    "/tickets/log_channel",
+    "/verification/channel",
+    "/verification/roles",
+];
+
+fn config_ids(config: &serde_json::Value) -> std::collections::HashSet<u64> {
+    use serde_json::Value as V;
+    let id = |v: &V| v.as_str().and_then(|s| s.parse::<u64>().ok());
+    let mut out = std::collections::HashSet::new();
+    for f in KEEP_FIELDS {
+        match config.pointer(f) {
+            Some(V::Array(a)) => out.extend(a.iter().filter_map(|v| {
+                // A custom log is an object with its channel.
+                id(v).or_else(|| v.get("channel").and_then(id))
+            })),
+            Some(V::Object(o)) => out.extend(o.values().filter_map(id)),
+            Some(v) => out.extend(id(v)),
+            None => {}
         }
-        serde_json::Value::Array(a) => a.iter().for_each(|v| config_ids(v, out)),
-        serde_json::Value::Object(o) => o.values().for_each(|v| config_ids(v, out)),
-        _ => {}
     }
+    out
 }
 
 #[cfg(test)]
@@ -968,25 +989,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_restore_keeps_every_id_the_config_names() {
-        let mut keep = std::collections::HashSet::new();
-        config_ids(
-            &json!({
-                "antinuke": {"quarantine_role": "1570002257523511317"},
-                "verification": {"channel": "1570002257523511318", "roles": ["1570002257523511319"]},
-                "misc": {"timeout": "600", "name": "x"}
-            }),
-            &mut keep,
-        );
-        assert_eq!(
-            keep,
-            [
-                1570002257523511317,
-                1570002257523511318,
-                1570002257523511319
-            ]
-            .into()
-        );
+    fn a_restore_keeps_only_the_named_config_ids() {
+        let keep = config_ids(&json!({
+            "antinuke": {"quarantine_role": "11", "ticket_categories": ["12"]},
+            "logging": {"fallback": "13", "routes": {"mod_command": "14"}, "events": {"message_delete": "15"},
+                        "custom": [{"channel": "16", "events": []}]},
+            "tickets": {"category": "17", "log_channel": "18"},
+            "verification": {"channel": "19", "roles": ["20"]},
+            // Any other field, even an id list, shields nothing.
+            "automod": {"exempt_roles": ["1570002257523511317"]},
+            "sticky": {"roles": ["21"]},
+            "misc": {"timeout": "600"}
+        }));
+        assert_eq!(keep, (11..=20).collect());
     }
     use serde_json::{json, Value};
 
