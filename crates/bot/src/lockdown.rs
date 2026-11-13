@@ -236,6 +236,8 @@ async fn apply(app: &App, gid: Id<GuildMarker>, mut plan: Plan) -> Result<()> {
 pub async fn resume(app: &App) -> Result<()> {
     for (guild, snap, unlocking) in store::interrupted(&app.pool).await? {
         let gid = Id::new(guild);
+        // `interrupted` flipped cut-off unlocks back to locked.
+        forget_locks(guild);
         let r = async {
             match (unlocking, &snap.kind) {
                 (true, kind) => unlock(app, gid, kind.as_ref()).await.map(drop),
