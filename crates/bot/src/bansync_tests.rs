@@ -309,8 +309,9 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, json!(all).to_string())
         }
         ("GET", ["guilds", _, "channels"]) => (200, "[]".into()),
-        ("GET", ["channels", c]) => {
-            let ows = m.overwrites.get(&n(c)).cloned().unwrap_or_default();
+        // Only channels a test gave overwrites; others answer 404 as before.
+        ("GET", ["channels", c]) if m.overwrites.contains_key(&n(c)) => {
+            let ows = m.overwrites[&n(c)].clone();
             (
                 200,
                 json!({"id": c, "type": 0, "permission_overwrites": ows}).to_string(),
@@ -443,6 +444,7 @@ pub(crate) struct T {
 
 impl T {
     pub(crate) async fn new(n: u64) -> Option<T> {
+        assert!(n < 1000, "T::new takes 0-999");
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = tommybot_core::db::connect(&url).await.unwrap();
         let mock = Arc::new(StdMutex::new(Mock::default()));
@@ -472,7 +474,8 @@ impl T {
         let t = T {
             app,
             mock,
-            base: 3_300_000_000_000 + std::process::id() as u64 * 1000 + n * 10,
+            // n < 1000, ten guilds each, so every (process, n) has its own range.
+            base: 3_300_000_000_000 + std::process::id() as u64 * 10_000 + n * 10,
         };
         t.cleanup().await;
         Some(t)
@@ -1439,7 +1442,7 @@ async fn a_discord_outage_on_the_ban_retries_instead_of_skipping() {
 /// that fails or finds nothing twice blocks the bot.
 #[tokio::test]
 async fn a_bot_adder_is_read_twice_then_the_bot_is_blocked() {
-    let Some(t) = T::new(19).await else {
+    let Some(t) = T::new(100).await else {
         return;
     };
     let (g, bot) = (t.g(0), Id::new(77));
@@ -1462,14 +1465,14 @@ async fn a_bot_adder_is_read_twice_then_the_bot_is_blocked() {
 /// after it, oldest first.
 #[tokio::test]
 async fn a_restart_reads_the_audit_entries_it_missed() {
-    let Some(t) = T::new(20).await else {
+    let Some(t) = T::new(101).await else {
         return;
     };
     let g = t.g(0);
     crate::welcome::saw_audit(&t.app, g.get(), 5).await;
     crate::welcome::saw_audit(&t.app, g.get(), 4).await; // never goes back
                                                          // A second app over the same database stands for the restart.
-    let fresh = T::new(21).await.unwrap();
+    let fresh = T::new(102).await.unwrap();
     crate::welcome::load_audit_seen(&fresh.app).await.unwrap();
     let last = |t: &T| t.app.last_audit.lock().unwrap().get(&g.get()).copied();
     assert_eq!(last(&fresh), Some(5));
@@ -1491,7 +1494,7 @@ async fn a_restart_reads_the_audit_entries_it_missed() {
 /// quarantined members who hold that role, with their own overwrite saved for unquarantine.
 #[tokio::test]
 async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
-    let Some(t) = T::new(22).await else {
+    let Some(t) = T::new(103).await else {
         return;
     };
     let g = t.g(0);
