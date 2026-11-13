@@ -163,6 +163,15 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if !cfg.antinuke.enabled {
         return Ok(());
     }
+    // Each check runs whatever an earlier one returned: an error in one (a REST or DB hiccup)
+    // must not skip the lock set-back or the count, which would work as "exempt" (D21, D79).
+    // The first error is returned at the end.
+    let mut failed = Ok(());
+    let mut keep = |r: Result<()>| {
+        if let (Err(e), true) = (r, failed.is_ok()) {
+            failed = Err(e);
+        }
+    };
     if matches!(
         e.action_type,
         A::MemberRoleUpdate
@@ -173,33 +182,45 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     ) {
         // Runs with Quarantine Hold off too: it then only keeps unverified joiners held.
         if e.action_type == A::MemberRoleUpdate {
-            hold(app, e, actor).await?;
+            keep(hold(app, e, actor).await);
         }
         // A role rename still counts below.
-        guard_perms(app, &cfg, e, actor).await?;
+        keep(guard_perms(app, &cfg, e, actor).await);
         if e.action_type == A::MemberRoleUpdate {
-            guard_permit_roles(app, e, actor).await?;
+            keep(guard_permit_roles(app, e, actor).await);
         }
-        if matches!(
-            e.action_type,
-            A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate
-        ) {
-            hold_overwrite(app, e, actor).await?;
-        }
+    }
+    if matches!(
+        e.action_type,
+        A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete
+    ) {
+        keep(hold_overwrite(app, e, actor).await);
     }
     if matches!(
         e.action_type,
         A::RoleUpdate | A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete
     ) {
-        guard_lock(app, &cfg, e, actor).await?;
+        keep(guard_lock(app, &cfg, e, actor).await);
     }
     match e.action_type {
         A::MemberUpdate | A::MemberKick | A::MemberBanAdd if cfg.antinuke.quarantine_hold => {
-            hold(app, e, actor).await?
+            keep(hold(app, e, actor).await)
         }
-        A::RoleCreate => guard_perms(app, &cfg, e, actor).await?,
+        A::RoleCreate => keep(guard_perms(app, &cfg, e, actor).await),
         _ => {}
     }
+    let counted = count_audit(app, &cfg, gid, actor, e).await;
+    counted.and(failed)
+}
+
+/// The counting half of `on_audit`: voice, then the watched cards.
+async fn count_audit(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    e: &AuditLogEntry,
+) -> Result<()> {
     if matches!(e.action_type, A::MemberDisconnect | A::MemberMove) {
         return crate::voice_nuke::note(app, &cfg, gid, e).await;
     }
@@ -2275,6 +2296,7 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
 
 /// A member overwrite that gives a quarantined member channel access is the hold's matter too
 /// (D14): undone, and the actor quarantined as for a role change. A join quarantine only undoes.
+/// Lifting the quarantine's own deny (clearing its bits or deleting the overwrite) is a grant too.
 pub(crate) async fn hold_overwrite(
     app: &App,
     e: &AuditLogEntry,
@@ -2283,25 +2305,37 @@ pub(crate) async fn hold_overwrite(
     let (Some(gid), Some(channel), Some(o)) = (e.guild_id, e.target_id, e.options.as_ref()) else {
         return Ok(());
     };
-    let Some((old, gained)) = e.changes.iter().find_map(|c| match c {
-        AuditLogChange::Allow { old, new } => {
-            let (old, new) = (
-                old.unwrap_or(Permissions::empty()),
-                new.unwrap_or(Permissions::empty()),
-            );
-            (!(new - old).is_empty()).then_some((old, new - old))
-        }
-        _ => None,
-    }) else {
-        return Ok(());
+    // A create has no old values and a delete no new ones: both read as empty.
+    let bits = |allow: bool| {
+        e.changes.iter().find_map(|c| match c {
+            AuditLogChange::Allow { old, new } if allow => Some((*old, *new)),
+            AuditLogChange::Deny { old, new } if !allow => Some((*old, *new)),
+            _ => None,
+        })
     };
+    let empty = Permissions::empty();
+    let allow = bits(true);
+    let (old_allow, new_allow) = allow.unwrap_or((None, None));
+    let (old_deny, new_deny) = bits(false).map_or((empty, empty), |(o, n)| {
+        (o.unwrap_or(empty), n.unwrap_or(empty))
+    });
+    let gained = new_allow.unwrap_or(empty) - old_allow.unwrap_or(empty);
+    // Removing a deny grants as much as adding an allow (a delete removes all of it).
+    let lost = old_deny - new_deny;
+    if gained.is_empty() && lost.is_empty() {
+        return Ok(());
+    }
     let user = match (o.id, o.kind.as_deref()) {
         (Some(user), Some("1")) => user.cast::<UserMarker>(),
         (Some(role), Some("0")) => {
-            return hold_role_overwrite(app, gid, channel.cast(), role.cast(), gained).await
+            return hold_role_overwrite(app, gid, channel.cast(), role.cast(), gained | lost).await
         }
         _ => return Ok(()),
     };
+    // A member's lost deny matters only where the quarantine put it (`quarantine_overwrites`).
+    if gained.is_empty() && !hid_channel(app, gid, user, channel.get()).await? {
+        return Ok(());
+    }
     let Some(on_join) = quarantine_kind(app, gid, user).await? else {
         return Ok(());
     };
@@ -2313,17 +2347,20 @@ pub(crate) async fn hold_overwrite(
     }
     let undo = async {
         let live = app.http.channel(channel.cast()).await?.model().await?;
-        let deny = live
+        let now = live
             .permission_overwrites
             .unwrap_or_default()
             .into_iter()
-            .find(|o| o.id.get() == user.get())
-            .map(|o| o.deny);
+            .find(|o| o.id.get() == user.get());
+        // The allow as it was, and the lost deny back on top of what is there now.
         let o = PermissionOverwrite {
             id: user.cast(),
             kind: PermissionOverwriteType::Member,
-            allow: Some(old),
-            deny,
+            allow: Some(match allow {
+                Some((old, _)) => old.unwrap_or(empty),
+                None => now.as_ref().map_or(empty, |o| o.allow),
+            }),
+            deny: Some(now.map_or(empty, |o| o.deny) | lost),
         };
         app.http
             .update_channel_permission(channel.cast(), &o)
@@ -2338,6 +2375,18 @@ pub(crate) async fn hold_overwrite(
         return Ok(());
     }
     quarantine_and_revert(app, gid, actor, "gave a quarantined member channel access").await
+}
+
+/// Whether the quarantine put a deny on `user`'s overwrite in `channel` (`hide_channels`).
+async fn hid_channel(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, channel: u64) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = $2 AND channel_id = $3)",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get() as i64)
+    .bind(channel as i64)
+    .fetch_one(&app.pool)
+    .await?)
 }
 
 /// A managed role's overwrite (booster, a bot's role) that now grants more in a channel: the

@@ -1574,6 +1574,29 @@ async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
     .await
     .unwrap();
     assert_eq!(saved, (true, 0, 2));
+    // Taking that deny away again is a grant too: a managed role's deny removed, or the member
+    // overwrite the quarantine put there deleted (type 15), gets the deny back.
+    let lift = |kind: u8, id: &str, of: &str| -> AuditLogEntry {
+        serde_json::from_value(json!({
+            "action_type": kind, "id": "2", "user_id": "9", "target_id": "30", "guild_id": g.to_string(),
+            "options": {"id": id, "type": of},
+            "changes": [{"key": "deny", "old_value": "1026"}, {"key": "allow", "old_value": "0"}]
+        }))
+        .unwrap()
+    };
+    crate::antinuke::hold_overwrite(&t.app, &lift(15, "6", "0"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 2, "role deny deleted");
+    t.set(|m| {
+        m.overwrites.insert(30, vec![]);
+    });
+    let _ = crate::antinuke::hold_overwrite(&t.app, &lift(15, "50", "1"), Id::new(9)).await;
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 3, "member deny deleted");
+    assert_eq!(t.calls(r#""deny":"1026""#), 3, "put back as it was");
+    // A deny the quarantine did not put there is not the hold's matter.
+    let _ = crate::antinuke::hold_overwrite(&t.app, &lift(14, "52", "1"), Id::new(9)).await;
+    assert_eq!(t.calls("PUT /channels/30/permissions/52"), 0);
     for q in [
         "DELETE FROM quarantines WHERE guild_id = $1",
         "DELETE FROM quarantine_overwrites WHERE guild_id = $1",
