@@ -258,7 +258,7 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
             severity: Severity::Warn,
             title: "Settings outside their range",
             detail: format!(
-                "Saved before the limits: {}. A 0 window or count switches that protection off. Set a value in range on its page and save.",
+                "Saved before the limits: {}. A 0 window or count switches that protection off; a value marked \"used as\" still works at that value. Set a value in range on its page and save.",
                 old.join(", ")
             ),
             fix: None,

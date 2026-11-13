@@ -349,8 +349,8 @@ impl Default for AutoSlowmodeCfg {
 
 /// At least two members' worth: one member adds at most max heat.
 pub const SLOW_PCT: (i64, i64) = (200, 5_000);
-/// Discord's maximum slowmode is 6 hours.
-pub const SLOW_SECS: (i64, i64) = (1, 21_600);
+/// At most 2 minutes: an automatic slowmode is temporary (Thomas, 2026-11-13).
+pub const SLOW_SECS: (i64, i64) = (1, 120);
 pub const SLOW_ON: (i64, i64) = (10, 3_600);
 pub const SLOW_CALM: (i64, i64) = (10, 3_600);
 
@@ -1085,7 +1085,7 @@ mod tests {
                 c.min_on_secs,
                 c.calm_secs
             ),
-            (true, 200, 21_600, 10, 3_600)
+            (true, 200, 120, 10, 3_600)
         );
         let d = AutoSlowmodeCfg::default();
         assert_eq!(d.clone().clamped().channel_pct, d.channel_pct);

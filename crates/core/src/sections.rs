@@ -1228,7 +1228,7 @@ mod tests {
             (200, 1, 3_600, 10)
         );
         let c = am(json!({"enabled": true, "slowmode_secs": 99_999})).auto_slowmode;
-        assert_eq!((c.slowmode_secs, c.channel_pct), (21_600, 300));
+        assert_eq!((c.slowmode_secs, c.channel_pct), (120, 300));
         // -1 does not fit a u32: the card falls back to its defaults, automod stays on.
         let bad = am(json!({"enabled": true, "calm_secs": -1}));
         assert!(bad.enabled && !bad.auto_slowmode.enabled);
