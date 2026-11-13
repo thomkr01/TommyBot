@@ -91,10 +91,12 @@ pub(crate) async fn gated(
         return Ok(Some("Mod commands are locked during panic mode".into()));
     }
     let cfg = app.cfg(gid.get()).await?;
-    let Some(limit) = permits::command_limit(actor, action, nuke_fallback(&cfg.antinuke, action))
-    else {
+    let fallback = nuke_fallback(&cfg.antinuke, action);
+    let own = permits::command_limit(actor, action, None);
+    let Some(limit) = own.or(permits::command_limit(actor, action, fallback)) else {
         return Ok(None);
     };
+    let action = limit_key(own.is_some(), action);
     let ok = app.rate_limiter.lock().unwrap().allow(
         actor_id.get() as i64,
         action,
@@ -121,6 +123,15 @@ pub(crate) async fn gated(
     Ok(Some(format!(
         "Command rate limit hit for `{action}`: nothing done, you have been quarantined"
     )))
+}
+
+/// The rate limiter key of a command. Anti-nuke counts bans and kicks on one card, so under its
+/// fallback limit they share one key too (D5); a permit's own limit stays per action.
+fn limit_key(own: bool, action: &str) -> &str {
+    match (own, action) {
+        (false, "ban" | "kick") => "ban+kick",
+        _ => action,
+    }
 }
 
 /// Anti-nuke's limit for the same action, for a permit without its own (D5). Anti-nuke trips when
@@ -987,6 +998,8 @@ mod tests {
         let l = super::nuke_fallback(&an, "kick").unwrap();
         assert_eq!((l.per_min, l.per_hour), (2, 8), "kicks share the ban card");
         assert!(super::nuke_fallback(&an, "purge").is_none());
+        assert_eq!(super::limit_key(false, "kick"), super::limit_key(false, "ban"));
+        assert_eq!(super::limit_key(true, "kick"), "kick", "a permit's own limit");
         assert!(
             super::nuke_fallback(&an, "timeout").is_none(),
             "opt-in card not set"
