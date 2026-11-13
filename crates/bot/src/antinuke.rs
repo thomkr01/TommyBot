@@ -178,6 +178,12 @@ async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()>
     }
     let cfg = app.cfg(gid.get()).await?;
     if !cfg.antinuke.enabled {
+        // Thomas 2026-11-13 22:49: a permit role still comes only from Owner, EO or TA with
+        // anti-nuke off (Discord's Manage Roles gives no more power than a member has); it is
+        // taken back, nobody is punished.
+        if e.action_type == A::MemberRoleUpdate {
+            return guard_permit_roles(app, e, actor, false).await;
+        }
         return Ok(());
     }
     // Each check runs whatever an earlier one returned: an error in one (a REST or DB hiccup)
@@ -204,7 +210,7 @@ async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()>
         // A role rename still counts below.
         keep(guard_perms(app, &cfg, e, actor).await);
         if e.action_type == A::MemberRoleUpdate {
-            keep(guard_permit_roles(app, e, actor).await);
+            keep(guard_permit_roles(app, e, actor, true).await);
         }
     }
     if matches!(
@@ -714,7 +720,12 @@ async fn guard_perms(
 
 /// Giving a member a role that carries a permit hands out a permit, and with it any whitelist:
 /// undone and the actor quarantined, unless an Owner, Extra Owner or Trusted Admin did it (D16).
-async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+async fn guard_permit_roles(
+    app: &App,
+    e: &AuditLogEntry,
+    actor: Id<UserMarker>,
+    punish: bool,
+) -> Result<()> {
     let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
         return Ok(());
     };
@@ -763,7 +774,7 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
         return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
     }
     // A failed undo must not spare the actor.
-    for (r, _) in permit {
+    for &(r, _) in &permit {
         let undo = app
             .http
             .remove_guild_member_role(gid, target.cast(), Id::new(r as u64))
@@ -778,6 +789,19 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
     if unsure {
         let what = "gave a member a role that carries a permit";
         return unsure_log(app, gid, actor, Some(target.cast()), what).await;
+    }
+    if !punish {
+        let names: Vec<String> = permit.iter().map(|r| format!("<@&{}>", r.0)).collect();
+        let log = Log::new("Anti Nuke", ALERT)
+            .user("Responsible", actor.get())
+            .user("Member", target.get())
+            .text("**Gave a member a role that carries a permit**")
+            .line("Roles", &names.join(", "))
+            .line(
+                "Action",
+                "taken back: only an Owner, Extra Owner or Trusted Admin gives permit roles. Anti-nuke is off, so nobody was punished",
+            );
+        return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
     }
     quarantine_and_revert(
         app,
@@ -2777,40 +2801,6 @@ pub(crate) async fn is_bot(app: &App, user: Id<UserMarker>) -> bool {
     async { anyhow::Ok(app.http.user(user).await?.model().await?.bot) }
         .await
         .unwrap_or(false)
-}
-
-/// Whether anti-nuke quarantined `actor` or put them in a nuke case since `since` (unix secs), so
-/// Ban Sync does not spread what a hacked staff account did. With `None`, any nuke case or the
-/// quarantine of someone who could ban, kick or quarantine (`Level::has("quarantine")`) counts:
-/// a quarantine on join or by `t!quarantine` hits members a raider can provoke. A nuke case keeps
-/// the time it opened, so cases opened up to [`NUKE_GAP`] earlier count too.
-pub(crate) async fn contained_since(
-    app: &App,
-    gid: Id<GuildMarker>,
-    actor: Option<Id<UserMarker>>,
-    since: i64,
-) -> Result<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM quarantines q WHERE q.guild_id = $1
-                          AND q.created_at >= to_timestamp($3::float8)
-                          AND CASE WHEN $2::bigint IS NULL THEN
-                                EXISTS (SELECT 1 FROM extra_owners WHERE guild_id = $1 AND user_id = q.user_id)
-                                OR EXISTS (SELECT 1 FROM trusted_admins WHERE guild_id = $1 AND user_id = q.user_id)
-                                OR EXISTS (SELECT 1 FROM permit_roles r JOIN permits p ON p.id = r.permit_id
-                                           WHERE r.guild_id = $1 AND r.role_id = ANY(q.saved_roles)
-                                             AND p.perms && ARRAY['ban', 'kick', 'quarantine'])
-                              ELSE q.user_id = $2 END)
-             OR EXISTS (SELECT 1 FROM nuke_incidents WHERE guild_id = $1
-                          AND created_at >= to_timestamp($3::float8) - make_interval(secs => $4)
-                          AND ($2::bigint IS NULL OR data->'quarantined' @> to_jsonb($2::bigint)
-                               OR data->'failed' @> to_jsonb($2::bigint)))",
-    )
-    .bind(gid.get() as i64)
-    .bind(actor.map(|a| a.get() as i64))
-    .bind(since as f64)
-    .bind(NUKE_GAP.as_secs_f64())
-    .fetch_one(&app.pool)
-    .await?)
 }
 
 #[cfg(test)]

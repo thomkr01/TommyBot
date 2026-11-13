@@ -578,7 +578,6 @@ pub const SENSITIVE: &[&str] = &[
     "panic",
     "backups",
     "catch",
-    "ban_sync",
     "raider_list",
 ];
 
@@ -911,47 +910,6 @@ pub struct CatchCfg {
     pub users: Vec<Id<UserMarker>>,
 }
 
-/// Ban Sync: copies bans between servers that have the same Discord owner. Off until the owner turns it on.
-#[derive(Deserialize)]
-#[serde(default)]
-pub struct BanSyncCfg {
-    pub enabled: bool,
-    /// Send this server's bans to the other servers in the group.
-    pub share: bool,
-    /// Which automatic bans are sent too (staff bans always are while `share` is on).
-    pub share_joinraid: bool,
-    pub share_automod: bool,
-    pub share_joingate: bool,
-    pub share_verify: bool,
-    pub receive: BanSyncReceive,
-    /// Lift the copies when the source ban is lifted.
-    pub sync_unbans: bool,
-}
-
-impl Default for BanSyncCfg {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            share: true,
-            share_joinraid: true,
-            share_automod: true,
-            share_joingate: false,
-            share_verify: false,
-            receive: BanSyncReceive::Alert,
-            sync_unbans: true,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BanSyncReceive {
-    Off,
-    #[default]
-    Alert,
-    Ban,
-}
-
 /// Raider List: acts on confirmed raider accounts when they join. Off until saved on.
 #[derive(Deserialize)]
 #[serde(default)]
@@ -1166,14 +1124,6 @@ mod tests {
         assert!(!c.enabled && c.scan_members && c.lift_on_removal && !c.no_collect);
         assert_eq!(c.action, RaiderAction::Ban);
         assert_eq!(c.categories, RaiderCategory::ALL);
-    }
-
-    #[test]
-    fn ban_sync_is_off_until_saved_on() {
-        let c: BanSyncCfg = serde_json::from_value(json!({})).unwrap();
-        assert!(!c.enabled && c.share && c.sync_unbans);
-        assert_eq!(c.receive, BanSyncReceive::Alert);
-        assert!(c.share_joinraid && c.share_automod && !c.share_joingate && !c.share_verify);
     }
 
     #[test]

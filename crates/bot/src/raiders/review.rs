@@ -21,10 +21,10 @@ use super::{
 };
 use crate::{
     app::{now_secs, App},
-    bansync::{self, live_owner, md},
     commands::{self, ModKind},
     modcmds::{self, ModCmd},
-    reply,
+    owner::live_owner,
+    reply::{self, md},
 };
 
 /// `raider:{ban|kick|quarantine|allow}:{user}` under an alert. The id is data only: the server is
@@ -42,7 +42,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         let here = (i.guild_id?, i.channel.as_ref()?.id);
         Some(click(app, here, i.author_id()?, action, user).await)
     };
-    bansync::answer_click(app, i, clicked).await?;
+    reply::answer_click(app, i, clicked).await?;
     Ok(true)
 }
 

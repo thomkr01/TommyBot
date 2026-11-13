@@ -1,7 +1,7 @@
 //! Tests of automod's message text and its punishment paths (own file to keep automod.rs short).
-//! The DB tests run only when DATABASE_URL points at a scratch Postgres, with Ban Sync's mock Discord.
+//! The DB tests run only when DATABASE_URL points at a scratch Postgres, with the mock Discord in `test_support`.
 use super::{parts::app_text, *};
-use crate::bansync::tests::T;
+use crate::test_support::T;
 use serde_json::{json, Value};
 
 /// A guild message by user 50 in channel 7, with `extra` fields on top.
@@ -385,6 +385,54 @@ async fn native_hits_of_whitelisted_members_do_not_fill_a_scope() {
         .await
         .unwrap();
     assert_eq!(t.calls("PATCH"), 0, "the owner's hit did not count");
+    t.cleanup().await;
+}
+
+/// Thomas 2026-11-13: a Discord AutoMod rule changed by someone without a permit triggers no
+/// TommyBot action until a trusted change.
+#[tokio::test]
+async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change() {
+    let Some(t) = T::new(264).await else { return };
+    let gid = t.g(0);
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"]}}}),
+    )
+    .await;
+    let edit = |id: u64, actor: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
+        serde_json::from_value(json!({
+            "id": id.to_string(), "action_type": 141, "guild_id": gid.to_string(), "target_id": "77",
+            "user_id": actor.to_string(), "reason": null, "changes": [],
+        }))
+        .unwrap()
+    };
+    let hit: twilight_model::gateway::payload::incoming::AutoModerationActionExecution =
+        serde_json::from_value(json!({
+            "guild_id": gid.to_string(), "action": {"type": 1}, "rule_id": "77",
+            "rule_trigger_type": 1, "user_id": (t.base + 6).to_string(), "content": "x",
+            "matched_keyword": null, "matched_content": null,
+        }))
+        .unwrap();
+    crate::native::on_rule_audit(&t.app, &edit(2, t.base + 5))
+        .await
+        .unwrap();
+    // An older trusted entry arriving late (a replay, a parallel task) does not clear it.
+    crate::native::on_rule_audit(&t.app, &edit(1, t.owner()))
+        .await
+        .unwrap();
+    // The bot's own sync of the rule keeps the verdict.
+    crate::native::on_rule_audit(&t.app, &edit(3, crate::test_support::ME))
+        .await
+        .unwrap();
+    crate::native::on_native_hit(&t.app, &hit).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 0, "no action after an untrusted change");
+    crate::native::rule_changed(gid.get(), 77);
+    crate::native::on_rule_audit(&t.app, &edit(4, t.owner()))
+        .await
+        .unwrap();
+    crate::native::on_native_hit(&t.app, &hit).await.unwrap();
+    assert!(t.calls("PATCH") >= 1, "acts again after the owner's change");
     t.cleanup().await;
 }
 

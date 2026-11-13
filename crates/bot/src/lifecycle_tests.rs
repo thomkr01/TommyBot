@@ -1,6 +1,6 @@
 //! Tests of what ends or undoes a moderation action (deep dive g2a): unban and renewal jobs, lock
 //! timers, panic's end, reverts and raid punishments. They run only when DATABASE_URL points at
-//! a scratch Postgres; Discord is Ban Sync's mock.
+//! a scratch Postgres; Discord is the mock in `test_support`.
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -14,8 +14,8 @@ use twilight_model::{gateway::payload::incoming::MemberAdd, id::Id, util::Timest
 
 use crate::{
     app::now_secs,
-    bansync::{self, tests::T},
     commands::{self, ModKind},
+    test_support::T,
 };
 
 /// (payload, seconds until it runs) of the pending `kind` jobs of server `i`, oldest first.
@@ -198,212 +198,6 @@ async fn a_later_ban_drops_an_older_temp_bans_unban() {
     let left = pending(&t, 0, "unban").await;
     assert_eq!(left.len(), 1, "{left:?}");
     assert!(left[0].1 > 7000, "the new temp ban's job: {left:?}");
-    t.cleanup().await;
-}
-
-/// D23: Ban Sync copies a permanent ban over a local temp ban, and the temp ban's unban goes.
-#[tokio::test]
-async fn a_synced_ban_replaces_a_shorter_local_temp_ban() {
-    let Some(t) = T::new(74).await else { return };
-    let o = t.owner();
-    t.server(0, o, "off").await;
-    t.server(1, o, "ban").await;
-    t.ban(1, 720, "temp ban");
-    enqueue(&t, 1, "unban", json!({"user": 720}), 3600).await;
-    t.ban(0, 720, "raiding");
-    bansync::share_job(&t.app, t.g(0), &t.share(720, Some(77)))
-        .await
-        .unwrap();
-    t.run_copies().await;
-    assert_eq!(t.rows(720).await, [T::row(1, "banned", None)]);
-    assert!(pending(&t, 1, "unban").await.is_empty());
-    // Discord kept the first reason, yet the copy is ours: the source's lift gives the temp ban back.
-    assert_eq!(t.banned(1, 720).as_deref(), Some("temp ban"));
-    t.set(|m| {
-        m.bans.remove(&(t.g(0).get(), 720));
-    });
-    bansync::lift_job(&t.app, t.g(0), &t.share(720, Some(77)))
-        .await
-        .unwrap();
-    let why = Some("the local temp ban runs on");
-    assert_eq!(t.rows(720).await, [T::row(1, "lifted", why)]);
-    assert_eq!(t.banned(1, 720).as_deref(), Some("temp ban"));
-    let left = pending(&t, 1, "unban").await;
-    assert_eq!(left.len(), 1, "{left:?}");
-    assert!((3590..=3600).contains(&left[0].1), "the old end: {left:?}");
-    t.cleanup().await;
-}
-
-/// Live 11-13: a copy laid over a local temp ban that has ended by the source's lift is unbanned,
-/// and a retry after the copy's ban (row still pending) sees that ban as its own.
-#[tokio::test]
-async fn a_copy_over_a_temp_ban_is_ours_on_retry_and_lifted_after_its_end() {
-    let Some(t) = T::new(87).await else { return };
-    let o = t.owner();
-    t.server(0, o, "off").await;
-    t.server(1, o, "ban").await;
-    t.ban(1, 721, "temp ban");
-    enqueue(&t, 1, "unban", json!({"user": 721}), 3600).await;
-    t.ban(0, 721, "raiding");
-    bansync::share_job(&t.app, t.g(0), &t.share(721, Some(77)))
-        .await
-        .unwrap();
-    t.run_copies().await;
-    assert_eq!(t.rows(721).await, [T::row(1, "banned", None)]);
-    t.exec("UPDATE ban_sync_links SET temp_end = now() - interval '1 minute' WHERE guild_id = $1 + 1 AND user_id = 721")
-        .await;
-    t.set(|m| {
-        m.bans.remove(&(t.g(0).get(), 721));
-    });
-    bansync::lift_job(&t.app, t.g(0), &t.share(721, Some(77)))
-        .await
-        .unwrap();
-    assert_eq!(t.rows(721).await, [T::row(1, "lifted", None)]);
-    assert_eq!(t.banned(1, 721), None);
-    assert!(pending(&t, 1, "unban").await.is_empty());
-    // A try banned over the temp ban (its unban job is gone) and stopped before the row moved on.
-    t.ban(1, 722, "temp ban");
-    t.ban(0, 722, "raiding");
-    t.link(1, 722, 0, "pending").await;
-    t.exec("UPDATE ban_sync_links SET over_reason = 'temp ban', temp_end = now() + interval '1 hour' WHERE guild_id = $1 + 1 AND user_id = 722")
-        .await;
-    let copy = json!({"user": 722, "source": t.g(0).get()});
-    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
-    assert_eq!(t.rows(722).await, [T::row(1, "banned", None)]);
-    let cases = t
-        .count(
-            "SELECT count(*) FROM cases WHERE guild_id = $1 + 1 AND user_id = 722 AND kind = 'ban'",
-        )
-        .await;
-    assert_eq!(cases, 1, "the retry finished the copy");
-    t.cleanup().await;
-}
-
-/// R-g4: a staff ban over a done copy is theirs (Discord keeps the copy's reason, or the temp
-/// ban's), so the source's lift leaves it and its unban job; a leased temp unban job still counts.
-#[tokio::test]
-async fn a_staff_ban_over_a_copy_is_not_lifted_and_a_leased_temp_job_counts() {
-    let Some(t) = T::new(62).await else { return };
-    let o = t.owner();
-    t.server(0, o, "off").await;
-    t.server(1, o, "ban").await;
-    bot_on_top(&t, 1);
-    let unban_source = |u: u64| {
-        t.set(|m| {
-            m.bans.remove(&(t.g(0).get(), u));
-        })
-    };
-    let hand = Some("banned again by hand");
-    // A copy laid over a local temp ban, then a week's tempban by staff.
-    t.ban(1, 723, "temp ban");
-    enqueue(&t, 1, "unban", json!({"user": 723}), 3600).await;
-    // A plain copy, then a permanent ban by staff.
-    for u in [723, 724] {
-        t.ban(0, u, "raiding");
-        bansync::share_job(&t.app, t.g(0), &t.share(u, Some(77)))
-            .await
-            .unwrap();
-    }
-    t.run_copies().await;
-    assert_eq!(t.rows(723).await, [T::row(1, "banned", None)]);
-    assert_eq!(t.rows(724).await, [T::row(1, "banned", None)]);
-    ban(&t, 1, 723, Some(7 * 86_400)).await;
-    ban(&t, 1, 724, None).await;
-    for u in [723, 724] {
-        unban_source(u);
-        bansync::lift_job(&t.app, t.g(0), &t.share(u, Some(77)))
-            .await
-            .unwrap();
-        assert_eq!(t.rows(u).await, [T::row(1, "skipped", hand)], "{u}");
-        assert!(t.banned(1, u).is_some(), "{u}");
-    }
-    let left = pending(&t, 1, "unban").await;
-    assert_eq!(left.len(), 1, "{left:?}");
-    assert!(left[0].1 > 7 * 86_400 - 10, "staff's own end: {left:?}");
-    // A retry while the temp ban's unban job is leased did not ban yet: not ours, it waits.
-    t.ban(1, 725, "temp ban");
-    t.ban(0, 725, "raiding");
-    enqueue(&t, 1, "unban", json!({"user": 725}), 3600).await;
-    t.exec("UPDATE scheduled_jobs SET locked_until = now() + interval '60 seconds' WHERE guild_id = $1 + 1 AND payload->>'user' = '725'")
-        .await;
-    t.link(1, 725, 0, "pending").await;
-    t.exec("UPDATE ban_sync_links SET over_reason = 'temp ban', temp_end = (SELECT run_at FROM scheduled_jobs WHERE guild_id = $1 + 1 AND payload->>'user' = '725') WHERE guild_id = $1 + 1 AND user_id = 725")
-        .await;
-    let copy = json!({"user": 725, "source": t.g(0).get()});
-    assert!(bansync::copy_job(&t.app, t.g(1), &copy).await.is_err());
-    assert_eq!(
-        t.rows(725).await,
-        [T::row(1, "pending", None)],
-        "no phantom ban case"
-    );
-    t.cleanup().await;
-}
-
-/// R-g4 round 2: a copy is not laid over a temp ban that is ending (its unban is due or running);
-/// the copy job fails and retries, and lays the copy once the temp unban is no longer running.
-#[tokio::test]
-async fn a_copy_waits_for_a_temp_ban_that_is_ending() {
-    let Some(t) = T::new(63).await else { return };
-    let o = t.owner();
-    t.server(0, o, "off").await;
-    t.server(1, o, "ban").await;
-    t.ban(1, 726, "temp ban");
-    t.ban(0, 726, "raiding");
-    enqueue(&t, 1, "unban", json!({"user": 726}), 3600).await;
-    t.exec("UPDATE scheduled_jobs SET locked_until = now() + interval '60 seconds' WHERE guild_id = $1 + 1 AND payload->>'user' = '726'")
-        .await;
-    t.link(1, 726, 0, "pending").await;
-    let copy = json!({"user": 726, "source": t.g(0).get()});
-    assert!(bansync::copy_job(&t.app, t.g(1), &copy).await.is_err());
-    assert_eq!(t.rows(726).await, [T::row(1, "pending", None)]);
-    assert_eq!(pending(&t, 1, "unban").await.len(), 1, "the temp job stays");
-    // The try failed and freed its lease: the copy goes over the temp ban.
-    t.exec("UPDATE scheduled_jobs SET locked_until = NULL WHERE guild_id = $1 + 1")
-        .await;
-    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
-    assert_eq!(t.rows(726).await, [T::row(1, "banned", None)]);
-    assert!(pending(&t, 1, "unban").await.is_empty());
-    t.cleanup().await;
-}
-
-/// FINAL review: the ban's own drop of the temp ban's unban job is best effort; when it fails,
-/// the copy does not count as done (a left job would disown and later lift it), and the retry
-/// finishes it.
-#[tokio::test]
-async fn a_copy_retries_when_the_temp_ban_job_cannot_be_dropped() {
-    let Some(t) = T::new(64).await else { return };
-    let o = t.owner();
-    t.server(0, o, "off").await;
-    t.server(1, o, "ban").await;
-    t.ban(1, 727, "temp ban");
-    t.ban(0, 727, "raiding");
-    enqueue(&t, 1, "unban", json!({"user": 727}), 3600).await;
-    t.link(1, 727, 0, "pending").await;
-    let g = t.g(1).get();
-    let ddl = format!(
-        "CREATE FUNCTION tb_keep_727_{g}() RETURNS trigger LANGUAGE plpgsql AS
-           $$ BEGIN RAISE EXCEPTION 'delete refused'; END $$;
-         CREATE TRIGGER tb_keep_727_{g} BEFORE DELETE ON scheduled_jobs FOR EACH ROW
-           WHEN (OLD.guild_id = {g} AND OLD.kind = 'unban' AND OLD.payload->>'user' = '727')
-           EXECUTE FUNCTION tb_keep_727_{g}();"
-    );
-    sqlx::raw_sql(sqlx::AssertSqlSafe(ddl))
-        .execute(&t.app.pool)
-        .await
-        .unwrap();
-    let copy = json!({"user": 727, "source": t.g(0).get()});
-    let first = bansync::copy_job(&t.app, t.g(1), &copy).await;
-    let undo =
-        format!("DROP TRIGGER tb_keep_727_{g} ON scheduled_jobs; DROP FUNCTION tb_keep_727_{g}();");
-    sqlx::raw_sql(sqlx::AssertSqlSafe(undo))
-        .execute(&t.app.pool)
-        .await
-        .unwrap();
-    assert!(first.is_err());
-    assert_eq!(t.rows(727).await, [T::row(1, "pending", None)]);
-    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
-    assert_eq!(t.rows(727).await, [T::row(1, "banned", None)]);
-    assert!(pending(&t, 1, "unban").await.is_empty());
     t.cleanup().await;
 }
 
@@ -806,7 +600,8 @@ async fn panic_owns_only_a_lock_it_saved() {
     }
     // Server 1 can be locked: the bot's own member is there.
     t.set(|m| {
-        m.members.insert((t.g(1).get(), bansync::tests::ME), vec![]);
+        m.members
+            .insert((t.g(1).get(), crate::test_support::ME), vec![]);
     });
     for i in [0, 1] {
         let cfg = t.app.cfg(t.g(i).get()).await.unwrap().panic.clone();
@@ -853,7 +648,7 @@ async fn panic_stops_writing_and_puts_it_back() {
         t.server_config(i, t.owner(), json!({ "panic": panic }))
             .await;
         t.set(|m| {
-            m.members.insert((g, bansync::tests::ME), vec![7 + i]);
+            m.members.insert((g, crate::test_support::ME), vec![7 + i]);
             m.roles
                 .insert(g, vec![(g, false, everyone, 0), (7 + i, false, 0, 5)]);
             // The category already denies @everyone reactions: the exemption must not open them.
@@ -971,7 +766,7 @@ async fn panic_takes_back_what_an_older_lock_gave_up() {
     t.server_config(0, t.owner(), json!({ "panic": panic }))
         .await;
     t.set(|m| {
-        m.members.insert((g, bansync::tests::ME), vec![7]);
+        m.members.insert((g, crate::test_support::ME), vec![7]);
         m.roles
             .insert(g, vec![(g, false, SEND | (1 << 10), 0), (7, false, 0, 5)]);
     });
@@ -1047,7 +842,7 @@ async fn panic_takes_back_what_an_older_lock_gave_up() {
     t.server_config(1, t.owner(), json!({ "panic": panic }))
         .await;
     t.set(|m| {
-        m.members.insert((g1, bansync::tests::ME), vec![8]);
+        m.members.insert((g1, crate::test_support::ME), vec![8]);
         m.roles
             .insert(g1, vec![(g1, false, SEND | (1 << 10), 0), (8, false, 0, 5)]);
     });
@@ -1095,7 +890,7 @@ async fn a_lock_and_unlock_keep_unknown_permission_bits() {
             g,
             vec![(g, false, voice_status | ban, 0), (500, true, 8, 10)],
         );
-        m.members.insert((g, bansync::tests::ME), vec![500]);
+        m.members.insert((g, crate::test_support::ME), vec![500]);
     });
     assert!(crate::lockdown::lock(&t.app, gid, LockKind::Role)
         .await

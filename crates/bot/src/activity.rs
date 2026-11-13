@@ -335,7 +335,7 @@ fn owner_renamed(
 mod tests {
     use super::*;
 
-    use crate::bansync::tests::T;
+    use crate::test_support::T;
     use serde_json::json;
 
     /// A reaction or thread heat strike reaches the strike-cap lockdown too, also when the timeout

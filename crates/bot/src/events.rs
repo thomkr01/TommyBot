@@ -528,10 +528,14 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::GuildUpdate(g) => {
             app.invalidate_guild(g.id);
-            crate::bansync::owner_seen(app, g.id, g.owner_id).await?
+            crate::owner::owner_seen(app, g.id, g.owner_id).await?
         }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
+        Event::AutoModerationRuleCreate(r) => {
+            crate::native::rule_changed(r.0.guild_id.get(), r.0.id.get())
+        }
         Event::AutoModerationRuleUpdate(r) => {
+            crate::native::rule_changed(r.0.guild_id.get(), r.0.id.get());
             crate::automod::on_rule_change(app, &r.0, false).await
         }
         Event::AutoModerationRuleDelete(r) => crate::automod::on_rule_change(app, &r.0, true).await,
@@ -570,7 +574,6 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                 && !crate::appeals::handle(app, &i.0).await?
                 && !crate::settings::handle(app, &i.0).await?
                 && !crate::whitelist::handle(app, &i.0).await?
-                && !crate::bansync::handle(app, &i.0).await?
                 && !crate::raiders::handle(app, &i.0).await?
                 && !crate::nsfw::handle(app, &i.0).await?
             {
@@ -585,17 +588,16 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             let g = e.0.guild_id.map(|g| g.get());
             let inflight = g.and_then(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
             let new = g.is_none() || inflight.is_some();
-            let nuke = if new {
-                antinuke::on_audit(app, &e.0).await
+            let (nuke, rule) = if new {
+                let nuke = antinuke::on_audit(app, &e.0).await;
+                (nuke, crate::native::on_rule_audit(app, &e.0).await)
             } else {
-                Ok(())
+                (Ok(()), Ok(()))
             };
             if let (true, Some(g)) = (new, g) {
                 crate::welcome::handled_audit(app, g, &e.0).await;
             }
             drop(inflight);
-            let ban = crate::bansync::on_ban(app, &e.0).await;
-            let unban = crate::bansync::on_unban(app, &e.0).await;
             let allow = crate::raiders::on_unban(app, &e.0).await;
             if let Err(err) = verify::deleted::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "verification channel delete check failed");
@@ -610,7 +612,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             if let Err(err) = crate::modstats::on_audit(app, &e.0).await {
                 tracing::warn!(?err, "recording a mod action failed");
             }
-            nuke.and(ban).and(unban).and(allow)?
+            nuke.and(allow).and(rule)?
         }
         // Voice raid first: the anti-nuke recheck can wait out its fetch gap.
         Event::VoiceStateUpdate(v) => {

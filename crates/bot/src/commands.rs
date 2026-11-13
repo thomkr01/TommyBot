@@ -255,7 +255,7 @@ pub async fn apply_dm(
         appeal,
     };
     // A hackban targets ids that left the server: a DM per raid id would only cost DM_WAIT each.
-    let dm = (reply::wants_dm(flags.dm, &cfg.misc) && !flags.hack && !flags.no_dm)
+    let dm = (reply::wants_dm(flags.dm, &cfg.misc) && !flags.hack)
         .then(|| reply::tell(app, gid, target, notice));
     let audit = audit_reason(reason, actor_id);
     let act = async {
@@ -584,6 +584,14 @@ pub async fn run(app: &App, msg: &MessageCreate, mut p: Parsed) -> Result<()> {
             Ok(id) => targets.push(id),
             Err(e) => say(app, msg, &e).await?,
         }
+    }
+    // A run with no target would report "All members were warned!" (live 2026-11-13). Failed
+    // names were answered above; a role mention is not a target.
+    if targets.is_empty() {
+        if p.names.is_empty() {
+            say(app, msg, "Name a member: a mention, an id or a name.").await?;
+        }
+        return Ok(());
     }
     let unsure = p.unsure();
     let job = Pending::new(

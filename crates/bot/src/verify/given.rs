@@ -374,7 +374,7 @@ fn changed(app: &App, gid: Id<GuildMarker>, e: &AuditLogEntry) {
     }
 }
 
-/// Runs first in the audit event arm, before anti-nuke, Ban Sync and the Raider List.
+/// Runs first in the audit event arm, before anti-nuke and the Raider List.
 pub(crate) fn audit_changed(app: &App, e: &AuditLogEntry) {
     if let Some(gid) = e.guild_id {
         changed(app, gid, e);

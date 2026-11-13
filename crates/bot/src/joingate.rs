@@ -929,7 +929,7 @@ pub(crate) async fn punish_job(
     p: &serde_json::Value,
 ) -> Result<()> {
     use anyhow::Context;
-    let user = crate::bansync::need(p, "user")?;
+    let user = crate::scheduler::need(p, "user")?;
     let action: Action = serde_json::from_value(p["action"].clone())?;
     let why = p["why"].as_str().context("job payload has no why")?;
     if app.is_immune(gid, Id::new(user)).await? || crate::raiders::allowed(app, gid, user).await? {

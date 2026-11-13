@@ -74,9 +74,6 @@ pub struct Flags {
     pub no_avatar: bool,
     #[serde(default)]
     pub voice: bool,
-    /// Never DM the target (Ban Sync copies: the source server already told them).
-    #[serde(default)]
-    pub no_dm: bool,
 }
 
 /// `s` is the message text with the prefix already stripped. Targets are mentions, raw ids, or names (words before the first `?flag`; with commas,

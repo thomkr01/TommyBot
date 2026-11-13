@@ -18,8 +18,8 @@ use tommybot_automod::{
 use tommybot_core::{
     permits::{self, Level, RateLimiter},
     sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
-        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, CatchCfg, LockdownCfg, MiscCfg, PanicCfg,
+        RaiderListCfg, TicketsCfg, WhitelistCfg,
     },
 };
 use tommybot_logging::{LogConfig, Logger};
@@ -47,7 +47,6 @@ pub struct GuildCfg {
     pub verification: VerificationCfg,
     pub tickets: TicketsCfg,
     pub catch: CatchCfg,
-    pub ban_sync: BanSyncCfg,
     pub raider_list: RaiderListCfg,
     /// Sections that failed to parse and run on their defaults; the owner is told (D48).
     pub fallbacks: Vec<&'static str>,
@@ -94,7 +93,6 @@ pub fn check_section(name: &str, v: &Value, old: &Value) -> Result<(), String> {
         "whitelist" => t::<WhitelistCfg>(v),
         "verification" => t::<VerificationCfg>(v),
         "tickets" => t::<TicketsCfg>(v),
-        "ban_sync" => t::<BanSyncCfg>(v),
         "raider_list" => t::<RaiderListCfg>(v),
         _ => Ok(()),
     }
@@ -126,7 +124,6 @@ impl GuildCfg {
             verification,
             tickets: section(cfg, "tickets", &mut f),
             catch: section(cfg, "catch", &mut f),
-            ban_sync: section(cfg, "ban_sync", &mut f),
             raider_list: section(cfg, "raider_list", &mut f),
             fallbacks: vec![],
         };
@@ -142,7 +139,7 @@ pub struct App {
     pub pool: PgPool,
     pub api: Api,
     pub me: Id<UserMarker>,
-    /// The bot application's owner (the team owner for a team app); Ban Sync never acts on them.
+    /// The bot application's owner (the team owner for a team app); the Raider List never acts on them.
     pub bot_owner: Option<Id<UserMarker>>,
     cfgs: RwLock<CfgCache>,
     pub logger: Mutex<Logger>,

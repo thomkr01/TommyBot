@@ -264,7 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_relink_is_a_config_version_with_the_permit_roles() {
-        let Some(t) = crate::bansync::tests::T::new(203).await else {
+        let Some(t) = crate::test_support::T::new(203).await else {
             return;
         };
         let g = t.g(0);

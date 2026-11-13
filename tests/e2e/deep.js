@@ -64,8 +64,8 @@ const getJson = (page, path) => page.evaluate(async (p) => {
 // ---------- 1. API matrix: nobody may change what their level does not allow ----------
 async function matrix(browser) {
   const g = `/api/guilds/${G}`;
-  const SECT = { misc: ['owner', false], antinuke: ['owner', true], panic: ['owner', true], backups: ['owner', true], whitelist: ['admin', true], catch: ['admin', true], ban_sync: ['discord', true], raider_list: ['owner', true] };
-  const sections = ['wizard', 'whitelist', 'antinuke', 'panic', 'backups', 'automod', 'filters', 'discord_automod', 'joingate', 'joinraid', 'verification', 'tickets', 'lockdown', 'catch', 'appeals', 'misc', 'logging', 'ban_sync', 'raider_list'];
+  const SECT = { misc: ['owner', false], antinuke: ['owner', true], panic: ['owner', true], backups: ['owner', true], whitelist: ['admin', true], catch: ['admin', true], raider_list: ['owner', true] };
+  const sections = ['wizard', 'whitelist', 'antinuke', 'panic', 'backups', 'automod', 'filters', 'discord_automod', 'joingate', 'joinraid', 'verification', 'tickets', 'lockdown', 'catch', 'appeals', 'misc', 'logging', 'raider_list'];
   // [method, path, body(v) or null, min level, step-up, staff perms]
   const routes = () => [
     ...sections.map((s) => ['PUT', `${g}/config/${s}`, (v, cfg) => ({ expected_version: v, value: cfg[s] ?? {} }), ...(SECT[s] || ['editor', false])]),
@@ -98,11 +98,6 @@ async function matrix(browser) {
     ['POST', `${g}/score/fix`, () => ({ setting: 'none' }), 'admin', true],
     ['POST', `${g}/revert`, () => ({ ids: [] }), 'admin', true],
     ['POST', `${g}/rescue/regenerate`, () => ({}), 'discord', true],
-    // Ban Sync only queues bot jobs; with Ban Sync off the owner gets a 400, which still counts as allowed
-    ['GET', `${g}/ban_sync`, () => undefined, 'admin', false],
-    ['GET', `${g}/ban_sync_log`, () => undefined, 'admin', false],
-    ['POST', `${g}/ban_sync/import`, () => ({ source: G2 }), 'discord', true],
-    ['POST', `${g}/ban_sync/send_rest`, () => ({}), 'discord', true],
     // Raider List: matches for trusted admins up; a report needs an owner after 2FA (the mock's 7
     // members get a 400, which still counts as allowed)
     ['GET', `${g}/raider_matches`, () => undefined, 'admin', false],
@@ -174,7 +169,7 @@ async function matrix(browser) {
 }
 
 // ---------- 2. Every page as every level ----------
-const ALL_PAGES = ['overview', 'wizard', 'misc', 'permits', 'logging', 'backups', 'channel_setup', 'lockdown', 'lockdown_settings', 'appeal_list', 'appeals', 'appeal_blacklist', 'automod', 'filters', 'discord_automod', 'whitelist', 'automod_panic', 'antinuke', 'antinuke_filters', 'antinuke_panic', 'joingate', 'joingate_log', 'joinraid', 'raid_log', 'verification', 'cases', 'ban_sync', 'ban_sync_log', 'mod_stats', 'raider_list', 'raider_matches', 'notes', 'report_list', 'report_blacklist', 'tickets', 'catch', 'revert', 'history', 'embeds', 'rescue'];
+const ALL_PAGES = ['overview', 'wizard', 'misc', 'permits', 'logging', 'backups', 'channel_setup', 'lockdown', 'lockdown_settings', 'appeal_list', 'appeals', 'appeal_blacklist', 'automod', 'filters', 'discord_automod', 'whitelist', 'automod_panic', 'antinuke', 'antinuke_filters', 'antinuke_panic', 'joingate', 'joingate_log', 'joinraid', 'raid_log', 'verification', 'cases', 'mod_stats', 'raider_list', 'raider_matches', 'notes', 'report_list', 'report_blacklist', 'tickets', 'catch', 'revert', 'history', 'embeds', 'rescue'];
 const PAGES = process.env.DEEP_PAGES ? process.env.DEEP_PAGES.split(',') : ALL_PAGES;
 // Buttons that only read, switch view, open a dialog or copy.
 const HARMLESS = /^(refresh|show|hide|view|preview|copy|next|back|previous|prev|close|cancel|export|download|search|filter|load more|more|less|details|open|test|check|reset view|history|\d+|‹|›|«|»|<|>|←|→)$/i;

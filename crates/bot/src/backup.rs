@@ -838,7 +838,7 @@ mod tests {
     /// D10/D11: load and clear need owner level plus a fresh 2FA, and load is refused in panic.
     #[tokio::test]
     async fn load_and_clear_need_an_owner_with_2fa_and_no_panic() {
-        use crate::{bansync::tests::T, commands::backup_cmd, slash::BackupCmd};
+        use crate::{commands::backup_cmd, slash::BackupCmd, test_support::T};
         use tommybot_core::permits::Level;
         let Some(t) = T::new(200).await else { return };
         let (g, user) = (t.g(0), Id::new(t.base + 1));

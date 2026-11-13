@@ -1,7 +1,7 @@
 //! Behaviour tests of the quarantine state (D1, D2/N1, D6, D7, D12, D18, D55, N5) through entry
 //! points that main had too, so each one also shows the bug on main. They run only when
-//! DATABASE_URL points at a scratch Postgres; Discord is Ban Sync's mock.
-use crate::bansync::tests::{ME, T};
+//! DATABASE_URL points at a scratch Postgres; Discord is the mock in `test_support`.
+use crate::test_support::{ME, T};
 use serde_json::{json, Value};
 use twilight_model::{
     channel::Channel,
@@ -1775,5 +1775,47 @@ async fn an_unreadable_actor_is_undone_but_not_punished() {
         .execute(&t.app.pool)
         .await
         .unwrap();
+    t.cleanup().await;
+}
+
+/// Thomas 2026-11-13: with anti-nuke off, a permit role given by someone without a permit is taken
+/// back, and nobody is punished.
+#[tokio::test]
+async fn anti_nuke_off_still_takes_back_a_permit_role() {
+    let Some(t) = T::new(263).await else { return };
+    server(
+        &t,
+        0,
+        json!({"antinuke": {"enabled": false, "quarantine_role": Q.to_string()}}),
+    )
+    .await;
+    t.exec("INSERT INTO permits (id, guild_id, name, perms) VALUES ($1 + 1, $1, 'Mods', '{ban}')")
+        .await;
+    // 501 = ROLE
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 501)")
+        .await;
+    let (actor, member) = (t.base * 10 + 1, t.base * 10 + 2);
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), actor), vec![]);
+        m.members.insert((t.g(0).get(), member), vec![ROLE]);
+    });
+    let e: AuditLogEntry = serde_json::from_value(json!({
+        "id": "1", "action_type": 25, "guild_id": t.g(0).to_string(), "target_id": member.to_string(),
+        "user_id": actor.to_string(), "reason": null,
+        "changes": [{"key": "$add", "new_value": [{"id": ROLE.to_string(), "name": "Mods"}]}],
+    }))
+    .unwrap();
+    crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+    assert_eq!(
+        roles(&t, 0, member),
+        Some(vec![]),
+        "the permit role is taken back"
+    );
+    assert_eq!(
+        roles(&t, 0, actor),
+        Some(vec![]),
+        "the actor is not quarantined"
+    );
+    assert_eq!(saved(&t, 0, actor).await, None);
     t.cleanup().await;
 }

@@ -432,7 +432,7 @@ mod tests {
     /// back with its old end.
     #[tokio::test]
     async fn a_queued_accept_is_checked_and_a_revert_keeps_the_temp_ban_temp() {
-        use crate::bansync::tests::T;
+        use crate::test_support::T;
         use serde_json::json;
         let Some(t) = T::new(201).await else { return };
         let (g, user) = (t.g(0), t.base + 5);

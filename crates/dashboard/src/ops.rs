@@ -185,7 +185,6 @@ pub(crate) async fn live(st: &AppState, guild: i64, config: &Value) -> Result<Li
                 ("Join gate", "joingate"),
                 ("Join raid", "joinraid"),
                 ("Verification", "verification"),
-                ("ban_sync", "ban_sync"),
             ]
             .map(|(name, k)| (name, config[k]["enabled"] == true))
             .to_vec(),
@@ -299,7 +298,7 @@ fn keep(entry: String) -> Option<Fix> {
 }
 
 /// The weaker permits from before the last ownership change that still have roles, as
-/// "name (@role (id), ...)": they stayed on, so the card and the Ban Sync page list them (D47).
+/// "name (@role (id), ...)": they stayed on, so the card lists them (D47).
 pub(crate) async fn weaker_permits(st: &AppState, guild: i64) -> Result<Vec<String>, ApiError> {
     let held: Vec<(String, Vec<String>)> = sqlx::query_as(
         "select p.name, array_agg(r.role_id::text order by r.role_id) from owner_handovers h
@@ -324,16 +323,15 @@ pub(crate) async fn weaker_permits(st: &AppState, guild: i64) -> Result<Vec<Stri
 /// After an ownership change the bot paused the previous owner's EO/TA and strong permit roles
 /// (D47): one Overview row per paused person or role, which the new owner keeps one by one.
 async fn handover_check(st: &AppState, guild: i64) -> Result<Vec<Check>, ApiError> {
-    type Row = (i64, Vec<i64>, Vec<i64>, Value, Vec<String>, bool, Vec<i64>);
+    type Row = (i64, Vec<i64>, Vec<i64>, Value, Vec<String>, Vec<i64>);
     let row: Option<Row> = sqlx::query_as(
-        "select old_owner, extra_owners, trusted_admins, paused_roles, other_permits, ban_sync_was_on,
-           quarantine_whitelist
+        "select old_owner, extra_owners, trusted_admins, paused_roles, other_permits, quarantine_whitelist
          from owner_handovers where guild_id = $1 and kept_at is null",
     )
     .bind(guild)
     .fetch_optional(&st.db)
     .await?;
-    let Some((old, eo, ta, roles, other, sync, qw)) = row else {
+    let Some((old, eo, ta, roles, other, qw)) = row else {
         return Ok(vec![]);
     };
     let roles: Vec<(String, String)> = roles
@@ -353,8 +351,7 @@ async fn handover_check(st: &AppState, guild: i64) -> Result<Vec<Check>, ApiErro
     let on = weaker_permits(st, guild).await?;
     let old_label = user_label(st, old).await;
     let mut detail = format!(
-        "When this server got a new owner, TommyBot paused what the previous owner, {old_label}, set{}. Each row below is one person or role: keep only the ones you trust. Only the server owner can keep them, and keeping never turns Ban Sync on.",
-        if sync { ", and switched Ban Sync off" } else { "" }
+        "When this server got a new owner, TommyBot paused what the previous owner, {old_label}, set. Each row below is one person or role: keep only the ones you trust. Only the server owner can keep them."
     );
     if !on.is_empty() {
         detail.push_str(&format!(
@@ -1382,8 +1379,8 @@ mod tests {
         assert!(handover_check(&st, g).await.unwrap().is_empty());
         run("insert into permits (guild_id, name, perms) values ($1, 'Admins', '{dashboard_edit}'), ($1, 'Mods', '{ban}')").await.unwrap();
         run("insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 21 from permits where guild_id = $1 and name = 'Mods'").await.unwrap();
-        run("insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, ban_sync_was_on, paused_roles, other_permits, quarantine_whitelist)
-             values ($1, 3, 7, '{3}', '{12, 13}', true, '[{\"permit\": \"Admins\", \"role\": \"20\"}]', '{Mods}', '{14}')").await.unwrap();
+        run("insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, paused_roles, other_permits, quarantine_whitelist)
+             values ($1, 3, 7, '{3}', '{12, 13}', '[{\"permit\": \"Admins\", \"role\": \"20\"}]', '{Mods}', '{14}')").await.unwrap();
         let rows = handover_check(&st, g).await.unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(
@@ -1398,8 +1395,7 @@ mod tests {
             ]
         );
         assert!(
-            rows[0].detail.contains("Ban Sync off")
-                && rows[0].detail.contains("stay on: Mods (21)")
+            !rows[0].detail.contains("Ban Sync") && rows[0].detail.contains("stay on: Mods (21)")
         );
         assert!(
             rows[1].detail.contains("This is the previous owner"),

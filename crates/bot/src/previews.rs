@@ -245,11 +245,6 @@ fn messages() -> Value {
         "automod_kick": log(automod::filter_log("member", FilterAction::Kick, "Posting an invite link", (GENERAL, "Join my server everyone discord.gg/example"), MEMBER)),
         "automod_timeout": log(automod::timeout_log("member", "Spamming the same message", (MEMBER, GENERAL), act.timeout_ms, act.strike)),
         "mod_log": log(commands::mod_log_embed((4151, "ban"), (YOU, MEMBER), None, Some("DM ads"))),
-        "bansync_alert": {
-            "embeds": [crate::bansync::alert_log("Your Other Server", 1_234_567_890, MEMBER, "Raiding", Some(812), None).time().build()],
-            "components": [{"type": 1, "components": [{"type": 2, "style": 4, "label": "Ban here", "custom_id": format!("bansync:1234567890:{MEMBER}")}]}],
-        },
-        "bansync_copy": log(commands::mod_log_embed((4153, "ban"), (YOU, MEMBER), None, Some(&format!("{} Your Other Server (1234567890): Raiding", crate::bansync::PREFIX)))),
         "raider_alert": {
             "embeds": [crate::raiders::alert_log(MEMBER, "raid", "Joined 40 servers with alt accounts").time().build()],
             "components": crate::raiders::alert_rows(MEMBER),

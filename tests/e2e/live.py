@@ -1048,32 +1048,6 @@ def g2a_renew_404():
     return check(3000 < secs <= 3600, "g2a_renew_404: renewal for a non-member re-queued about 1 h out")
 
 
-def g2a_reban_reason():
-    """Ban Sync `outlasts`: does a second PUT ban on an already banned user replace its reason in
-    real Discord (the mock does)? `ours` reads that reason to tell a copy from a local ban."""
-    path = f"/guilds/{GUILD}/bans/{OUTSIDER}"
-    if call("GET", path, soft=True) is not None:
-        raise SystemExit("the outsider is already banned on the test server")
-    def ban(why):
-        # The ban reason is the audit log reason header, as twilight sends it.
-        req = urllib.request.Request(API + path, b"{}", {
-            "Content-Type": "application/json", "User-Agent": "DiscordBot (tommybot-e2e, 1)",
-            "Authorization": f"Bot {os.environ['DISCORD_TOKEN']}", "X-Audit-Log-Reason": why}, method="PUT")
-        urllib.request.urlopen(req).read()
-        return call("GET", path).get("reason")
-    try:
-        first = ban("e2e local temp ban")
-        second = ban("Ban Sync: copied from e2e (1): later copy")
-    finally:
-        # Without a JSON body Discord refuses this DELETE (50109) under the JSON content type.
-        call("DELETE", path, body={})
-        print("cleaned: outsider unbanned")
-    print(f"g2a_reban_reason: reason after first ban {first!r}, after the second PUT {second!r}")
-    # Informational: Ban Sync's `ours` and `outlasts` paths depend on which one Discord does.
-    return check(True, f"g2a_reban_reason: second PUT {'replaced' if second != first else 'kept'} the reason")
-
-
-
 def role_id(name):
     return next(r["id"] for r in call("GET", f"/guilds/{GUILD}/roles") if r["name"] == name)
 
@@ -1392,7 +1366,6 @@ SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": n
              "g2b_forward": g2b_forward,
              "g1_stale": g1_stale, "g1_verify_channel": g1_verify_channel, "g1_deleted_role": g1_deleted_role,
              "g2a_panic_lock": g2a_panic_lock, "g2a_timer": g2a_timer, "g2a_renew_404": g2a_renew_404,
-             "g2a_reban_reason": g2a_reban_reason,
              "h_d58": h_d58, "h_d16": h_d16, "h_d20": h_d20, "h_panic_cat": h_panic_cat,
              "panic_write": panic_write}
 

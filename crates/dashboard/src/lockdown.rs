@@ -435,6 +435,7 @@ async fn create_rule(
         )
         .await?;
     let id = made["id"].as_str().unwrap_or_default();
+    trust_rule(&st, guild, id).await?;
     set_bot_actions(&st, &s, guild, id, &spec).await?;
     audit(
         &st,
@@ -504,6 +505,24 @@ fn rule_path(guild: i64, rule: &str) -> Result<String, ApiError> {
     Ok(format!("/guilds/{guild}/auto-moderation/rules/{rule}"))
 }
 
+/// A dashboard Editor set this rule, so the bot acts on it again. Discord records the edit as the
+/// bot's, and the bot's own audit entries keep the earlier verdict (bot `native::on_rule_audit`).
+async fn trust_rule(st: &AppState, guild: i64, rule: &str) -> Result<(), ApiError> {
+    let Ok(rule) = rule.parse::<i64>() else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO automod_rule_untrusted (guild_id, rule_id, audit_id, actor, trusted)
+         VALUES ($1, $2, 0, 0, true)
+         ON CONFLICT (guild_id, rule_id) DO UPDATE SET trusted = true, at = now()",
+    )
+    .bind(guild)
+    .bind(rule)
+    .execute(&st.db)
+    .await?;
+    Ok(())
+}
+
 async fn update_rule(
     State(st): State<AppState>,
     s: Sess,
@@ -515,6 +534,7 @@ async fn update_rule(
     st.discord
         .call(Method::PATCH, &rule_path(guild, &rule)?, Some(b))
         .await?;
+    trust_rule(&st, guild, &rule).await?;
     set_bot_actions(&st, &s, guild, &rule, &spec).await?;
     audit(
         &st,

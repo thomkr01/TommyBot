@@ -521,7 +521,7 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         }
         .await)
     };
-    crate::bansync::answer_click(app, i, clicked).await?;
+    crate::reply::answer_click(app, i, clicked).await?;
     Ok(true)
 }
 
@@ -623,7 +623,7 @@ mod tests {
     /// strike keeps them, so the next pass does not punish again.
     #[tokio::test]
     async fn only_a_failed_punishment_frees_the_scan_rows() {
-        let Some(t) = crate::bansync::tests::T::new(96).await else {
+        let Some(t) = crate::test_support::T::new(96).await else {
             return;
         };
         let gid = t.g(0);
@@ -740,7 +740,7 @@ mod tests {
     /// With Monitor Webhooks off a webhook's image is not scanned, saved or logged.
     #[tokio::test]
     async fn unmonitored_webhooks_are_not_scanned() {
-        let Some(t) = crate::bansync::tests::T::new(94).await else {
+        let Some(t) = crate::test_support::T::new(94).await else {
             return;
         };
         let gid = t.g(0);
