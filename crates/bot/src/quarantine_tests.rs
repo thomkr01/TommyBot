@@ -894,3 +894,45 @@ async fn a_failed_undo_on_a_join_quarantine_is_retried_and_logged() {
     assert_eq!(saved(&t, 0, actor).await, None, "nobody is punished");
     t.cleanup().await;
 }
+
+/// D17: at startup a member with a quarantine row who joined after their last quarantine (a rejoin
+/// while the bot was down) is quarantined again; one in the same membership is left as staff left
+/// them, and one who is gone is skipped.
+#[tokio::test]
+async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
+    let Some(t) = T::new(45).await else { return };
+    server(&t, 0, json!({"antinuke": {"quarantine_role": Q.to_string()}})).await;
+    let [back, freed, held_live, gone] = [1, 2, 3, 4].map(|n| t.base * 10 + n);
+    for u in [back, freed, held_live, gone] {
+        row(&t, 0, u, &[ROLE as i64]).await;
+    }
+    // The mock's members joined in 2020: before these rows, after a 2019 quarantine.
+    let g = t.g(0).get() as i64;
+    sqlx::query("UPDATE quarantines SET created_at = '2019-01-01' WHERE guild_id = $1 AND user_id <> $2")
+        .bind(g)
+        .bind(freed as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    // Quarantined again live on its rejoin: the bot's own record is newer than the join.
+    sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id) VALUES ($1, $2, 'quarantine', $3)")
+        .bind(g)
+        .bind(ME as i64)
+        .bind(held_live as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.set(|m| {
+        for u in [back, freed, held_live] {
+            m.members.insert((t.g(0).get(), u), vec![ROLE]);
+        }
+    });
+    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false)
+        .await
+        .unwrap();
+    assert_eq!(roles(&t, 0, back), Some(vec![Q]), "rejoined while down");
+    assert_eq!(roles(&t, 0, freed), Some(vec![ROLE]), "released by hand");
+    assert_eq!(roles(&t, 0, held_live), Some(vec![ROLE]), "same membership");
+    assert_eq!(saved(&t, 0, back).await, Some(vec![ROLE as i64]), "saved list kept");
+    t.cleanup().await;
+}

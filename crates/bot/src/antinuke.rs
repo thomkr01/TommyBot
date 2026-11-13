@@ -1727,11 +1727,14 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         undo_role_change(app, &cfg, gid, target).await;
         return Ok(());
     }
-    // A failed undo must not spare the actor.
-    if let Err(err) = back_to_quarantine(app, &cfg, gid, target).await {
+    // A failed undo must not spare the actor, nor wait for its retry.
+    let undone = back_to_quarantine(app, &cfg, gid, target).await;
+    let r = quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await;
+    if let Err(err) = undone {
         tracing::warn!(?err, "undoing a quarantined member's role change failed");
+        undo_role_change(app, &cfg, gid, target).await;
     }
-    quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await
+    r
 }
 
 /// Sets a quarantined member's roles back to what [`quarantine_roles`] leaves.

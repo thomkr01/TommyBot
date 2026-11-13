@@ -130,6 +130,10 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
         return Ok(());
     };
     crate::bansync::on_owner(app, g.id, g.owner_id).await?;
+    let complete = g.member_count == Some(g.members.len() as u64);
+    if let Err(e) = crate::joingate::requarantine_missed(app, g.id, &g.members, complete).await {
+        tracing::warn!(?e, "quarantining members who rejoined while the bot was down failed");
+    }
     let fresh = g
         .joined_at
         .is_some_and(|t| t.as_secs() > crate::app::now_secs() - FRESH_SECS);

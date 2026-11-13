@@ -208,6 +208,55 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
     restored
 }
 
+/// A quarantined member who rejoined while the bot was down got no `MemberAdd` (D17). At
+/// GuildCreate each member with a quarantine row who joined after the bot last quarantined them is
+/// quarantined again, through the rejoin path (a join quarantine with verification off ends there).
+/// One who joined before is in the same membership, still held or released by hand (Quarantine
+/// Whitelist, Quarantine Hold off), and is left alone. `known`: GuildCreate's members, the whole
+/// list when `complete`; anyone else is read one by one, so a large server costs one member read
+/// per row, paced by the rate limiter.
+pub async fn requarantine_missed(
+    app: &App,
+    gid: Id<GuildMarker>,
+    known: &[twilight_model::guild::Member],
+    complete: bool,
+) -> Result<()> {
+    use sqlx::types::chrono::{DateTime, Utc};
+    let rows: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT q.user_id, greatest(q.created_at, a.at) FROM quarantines q
+         LEFT JOIN (SELECT target_id, max(created_at) AS at FROM action_log
+                    WHERE guild_id = $1 AND actor_id = $2 AND action = 'quarantine'
+                    GROUP BY target_id) a ON a.target_id = q.user_id
+         WHERE q.guild_id = $1",
+    )
+    .bind(gid.get() as i64)
+    .bind(app.me.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    for (user, since) in rows {
+        let uid = Id::new(user as u64);
+        let joined = match known.iter().find(|m| m.user.id == uid) {
+            Some(m) => m.joined_at,
+            None if complete => continue,
+            None => match crate::http_err::member(&app.http, gid, uid).await {
+                Ok(Some(m)) => m.joined_at,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(?e, user, "checking a quarantined member at startup failed");
+                    continue;
+                }
+            },
+        };
+        if joined.is_none_or(|j| j.as_micros() <= since.timestamp_micros()) {
+            continue;
+        }
+        if let Err(e) = crate::antinuke::requarantine_rejoin(app, gid, uid).await {
+            tracing::warn!(?e, user, "quarantining a member who rejoined while the bot was down failed");
+        }
+    }
+    Ok(())
+}
+
 /// The punishment takes the member out of the server.
 fn removes(action: Action) -> bool {
     matches!(action, Action::Kick | Action::Ban)
