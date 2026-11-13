@@ -178,6 +178,12 @@ async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()>
     }
     let cfg = app.cfg(gid.get()).await?;
     if !cfg.antinuke.enabled {
+        // Thomas 2026-11-13 22:49: a permit role still comes only from Owner, EO or TA with
+        // anti-nuke off (Discord's Manage Roles gives no more power than a member has); it is
+        // taken back, nobody is punished.
+        if e.action_type == A::MemberRoleUpdate {
+            return guard_permit_roles(app, e, actor, false).await;
+        }
         return Ok(());
     }
     // Each check runs whatever an earlier one returned: an error in one (a REST or DB hiccup)
@@ -204,7 +210,7 @@ async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()>
         // A role rename still counts below.
         keep(guard_perms(app, &cfg, e, actor).await);
         if e.action_type == A::MemberRoleUpdate {
-            keep(guard_permit_roles(app, e, actor).await);
+            keep(guard_permit_roles(app, e, actor, true).await);
         }
     }
     if matches!(
@@ -714,7 +720,12 @@ async fn guard_perms(
 
 /// Giving a member a role that carries a permit hands out a permit, and with it any whitelist:
 /// undone and the actor quarantined, unless an Owner, Extra Owner or Trusted Admin did it (D16).
-async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+async fn guard_permit_roles(
+    app: &App,
+    e: &AuditLogEntry,
+    actor: Id<UserMarker>,
+    punish: bool,
+) -> Result<()> {
     let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
         return Ok(());
     };
@@ -763,7 +774,7 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
         return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
     }
     // A failed undo must not spare the actor.
-    for (r, _) in permit {
+    for &(r, _) in &permit {
         let undo = app
             .http
             .remove_guild_member_role(gid, target.cast(), Id::new(r as u64))
@@ -778,6 +789,19 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
     if unsure {
         let what = "gave a member a role that carries a permit";
         return unsure_log(app, gid, actor, Some(target.cast()), what).await;
+    }
+    if !punish {
+        let names: Vec<String> = permit.iter().map(|r| format!("<@&{}>", r.0)).collect();
+        let log = Log::new("Anti Nuke", ALERT)
+            .user("Responsible", actor.get())
+            .user("Member", target.get())
+            .text("**Gave a member a role that carries a permit**")
+            .line("Roles", &names.join(", "))
+            .line(
+                "Action",
+                "taken back: only an Owner, Extra Owner or Trusted Admin gives permit roles. Anti-nuke is off, so nobody was punished",
+            );
+        return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
     }
     quarantine_and_revert(
         app,
