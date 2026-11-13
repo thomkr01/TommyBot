@@ -561,9 +561,21 @@ async fn guard_perms(
         || an.monitor_channel_perms
         || an.vanity_guard
         || an.quarantine_role == Some(target.cast());
-    if !guarded || app.whitelisted(gid, actor, "antinuke").await? {
+    if !guarded {
         return Ok(());
     }
+    // Unread, the change is undone but nobody punished (Thomas, D12b).
+    let unsure = match app.whitelisted(gid, actor, "antinuke").await {
+        Ok(true) => return Ok(()),
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "anti-nuke whitelist lookup failed, undoing without punishment"
+            );
+            true
+        }
+    };
     let public = |id: u64| id == gid.get() || cfg.lockdown.main_roles.iter().any(|r| r.get() == id);
     let gained = |old: Option<Permissions>, new: Option<Permissions>| {
         let bits = |p: Option<Permissions>| p.map_or(0, |p| p.bits());
@@ -703,6 +715,9 @@ async fn guard_perms(
     if let Err(err) = undo {
         tracing::warn!(?err, why, "undoing a guarded change failed");
     }
+    if unsure {
+        return unsure_log(app, gid, actor, None, why).await;
+    }
     quarantine_and_revert(app, gid, actor, why).await
 }
 
@@ -726,9 +741,21 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
         return Ok(());
     }
     let roles = permit_roles_in(&app.pool, gid.get() as i64, &added).await?;
-    if roles.is_empty() || app.is_immune(gid, actor).await? {
+    if roles.is_empty() {
         return Ok(());
     }
+    // Unread, the role is taken back but nobody punished (Thomas, D12b).
+    let unsure = match app.is_immune(gid, actor).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "immunity lookup failed, taking the permit role back without punishment"
+            );
+            true
+        }
+    };
     let (permit, weak): (Vec<_>, Vec<_>) = roles.into_iter().partition(|r| r.1);
     if permit.is_empty() {
         // A weak permit (a link whitelist, say): reaction-role and level bots hand these out.
@@ -756,6 +783,10 @@ async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>)
         if let Err(err) = undo {
             tracing::warn!(?err, "taking a permit role back failed");
         }
+    }
+    if unsure {
+        let what = "gave a member a role that carries a permit";
+        return unsure_log(app, gid, actor, Some(target.cast()), what).await;
     }
     quarantine_and_revert(
         app,
@@ -858,8 +889,10 @@ async fn guard_lock(
     let Some(locked) = lock_target(e, &locks) else {
         return Ok(());
     };
-    // Unknown counts as not immune, as for the count (D21).
-    let immune = app.is_immune(gid, actor).await.unwrap_or(false);
+    // Unknown is set back as for anyone, but not counted: undo, not punish (D12b).
+    let lookup = app.is_immune(gid, actor).await;
+    let unsure = lookup.is_err();
+    let immune = lookup.unwrap_or(false);
     let set_back: Result<()> = async {
         match &locked {
             _ if immune => {}
@@ -911,6 +944,9 @@ async fn guard_lock(
     };
     let result = match (&set_back, immune) {
         (_, true) => "left as is (Owner, Extra Owner or Trusted Admin)".to_string(),
+        (Ok(()), _) if unsure => {
+            "set back; not counted: their permits could not be read".to_string()
+        }
         (Ok(()), _) => "set back".to_string(),
         (Err(err), _) => format!("could not be set back: {}", crate::http_err::why(err)),
     };
@@ -925,7 +961,7 @@ async fn guard_lock(
         tracing::warn!(?err, "lock change log failed");
     }
     // A rename is already counted as a Role Update by `watched`.
-    if immune || watched(e) == Some(action) {
+    if immune || unsure || watched(e) == Some(action) {
         return Ok(());
     }
     let exempt = app
@@ -2375,7 +2411,14 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         if e.action_type == A::MemberRoleUpdate {
             back_to_quarantine(app, &cfg, gid, target).await?;
         }
-        return hold_unsure_log(app, gid, actor, target, "touched a quarantined member").await;
+        return unsure_log(
+            app,
+            gid,
+            actor,
+            Some(target),
+            "touched a quarantined member",
+        )
+        .await;
     }
     if e.action_type != A::MemberRoleUpdate {
         return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
@@ -2468,7 +2511,7 @@ pub(crate) async fn hold_overwrite(
     }
     if unsure {
         let what = "gave a quarantined member channel access";
-        return hold_unsure_log(app, gid, actor, user, what).await;
+        return unsure_log(app, gid, actor, Some(user), what).await;
     }
     quarantine_and_revert(app, gid, actor, "gave a quarantined member channel access").await
 }
@@ -2497,21 +2540,22 @@ async fn hold_whitelisted(
     }
 }
 
-async fn hold_unsure_log(
+/// A guarded change undone without punishment, because the actor's permits could not be read.
+async fn unsure_log(
     app: &App,
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
-    target: Id<UserMarker>,
+    target: Option<Id<UserMarker>>,
     what: &str,
 ) -> Result<()> {
-    let log = Log::new("Anti Nuke", ALERT)
-        .user("Responsible", actor.get())
-        .user("Member", target.get())
-        .text(&format!("**{what}**"))
-        .line(
-            "Action",
-            "undone where it can be; not quarantined: their permits could not be read",
-        );
+    let mut log = Log::new("Anti Nuke", ALERT).user("Responsible", actor.get());
+    if let Some(t) = target {
+        log = log.user("Member", t.get());
+    }
+    let log = log.text(&format!("**{what}**")).line(
+        "Action",
+        "undone where it can be; not quarantined: their permits could not be read",
+    );
     send_log(app, gid.get(), LogKind::AntiNuke, log).await
 }
 

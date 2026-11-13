@@ -771,3 +771,62 @@ async fn verifying_during_a_timeout_does_not_give_back_main_roles() {
         .unwrap();
     t.cleanup().await;
 }
+
+/// D12b: when the actor's permits cannot be read, a dangerous grant and a permit role grant are
+/// undone, but nobody is quarantined.
+#[tokio::test]
+async fn an_unreadable_actor_is_undone_but_not_punished() {
+    let Some(t) = T::new(106).await else { return };
+    let an = json!({"enabled": true, "strict_mode": true, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let (g, actor, member) = (t.g(0), t.base * 10 + 1, t.base * 10 + 2);
+    let (permit,): (i64,) = sqlx::query_as(
+        "INSERT INTO permits (guild_id, name, rank, perms) VALUES ($1, 'Mods', 1, '{ban}') RETURNING id",
+    )
+    .bind(g.get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, $3)")
+        .bind(permit)
+        .bind(g.get() as i64)
+        .bind(BOOST as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.set(|m| {
+        m.members.insert((g.get(), actor), vec![ROLE]);
+        m.members.insert((g.get(), member), vec![BOOST]);
+        m.fail_member = true;
+    });
+    let entry = |action: u8, target: u64, changes: Value| -> AuditLogEntry {
+        serde_json::from_value(json!({
+            "id": "1", "action_type": action, "guild_id": g.to_string(), "target_id": target.to_string(),
+            "user_id": actor.to_string(), "reason": null, "changes": changes,
+        }))
+        .unwrap()
+    };
+    let perms = json!([{"key": "permissions", "old_value": "0", "new_value": "8"}]);
+    let _ = crate::antinuke::on_audit(&t.app, &entry(31, ROLE, perms)).await;
+    assert!(
+        t.calls(&format!("PATCH /guilds/{g}/roles/{ROLE}")) >= 1,
+        "the grant is undone"
+    );
+    let added = json!([{"key": "$add", "new_value": [{"id": BOOST.to_string(), "name": "Mods"}]}]);
+    let _ = crate::antinuke::on_audit(&t.app, &entry(25, member, added)).await;
+    assert_eq!(
+        t.calls(&format!(
+            "DELETE /guilds/{g}/members/{member}/roles/{BOOST}"
+        )),
+        1,
+        "the permit role is taken back"
+    );
+    t.set(|m| m.fail_member = false);
+    assert_eq!(roles(&t, 0, actor), Some(vec![ROLE]), "not quarantined");
+    sqlx::query("DELETE FROM permits WHERE guild_id = $1")
+        .bind(g.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.cleanup().await;
+}
