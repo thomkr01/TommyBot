@@ -125,14 +125,30 @@ pub fn saw_audit(app: &App, guild: u64, id: u64) -> bool {
         .unwrap()
         .entry(guild)
         .or_default()
-        .insert(id);
+        .insert(id, std::time::Instant::now());
     let mut last = app.last_audit.lock().unwrap();
     let l = last.entry(guild).or_default();
     *l = (*l).max(id);
     true
 }
 
-/// After anti-nuke handled an entry: queues its id for `audit_seen`. The write is batched by
+/// After anti-nuke handled an entry: records it in `audit_handled`, so no catch-up runs it again
+/// (a distinct row per entry, no shared row lock), then `done_audit`.
+pub async fn handled_audit(app: &App, guild: u64, id: u64) {
+    let kept = sqlx::query(
+        "INSERT INTO audit_handled (guild_id, audit_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(guild as i64)
+    .bind(id as i64)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "recording a handled audit entry failed");
+    }
+    done_audit(app, guild, id);
+}
+
+/// Queues a handled entry's id for `audit_seen`. The write is batched by
 /// `flush_audit`, so a nuke's entries never wait on that row's lock (D20).
 pub fn done_audit(app: &App, guild: u64, id: u64) {
     if let Some(f) = app.audit_inflight.lock().unwrap().get_mut(&guild) {
@@ -150,12 +166,16 @@ pub async fn flush_audit(app: &App) {
     for (guild, id) in done {
         // Never past an older entry still being handled, nor past an unread gap: a restart
         // reads from here, and `action_log.audit_id` skips what was already counted.
+        // A task that panicked never finishes its entry: after a minute it stops holding.
         let inflight = app
             .audit_inflight
             .lock()
             .unwrap()
-            .get(&guild)
-            .and_then(|f| f.first().copied());
+            .get_mut(&guild)
+            .and_then(|f| {
+                f.retain(|_, at| at.elapsed() < std::time::Duration::from_secs(60));
+                f.keys().next().copied()
+            });
         let pinned = app.audit_pinned.lock().unwrap().get(&guild).copied();
         let safe = [Some(id), inflight.map(|i| i - 1), pinned]
             .into_iter()
@@ -223,6 +243,8 @@ async fn catch_up_retrying(app: &App, mut todo: Vec<(u64, u64)>) {
         }
         if wait == 0 {
             for (g, _) in failed {
+                // Declared unchecked: holding the saved id back for it would replay days of entries.
+                app.audit_pinned.lock().unwrap().remove(&g);
                 gap_alert(
                     app,
                     Id::new(g),
@@ -286,10 +308,10 @@ pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -
         .await;
     }
     let entries = missed(all, last);
-    // Counted before a crash that lost the saved id: `action_log` has them.
+    // Handled before a crash or restart that lost the batched saved id.
     let ids: Vec<i64> = entries.iter().map(|e| e.id.get() as i64).collect();
-    let counted: Vec<i64> = sqlx::query_scalar(
-        "SELECT audit_id FROM action_log WHERE guild_id = $1 AND audit_id = ANY($2)",
+    let handled: Vec<i64> = sqlx::query_scalar(
+        "SELECT audit_id FROM audit_handled WHERE guild_id = $1 AND audit_id = ANY($2)",
     )
     .bind(gid.get() as i64)
     .bind(&ids)
@@ -301,7 +323,7 @@ pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -
         if !saw_audit(app, gid.get(), e.id.get()) {
             continue;
         }
-        if counted.contains(&(e.id.get() as i64)) {
+        if handled.contains(&(e.id.get() as i64)) {
             done_audit(app, gid.get(), e.id.get());
             continue;
         }
@@ -309,7 +331,7 @@ pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -
         if let Err(err) = crate::antinuke::on_replayed(app, &e).await {
             tracing::warn!(?err, "anti-nuke on a missed audit entry failed");
         }
-        done_audit(app, gid.get(), e.id.get());
+        handled_audit(app, gid.get(), e.id.get()).await;
     }
     if stale > 0 {
         let why =
@@ -365,6 +387,8 @@ pub async fn purge_left(app: std::sync::Arc<App>) {
         // Restart copies of the hour-long windows (N3).
         for q in [
             "DELETE FROM command_uses WHERE at < now() - interval '1 hour'",
+            // Past Discord's audit log window no catch-up can read them (D20).
+            "DELETE FROM audit_handled WHERE at < now() - interval '45 days'",
             "DELETE FROM heat_panic WHERE until < extract(epoch FROM now())",
         ] {
             if let Err(e) = sqlx::query(q).execute(&app.pool).await {

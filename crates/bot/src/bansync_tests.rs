@@ -1498,6 +1498,11 @@ async fn a_restart_reads_the_audit_entries_it_missed() {
         .unwrap();
     assert_eq!(fresh.calls("audit-logs"), 11);
     assert_eq!(last(&fresh), Some(1099));
+    sqlx::query("DELETE FROM audit_handled WHERE guild_id = $1")
+        .bind(g.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM audit_seen WHERE guild_id = $1")
         .bind(g.get() as i64)
         .execute(&t.app.pool)
@@ -1697,6 +1702,25 @@ async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
     crate::welcome::done_audit(app, g, 20);
     crate::welcome::flush_audit(app).await;
     assert_eq!(saved(g).await, Some(21));
+    // A task that never finished (a panic) stops holding the saved id after a minute.
+    let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(61);
+    app.audit_inflight
+        .lock()
+        .unwrap()
+        .entry(g)
+        .or_default()
+        .insert(22, long_ago);
+    crate::welcome::handled_audit(app, g, 23).await;
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(23));
+    let handled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_handled WHERE guild_id = $1 AND audit_id = 23",
+    )
+    .bind(g as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(handled, 1, "recorded, so no catch-up runs it again");
     // Two Readies before the catch-up: the floor stays at the first gap, and so does the save.
     app.last_audit.lock().unwrap().insert(h, 50);
     crate::welcome::note_ready(app);
@@ -1713,6 +1737,11 @@ async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
         .unwrap();
     crate::welcome::flush_audit(app).await;
     assert_eq!(saved(h).await, Some(90));
+    sqlx::query("DELETE FROM audit_handled WHERE guild_id = ANY($1)")
+        .bind(vec![g as i64, h as i64])
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM audit_seen WHERE guild_id = ANY($1)")
         .bind(vec![g as i64, h as i64])
         .execute(&t.app.pool)

@@ -568,7 +568,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
                 Ok(())
             };
             if let (true, Some(g)) = (new, g) {
-                crate::welcome::done_audit(app, g, e.0.id.get());
+                crate::welcome::handled_audit(app, g, e.0.id.get()).await;
             }
             let ban = crate::bansync::on_ban(app, &e.0).await;
             let unban = crate::bansync::on_unban(app, &e.0).await;
