@@ -30,16 +30,21 @@ async fn run(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>) -> Result
     let g = gid.get() as i64;
     let (mut tx, version, mut doc) = crate::settings::locked(app, gid).await?;
     let mut n = swap(&mut doc, map);
-    // A deleted log channel already left `logging` when it was deleted (`forget_log_channel`):
-    // its routes come back from the newest version that still named it.
+    // A deleted log channel already left `logging` when it was deleted (`forget_log_channel`, a
+    // version by the bot): its routes come back from the version just before that one, never from
+    // an older one, so a route staff removed on purpose stays removed (R-h3 7).
     let olds: Vec<String> = map.keys().map(u64::to_string).collect();
     let before: Option<Value> = sqlx::query_scalar(
-        "SELECT config->'logging' FROM guild_config WHERE guild_id = $1
-         AND EXISTS (SELECT 1 FROM unnest($2::text[]) o WHERE strpos((config->'logging')::text, '\"' || o || '\"') > 0)
-         ORDER BY version DESC LIMIT 1",
+        "SELECT p.config->'logging' FROM guild_config c
+         JOIN guild_config p ON p.guild_id = c.guild_id AND p.version = c.version - 1
+         WHERE c.guild_id = $1 AND c.changed_by = $3
+           AND EXISTS (SELECT 1 FROM unnest($2::text[]) o WHERE strpos((p.config->'logging')::text, '\"' || o || '\"') > 0)
+           AND NOT EXISTS (SELECT 1 FROM unnest($2::text[]) o WHERE strpos((c.config->'logging')::text, '\"' || o || '\"') > 0)
+         ORDER BY c.version DESC LIMIT 1",
     )
     .bind(g)
     .bind(&olds)
+    .bind(app.me.get() as i64)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(before) = before {
@@ -225,9 +230,11 @@ mod tests {
             json!({"logging": {"routes": {"anti_nuke": old.to_string()}}}),
         )
         .await;
-        sqlx::query("INSERT INTO guild_config (guild_id, version, config) VALUES ($1, 2, $2)")
+        // Version 2 is the bot's forget_log_channel after the channel was deleted.
+        sqlx::query("INSERT INTO guild_config (guild_id, version, config, changed_by) VALUES ($1, 2, $2, $3)")
             .bind(g.get() as i64)
             .bind(json!({"logging": {}, "catch": {"channel": old.to_string()}}))
+            .bind(t.app.me.get() as i64)
             .execute(&t.app.pool)
             .await
             .unwrap();
@@ -262,6 +269,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(role, new as i64);
+        // R-h3 7: a route staff removed before the deletion stays removed, and with no deletion
+        // version by the bot nothing comes back from an old version.
+        let routes = |r: Value| json!({"logging": {"routes": r}});
+        let o = old.to_string();
+        for (i, versions, want) in [
+            (
+                1,
+                vec![
+                    (routes(json!({"anti_nuke": o, "panic": o})), None),
+                    (routes(json!({"panic": o})), Some(t.owner())),
+                    (routes(json!({})), Some(t.app.me.get())),
+                ],
+                json!({"panic": new.to_string()}),
+            ),
+            (
+                2,
+                vec![
+                    (routes(json!({"anti_nuke": o})), None),
+                    (routes(json!({})), Some(t.owner())),
+                ],
+                json!({}),
+            ),
+        ] {
+            let gi = t.g(i).get() as i64;
+            for (v, (c, by)) in versions.into_iter().enumerate() {
+                sqlx::query("INSERT INTO guild_config (guild_id, version, config, changed_by) VALUES ($1, $2, $3, $4)")
+                    .bind(gi)
+                    .bind(v as i32 + 1)
+                    .bind(c)
+                    .bind(by.map(|b| b as i64))
+                    .execute(&t.app.pool)
+                    .await
+                    .unwrap();
+            }
+            relink(&t.app, t.g(i), &HashMap::from([(old, new)])).await;
+            let c: Value = sqlx::query_scalar(
+                "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+            )
+            .bind(gi)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+            assert_eq!(c["logging"]["routes"], want, "server {i}");
+        }
         t.cleanup().await;
     }
 }
