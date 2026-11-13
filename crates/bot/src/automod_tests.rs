@@ -287,6 +287,14 @@ fn an_app_message_is_filtered_once_per_text() {
         "a fill or edit with new text"
     );
     assert!(!new_text(&m("hi discord.gg/x")));
+    // An image-only deferred fill: same (empty) text, a new file.
+    let fill =
+        |files: Value| msg(json!({"id": "910002", "application_id": "3", "attachments": files}));
+    assert!(new_text(&fill(json!([]))), "the LOADING post");
+    let img = json!([{"id": "1", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+        "proxy_url": "https://media.discordapp.net/a.png", "content_type": "image/png"}]);
+    assert!(new_text(&fill(img.clone())), "the fill adds an image");
+    assert!(!new_text(&fill(img)), "the same image again");
 }
 
 /// A user-installed app's reply to a button click is deleted for its text, but the clicker did not

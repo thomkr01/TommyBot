@@ -95,17 +95,21 @@ pub(crate) fn app_message(m: &Message) -> bool {
 /// Remembers the text a webhook or app message was filtered on (content and embed text); true when
 /// it is new for that message, so an update that changes nothing is not filtered twice.
 pub(crate) fn new_text(m: &Message) -> bool {
-    use std::hash::{Hash, Hasher};
+    use std::hash::BuildHasher;
     static READ: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, u64>>> =
         std::sync::LazyLock::new(Default::default);
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (filter_text(m), app_text(m)).hash(&mut h);
+    // Random keys per process: a fixed-key hash can be collided offline to pass a bad edit.
+    static KEYS: std::sync::LazyLock<std::collections::hash_map::RandomState> =
+        std::sync::LazyLock::new(Default::default);
+    // A file added with the same text (an image-only fill) counts too: its scan and QR must run.
+    let files: Vec<u64> = attachments(m).map(|a| a.id.get()).collect();
+    let h = KEYS.hash_one((filter_text(m), app_text(m), files));
     let mut read = READ.lock().unwrap();
     // shortcut: past the cap every message is forgotten; its next update is filtered once more.
     if read.len() >= 20_000 {
         read.clear();
     }
-    read.insert(m.id.get(), h.finish()) != Some(h.finish())
+    read.insert(m.id.get(), h) != Some(h)
 }
 
 /// An edit can sneak in a link or word after the message passed, so only those filters run again.

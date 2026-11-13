@@ -435,8 +435,9 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             }
             automod::on_message(app, m).await?;
         }
-        // A webhook or app can change its text without edited_timestamp (a deferred fill, a button
-        // update): any new text is filtered, the same text never twice.
+        // A webhook or app can change its text or files without edited_timestamp (a deferred fill,
+        // a button update): new text or files are filtered (unseen files scanned and QR-read),
+        // the same ones never twice.
         Event::MessageUpdate(m) if app_post(app, &m.0) => {
             if automod::new_text(&m.0) {
                 automod::on_edit(app, &m.0).await?;
