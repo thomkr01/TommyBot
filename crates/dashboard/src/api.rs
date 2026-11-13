@@ -943,7 +943,7 @@ mod logging_validate_tests {
             return;
         };
         let db = tommybot_core::db::connect(&url).await.unwrap();
-        let g = 9_880_000_000 + std::process::id() as i64;
+        let g = 9_884_000_000 + std::process::id() as i64;
         let cfg = |ch: Option<&str>| json!({"logging": {"config_changes": ch}});
         for (v, ch) in [(1, Some("11")), (2, Some("22")), (3, None)] {
             sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
