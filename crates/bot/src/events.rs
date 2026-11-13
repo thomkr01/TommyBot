@@ -386,6 +386,8 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         Event::ChannelUpdate(c) => {
             app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), false)
         }
+        Event::MemberUpdate(m) => app.forget_level(m.guild_id.get(), m.user.id.get()),
+        Event::MemberRemove(m) => app.forget_level(m.guild_id.get(), m.user.id.get()),
         _ => {}
     }
     // A voice member's channel before this event, read as the update is recorded.

@@ -174,6 +174,8 @@ pub struct App {
     /// Category (None: no category) of each channel created or deleted, until its audit entry arrives.
     pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
     /// Each channel's category as last seen, and when it last moved to another (D4).
+    /// Permit levels [`App::whitelisted`] read in the last [`LEVEL_TTL`].
+    pub(crate) levels: Mutex<LevelCache>,
     pub category_moves: Mutex<HashMap<u64, (Option<u64>, crate::hierarchy::CategoryMove)>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
@@ -193,6 +195,16 @@ pub struct App {
     pub voice_raids: Mutex<HashMap<u64, tommybot_automod::voice::VoiceRaidDetector>>,
     /// NSFW image scan queue, model and score cache.
     pub nsfw: crate::nsfw::Scanner,
+}
+
+/// How long a whitelist lookup is reused (D77). Short: a role change clears it anyway.
+const LEVEL_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+pub(crate) struct LevelCache {
+    map: HashMap<(u64, u64), (Level, Instant)>,
+    /// Moves on every forget, so a lookup started before it is not cached.
+    generation: u64,
 }
 
 /// Parsed configs per guild. A load that read the database before a newer save was announced must not
@@ -281,6 +293,7 @@ impl App {
             guilds: Default::default(),
             channel_parents: Default::default(),
             category_moves: Default::default(),
+            levels: Default::default(),
             nuke_runs: Default::default(),
             lock_ops: Default::default(),
             thread_parents: Default::default(),
@@ -327,15 +340,45 @@ impl App {
         Ok(self.level(guild, owner, user).await?.immune())
     }
 
-    /// Exempt from one system via the permit whitelist (immune levels are exempt from all).
+    /// Exempt from one system via the permit whitelist (immune levels are exempt from all). A nuke
+    /// asks this for every audit entry, so the level is kept for [`LEVEL_TTL`] (D77): a member
+    /// update clears it, and a read that raced that clear is not kept.
     pub async fn whitelisted(
         &self,
         guild: Id<GuildMarker>,
         user: Id<UserMarker>,
         flag: &str,
     ) -> Result<bool> {
-        let owner = self.guild_info(guild).await?.owner;
-        Ok(self.level(guild, owner, user).await?.whitelisted(flag))
+        let key = (guild.get(), user.get());
+        let (hit, generation) = {
+            let c = self.levels.lock().unwrap();
+            let hit = c.map.get(&key).filter(|e| e.1.elapsed() < LEVEL_TTL);
+            (hit.map(|e| e.0.clone()), c.generation)
+        };
+        let level = match hit {
+            Some(l) => l,
+            None => {
+                let owner = self.guild_info(guild).await?.owner;
+                let l = self.level(guild, owner, user).await?;
+                let mut c = self.levels.lock().unwrap();
+                if c.generation == generation {
+                    // shortcut: cleared whole past the cap, it only costs lookups.
+                    if c.map.len() > 10_000 {
+                        c.map.clear();
+                    }
+                    c.map.insert(key, (l.clone(), Instant::now()));
+                }
+                l
+            }
+        };
+        Ok(level.whitelisted(flag))
+    }
+
+    /// A member's roles (and so their level) changed: drop the cached level.
+    pub fn forget_level(&self, guild: u64, user: u64) {
+        let mut c = self.levels.lock().unwrap();
+        c.generation += 1;
+        c.map.remove(&(guild, user));
     }
 
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {

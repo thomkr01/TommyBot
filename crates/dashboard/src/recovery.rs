@@ -254,10 +254,13 @@ async fn panic_start(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>
 /// Moves the pending `panic_end` job to now, so the bot ends panic mode with the unlock settings it stored.
 async fn panic_end(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
+    // Who ended it goes into the panic log: a Trusted Admin may end it, not change it (D74).
     let moved = sqlx::query(
-        "UPDATE scheduled_jobs SET run_at = now() WHERE guild_id = $1 AND kind = 'panic_end'",
+        "UPDATE scheduled_jobs SET run_at = now(), payload = payload || jsonb_build_object('ended_by', $2::text)
+         WHERE guild_id = $1 AND kind = 'panic_end'",
     )
     .bind(guild)
+    .bind(s.user_id.to_string())
     .execute(&st.db)
     .await?;
     if moved.rows_affected() == 0 {

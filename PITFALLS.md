@@ -258,6 +258,14 @@ Anti-nuke heat at 100 % only counted towards panic, which needs 3 distinct accou
 Ticket categories and panic's Whitelisted Categories exempted every channel create and delete in them, for any actor, so a nuker moved channels into the category and deleted them uncounted and never recreated. The panic list was only ever documented as "left unlocked by panic". Root cause: an exemption meant for one kind of actor (ticket bots) was keyed only on the place.
 *Avoid:* an exemption names who it is for: ticket categories exempt only a bot (`antinuke::is_bot`, a failed lookup counts), never a channel that moved in from outside them in the last hour (`App::note_category` before the first await of the gateway task, `moved_in`), and panic's list is panic-only. Searched: no other module reads `whitelisted_categories`.
 
+**Manage Roles handed out a whitelist.** (overlap deep dive D16, 13-11)
+Anyone with Manage Roles could give themselves a role that carries a permit, and with it the permit's anti-nuke whitelist, then nuke uncounted. Root cause: the permit tables decide trust, but who may hand out a permit's role was left to Discord's hierarchy.
+*Avoid:* giving a member a permit role is a guarded action (`antinuke::guard_permit_roles`): the role is taken back and the actor quarantined unless they are Owner, Extra Owner or Trusted Admin. Runs with anti-nuke on, after `guard_perms`, also for a self-grant.
+
+**A failed whitelist lookup dropped the action.** (overlap deep dive D21, 13-11)
+`on_audit` used `app.whitelisted(..)?`, so a 5xx or timeout on the member lookup returned before the action was logged or counted: a nuke during a Discord hiccup was never stopped or reverted. Root cause: an error in the exemption check was handled like "exempt".
+*Avoid:* on a protection path a failed exemption check means "not exempt" for counting (the limits apply). The instant tripwires (`guard_perms`, the hold) still stop on the error, as #97 asks for staff. During a nuke the level is reused for 5 s (`App::whitelisted`, D77), cleared on every member update or leave before the event's first await, and a lookup that raced a clear is not kept (as D66).
+
 **The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
 `/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
 *Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).

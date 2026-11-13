@@ -176,6 +176,9 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         }
         // A role rename still counts below.
         guard_perms(app, &cfg, e, actor).await?;
+        if e.action_type == A::MemberRoleUpdate {
+            guard_permit_roles(app, e, actor).await?;
+        }
     }
     match e.action_type {
         A::MemberUpdate | A::MemberKick | A::MemberBanAdd if cfg.antinuke.quarantine_hold => {
@@ -209,9 +212,13 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             return Ok(());
         }
     }
-    // A webhook on the webhook whitelist is exempt whatever its creator may do.
-    let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?
-        || (action == Action::WebhookCreate
+    // A webhook on the webhook whitelist is exempt whatever its creator may do. A failed lookup
+    // counts the action, so a Discord error cannot hide a nuke (D21).
+    let listed = app.whitelisted(gid, actor, whitelist_flag(action)).await;
+    let exempt = listed.unwrap_or_else(|e| {
+        tracing::warn!(?e, "whitelist lookup failed, counting the action");
+        false
+    }) || (action == Action::WebhookCreate
             && e.target_id.is_some_and(|t| {
                 cfg.whitelist
                     .spam
@@ -567,6 +574,54 @@ async fn guard_perms(
         tracing::warn!(?err, why, "undoing a guarded change failed");
     }
     quarantine_and_revert(app, gid, actor, why).await
+}
+
+/// Giving a member a role that carries a permit hands out a permit, and with it any whitelist:
+/// undone and the actor quarantined, unless an Owner, Extra Owner or Trusted Admin did it (D16).
+async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+    let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
+        return Ok(());
+    };
+    let added: Vec<i64> = e
+        .changes
+        .iter()
+        .filter_map(|c| match c {
+            AuditLogChange::RoleAdded { new, .. } => Some(new),
+            _ => None,
+        })
+        .flatten()
+        .map(|r| r.id.get() as i64)
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+    let permit = permit_roles_in(&app.pool, gid.get() as i64, &added).await?;
+    if permit.is_empty() || app.is_immune(gid, actor).await? {
+        return Ok(());
+    }
+    // A failed undo must not spare the actor.
+    for r in permit {
+        let undo = app
+            .http
+            .remove_guild_member_role(gid, target.cast(), Id::new(r as u64))
+            .reason("Anti-nuke: a permit role is given only by an Owner, Extra Owner or Trusted Admin")
+            .await;
+        if let Err(err) = undo {
+            tracing::warn!(?err, "taking a permit role back failed");
+        }
+    }
+    quarantine_and_revert(app, gid, actor, "gave a member a role that carries a permit").await
+}
+
+/// Which of `roles` carry a permit in the guild.
+async fn permit_roles_in(pool: &PgPool, guild: i64, roles: &[i64]) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT role_id FROM permit_roles WHERE guild_id = $1 AND role_id = ANY($2)",
+    )
+    .bind(guild)
+    .bind(roles)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Roles of `member` that carry dangerous permissions and sit below the bot, so it can take them.
@@ -2335,6 +2390,36 @@ mod tests {
         sqlx::query("DELETE FROM command_uses WHERE actor_id = $1")
             .bind(g)
             .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn only_roles_with_a_permit_are_guarded() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 6_490_000_000 + std::process::id() as i64;
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO permits (guild_id, name, rank, perms) VALUES ($1, 'Mods', 1, '{ban}') RETURNING id",
+        )
+        .bind(g)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, 7)")
+            .bind(id)
+            .bind(g)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(permit_roles_in(&pool, g, &[5, 7]).await.unwrap(), vec![7]);
+        assert!(permit_roles_in(&pool, g + 1, &[7]).await.unwrap().is_empty());
+        sqlx::query("DELETE FROM permits WHERE guild_id = $1")
+            .bind(g)
+            .execute(&pool)
             .await
             .unwrap();
     }
