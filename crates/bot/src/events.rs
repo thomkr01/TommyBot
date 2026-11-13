@@ -457,7 +457,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
-            app.invalidate_guild(r.guild_id);
+            app.invalidate_object(r.guild_id, r.role.id.get());
             app.log_public.lock().unwrap().clear();
         }
         Event::RoleDelete(r) => app.invalidate_guild(r.guild_id),
@@ -470,7 +470,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::ChannelUpdate(c) => {
             app.log_public.lock().unwrap().remove(&c.id);
-            c.guild_id.into_iter().for_each(|g| app.invalidate_guild(g));
+            c.guild_id.into_iter().for_each(|g| app.invalidate_object(g, c.id.get()));
             if let Err(e) = crate::setup::enforce_quarantine(app, c).await {
                 tracing::warn!(?e, channel = %c.id, "quarantine overwrite failed");
             }

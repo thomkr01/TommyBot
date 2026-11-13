@@ -1231,8 +1231,8 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
     const TALK: u64 = 514;
     const SENDS: u64 = 515;
     let (view, send) = (1024u64, 2048u64);
-    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human, s4, d, e, nobody, s5] =
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17].map(|n| t.base * 100 + n);
+    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human, s4, d, e, nobody, s5, s6] =
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18].map(|n| t.base * 100 + n);
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(), "quarantine_hold": false});
     for i in 0..3 {
         server(&t, i, json!({"verification": web_verification(), "antinuke": an})).await;
@@ -1418,14 +1418,22 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
         ..Default::default()
     };
     tommybot_automod::store::save_lock(&t.app.pool, g1, &lock).await.unwrap();
-    // The lock's gateway events: TommyBot marked them as its own, so they only soften.
-    crate::verify::given::mark_own(t.g(1));
-    t.app.invalidate_guild(t.g(1));
+    // The lock's gateway event for the channel TommyBot marked only softens the gate.
+    crate::verify::given::mark_own(t.g(1), 712);
+    t.app.invalidate_object(t.g(1), 712);
     assert!(crate::verify::given::cached_for(t.g(1)).is_some_and(|d| d < std::time::Duration::from_secs(60)));
-    // Anyone else's gateway edit drops the gate at once (S R5-1).
-    std::thread::sleep(std::time::Duration::from_millis(5100));
-    t.app.invalidate_guild(t.g(1));
-    assert_eq!(crate::verify::given::cached_for(t.g(1)), None);
+    // An event about another object inside the window drops it (S R6-1); so does any event once
+    // the mark ran out (S R5-1).
+    given(give(1, s5, SENDS)).await;
+    t.app.invalidate_object(t.g(1), 799);
+    assert_eq!(crate::verify::given::cached_for(t.g(1)), None, "another object");
+    given(give(1, s5, SENDS)).await;
+    crate::verify::given::age_own_edits(t.g(1));
+    t.app.invalidate_object(t.g(1), 712);
+    assert_eq!(crate::verify::given::cached_for(t.g(1)), None, "mark ran out");
+    t.set(|m| {
+        m.members.insert((g1, s5), vec![TALK]);
+    });
     given(give(1, s5, TALK)).await;
     sqlx::query("DELETE FROM lock_snapshots WHERE guild_id = $1")
         .bind(g1 as i64)
@@ -1433,6 +1441,19 @@ async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_
         .await
         .unwrap();
     assert_eq!(roles(&t, 1, s5), Some(vec![]), "Send gate held during the lock");
+    // Panic lets @everyone send in a whitelisted category: the gate judges the saved overwrite.
+    t.set(|m| {
+        m.channels.insert(g1, chan(g1, "712", vec![ow(g1, send, 0), ow(VERIFIED, send, 0), ow(TALK, send, 0)]));
+        m.members.insert((g1, s6), vec![TALK]);
+    });
+    let end = json!({"exempt": [{"channel": 712, "allow": 0, "deny": send, "had": true}]});
+    tommybot_core::jobs::enqueue(&t.app.pool, g1 as i64, "panic_end", end, crate::app::now_secs() + 3600)
+        .await
+        .unwrap();
+    t.app.invalidate_guild(t.g(1));
+    given(give(1, s6, TALK)).await;
+    t.exec("DELETE FROM scheduled_jobs WHERE guild_id = $1 + 1").await;
+    assert_eq!(roles(&t, 1, s6), Some(vec![]), "Send gate held during panic");
     // At GuildCreate: only a role whose newest grant came from another bot goes.
     // During a raid the catch-up waits in a job and reads nothing.
     let raid = tommybot_automod::join::RaidDetector::restored(0, i64::MAX, String::new());

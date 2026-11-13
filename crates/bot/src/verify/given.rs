@@ -153,8 +153,10 @@ async fn gate(
     let live = live.iter().map(|r| (r.id, r.permissions.bits())).collect();
     let perms = crate::lockdown::unlocked(app, gid, live).await?;
     let mut channels = app.http.guild_channels(gid).await?.models().await?;
-    // A channel lock's denies are not what verification opens: judge the saved overwrites.
+    // A channel lock's denies and panic's Send exemption are not what verification opens:
+    // judge the overwrites they saved.
     crate::lockdown::unlocked_channels(app, gid, &mut channels).await?;
+    crate::panic::unexempted(app, gid, &mut channels).await?;
     let g = Arc::new(gate_of(gid, verify, &perms, &channels));
     store_gate(gid, gen, g.clone());
     Ok(g)
@@ -181,27 +183,37 @@ pub(crate) fn forget_gate(gid: Id<GuildMarker>) {
     slot.gen.0 += 1;
 }
 
-/// Guilds where TommyBot is editing roles or overwrites itself (a lock, an unlock, panic),
+/// Roles and channels TommyBot is editing itself (a lock, an unlock, panic), by (guild, id),
 /// marked just before each edit.
-static OWN_EDITS: LazyLock<Mutex<HashMap<u64, Instant>>> = LazyLock::new(Default::default);
+static OWN_EDITS: LazyLock<Mutex<HashMap<(u64, u64), Instant>>> = LazyLock::new(Default::default);
 const OWN_FOR: Duration = Duration::from_secs(5);
 
-/// TommyBot is about to edit a role or channel itself: the gateway event it causes only softens
-/// the gate.
-pub(crate) fn mark_own(gid: Id<GuildMarker>) {
+/// TommyBot is about to edit this role or channel itself: the gateway event it causes only
+/// softens the gate. Scoped to the object, so nobody can open the window for their own edits.
+pub(crate) fn mark_own(gid: Id<GuildMarker>, object: u64) {
     let mut all = OWN_EDITS.lock().unwrap_or_else(|p| p.into_inner());
     all.retain(|_, at| at.elapsed() < OWN_FOR);
-    all.insert(gid.get(), Instant::now());
+    all.insert((gid.get(), object), Instant::now());
+}
+
+/// Tests: the own-edit marks of `gid` run out now.
+#[cfg(test)]
+pub(crate) fn age_own_edits(gid: Id<GuildMarker>) {
+    let mut all = OWN_EDITS.lock().unwrap_or_else(|p| p.into_inner());
+    let old = Instant::now().checked_sub(OWN_FOR * 2).unwrap_or_else(Instant::now);
+    all.iter_mut().filter(|((g, _), _)| *g == gid.get()).for_each(|(_, at)| *at = old);
 }
 
 /// A gateway role or channel event (from `invalidate_guild`), which names no actor: a hard
-/// forget, unless TommyBot marked its own edits just now (S R5-1).
-pub(crate) fn invalidated(gid: Id<GuildMarker>) {
-    let own = OWN_EDITS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(&gid.get())
-        .is_some_and(|at| at.elapsed() < OWN_FOR);
+/// forget, unless it is about `object` and TommyBot marked that object just now (S R5-1, R6-1).
+pub(crate) fn invalidated(gid: Id<GuildMarker>, object: Option<u64>) {
+    let own = object.is_some_and(|o| {
+        OWN_EDITS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(gid.get(), o))
+            .is_some_and(|at| at.elapsed() < OWN_FOR)
+    });
     if own {
         soften_gate(gid);
     } else {

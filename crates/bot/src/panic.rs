@@ -112,7 +112,7 @@ async fn put_everyone(
         allow: Some(allow),
         deny: Some(deny),
     };
-    crate::verify::given::mark_own(gid);
+    crate::verify::given::mark_own(gid, channel.get());
     app.http.update_channel_permission(channel, &o).await?;
     Ok(())
 }
@@ -144,6 +144,42 @@ async fn exempt(app: &App, gid: Id<GuildMarker>, category: Id<ChannelMarker>) ->
     }))
 }
 
+/// `channels` with panic's Send exemptions undone as [`unexempt`] would: the @everyone overwrite
+/// each whitelisted category had before (or none), from the pending `panic_end` job.
+/// shortcut: only the category itself; a child channel synced to it is read live.
+pub(crate) async fn unexempted(
+    app: &App,
+    gid: Id<GuildMarker>,
+    channels: &mut [twilight_model::channel::Channel],
+) -> Result<()> {
+    let ends: Vec<Value> = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    for saved in ends.iter().flat_map(|p| p["exempt"].as_array().into_iter().flatten()) {
+        let Some(c) = saved["channel"]
+            .as_u64()
+            .and_then(|id| channels.iter_mut().find(|c| c.id.get() == id))
+        else {
+            continue;
+        };
+        let all = c.permission_overwrites.get_or_insert_with(Vec::new);
+        all.retain(|o| o.id.get() != gid.get());
+        if saved["had"].as_bool().unwrap_or(false) {
+            let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
+            all.push(twilight_model::channel::permission_overwrite::PermissionOverwrite {
+                id: gid.cast(),
+                kind: ModelOverwriteType::Role,
+                allow: bits("allow"),
+                deny: bits("deny"),
+            });
+        }
+    }
+    Ok(())
+}
+
 async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> {
     let channel = Id::new(
         saved["channel"]
@@ -154,7 +190,7 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
         let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
         put_everyone(app, gid, channel, bits("allow"), bits("deny")).await
     } else {
-        crate::verify::given::mark_own(gid);
+        crate::verify::given::mark_own(gid, channel.get());
         app.http
             .delete_channel_permission(channel)
             .role(Id::new(gid.get()))

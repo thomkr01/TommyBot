@@ -29,9 +29,9 @@ use twilight_model::channel::message::Embed;
 
 /// Runs one op; returns the channel it created, if any.
 async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Result<Option<u64>> {
-    crate::verify::given::mark_own(gid);
     match op {
         Op::SetRolePerms { role, perms } => {
+            crate::verify::given::mark_own(gid, *role);
             let perms = Permissions::from_bits_retain(*perms);
             app.http
                 .update_role(gid, Id::new(*role))
@@ -39,6 +39,7 @@ async fn exec(app: &App, gid: Id<GuildMarker>, op: &Op, snap: &Snapshot) -> Resu
                 .await?;
         }
         Op::DenyChannelSend { channel, role } => {
+            crate::verify::given::mark_own(gid, *channel);
             // Other bits of an existing overwrite stay; unlock puts the old one back.
             let (allow, deny) = snap
                 .prior
@@ -537,7 +538,7 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             step(app.api.pause_invites(gid.get(), None).await);
         }
         for &(channel, role) in &snap.channel_denies {
-            crate::verify::given::mark_own(gid);
+            crate::verify::given::mark_own(gid, channel);
             let r = match snap.prior.iter().find(|p| p.0 == channel && p.1 == role) {
                 Some(&(_, _, allow, deny)) => {
                     let o = PermissionOverwrite {
