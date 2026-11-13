@@ -212,21 +212,23 @@ pub async fn apply_dm(
                     .reason(&audit)
                     .await?;
                 app.http.delete_ban(gid, target).reason(&audit).await?;
+                crate::scheduler::forget_jobs(app, gid, t, &["unban"], None).await;
                 (None, 0)
             }
             ModKind::Ban => {
                 // Queued first: a restart right after the ban must not make it permanent. If the ban
                 // fails, the unban later finds no ban and is dropped.
+                let mut job = None;
                 if let Some(d) = duration_s {
-                    let job = json!({"user":t});
-                    jobs::enqueue(&app.pool, gid.get() as i64, "unban", job, now_secs() + d)
-                        .await?;
+                    let (g, at) = (gid.get() as i64, now_secs() + d);
+                    job = Some(jobs::enqueue(&app.pool, g, "unban", json!({"user":t}), at).await?);
                 }
                 app.http
                     .create_ban(gid, target)
                     .delete_message_seconds(cfg.misc.purge_secs())
                     .reason(&audit)
                     .await?;
+                crate::scheduler::forget_jobs(app, gid, t, crate::scheduler::BANNED, job).await;
                 (Some(json!({"op":"unban","user":t})), 0)
             }
             ModKind::Kick => {
@@ -660,6 +662,9 @@ pub(crate) async fn apply_warn_actions(
     };
     // Same rule as a typed punishment: tell the member first.
     reply::dm_and_act(true, dm, act).await.1?;
+    if kind == "ban" {
+        crate::scheduler::forget_jobs(app, g, u.get(), crate::scheduler::BANNED, None).await;
+    }
     let case_no = cases::create(
         &app.pool,
         cases::NewCase {
@@ -700,7 +705,8 @@ fn timeout_chunk(remaining: i64) -> (i64, bool) {
     (remaining.min(MAX_TIMEOUT_S), remaining > MAX_TIMEOUT_S)
 }
 
-/// Single capped timeout for callers that cannot renew (warn thresholds, automod).
+/// Single capped timeout for callers that cannot renew (warn thresholds, automod). Keeps a longer
+/// running timeout; a failed read times out anyway.
 pub async fn timeout(
     http: &Client,
     g: Id<GuildMarker>,
@@ -708,9 +714,16 @@ pub async fn timeout(
     secs: i64,
     reason: &str,
 ) -> Result<()> {
-    let until = Timestamp::from_secs(now_secs() + timeout_chunk(secs).0)?;
+    let until = now_secs() + timeout_chunk(secs).0;
+    let running = crate::http_err::member(http, g, u).await.ok().flatten();
+    if running
+        .and_then(|m| m.communication_disabled_until)
+        .is_some_and(|t| t.as_secs() >= until)
+    {
+        return Ok(());
+    }
     http.update_guild_member(g, u)
-        .communication_disabled_until(Some(until))
+        .communication_disabled_until(Some(Timestamp::from_secs(until)?))
         .reason(reason)
         .await?;
     Ok(())
@@ -734,18 +747,15 @@ pub async fn timeout_until(
         .communication_disabled_until(Some(Timestamp::from_secs(now + chunk)?))
         .reason(reason)
         .await?;
+    let mut job = None;
     if more {
         // Renewed a day early so scheduler lag cannot open a gap.
-        let job = json!({"user":u.get(),"until_secs":until});
-        jobs::enqueue(
-            &app.pool,
-            g.get() as i64,
-            "timeout_renew",
-            job,
-            now + chunk - 86_400,
-        )
-        .await?;
+        let p = json!({"user":u.get(),"until_secs":until});
+        let at = now + chunk - 86_400;
+        job = Some(jobs::enqueue(&app.pool, g.get() as i64, "timeout_renew", p, at).await?);
     }
+    // After the PATCH: a failed one keeps the old timeout's renewal. One chain per member.
+    crate::scheduler::forget_jobs(app, g, u.get(), &["timeout_renew"], job).await;
     Ok(())
 }
 

@@ -59,7 +59,9 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
             let log = Log::new("Catch channel (test mode)", RED)
                 .user("Member", uid.get())
                 .line("Action", "None, test mode only logs");
-            send_log(app, gid.get(), LogKind::AutoMod, log).await?;
+            if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+                tracing::warn!(?e, "catch channel test log failed");
+            }
             return Ok(true);
         }
     };
@@ -97,7 +99,10 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     let log = Log::new("Catch channel action failed", RED)
         .user("Member", uid.get())
         .line("Error", &text);
-    send_log(app, gid.get(), LogKind::AutoMod, log).await?;
+    // The member was caught: a failed log must not hand the message on as uncaught.
+    if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+        tracing::warn!(?e, "catch channel failure log failed");
+    }
     Ok(true)
 }
 

@@ -102,6 +102,13 @@ async fn decide(
                 "Could not lift the punishment, it may already be lifted".into(),
             ));
         }
+        // A ban's `lifted` below drops a pending raid punishment retry; a timeout has none.
+        let jobs: &[&str] = if kind == "ban" {
+            &["unban"]
+        } else {
+            &["timeout_renew", "raid_punish"]
+        };
+        crate::scheduler::forget_jobs(app, gid, user as u64, jobs, None).await;
         if kind == "ban" {
             crate::raiders::lifted(app, gid, user_id, actor_id).await;
         }

@@ -285,7 +285,7 @@ pub(crate) async fn count(
                 cfg.panic.heat_decay,
             )
         {
-            crate::panic::note(app, gid, actor, true).await?;
+            crate::panic::note_heat(app, gid, actor).await;
         }
     }
     let verdict = {
@@ -932,8 +932,10 @@ pub(crate) struct RevertSummary {
     pub done: Vec<Inverse>,
     pub failed: usize,
     pub reinvite: Vec<u64>,
-    /// Deleted channels and roles recreated from the latest backup.
+    /// Changes made to recreate deleted channels and roles from the backups.
     pub recreated: usize,
+    /// Roles recreated from an older backup without their dangerous permissions.
+    pub stripped: usize,
 }
 
 /// Undoes the actor's unreverted logged actions since `since_secs` (unix seconds) and marks them reverted.
@@ -945,7 +947,7 @@ pub(crate) async fn revert_actor(
     filters: Option<&BackupsCfg>,
 ) -> Result<RevertSummary> {
     let since = since_secs;
-    // Only the rows read here are marked reverted at the end: the actor's newer actions are not undone yet.
+    // Only rows read here can be marked reverted at the end: the actor's newer actions are not undone yet.
     let rows: Vec<(i64, serde_json::Value, i64)> = sqlx::query_as(
         "SELECT id, inverse, EXTRACT(EPOCH FROM created_at)::BIGINT FROM action_log
          WHERE guild_id=$1 AND actor_id=$2 AND NOT reverted AND inverse IS NOT NULL AND created_at >= to_timestamp($3)
@@ -956,7 +958,11 @@ pub(crate) async fn revert_actor(
     .bind(since)
     .fetch_all(&app.pool)
     .await?;
-    let mut ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    // A row whose inverse does not parse can never be undone, so it counts as handled.
+    let read: Vec<(i64, Option<Inverse>)> = rows
+        .iter()
+        .map(|(id, inv, _)| (*id, serde_json::from_value(inv.clone()).ok()))
+        .collect();
     // Newest first by id: `at` is whole seconds, and two renames in one second must put the
     // older name back last.
     let log: Vec<LogEntry> = rows
@@ -997,13 +1003,13 @@ pub(crate) async fn revert_actor(
             _ => true,
         });
     }
-    let mut failed = 0;
+    let mut failed = vec![];
     for op in &plan.ops {
         // Already undone (a revert cut off by a restart runs again) or the target is gone.
         match run_inverse(app, gid, op).await {
             Err(e) if !crate::http_err::gone_any(&e) => {
                 tracing::warn!(?e, ?op, "revert step failed");
-                failed += 1;
+                failed.push(op.clone());
             }
             _ => {}
         }
@@ -1018,18 +1024,28 @@ pub(crate) async fn revert_actor(
     .bind(since)
     .fetch_all(&app.pool)
     .await?;
-    ids.extend(gone.iter().map(|g| g.0));
-    let gone: std::collections::HashSet<u64> = gone.into_iter().map(|(_, t)| t as u64).collect();
-    let recreated = if gone.is_empty() {
-        0
+    let targets: std::collections::HashSet<u64> = gone.iter().map(|g| g.1 as u64).collect();
+    let back = if targets.is_empty() {
+        Default::default()
     } else {
-        backup::recreate(app, gid, &gone, filters)
+        backup::recreate(app, gid, &targets, filters)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(?e, "recreating deleted objects failed");
-                0
+                Default::default()
             })
     };
+    // Failed, filtered out or not recreated stays unreverted, for the next run or `/revert`.
+    let ids: Vec<i64> = read
+        .iter()
+        .filter(|(_, inv)| inv.as_ref().is_none_or(|i| undone(i, &plan.ops, &failed)))
+        .map(|r| r.0)
+        .chain(
+            gone.iter()
+                .filter(|g| back.back.contains(&(g.1 as u64)))
+                .map(|g| g.0),
+        )
+        .collect();
     sqlx::query("UPDATE action_log SET reverted = true WHERE id = ANY($1)")
         .bind(&ids)
         .execute(&app.pool)
@@ -1037,10 +1053,26 @@ pub(crate) async fn revert_actor(
     Ok(RevertSummary {
         ops: plan.ops.len(),
         done: plan.ops,
-        failed,
+        failed: failed.len(),
         reinvite: plan.reinvite,
-        recreated,
+        recreated: back.changes,
+        stripped: back.stripped,
     })
+}
+
+/// A read row's inverse was carried out: it is in the plan and did not fail. Name and icon rows
+/// went into one op of their kind (`settle_guild`), so they follow that op. Kicks only report a
+/// re-invite, which the caller sends.
+fn undone(inv: &Inverse, ops: &[Inverse], failed: &[Inverse]) -> bool {
+    let same = |op: &Inverse| {
+        op == inv
+            || matches!(
+                (op, inv),
+                (Inverse::GuildName { .. }, Inverse::GuildName { .. })
+                    | (Inverse::GuildIcon { .. }, Inverse::GuildIcon { .. })
+            )
+    };
+    matches!(inv, Inverse::Reinvite { .. }) || (ops.iter().any(same) && !failed.iter().any(same))
 }
 
 /// How a nuker was dealt with, for the report and the nuke case.
@@ -1475,13 +1507,24 @@ pub(crate) fn report_log(
     if let Some(cleared) = done.bot_role {
         log = log.line("Bot Role Cleansing", &mark(cleared));
     }
-    log.section("Revert Report:")
+    log = log
+        .section("Revert Report:")
         .line(
             "Reverted",
             &format!("`{}/{}`", sum.ops - sum.failed, sum.ops),
         )
         .line("Recreated", &format!("`{}`", sum.recreated))
-        .line("Kicked, re-invite", &reinvite)
+        .line("Kicked, re-invite", &reinvite);
+    if sum.stripped > 0 {
+        log = log.line(
+            "Older backup",
+            &format!(
+                "`{}` recreated roles came from an older backup and got no dangerous permissions. Give them back by hand if they should have them.",
+                sum.stripped
+            ),
+        );
+    }
+    log
 }
 
 /// A quiet gap this long starts a new nuke case instead of extending the last one.
@@ -1529,6 +1572,7 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
     match op {
         Inverse::Unban { user } => {
             app.http.delete_ban(gid, Id::new(*user)).await?;
+            crate::scheduler::forget_jobs(app, gid, *user, &["unban"], None).await;
         }
         Inverse::DeleteChannel { id } => {
             app.http.delete_channel(Id::new(*id)).await?;
@@ -2063,6 +2107,88 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(left, vec![("ChannelUpdate".to_string(),)]);
+    }
+
+    #[test]
+    fn only_carried_out_ops_count_as_undone() {
+        let ban = Inverse::Unban { user: 7 };
+        let chan = Inverse::DeleteChannel { id: 5 };
+        let name = |n: &str| Inverse::GuildName {
+            name: n.into(),
+            from: Some("x".into()),
+        };
+        let settled = Inverse::GuildName {
+            name: "orig".into(),
+            from: None,
+        };
+        let ops = [ban.clone(), settled.clone()];
+        assert!(undone(&ban, &ops, &[]));
+        assert!(!undone(&ban, &ops, std::slice::from_ref(&ban)), "failed");
+        assert!(!undone(&chan, &ops, &[]), "filtered out");
+        assert!(
+            undone(&name("a"), &ops, &[]),
+            "merged into the settled rename"
+        );
+        assert!(!undone(&name("a"), &ops, &[settled]));
+        assert!(undone(&Inverse::Reinvite { user: 7 }, &[], &[]));
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. A filtered op and a deleted
+    /// channel that no backup can bring back stay unreverted, for a later `/revert`.
+    #[tokio::test]
+    async fn revert_leaves_what_it_did_not_undo() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(6_450_000_000 + std::process::id() as u64);
+        let actor = Id::new(42);
+        for (action, inv) in [
+            (
+                "ChannelCreate",
+                Some(json!(Inverse::DeleteChannel { id: 9 })),
+            ),
+            ("ChannelDelete", None),
+            ("Kick", Some(json!(Inverse::Reinvite { user: 7 }))),
+        ] {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,9,$4)")
+                .bind(gid.get() as i64)
+                .bind(actor.get() as i64)
+                .bind(action)
+                .bind(inv)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+        let off = BackupsCfg {
+            restore: false,
+            ..Default::default()
+        };
+        let sum = revert_actor(&app, gid, actor, now_secs() - 60, Some(&off))
+            .await
+            .unwrap();
+        assert_eq!((sum.ops, sum.failed, sum.recreated), (0, 0, 0));
+        let left: Vec<(String,)> = sqlx::query_as(
+            "SELECT action FROM action_log WHERE guild_id=$1 AND NOT reverted ORDER BY id",
+        )
+        .bind(gid.get() as i64)
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+        let left: Vec<_> = left.into_iter().map(|r| r.0).collect();
+        assert_eq!(left, ["ChannelCreate", "ChannelDelete"]);
+        sqlx::query("DELETE FROM action_log WHERE guild_id=$1")
+            .bind(gid.get() as i64)
+            .execute(&app.pool)
+            .await
+            .unwrap();
     }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres.

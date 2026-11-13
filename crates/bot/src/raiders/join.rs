@@ -72,6 +72,17 @@ fn join_action(c: &RaiderListCfg, e: &Entry) -> RaiderAction {
     }
 }
 
+/// Staff let the user back in here (unban, unquarantine, Allow).
+pub(crate) async fn allowed(app: &App, gid: Id<GuildMarker>, user: u64) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM raider_allow WHERE guild_id = $1 AND user_id = $2)",
+    )
+    .bind(gid.get() as i64)
+    .bind(user as i64)
+    .fetch_one(&app.pool)
+    .await?)
+}
+
 /// Never acted on here: the bot, the bot owner, the owner, extra owners, trusted admins, the
 /// anti-nuke whitelist, and whoever staff let back in. `roles` when the caller has them already.
 pub(super) async fn exempt(
@@ -80,14 +91,7 @@ pub(super) async fn exempt(
     user: Id<UserMarker>,
     roles: Option<&[i64]>,
 ) -> Result<bool> {
-    let allowed: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM raider_allow WHERE guild_id = $1 AND user_id = $2)",
-    )
-    .bind(gid.get() as i64)
-    .bind(user.get() as i64)
-    .fetch_one(&app.pool)
-    .await?;
-    if allowed {
+    if allowed(app, gid, user.get()).await? {
         return Ok(true);
     }
     let owner = live_owner(app, gid)

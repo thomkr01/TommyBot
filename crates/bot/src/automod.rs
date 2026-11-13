@@ -376,7 +376,7 @@ async fn check_message(
         .await;
         return crate::webhooks::delete_new_webhooks(app, gid).await;
     }
-    crate::panic::note(app, gid, m.author.id, true).await?;
+    crate::panic::note_heat(app, gid, m.author.id).await;
     let tripped = tripped_filter(&breakdown, f, bad_site);
     if let Some((fc, factor)) = tripped {
         // Timeout without its own duration uses the Auto Timeouts, so it goes through the strikes.
@@ -435,7 +435,7 @@ async fn punish_crowd(
             if !fresh || app.whitelisted(gid, user, "automod").await? {
                 return Ok(());
             }
-            crate::panic::note(app, gid, user, true).await?;
+            crate::panic::note_heat(app, gid, user).await;
             strike_member(
                 app,
                 cfg,
@@ -769,6 +769,10 @@ async fn filter_action(
             if let Err(e) = done {
                 action_failed(app, gid, uid.get(), kind, &e).await;
                 return Err(e);
+            }
+            if kind == "ban" {
+                crate::scheduler::forget_jobs(app, gid, uid.get(), crate::scheduler::BANNED, None)
+                    .await;
             }
             auto_case(app, gid, uid, kind, factor, timed).await?;
         }

@@ -80,7 +80,7 @@ async fn heat_up(
     if !fresh || !am.strike.enabled {
         return Ok(());
     }
-    crate::panic::note(app, gid, user, true).await?;
+    crate::panic::note_heat(app, gid, user).await;
     let mut st = store::load_strikes(&app.pool, gid.get(), user.get()).await?;
     let act = strike(&mut st, &am.strike, now);
     store::save_strikes(&app.pool, gid.get(), user.get(), &st).await?;

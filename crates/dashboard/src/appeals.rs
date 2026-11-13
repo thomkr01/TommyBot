@@ -552,6 +552,14 @@ async fn accept_appeal(
         },
     )
     .await?;
+    // An older temp ban's unban or timeout's renewal must not act after the lift. A ban's
+    // `raiders::allow` below drops a pending raid punishment retry; a timeout drops it here.
+    let jobs: &[&str] = if kind == "ban" {
+        &["unban"]
+    } else {
+        &["timeout_renew", "raid_punish"]
+    };
+    tommybot_core::jobs::cancel_user(&mut *tx, guild, jobs, user as u64, None).await?;
     // The dashboard unbans as the bot, so the bot cannot tell staff lifted a Raider List ban.
     if kind == "ban" {
         tommybot_core::raiders::allow(&mut *tx, guild, user, s.user_id).await?;

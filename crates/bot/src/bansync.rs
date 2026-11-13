@@ -352,6 +352,11 @@ async fn origin(
     })
 }
 
+/// A copy ending at `copy` (None: never) outlasts a local ban ending at `local` (None: never).
+fn outlasts(copy: Option<i64>, local: Option<i64>) -> bool {
+    local.is_some_and(|l| copy.is_none_or(|c| c > l))
+}
+
 /// The end of a TommyBot temp ban: its pending unban job.
 async fn temp_end(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<Option<i64>> {
     Ok(
@@ -749,8 +754,10 @@ async fn copy(app: &App, key: Key) -> Result<()> {
         None => {}
     }
     let skip = |why: &'static str| mark(app, key, &["pending"], "skipped", Some(why));
-    // So a later unban there never lifts a ban this server made itself.
-    if ban.is_some() {
+    // So a later unban there never lifts a ban this server made itself. A TommyBot temp ban here
+    // that ends before the copy would is not a reason to skip: the copy outlasts it (its ban
+    // drops the temp ban's unban job), and the source's lift still finds a ban that is not ours.
+    if ban.is_some() && !outlasts(row.expires, temp_end(app, to, user).await?) {
         return skip("already banned").await.map(drop);
     }
     let duration = match remaining(row.expires) {
@@ -1014,6 +1021,8 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
         Err(e) if !http_err::gone(&e) => return Err(e.into()),
         _ => {}
     }
+    // A temp copy's unban job must not lift a ban staff make later.
+    crate::scheduler::forget_jobs(app, to, user.get(), &["unban"], None).await;
     let case_no = new_case(app, (to, user), "unban", &why, None).await?;
     mark(app, key, LIVE, "lifted", None).await?;
     commands::mod_log(

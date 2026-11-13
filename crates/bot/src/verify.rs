@@ -534,20 +534,16 @@ pub async fn deadline(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
             crate::antinuke::quarantine_as(app, gid, user, reason, kind).await?
         }
     }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::Verification,
-        result_log(
-            &member.user,
-            ALERT,
-            &format!(
-                "{NO} `{}` did not verify in time: **{:?}**",
-                member.user.name, v.verify.on_fail
-            ),
-        ),
-    )
-    .await
+    let text = format!(
+        "{NO} `{}` did not verify in time: **{:?}**",
+        member.user.name, v.verify.on_fail
+    );
+    let log = result_log(&member.user, ALERT, &text);
+    // The punishment is done: a failed log must not fail the job, which would punish again.
+    if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
+        tracing::warn!(?e, "verification deadline log failed");
+    }
+    Ok(())
 }
 
 pub(crate) fn ephemeral(

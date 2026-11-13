@@ -165,6 +165,7 @@ fn messages() -> Value {
         failed: 0,
         reinvite: vec![],
         recreated: 5,
+        stripped: 0,
     };
     let nuke = |applied, bot_role| {
         let why = format!(

@@ -381,7 +381,7 @@ mod review;
 mod tasks;
 
 pub use join::on_join;
-pub(crate) use join::{action_log, alert_log, alert_rows};
+pub(crate) use join::{action_log, alert_log, alert_rows, allowed};
 use review::listed_dm;
 pub(crate) use review::listed_text;
 pub use review::{command, handle, sweep};

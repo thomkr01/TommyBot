@@ -43,6 +43,14 @@ fn every_exemption_is_named() {
 }
 
 #[test]
+fn a_copy_replaces_only_a_local_temp_ban_it_outlasts() {
+    assert!(outlasts(None, Some(100)) && outlasts(Some(200), Some(100)));
+    assert!(!outlasts(Some(100), Some(100)) && !outlasts(Some(50), Some(100)));
+    // A permanent ban here (no unban job) is never replaced.
+    assert!(!outlasts(None, None) && !outlasts(Some(200), None));
+}
+
+#[test]
 fn automatic_bans_follow_their_switches() {
     let c = BanSyncCfg::default();
     for (o, on) in [
@@ -124,6 +132,12 @@ pub(crate) struct Mock {
     pub(crate) timeouts: HashMap<(u64, u64), String>,
     /// Managed role -> the bot it belongs to (its tags.bot_id).
     pub(crate) bot_roles: HashMap<u64, u64>,
+    /// Log and DM messages fail with 403.
+    pub(crate) fail_message: bool,
+    /// Log and DM messages fail with 502.
+    pub(crate) fail_message_5xx: bool,
+    /// Channel deletes fail with 500.
+    pub(crate) fail_delete_channel: bool,
     pub(crate) log: Vec<String>,
 }
 
@@ -180,12 +194,14 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
     let err = |s: u16, code: u64| (s, json!({"code": code, "message": "x"}).to_string());
     let n = |s: &str| s.parse::<u64>().unwrap();
     let bot = m.bots.clone();
-    let member = |u: &str, roles: &[u64]| {
+    let timeouts = m.timeouts.clone();
+    let member = |g: &str, u: &str, roles: &[u64]| {
         let roles: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
         let mut usr = user(u);
         usr["bot"] = json!(bot.iter().any(|b| b.to_string() == u));
+        let until = timeouts.get(&(n(g), n(u)));
         json!({"user": usr, "roles": roles, "joined_at": "2020-01-01T00:00:00.000000+00:00",
-               "deaf": false, "mute": false, "flags": 0})
+               "deaf": false, "mute": false, "flags": 0, "communication_disabled_until": until})
     };
     match (method, parts.as_slice()) {
         ("GET", ["guilds", _, "bans", _]) if m.fail_get => err(500, 0),
@@ -217,17 +233,11 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         ("GET", ["guilds", _, "members", _]) if m.fail_member => err(500, 0),
         ("GET", ["guilds", g, "members", u]) => match m.members.get(&(n(g), n(u))) {
             Some(r) if n(u) == ME && m.new_bot.contains(&n(g)) => {
-                let mut j = member(u, r);
+                let mut j = member(g, u, r);
                 j["joined_at"] = json!("2099-01-01T00:00:00.000000+00:00");
                 (200, j.to_string())
             }
-            Some(r) => {
-                let mut j = member(u, r);
-                if let Some(until) = m.timeouts.get(&(n(g), n(u))) {
-                    j["communication_disabled_until"] = json!(until);
-                }
-                (200, j.to_string())
-            }
+            Some(r) => (200, member(g, u, r).to_string()),
             None => err(404, 10007),
         },
         ("GET", ["guilds", g, "members"]) => {
@@ -237,10 +247,24 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 .into_iter()
                 .filter(|x| x.0 .1 > q("after").unwrap_or(0))
                 .take(q("limit").unwrap_or(1) as usize)
-                .map(|x| member(&x.0 .1.to_string(), x.1))
+                .map(|x| member(g, &x.0 .1.to_string(), x.1))
                 .collect();
             (200, json!(page).to_string())
         }
+        ("PATCH", ["guilds", g, "members", u])
+            if m.members.contains_key(&(n(g), n(u))) && body.contains("communication_disabled_until") =>
+        {
+            let b: Value = serde_json::from_str(body).unwrap_or_default();
+            match b["communication_disabled_until"].as_str() {
+                Some(t) => m.timeouts.insert((n(g), n(u)), t.into()),
+                None => m.timeouts.remove(&(n(g), n(u))),
+            };
+            let roles = m.members[&(n(g), n(u))].clone();
+            let mut j = member(g, u, &roles);
+            j["communication_disabled_until"] = b["communication_disabled_until"].clone();
+            (200, j.to_string())
+        }
+        ("DELETE", ["channels", _]) if m.fail_delete_channel => err(500, 0),
         ("DELETE", ["guilds", g, "members", u]) => match m.members.remove(&(n(g), n(u))) {
             Some(_) => (204, String::new()),
             None => err(404, 10007),
@@ -298,7 +322,7 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 *have = ids;
             }
             let have = have.clone();
-            (200, member(u, &have).to_string())
+            (200, member(g, u, &have).to_string())
         }
         ("PUT", ["guilds", g, "members", u, "roles", r]) => {
             match m.members.get_mut(&(n(g), n(u))) {
@@ -327,6 +351,8 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         }
         ("PUT", ["channels", _, "permissions", _]) => (204, String::new()),
         ("POST", ["channels", c, "messages"]) if m.fail_channels.contains(&n(c)) => err(403, 50001),
+        ("POST", ["channels", _, "messages"]) if m.fail_message => err(403, 50013),
+        ("POST", ["channels", _, "messages"]) if m.fail_message_5xx => err(502, 0),
         ("POST", ["users", "@me", "channels"]) => (200, json!({"id": "77", "type": 1}).to_string()),
         ("POST", ["channels", c, "messages"]) => {
             let msg = json!({"id": "1", "channel_id": c, "author": user("1"), "content": "",
