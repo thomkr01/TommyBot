@@ -747,6 +747,322 @@ def g2b_forward():
     print("cleaned: webhook e2e-g2b-source, both messages and scan rows")
     return check(bool(fwd) and rows > 0, f"g2b_forward: forward seen={bool(fwd)}, scan rows={rows}")
 
+def section(name):
+    """The newest saved config section, or None when the config has no such key."""
+    raw = sql(f"select config->'{name}' from guild_config where guild_id = {GUILD} order by version desc limit 1")
+    return json.loads(raw) if raw else None
+
+
+def restore_section(name, old):
+    """Puts a section back as `section` read it: the old value, or no key at all."""
+    if old is not None:
+        return set_config(name, old)
+    sql(f"""insert into guild_config (guild_id, version, config)
+            select {GUILD}, max(version) + 1,
+                   (select config from guild_config where guild_id = {GUILD} order by version desc limit 1) - '{name}'
+            from guild_config where guild_id = {GUILD};
+            select pg_notify('config_changed', '{GUILD}');""")
+    time.sleep(2)
+
+
+def incidents():
+    return int(sql(f"select count(*) from nuke_incidents where guild_id = {GUILD}"))
+
+
+def wait_report(since, tries=20):
+    for _ in range(tries):
+        report = [e for _, e in titled("anti_nuke", since, "Anti Nuke Report:")]
+        if report:
+            return report
+        time.sleep(3)
+    return []
+
+
+def attacker_setup():
+    attacker = os.environ["ATTACKER_TOKEN"]
+    user = attacker_id()
+    role = bot_role_of(user)
+    if role is None:
+        raise SystemExit("the attacker bot is not on the test server: invite it again")
+    return attacker, user, role, int(role["permissions"]) or 8
+
+
+def g1_stale():
+    """D1: a nuker released by hand with its quarantines row left behind is contained again."""
+    attacker, user, role, perms = attacker_setup()
+    antinuke_on()
+    try:
+        before = incidents()
+        since = snowflake_now()
+        attack_channels(6, attacker)
+        first = wait_for(f"select count(*) from nuke_incidents where guild_id = {GUILD}",
+                         lambda n: n > before, tries=30)
+        held = contained(user)
+        # Its report lands after the incident row; the control must not count it.
+        first_report = bool(wait_report(since))
+        clean_nuke_channels()
+        # Control: still held, so its calls fail and nothing new is written.
+        since = snowflake_now()
+        attack_channels(6, attacker)
+        time.sleep(20)
+        control = not wait_report(since, tries=1)
+        clean_nuke_channels()
+        # Released by hand, row kept (not free_attacker).
+        call("PATCH", f"/guilds/{GUILD}/roles/{role['id']}", body={"permissions": str(perms)})
+        call("DELETE", f"/guilds/{GUILD}/members/{user}/roles/{quarantine_role()}", soft=True)
+        time.sleep(2)
+        rows = int(sql(f"select count(*) from quarantines where guild_id = {GUILD} and user_id = {user}"))
+        released = contained(user)
+        since = snowflake_now()
+        attack_channels(6, attacker)
+        # Within 10 minutes the bot extends the same nuke case (record_nuke, NUKE_GAP), so the
+        # incident row count stays; a second Anti Nuke Report is the full contain.
+        report = wait_report(since, tries=30)
+        again = contained(user)
+        second = incidents()
+    finally:
+        clean_nuke_channels()
+        free_attacker(user, perms)
+    print(f"g1_stale: first contain {held}, control no-op={control}, row kept={rows}, released {released}, "
+          f"incidents {before} -> {first} -> {second}, contained again {again}, second report="
+          f"{[e.get('description', '')[:40] for e in report]}")
+    return check(first > before and all(held) and first_report and control and rows == 1
+                 and released == (True, False, False) and all(again) and bool(report),
+                 "g1_stale: a hand-released nuker with a leftover row is contained and reported again")
+
+
+def quarantine_overwrite_of(chan):
+    q = quarantine_role()
+    o = next((o for o in call("GET", f"/channels/{chan}")["permission_overwrites"] if o["id"] == q), None)
+    return o and (int(o["allow"]), int(o["deny"]))
+
+
+def sanitized_channel(chan, since):
+    """An overwrite create (13) or update (14) audit entry on `chan` with the sanitize reason."""
+    for t in (13, 14):
+        for e in call("GET", f"/guilds/{GUILD}/audit-logs?action_type={t}&limit=50")["audit_log_entries"]:
+            if (int(e["id"]) > int(since) and e.get("target_id") == chan
+                    and "Sanitizing the channel" in (e.get("reason") or "")):
+                return True
+    return False
+
+
+def g1_verify_channel():
+    """D55: enforce_quarantine keeps the verification channel's readable overwrite on a ChannelUpdate."""
+    old_misc, old_ver, old_anti = section("misc"), section("verification"), section("antinuke")
+    antinuke_on()
+    q = quarantine_role()
+    made = []
+    try:
+        chan = call("POST", f"/guilds/{GUILD}/channels", body={
+            "name": "g1-verify", "permission_overwrites": [{"id": q, "type": 0, "allow": "66560", "deny": "2048"}]})
+        made.append(chan["id"])
+        set_config("verification", {**(old_ver or {}), "enabled": True, "mode": "Button", "channel": chan["id"]})
+        set_config("misc", {**(old_misc or {}), "enforce_quarantine_perms": True})
+        start = quarantine_overwrite_of(chan["id"])
+        since = snowflake_now()
+        call("PATCH", f"/channels/{chan['id']}", body={"name": "g1-verify-2"})
+        time.sleep(4)
+        after = quarantine_overwrite_of(chan["id"])
+        hit = sanitized_channel(chan["id"], since)
+        since2 = snowflake_now()
+        other = call("POST", f"/guilds/{GUILD}/channels", body={"name": "g1-other"})
+        made.append(other["id"])
+        time.sleep(4)
+        other_ow = quarantine_overwrite_of(other["id"])
+        other_hit = sanitized_channel(other["id"], since2)
+    finally:
+        # Verification off first, so deleting its channel does not make a new one.
+        restore_section("verification", old_ver)
+        restore_section("misc", old_misc)
+        restore_section("antinuke", old_anti)
+        for c in made:
+            call("DELETE", f"/channels/{c}", soft=True)
+        print(f"cleaned: {len(made)} g1 channels, verification/misc/antinuke sections restored")
+    print(f"g1_verify_channel: verify overwrite {start} -> {after} (sanitize audit={hit}); "
+          f"g1-other overwrite {other_ow} (sanitize audit={other_hit})")
+    # Verification rewrites the plan's 66560/2048 to its own shape (VERIFY_ALLOW, VERIFY_DENY) when
+    # it is turned on; what matters is that View stays allowed after the ChannelUpdate.
+    return check(after == start and after[0] == 66560 and after[1] & 1024 == 0 and not hit and other_ow is not None and other_ow[1] != 0 and other_hit,
+                 "g1_verify_channel: verification overwrite kept, other channel sanitized")
+
+
+def g1_deleted_role():
+    """D6: with the Quarantine role deleted in Discord, a nuking bot is still stripped and not kicked."""
+    attacker, user, role, perms = attacker_setup()
+    old_anti = section("antinuke")
+    gone = call("POST", f"/guilds/{GUILD}/roles", body={"name": "Quarantine-g1", "permissions": "0"})
+    antinuke_on(quarantine_role=gone["id"])
+    call("DELETE", f"/guilds/{GUILD}/roles/{gone['id']}")
+    time.sleep(2)
+    try:
+        since = snowflake_now()
+        before = incidents()
+        attack_channels(6, attacker)
+        after = wait_for(f"select count(*) from nuke_incidents where guild_id = {GUILD}",
+                         lambda n: n > before, tries=30)
+        member = call("GET", f"/guilds/{GUILD}/members/{user}", soft=True)
+        brole = bot_role_of(user)
+        report = wait_report(since)
+        logs = json.dumps([e for m in log_messages("anti_nuke", since) for e in m["embeds"]])
+        saved = sql(f"select saved_roles from quarantines where guild_id = {GUILD} and user_id = {user}")
+    finally:
+        restore_section("antinuke", old_anti)
+        antinuke_on()
+        clean_nuke_channels()
+        if call("GET", f"/guilds/{GUILD}/members/{user}", soft=True) is None:
+            print("ATTENTION: the attacker bot was kicked and must be invited again")
+        else:
+            free_attacker(user, perms)
+    roles = member["roles"] if member else None
+    text = json.dumps(report)
+    print(f"g1_deleted_role: incidents {before} -> {after}, member={member is not None}, roles={roles}, "
+          f"bot role perms={brole and brole['permissions']}, saved roles={saved!r}, "
+          f"'Quarantine role missing' logged={'Quarantine role missing' in logs}, report kicked={'kick' in text.lower()}")
+    print(f"g1_deleted_role: report {text[:600]}")
+    return check(after > before and member is not None and roles == [role["id"]] and brole
+                 and int(brole["permissions"]) == 0 and "Quarantine role missing" in logs,
+                 "g1_deleted_role: contained without a Quarantine role, not kicked")
+
+
+def g2a_panic_lock():
+    """D8: panic mode's end does not lift a lock staff made before panic."""
+    attacker, user, role, perms = attacker_setup()
+    general = text_channel("general")
+    old = {s: section(s) for s in ("backups", "panic", "antinuke")}
+    locks = f"select count(*) from lock_snapshots where guild_id = {GUILD}"
+    antinuke_on()
+    set_config("backups", {"enabled": False})
+    set_config("panic", {"executors": 1, "window_secs": 600, "duration_secs": 60,
+                         "lock_on_trigger": True, "unlock_when_ending": True})
+    since = snowflake_now()
+    # A role lock strips role permissions, it puts no overwrite on #general.
+    role_perms = lambda: {r["name"]: r["permissions"] for r in call("GET", f"/guilds/{GUILD}/roles") if not r.get("managed")}
+    base = role_perms()
+    try:
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'lock', '{{"kind": "role"}}', now())""")
+        wait_for(locks, lambda n: n > 0)
+        time.sleep(3)
+        kinds = sql(f"select string_agg(kind::text, ',') from lock_snapshots where guild_id = {GUILD}")
+        attack_channels(4, attacker)
+        end = ""
+        for _ in range(15):
+            end = sql(f"select payload from scheduled_jobs where guild_id = {GUILD} and kind = 'panic_end'")
+            if end:
+                break
+            time.sleep(2)
+        ended, waited = [], 0
+        while not ended and waited < 150:
+            time.sleep(5)
+            waited += 5
+            ended = titled("panic", since, "Panic Mode Ended")
+        time.sleep(3)
+        left = int(sql(locks))
+        held = {n: p for n, p in role_perms().items() if base.get(n) != p}
+    finally:
+        sql(f"insert into scheduled_jobs (guild_id, kind, run_at) values ({GUILD}, 'unlock', now())")
+        unlocked = wait_for(locks, lambda n: n == 0) == 0
+        for s, v in old.items():
+            restore_section(s, v)
+        clean_nuke_channels()
+        free_attacker(user, perms)
+        time.sleep(2)
+        print(f"cleaned: unlocked={unlocked}, role perms as before={role_perms() == base}, panic/backups/antinuke restored")
+    print(f"g2a_panic_lock: manual lock kinds [{kinds}], panic_end payload {end}, ended={bool(ended)}, "
+          f"snapshots after end={left}, roles still locked={sorted(held)}")
+    return check(bool(ended) and '"locked": false' in end and left == 1 and bool(held),
+                 "g2a_panic_lock: the manual lock outlived panic mode's end")
+
+
+def g2a_timer():
+    """D8: a timed lock lifted early takes its timer with it, so a later lock stays."""
+    chan = text_channel("general")
+    locks = f"select count(*) from lock_snapshots where guild_id = {GUILD}"
+    timer = f"select payload->'lock' from scheduled_jobs where guild_id = {GUILD} and kind = 'unlock'"
+    start = time.monotonic()
+    try:
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'lock', '{{"kind": "channel", "channel": {chan}, "duration_s": 40}}', now())""")
+        wait_for(locks, lambda n: n > 0)
+        lock = ""
+        for _ in range(10):
+            lock = sql(timer)
+            if lock:
+                break
+            time.sleep(1)
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'unlock', '{{"lock": {lock}}}', now())""")
+        lifted = wait_for(locks, lambda n: n == 0) == 0
+        time.sleep(2)
+        timers = int(sql(f"select count(*) from scheduled_jobs where guild_id = {GUILD} and kind = 'unlock'"))
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'lock', '{{"kind": "channel", "channel": {chan}}}', now())""")
+        relocked = wait_for(locks, lambda n: n > 0) > 0
+        time.sleep(max(0, 45 - (time.monotonic() - start)))
+        left = int(sql(locks))
+        sends = can_send(chan)
+    finally:
+        sql(f"insert into scheduled_jobs (guild_id, kind, run_at) values ({GUILD}, 'unlock', now())")
+        ok = wait_for(locks, lambda n: n == 0) == 0
+        print(f"cleaned: #general unlocked={ok and can_send(chan)}")
+    print(f"g2a_timer: timer payload {lock}, lifted early={lifted}, unlock jobs left={timers}, "
+          f"relocked={relocked}, at 45 s snapshots={left} can send={sends}")
+    return check(lifted and timers == 0 and relocked and left == 1 and not sends,
+                 "g2a_timer: the first lock's timer did not lift the later lock")
+
+
+# A real Discord user that is never a member of the test server (Discord's system account).
+OUTSIDER = "643945264868098049"
+
+
+def g2a_renew_404():
+    """D26: a timeout renewal for a user who is not a member retries hourly instead of being dropped."""
+    renew = f"from scheduled_jobs where guild_id = {GUILD} and kind = 'timeout_renew' and payload->>'user' = '{OUTSIDER}'"
+    until = int(time.time()) + 30 * 86400
+    try:
+        sql(f"""insert into scheduled_jobs (guild_id, kind, payload, run_at)
+                values ({GUILD}, 'timeout_renew', '{{"user": {OUTSIDER}, "until_secs": {until}}}', now())""")
+        rows = ""
+        for _ in range(15):
+            time.sleep(2)
+            rows = sql(f"select attempts, round(extract(epoch from run_at - now())) {renew}")
+            if rows and int(rows.split("|")[1]) > 600:
+                break
+            if not rows:
+                break
+    finally:
+        sql(f"delete {renew}")
+        print("cleaned: timeout_renew rows for the outsider")
+    print(f"g2a_renew_404: row after the run (attempts|secs to run_at): {rows!r}")
+    secs = int(rows.split("|")[1]) if rows else 0
+    return check(3000 < secs <= 3600, "g2a_renew_404: renewal for a non-member re-queued about 1 h out")
+
+
+def g2a_reban_reason():
+    """Ban Sync `outlasts`: does a second PUT ban on an already banned user replace its reason in
+    real Discord (the mock does)? `ours` reads that reason to tell a copy from a local ban."""
+    path = f"/guilds/{GUILD}/bans/{OUTSIDER}"
+    if call("GET", path, soft=True) is not None:
+        raise SystemExit("the outsider is already banned on the test server")
+    def ban(why):
+        # The ban reason is the audit log reason header, as twilight sends it.
+        req = urllib.request.Request(API + path, b"{}", {
+            "Content-Type": "application/json", "User-Agent": "DiscordBot (tommybot-e2e, 1)",
+            "Authorization": f"Bot {os.environ['DISCORD_TOKEN']}", "X-Audit-Log-Reason": why}, method="PUT")
+        urllib.request.urlopen(req).read()
+        return call("GET", path).get("reason")
+    try:
+        first = ban("e2e local temp ban")
+        second = ban("Ban Sync: copied from e2e (1): later copy")
+    finally:
+        # Without a JSON body Discord refuses this DELETE (50109) under the JSON content type.
+        call("DELETE", path, body={})
+        print("cleaned: outsider unbanned")
+    print(f"g2a_reban_reason: reason after first ban {first!r}, after the second PUT {second!r}")
+    # Informational: Ban Sync's `ours` and `outlasts` paths depend on which one Discord does.
+    return check(True, f"g2a_reban_reason: second PUT {'replaced' if second != first else 'kept'} the reason")
+
 
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
              "purge": purge, "emojis": emojis, "edit": edit, "restart": restart, "panic": panic,
@@ -755,7 +1071,10 @@ SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": n
              "g2b_hook_button": lambda: g2b_hook_app_text("button"),
              "g2b_thread_rename": g2b_thread_rename, "g2b_nsfw_hook_off": g2b_nsfw_hook_off,
              "g2b_nsfw_hook_on": lambda: g2b_nsfw_hook_off(True), "g2b_hook_edit_file": g2b_hook_edit_file,
-             "g2b_forward": g2b_forward}
+             "g2b_forward": g2b_forward,
+             "g1_stale": g1_stale, "g1_verify_channel": g1_verify_channel, "g1_deleted_role": g1_deleted_role,
+             "g2a_panic_lock": g2a_panic_lock, "g2a_timer": g2a_timer, "g2a_renew_404": g2a_renew_404,
+             "g2a_reban_reason": g2a_reban_reason}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
