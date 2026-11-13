@@ -771,3 +771,48 @@ async fn verifying_during_a_timeout_does_not_give_back_main_roles() {
         .unwrap();
     t.cleanup().await;
 }
+
+/// D25: `verify` ends only verification's join quarantine (other quarantines need the quarantine
+/// permit), and saved roles with dangerous permissions (Administrator) need an owner or TA.
+#[tokio::test]
+async fn verify_lifts_only_a_join_quarantine_and_admin_roles_need_staff() {
+    let Some(t) = T::new(42).await else { return };
+    let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": web_verification()});
+    server(&t, 0, cfg).await;
+    const ADMIN: u64 = 505;
+    let (real, admin) = (t.base * 10 + 1, t.base * 10 + 2);
+    t.set(|m| {
+        let g = t.g(0).get();
+        m.roles.get_mut(&g).unwrap().push((ADMIN, false, 8, 6));
+        m.members.insert((g, real), vec![Q]);
+        m.members.insert((g, admin), vec![Q]);
+    });
+    row(&t, 0, real, &[ROLE as i64]).await;
+    row(&t, 0, admin, &[ADMIN as i64]).await;
+    let permit = |perms: &[&str]| tommybot_core::permits::Level::Custom {
+        rank: 1,
+        perms: perms.iter().map(|p| p.to_string()).collect(),
+        whitelist: vec![],
+        limits: Default::default(),
+    };
+    let run = |level: tommybot_core::permits::Level, cmd| {
+        let t = &t;
+        async move {
+            let me = (Id::new(9), &level);
+            let owner = Id::new(t.owner());
+            let r = crate::modcmds::run(&t.app, t.g(0), owner, me, Id::new(LOGS), cmd, (None, None), false);
+            r.await.unwrap().text
+        }
+    };
+    use crate::modcmds::ModCmd::{Unquarantine, Verify};
+    let text = run(permit(&["verify"]), Verify { user: real }).await;
+    assert!(text.starts_with("Cannot verify"), "{text}");
+    assert_eq!(roles(&t, 0, real), Some(vec![Q]), "still quarantined");
+    let text = run(permit(&["quarantine"]), Unquarantine { user: admin }).await;
+    assert!(text.starts_with("Cannot release"), "{text}");
+    assert_eq!(saved(&t, 0, admin).await, Some(vec![ADMIN as i64]));
+    // With the quarantine permit, verify may end it.
+    let text = run(permit(&["verify", "quarantine"]), Verify { user: real }).await;
+    assert_eq!(saved(&t, 0, real).await, None, "{text}");
+    t.cleanup().await;
+}

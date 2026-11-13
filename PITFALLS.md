@@ -131,6 +131,10 @@ Ticket and modmail relays copied every attachment with `.bytes()` and then `to_v
 
 **A Raider List hit was invisible to Join Raid.** (D56, 11-13) `joingate::on_join` returned right after the list acted, so listed raiders never counted and a raid made only partly of listed accounts did not trigger. *Avoid:* an early return on a protection path must not skip the counters of the next check. The hit now counts (`RaidDetector::note(.., listed)`) and the raid skips whoever the list already punished.
 
+**A command that can end a quarantine skipped every target check.** (D25, 11-13)
+`t!verify` ends a quarantine, but `ModCmd::target()` did not list it, so the release guard (staff saved in the quarantine go free only through an owner or TA), the hierarchy check and the self check never ran: the verify permit freed any quarantine, a nuking admin's too. The guard also looked only at permit roles, so a saved role with Administrator but no permit counted as a plain member. Root cause: the per-command checks hang off `target()`, and a new command that acts on a member must be added there by hand.
+*Avoid:* every command that acts on a member returns it from `target()`. `verify` ends only verification's join quarantine (`on_join`); any other needs the `quarantine` permit, and saved roles holding `DANGEROUS_PERMS` count as staff. Searched: the dashboard's revert skips Unquarantine, the Raider List releases only its own quarantines, verification's buttons lift only `on_join` (D2).
+
 ## 2. Concurrency and restarts
 
 **Unlock deleted its snapshot first.** (#97, #111)

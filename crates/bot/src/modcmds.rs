@@ -260,6 +260,8 @@ impl ModCmd {
             | Self::ClearWarns { user }
             | Self::Quarantine { user }
             | Self::Unquarantine { user }
+            // Verify can end a quarantine, so it gets the same checks as unquarantine (D25).
+            | Self::Verify { user }
             | Self::Sanitize { user }
             | Self::NoteAdd { user, .. }
             | Self::NoteList {
@@ -606,14 +608,18 @@ pub async fn run(
         let mut level = app.level(gid, owner, target).await?;
         // Quarantine took the member's roles, so judge a release by the roles it gives back.
         if matches!(cmd, ModCmd::Unquarantine { .. } | ModCmd::Verify { .. }) {
-            let saved: Option<Vec<i64>> = sqlx::query_scalar(
-                "SELECT saved_roles FROM quarantines WHERE guild_id=$1 AND user_id=$2",
+            let saved: Option<(Vec<i64>, bool)> = sqlx::query_as(
+                "SELECT saved_roles, on_join FROM quarantines WHERE guild_id=$1 AND user_id=$2",
             )
             .bind(gid.get() as i64)
             .bind(t as i64)
             .fetch_optional(&app.pool)
             .await?;
-            if let Some(roles) = saved {
+            if let Some((roles, on_join)) = saved {
+                // Verify ends only verification's join quarantine; any other needs the quarantine permit (D25).
+                if matches!(cmd, ModCmd::Verify { .. }) && !on_join && !actor.has("quarantine") {
+                    return plain(format!("Cannot verify <@{t}>: they are quarantined for another reason, which needs the `quarantine` permit"));
+                }
                 let held = permits::resolve(
                     &app.pool,
                     gid.get() as i64,
@@ -622,9 +628,16 @@ pub async fn run(
                     &roles,
                 )
                 .await?;
+                // Roles with Administrator or other dangerous permissions count as staff too.
+                let info = app.guild_info(gid).await?;
+                let dangerous = roles.iter().any(|r| {
+                    Id::new_checked(*r as u64)
+                        .and_then(|r| info.role_perms.get(&r))
+                        .is_some_and(|p| p & tommybot_antinuke::DANGEROUS_PERMS != 0)
+                });
                 // Staff caught by anti-nuke or a rate limit go free only through an owner or TA.
-                if held != permits::Level::None && !actor.immune() {
-                    return plain(format!("Cannot release <@{t}>: their roles hold a permit, so only an owner or trusted admin can"));
+                if (held != permits::Level::None || dangerous) && !actor.immune() {
+                    return plain(format!("Cannot release <@{t}>: their roles hold a permit or dangerous permissions, so only an owner or trusted admin can"));
                 }
                 if held.immune() {
                     level = held;
