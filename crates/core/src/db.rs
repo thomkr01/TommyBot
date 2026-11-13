@@ -6,7 +6,11 @@ pub async fn connect(url: &str) -> Result<PgPool> {
         .max_connections(10)
         .connect(url)
         .await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    // An older binary after a rollback must start on a newer schema (D48): migrations stay additive.
+    sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
+        .run(&pool)
+        .await?;
     if let Some(pw) = std::env::var("MCP_DB_PASSWORD")
         .ok()
         .filter(|p| !p.is_empty())

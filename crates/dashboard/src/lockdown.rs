@@ -322,12 +322,27 @@ async fn check(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     Ok(Json(json!(problems(&st, guild).await?)))
 }
 
-/// Single Apply Fix button: applies every automatic fix the check found.
-async fn fix(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
+#[derive(Deserialize, Default)]
+struct FixPick {
+    /// Ids of opt-in problems (an @everyone allow) the user ticked.
+    #[serde(default)]
+    picked: Vec<String>,
+}
+
+/// Single Apply Fix button: applies every automatic fix the check found, and the opt-in ones
+/// the user ticked (D76b).
+async fn fix(
+    State(st): State<AppState>,
+    s: Sess,
+    Path(guild): Path<i64>,
+    b: Option<Json<FixPick>>,
+) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
+    let picked = b.map(|b| b.0.picked).unwrap_or_default();
     let fixes: Vec<Fix> = problems(&st, guild)
         .await?
         .iter()
+        .filter(|p| !p.opt_in || picked.contains(&p.id))
         .filter_map(|p| p.fix)
         .collect();
     for f in &fixes {

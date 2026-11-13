@@ -18,7 +18,8 @@ pub fn write_bar(section: &str) -> (Level, bool) {
     // Trusted Admins cannot change Miscellaneous or Anti-Nuke (and Panic).
     match section {
         "misc" => (Level::Owner, false),
-        "antinuke" | "panic" | "ban_sync" | "raider_list" => (Level::Owner, true),
+        // Backups steer anti-nuke's revert and panic's restore, so they get its bar (D67).
+        "antinuke" | "panic" | "backups" | "ban_sync" | "raider_list" => (Level::Owner, true),
         s if SENSITIVE.contains(&s) => (Level::Admin, true),
         _ => (Level::Editor, false),
     }
@@ -251,7 +252,7 @@ mod tests {
             assert_eq!(step_up, SENSITIVE.contains(s));
             let owner_only = matches!(
                 *s,
-                "misc" | "antinuke" | "panic" | "ban_sync" | "raider_list"
+                "misc" | "antinuke" | "panic" | "backups" | "ban_sync" | "raider_list"
             );
             let want = match (owner_only, step_up) {
                 (true, _) => Level::Owner,

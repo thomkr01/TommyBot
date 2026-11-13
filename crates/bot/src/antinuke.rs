@@ -2301,8 +2301,28 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
                 tracing::warn!(?e, "restoring a released member's overwrites failed");
             }
         }
-        Inverse::Ban { user } => {
-            app.http.create_ban(gid, Id::new(*user)).await?;
+        // A temp ban comes back with its old end; one that would have ended by now is not redone.
+        Inverse::Ban { user, until } => {
+            if until.is_some_and(|t| t <= now_secs()) {
+                return Ok(());
+            }
+            let mut job = None;
+            if let Some(t) = until {
+                let p = serde_json::json!({ "user": user });
+                job = Some(jobs::enqueue(&app.pool, gid.get() as i64, "unban", p, *t).await?);
+            }
+            // Queued first so a crash never leaves a temp ban without its end; a failed ban drops
+            // the job again, or it would lift a later permanent ban (R-h3 3, as ops::run_inverse).
+            if let Err(e) = app.http.create_ban(gid, Id::new(*user)).await {
+                if let Some(id) = job {
+                    sqlx::query("DELETE FROM scheduled_jobs WHERE id = $1")
+                        .bind(id)
+                        .execute(&app.pool)
+                        .await?;
+                }
+                return Err(e.into());
+            }
+            crate::scheduler::forget_jobs(app, gid, *user, crate::scheduler::BANNED, job).await;
         }
         Inverse::Timeout { user, until } => {
             crate::commands::timeout_until(app, gid, Id::new(*user), *until, "Restored timeout")

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tommybot_core::jobs;
 use tommybot_logging::embed::{duration, Log, ARROW, BLUE, GREEN, NO, YES};
-use tommybot_logging::emoji::{DETAILS, MODERATOR, PANIC, REASON, UNSET};
+use tommybot_logging::emoji::{DETAILS, MODERATOR, PANIC, REASON, UNSET, WARNING};
 use tommybot_logging::LogKind;
 use twilight_model::channel::message::{Component, Embed};
 use twilight_model::id::{
@@ -413,6 +413,86 @@ pub async fn alert_owner(app: &App, gid: Id<GuildMarker>, what: &str) {
         });
     let text = format!("{PANIC} **{what}** on your server. TommyBot is handling it.{logs}");
     dm(app, info.owner, &text).await;
+}
+
+/// Tells the owner that settings could not be read and run on their defaults (a newer version
+/// saved them, or they are damaged). Once a day per server.
+pub async fn fallback_alert(
+    app: &App,
+    gid: Id<GuildMarker>,
+    sections: &[&str],
+    main_roles: &[Id<twilight_model::id::marker::RoleMarker>],
+) {
+    static LAST: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
+    if !alert_due(&mut LAST.lock().unwrap(), gid.get(), now_secs(), 86_400) {
+        return;
+    }
+    let list = sections.join(", ");
+    let name = crate::bansync::md(&crate::verify::guild_name(app, gid).await);
+    let text = format!(
+        "{WARNING} TommyBot could not read these settings of **{name}** and uses their defaults until they are saved again: {list}. Defaults are off for most systems, Anti-nuke too. This happens after a rollback to an older TommyBot version; update it again, or open the dashboard and save these settings."
+    );
+    dm_owner(app, gid, &text).await;
+    // Also in the log, so it is seen with the owner's DMs closed (S-h3 6). Read from the raw
+    // config: the logging section may be one that failed.
+    let ch: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT coalesce(config->'logging'->>'config_changes', config->'logging'->>'fallback')
+         FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(?e, "settings-not-read log: config lookup failed");
+        None
+    });
+    let Some(ch) = ch
+        .flatten()
+        .and_then(|c| c.parse().ok())
+        .and_then(Id::new_checked)
+    else {
+        return;
+    };
+    let log = Log::new("Settings Not Read", tommybot_logging::embed::RED)
+        .line("Sections", &list)
+        .line(
+            "Effect",
+            "TommyBot runs them on their defaults (off for most systems, Anti-nuke too) until they are saved again or TommyBot is updated.",
+        )
+        .time()
+        .build();
+    // Straight to Discord, not events::send: that reads the config, and this runs inside App::cfg.
+    // Only to a channel @everyone cannot see: "Anti-nuke is off" helps a raider (R-h3 round 2, 4).
+    // Without readable main roles the check sees only @everyone, so a members-only channel
+    // would pass as private (R-h3 round 3, 1).
+    if sections.contains(&"lockdown") {
+        tracing::warn!(%gid, "settings-not-read log skipped: main roles unknown");
+        return;
+    }
+    let private = async {
+        let c = app.http.channel(ch).await?.model().await?;
+        // The id comes from raw config that may be damaged: only a channel of this server.
+        if c.guild_id != Some(gid) {
+            return anyhow::Ok(false);
+        }
+        crate::events::public_with(app, c, main_roles)
+            .await
+            .map(|p| !p)
+    };
+    match private.await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(%gid, "settings-not-read log skipped: @everyone can read the channel");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(?e, "settings-not-read log: visibility check failed");
+            return;
+        }
+    }
+    if let Err(e) = app.http.create_message(ch).embeds(&[log]).await {
+        tracing::warn!(?e, "settings-not-read log not sent");
+    }
 }
 
 /// DMs the server owner right away, without [`alert_owner`]'s 10-minute limit.

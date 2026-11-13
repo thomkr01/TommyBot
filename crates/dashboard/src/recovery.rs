@@ -196,15 +196,38 @@ async fn preview(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i
 }
 
 async fn load(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i64, i64)>) -> Res {
-    require(&st, &s, guild, Level::Admin, true).await?;
+    // Owner level as `t!backups load` (D10/D11); the bot refuses it again during a lock or panic.
+    require(&st, &s, guild, Level::Owner, true).await?;
     owned_image(&st, guild, id).await?;
+    if busy(&st, guild).await? {
+        return Err(ApiError::BadRequest(
+            "The server is locked or in panic mode. End it before loading a backup.".into(),
+        ));
+    }
     queue(&st, guild, "backup_load", json!({"id": id})).await?;
     announce(&st, &s, guild, &format!("loaded backup #{id}")).await?;
     Ok(Json(json!({"queued": true})))
 }
 
+/// A lock or panic mode is on: loading or deleting a backup waits until it ends.
+async fn busy(st: &AppState, guild: i64) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM lock_snapshots WHERE guild_id = $1 AND state <> 'unlocking') \
+         OR EXISTS(SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end')",
+    )
+    .bind(guild)
+    .fetch_one(&st.db)
+    .await?)
+}
+
+/// Ten deletes clear anti-nuke's restore source, so the bar of `t!backups clear` (S-h3 2).
 async fn delete(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i64, i64)>) -> Res {
-    require(&st, &s, guild, Level::Admin, true).await?;
+    require(&st, &s, guild, Level::Owner, true).await?;
+    if busy(&st, guild).await? {
+        return Err(ApiError::BadRequest(
+            "The server is locked or in panic mode. End it before deleting a backup.".into(),
+        ));
+    }
     let done = sqlx::query("DELETE FROM backups WHERE guild_id = $1 AND id = $2")
         .bind(guild)
         .bind(id)
@@ -257,6 +280,49 @@ async fn panic_end(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S-h3 2: a dashboard delete has the bar of a clear: Owner, 2FA, and no lock or panic.
+    #[tokio::test]
+    async fn deleting_a_backup_needs_the_owner_and_no_panic() {
+        let Some((st, s, g)) = crate::api::g3_handler_tests::setup(9_896_000_000).await else {
+            return;
+        };
+        let run = |sql: &'static str| sqlx::query(sql).bind(g).execute(&st.db);
+        for sql in [
+            "delete from backups where guild_id = $1",
+            "delete from trusted_admins where guild_id = $1",
+            "delete from scheduled_jobs where guild_id = $1",
+        ] {
+            run(sql).await.unwrap();
+        }
+        let id: i64 = sqlx::query_scalar(r#"insert into backups (guild_id, image, code) values ($1, '{"guild": 0, "name": "x", "roles": [], "channels": []}', 'h3del') returning id"#)
+            .bind(g).fetch_one(&st.db).await.unwrap();
+        run("insert into trusted_admins (guild_id, user_id) values ($1, 8)")
+            .await
+            .unwrap();
+        st.discord.memo.lock().unwrap().insert(
+            format!("/guilds/{g}/members/8"),
+            (std::time::Instant::now(), Some(json!({"roles": []}))),
+        );
+        let del = |s: Sess| delete(State(st.clone()), s, Path((g, id)));
+        let ta = Sess {
+            user_id: 8,
+            ..s.clone()
+        };
+        assert!(matches!(del(ta).await, Err(ApiError::Forbidden(_))));
+        run("insert into scheduled_jobs (guild_id, kind, payload, run_at) values ($1, 'panic_end', '{}', now() + interval '1 hour')").await.unwrap();
+        assert!(matches!(del(s.clone()).await, Err(ApiError::BadRequest(_))));
+        run("delete from scheduled_jobs where guild_id = $1")
+            .await
+            .unwrap();
+        assert!(del(s.clone()).await.is_ok());
+        for sql in [
+            "delete from backups where guild_id = $1",
+            "delete from trusted_admins where guild_id = $1",
+        ] {
+            run(sql).await.unwrap();
+        }
+    }
 
     #[test]
     fn live_image_reads_discord_json() {

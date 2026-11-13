@@ -154,8 +154,17 @@ impl Discord {
 
     /// A bot GET reused for [`MEMO_TTL`]; None when Discord answers 404.
     async fn memo_get(&self, path: String) -> Result<Option<serde_json::Value>> {
+        self.memo_get_within(path, MEMO_TTL).await
+    }
+
+    /// [`Self::memo_get`] reusing an answer only while it is younger than `max_age`.
+    async fn memo_get_within(
+        &self,
+        path: String,
+        max_age: Duration,
+    ) -> Result<Option<serde_json::Value>> {
         let hit = self.memo.lock().unwrap().get(&path).cloned();
-        if let Some((_, v)) = hit.filter(|(at, _)| at.elapsed() < MEMO_TTL) {
+        if let Some((_, v)) = hit.filter(|(at, _)| at.elapsed() < max_age) {
             return Ok(v);
         }
         let r = self.bot(path.clone()).send().await?;
@@ -179,10 +188,32 @@ impl Discord {
             .ok_or_else(|| anyhow::anyhow!("guild {guild} not found"))
     }
 
+    /// The Discord owner from an answer at most 2 s old, for owner-only writes (D47): the
+    /// 30 s memo can still name the previous owner.
+    pub async fn guild_owner_fresh(&self, guild: i64) -> Result<String> {
+        let g = self
+            .memo_get_within(format!("/guilds/{guild}"), Duration::from_secs(2))
+            .await?;
+        g.as_ref()
+            .and_then(|g| g["owner_id"].as_str())
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("guild {guild} not found"))
+    }
+
     /// The server's name, or None when the bot is not in it.
     pub async fn guild_name(&self, guild: i64) -> Result<Option<String>> {
         let g = self.memo_get(format!("/guilds/{guild}")).await?;
         Ok(g.and_then(|g| g["name"].as_str().map(String::from)))
+    }
+
+    /// A role's name, or None when the server or the role is unknown.
+    pub async fn role_name(&self, guild: i64, role: &str) -> Result<Option<String>> {
+        let g = self.memo_get(format!("/guilds/{guild}")).await?;
+        Ok(g.and_then(|g| {
+            g["roles"].as_array()?.iter().find(|r| r["id"] == role)?["name"]
+                .as_str()
+                .map(String::from)
+        }))
     }
 
     /// The server's name and approximate member count, or None when the bot is not in it.

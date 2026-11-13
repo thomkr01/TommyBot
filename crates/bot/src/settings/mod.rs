@@ -413,7 +413,7 @@ pub(crate) fn needs_2fa(gid: u64) -> String {
     )
 }
 
-fn dashboard_link(gid: u64) -> String {
+pub(crate) fn dashboard_link(gid: u64) -> String {
     match std::env::var("DASHBOARD_URL")
         .ok()
         .filter(|u| !u.is_empty())
@@ -601,11 +601,12 @@ pub async fn save(
     f: impl FnOnce(&mut Value) -> Result<(), String>,
 ) -> Result<Result<Value, String>> {
     let (tx, version, mut doc) = locked(app, gid).await?;
+    let before = doc.clone();
     if let Err(e) = f(&mut doc) {
         return Ok(Err(e));
     }
     for s in sections.iter().filter(|s| !doc[**s].is_null()) {
-        if let Err(e) = crate::app::check_section(s, &doc[*s]) {
+        if let Err(e) = crate::app::check_section(s, &doc[*s], &before[*s]) {
             return Ok(Err(format!("Not saved: {e}")));
         }
     }
@@ -620,7 +621,7 @@ pub async fn save(
 }
 
 /// A transaction holding the guild's config lock, with the newest version and its config.
-async fn locked(
+pub(crate) async fn locked(
     app: &App,
     gid: Id<GuildMarker>,
 ) -> Result<(sqlx::Transaction<'static, sqlx::Postgres>, i32, Value)> {
@@ -641,7 +642,7 @@ async fn locked(
 }
 
 /// Saves `doc` as version `version + 1` with the live permits as its `permits` copy, then commits.
-async fn append(
+pub(crate) async fn append(
     app: &App,
     mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
     gid: Id<GuildMarker>,
@@ -820,6 +821,23 @@ pub async fn try_run(app: &App, msg: &MessageCreate, rest: &str) -> Result<bool>
         },
         _ => vec![],
     };
+    // Anti-nuke guards the main roles while a monitor is on, so they need its bar then (D67).
+    if row.path == "lockdown.main_roles" {
+        let an = &app.cfg(gid.get()).await?.antinuke;
+        let text = if !(an.monitor_public_roles || an.monitor_channel_perms) {
+            None
+        } else if !matches!(level, Level::Owner | Level::ExtraOwner) {
+            Some("Anti-nuke monitors the main roles, so only the owner and Extra Owners can change them".into())
+        } else if !fresh_2fa(app, msg.author.id.get()).await? {
+            Some(needs_2fa(gid.get()))
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            send(app, msg, &text, None, vec![]).await?;
+            return Ok(true);
+        }
+    }
     // The dashboard's rule too: a main role is never @everyone, managed or above the bot.
     if row.path == "lockdown.main_roles" && !matches!(op, Op::Remove(..)) {
         let info = app.guild_info(gid).await?;
@@ -1094,7 +1112,7 @@ mod tests {
                 let e = edit_for(r, &op, &[5], None).unwrap_or_else(|e| panic!("{e}"));
                 apply(&mut doc, r.path, e);
                 let section = r.path.split('.').next().unwrap();
-                crate::app::check_section(section, &doc[section])
+                crate::app::check_section(section, &doc[section], &Value::Null)
                     .unwrap_or_else(|e| panic!("{} {}: {e}", m.title, r.code));
                 // The panel getter reads the result back without panicking.
                 (r.get)(&GuildCfg::parse(&doc));

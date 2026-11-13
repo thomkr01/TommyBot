@@ -52,6 +52,11 @@ pub fn AppealList(guild: String) -> impl IntoView {
             let path = format!("/api/guilds/{}/appeals/{id}/decide", g.get_value());
             let body = json!({"accept": accept, "blacklist": blacklist, "dismiss": dismiss, "reply": reply.get_untracked()});
             match api("POST", &path, Some(body)).await {
+                // An accept runs in the bot (its rate limit); the appeal closes once it is done.
+                Ok(v) if v["queued"] == true => {
+                    msg.ok("Sent to the bot. The appeal closes when the punishment is lifted; a refusal is posted in the appeal log.");
+                    load()
+                }
                 Ok(_) => load(),
                 Err(e) => msg.err(e),
             }

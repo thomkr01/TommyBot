@@ -318,6 +318,16 @@ pub const CATALOG: &[PermSection] = &[
     },
 ];
 
+/// Perms that make a permit's holders owners or dashboard editors.
+pub const HANDOVER_PERMS: &[&str] = &["owner", "dashboard_edit"];
+
+/// Whether a permit is guarded: an ownership change pauses its roles, and a rollback never makes
+/// a role guarded again (D47). Strong by default, so a new flag is covered without a change here.
+pub fn guarded<S: AsRef<str>>(perms: &[S], whitelist: &[S]) -> bool {
+    perms.iter().any(|p| HANDOVER_PERMS.contains(&p.as_ref()))
+        || whitelist.iter().any(|w| !WEAK_WHITELIST.contains(&w.as_ref()))
+}
+
 /// Keys older setups may already hold; saving them stays allowed.
 const LEGACY: &[&str] = &["lockdown", "antinuke"];
 
@@ -491,6 +501,24 @@ pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx:
     .await
 }
 
+/// The member's permit: the highest-ranked one among `roles` (ties: the oldest), as
+/// (rank, perms, whitelist, limits). Only that permit counts, never a union of several; the bot
+/// and the dashboard both read it here (D72).
+pub async fn top_permit(
+    pool: &sqlx::PgPool,
+    guild_id: i64,
+    roles: &[i64],
+) -> sqlx::Result<Option<(i32, Vec<String>, Vec<String>, serde_json::Value)>> {
+    sqlx::query_as(
+        "SELECT p.rank, p.perms, p.whitelist, p.limits FROM permits p JOIN permit_roles r ON r.permit_id = p.id
+         WHERE p.guild_id = $1 AND r.role_id = ANY($2) ORDER BY p.rank DESC, p.id LIMIT 1",
+    )
+    .bind(guild_id)
+    .bind(roles)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Resolves a member's level from the DB. `roles` are the member's role ids.
 pub async fn resolve(
     pool: &sqlx::PgPool,
@@ -522,15 +550,7 @@ pub async fn resolve(
     if ta {
         return Ok(Level::TrustedAdmin);
     }
-    // Highest-ranked permit among the member's roles; perms are the union of that permit only.
-    let row: Option<(i32, Vec<String>, Vec<String>, serde_json::Value)> = sqlx::query_as(
-        "SELECT p.rank, p.perms, p.whitelist, p.limits FROM permits p JOIN permit_roles r ON r.permit_id = p.id
-         WHERE p.guild_id = $1 AND r.role_id = ANY($2) ORDER BY p.rank DESC LIMIT 1",
-    )
-    .bind(guild_id)
-    .bind(roles)
-    .fetch_optional(pool)
-    .await?;
+    let row = top_permit(pool, guild_id, roles).await?;
     Ok(row.map_or(Level::None, |(rank, perms, whitelist, limits)| {
         // Malformed entries are dropped one by one so a bad action does not void the rest.
         let limits = limits
@@ -558,6 +578,30 @@ mod tests {
             assert_eq!(known(d.key, d.flag), d.key != "owner");
         }
         assert!(known("antinuke", true) && !known("made_up", false) && !known("ban", true));
+    }
+
+    #[test]
+    fn only_filter_flags_are_weak() {
+        let g = |p: &[&str], w: &[&str]| guarded(p, w);
+        assert!(g(&["dashboard_edit"], &[]) && g(&["owner"], &[]));
+        for f in [
+            "all",
+            "antinuke",
+            "quarantine",
+            "wl_role_delete",
+            "automod",
+            "a_flag_from_later",
+        ] {
+            assert!(g(&[], &[f]), "{f}");
+        }
+        assert!(!g(
+            &["ban", "warn"],
+            &["words", "links", "reports"]
+        ));
+        // Every catalog flag that is not listed weak is guarded.
+        for d in CATALOG.iter().flat_map(|s| s.items).filter(|d| d.flag) {
+            assert_eq!(g(&[], &[d.key]), !WEAK_WHITELIST.contains(&d.key), "{}", d.key);
+        }
     }
 
     #[test]

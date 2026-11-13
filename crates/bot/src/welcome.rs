@@ -64,17 +64,15 @@ pub async fn on_ready(
     // Before the first await: a second `Ready` meanwhile adds to the floor, never replaces it.
     let floor = std::mem::take(&mut *app.audit_floor.lock().unwrap());
     sqlx::query(
-        "INSERT INTO guild_left (guild_id) SELECT DISTINCT guild_id FROM guild_config \
-         WHERE guild_id <> ALL($1) ON CONFLICT DO NOTHING",
+        "INSERT INTO guild_left (guild_id) SELECT guild_id FROM guild_config \
+         WHERE guild_id <> ALL($1) UNION SELECT guild_id FROM guild_owners WHERE guild_id <> ALL($1) \
+         ON CONFLICT DO NOTHING",
     )
     .bind(&ids)
     .execute(&app.pool)
     .await?;
-    // Ban Sync groups only servers the bot is still in.
-    sqlx::query("DELETE FROM guild_owners WHERE guild_id <> ALL($1)")
-        .bind(&ids)
-        .execute(&app.pool)
-        .await?;
+    // Ban Sync groups skip servers in guild_left; their guild_owners rows stay, so an owner
+    // change while the bot was out is caught at the next GuildCreate.
     // A new session (not a resume) or a restart gets no replay of the audit entries made in the
     // gap: anti-nuke reads them from the audit log (D20). The floor was noted before this task ran.
     let (todo, gone): (Vec<(u64, u64)>, Vec<_>) = floor
@@ -444,7 +442,7 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
     let GuildCreate::Available(g) = ev else {
         return Ok(());
     };
-    crate::bansync::on_owner(app, g.id, g.owner_id).await?;
+    crate::bansync::owner_seen(app, g.id, g.owner_id).await?;
     let fresh = g
         .joined_at
         .is_some_and(|t| t.as_secs() > crate::app::now_secs() - FRESH_SECS);

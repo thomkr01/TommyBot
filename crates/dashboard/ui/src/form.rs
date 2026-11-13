@@ -699,6 +699,8 @@ pub fn Section(
     // The default of the section's `enabled` field, from the whole schema: a page may not show the switch.
     let switch_default = RwSignal::new(None::<bool>);
     let orig = RwSignal::new(json!({}));
+    // The bot could not read the saved section and runs it on its defaults (D48).
+    let unread = RwSignal::new(false);
     let (msg, need) = (Msg::default(), RwSignal::new(false));
     // Until the schema answers, show a loading line instead of flashing the raw JSON editor.
     let loaded = RwSignal::new(false);
@@ -712,6 +714,7 @@ pub fn Section(
         match r {
             Ok(v) => {
                 version.set(v["version"].as_i64().unwrap_or(0));
+                unread.set(v["unread"].as_array().is_some_and(|u| u.iter().any(|x| x == n.as_str())));
                 let mut c = if v["config"].is_object() {
                     v["config"].clone()
                 } else {
@@ -960,6 +963,7 @@ pub fn Section(
         switch_default.get().is_some_and(|d| !val.with(|v| v[sec.as_str()]["enabled"].as_bool().unwrap_or(d)))
     });
     view! {
+        <Show when=move || unread.get()><p class="card err" role="alert">"TommyBot could not read these saved settings, so it runs this section on its defaults (off for most systems) whatever this page shows. A newer TommyBot version saved them: update TommyBot again, or fix and save this page."</p></Show>
         {card_view}
         <Show when=move || cards.is_none() && !fields.get().is_empty() fallback=move || cards.is_none().then(|| if loaded.get() { raw_editor(val, n.get_value(), msg).into_any() } else { view! { <p class="muted">"Loading..."</p> }.into_any() })>
             <div class="cards">

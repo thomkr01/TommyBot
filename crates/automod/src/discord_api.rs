@@ -279,6 +279,8 @@ impl Default for MentionScope {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct DiscordAutomodCfg {
+    /// An action this version does not know is skipped, not its rule or the section (D48).
+    #[serde(deserialize_with = "tommybot_logging::lenient::map_of_lists")]
     pub actions: std::collections::HashMap<String, Vec<BotAction>>,
     /// Rule id -> its mention scope.
     pub scopes: std::collections::HashMap<String, MentionScope>,

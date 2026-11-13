@@ -13,7 +13,7 @@ use tommybot_core::limits;
 
 pub(crate) type Res = Result<Json<Value>, ApiError>;
 
-/// Permissions granted by the user's permit roles.
+/// Permissions of the user's permit: the highest-ranked one, as the bot reads it (D72).
 pub(crate) async fn permit_perms(
     st: &AppState,
     s: &Sess,
@@ -26,17 +26,85 @@ pub(crate) async fn permit_perms(
         .iter()
         .filter_map(|r| r.parse().ok())
         .collect();
-    Ok(sqlx::query_scalar::<_, Vec<String>>(
-        "select p.perms from permits p join permit_roles r on r.permit_id = p.id where p.guild_id = $1 and r.role_id = any($2)")
-        .bind(guild).bind(&roles).fetch_all(&st.db).await?.concat())
+    let top = tommybot_core::permits::top_permit(&st.db, guild, &roles).await?;
+    Ok(top.map(|p| p.1).unwrap_or_default())
 }
 
+/// The Discord owner, checked fresh against Discord and against what the bot recorded: owner-only
+/// writes (Ban Sync, Extra Owners, Keep, purge) need the bot to have processed an ownership
+/// change, so it has paused the previous owner's staff first (D47).
 pub(crate) async fn is_discord_owner(
     st: &AppState,
     s: &Sess,
     guild: i64,
 ) -> Result<bool, ApiError> {
-    Ok(st.discord.guild_owner(guild).await? == s.user_id.to_string())
+    Ok(owner_state(st, s, guild, true).await? == Some(true))
+}
+
+/// None: not the owner. Some(true): the owner, and the bot's `guild_owners` agrees. Some(false):
+/// Discord says this user is the owner, but the bot has not processed the change yet (a failed
+/// `on_owner`); a retry is queued. Only the memoized owner is checked fresh, so other users cost
+/// no Discord call.
+async fn owner_state(
+    st: &AppState,
+    s: &Sess,
+    guild: i64,
+    always_fresh: bool,
+) -> Result<Option<bool>, ApiError> {
+    if st.discord.guild_owner(guild).await? != s.user_id.to_string() {
+        return Ok(None);
+    }
+    // The memo is 30 s old at most, but the bot moves guild_owners and records the handover within
+    // a second, so a stale memo never keeps the previous owner at Owner level.
+    let (other_owner, was_owner): (bool, bool) = sqlx::query_as(
+        "select exists(select 1 from guild_owners where guild_id = $1 and owner_id <> $2),
+                exists(select 1 from owner_handovers where guild_id = $1 and old_owner = $2)",
+    )
+    .bind(guild)
+    .bind(s.user_id)
+    .fetch_one(&st.db)
+    .await?;
+    if was_owner {
+        return Ok(None);
+    }
+    if !other_owner && !always_fresh {
+        return Ok(Some(true));
+    }
+    // Fail closed: Discord must confirm it now, and a lookup error is "not the owner".
+    let fresh = st.discord.guild_owner_fresh(guild).await.ok();
+    if fresh.as_deref() != Some(s.user_id.to_string().as_str()) {
+        return Ok(None);
+    }
+    if !other_owner {
+        return Ok(Some(true));
+    }
+    // At most once an hour per server: a job dropped after its retries failed would otherwise come
+    // back on every request and repeat its failure log (R-h3 round 3, 3). The bot's own guild
+    // events still queue it at once.
+    // shortcut: per process, so a dashboard restart may queue once more; fine for one instance.
+    static QUEUED: std::sync::Mutex<std::collections::BTreeMap<i64, std::time::Instant>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let due = {
+        let mut q = QUEUED.lock().unwrap();
+        let due = q
+            .get(&guild)
+            .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(3600));
+        if due {
+            q.insert(guild, std::time::Instant::now());
+        }
+        due
+    };
+    if due {
+        sqlx::query(
+            "insert into scheduled_jobs (guild_id, kind, payload, run_at)
+             select $1, 'owner_check', '{}', now()
+             where not exists (select 1 from scheduled_jobs where guild_id = $1 and kind = 'owner_check')",
+        )
+        .bind(guild)
+        .execute(&st.db)
+        .await?;
+    }
+    Ok(Some(false))
 }
 
 /// Re-resolved on every request, including writes (spec 3.1).
@@ -50,7 +118,9 @@ pub(crate) async fn level_of(st: &AppState, s: &Sess, guild: i64) -> Result<Leve
         .fetch_one(&st.db)
         .await
     };
-    let discord_owner = is_discord_owner(st, s, guild).await?;
+    // The real owner keeps Owner level while the bot catches up on a change (R-h3 round 2, 3);
+    // the owner-only writes still wait for it.
+    let discord_owner = owner_state(st, s, guild, false).await?.is_some();
     let (mut extra_owner, mut trusted_admin) =
         (flag("extra_owners").await?, flag("trusted_admins").await?);
     // A banned or departed EO/TA keeps the table row, so the list alone never grants access.
@@ -202,7 +272,7 @@ pub async fn get_config(State(st): State<AppState>, s: Sess, Path(guild): Path<i
     let (version, mut config) = store::current(&st.db, guild).await?;
     config["permits"] = store::read_permits(&mut *st.db.acquire().await?, guild).await?;
     Ok(Json(
-        json!({"version": version, "config": config, "level": level, "sensitive": access::SENSITIVE}),
+        json!({"version": version, "config": config, "level": level, "sensitive": access::SENSITIVE, "unread": unread_sections(&config)}),
     ))
 }
 
@@ -391,8 +461,11 @@ pub async fn put_section(
     if !b.value.is_object() {
         return Err(ApiError::BadRequest("section must be an object".into()));
     }
-    validate(&section, &b.value)?;
     let (cur, mut config) = store::current(&st.db, guild).await?;
+    validate(&section, &b.value, &config[&section])?;
+    if section == "lockdown" && main_roles_guarded(&config, &b.value, &config["lockdown"]) {
+        require(&st, &s, guild, Level::Owner, true).await?;
+    }
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
     check_held_roles(&st, guild, &section, &b.value, &config[&section]).await?;
     limits::check(&section, &b.value, &config[&section]).map_err(ApiError::BadRequest)?;
@@ -466,9 +539,17 @@ pub async fn put_permits(
         return Err(ApiError::Forbidden("only owners can change the TA list"));
     }
     if old["eo"] != b.value["eo"] && !is_discord_owner(&st, &s, guild).await? {
-        return Err(ApiError::Forbidden(
-            "only the server owner can change the Extra Owners list",
-        ));
+        // While the bot has not processed an ownership change yet, the real owner may still
+        // remove the previous owner's Extra Owners, never add one (S-h3 round 3).
+        let had = old["eo"].as_array().cloned().unwrap_or_default();
+        let only_removes = b.value["eo"]
+            .as_array()
+            .is_some_and(|n| n.iter().all(|u| had.contains(u)));
+        if !(only_removes && owner_state(&st, &s, guild, true).await? == Some(false)) {
+            return Err(ApiError::Forbidden(
+                "only the server owner can change the Extra Owners list",
+            ));
+        }
     }
     store::write_permits(&mut tx, guild, &b.value).await?;
     keep_exemptions(&mut tx, guild, level, &old).await?;
@@ -591,8 +672,31 @@ pub async fn rollback(
 ) -> Res {
     // Config may hold sensitive sections and permits, so a rollback needs the same bar as editing them.
     let level = require(&st, &s, guild, Level::Admin, true).await?;
-    let old = version(&st, guild, v).await?;
+    let mut old = version(&st, guild, v).await?;
     let (_, now) = store::current(&st.db, guild).await?;
+    // A version from before the last ownership change would bring back what the change paused (D47).
+    let before_handover: bool = sqlx::query_scalar(
+        "select exists(select 1 from owner_handovers h join guild_config c on c.guild_id = h.guild_id
+           where h.guild_id = $1 and c.version = $2 and c.created_at < h.at)",
+    )
+    .bind(guild)
+    .bind(v)
+    .fetch_one(&st.db)
+    .await?;
+    let mut held = vec![];
+    if before_handover && old["ban_sync"]["enabled"] == true && now["ban_sync"]["enabled"] != true {
+        old["ban_sync"]["enabled"] = json!(false);
+        held.push("Ban Sync stays off".to_string());
+    }
+    // The quarantine whitelist is paused like EO/TA and comes back only through Keep.
+    let qw = |c: &Value| match &c["antinuke"]["quarantine_whitelist"] {
+        Value::Null => json!([]),
+        v => v.clone(),
+    };
+    if before_handover && old["antinuke"].is_object() && qw(&old) != qw(&now) {
+        old["antinuke"]["quarantine_whitelist"] = qw(&now);
+        held.push("the quarantine whitelist stays as it is".to_string());
+    }
     if level < rollback_bar(&old, &now) {
         return Err(ApiError::Forbidden(
             "this rollback changes a section only owners can edit",
@@ -600,15 +704,21 @@ pub async fn rollback(
     }
     discord_owner_for(&st, &s, guild, owner_only_changed(&old, &now)).await?;
     // The same checks as a save: an old version may hold a value the bot would now read as off.
+    // A number out of range is pulled into it and reported, so a cleanup is not blocked (D69b).
+    let mut clamped = vec![];
     for k in access::SECTIONS {
-        if let Some(v) = old.get(*k).filter(|v| Some(*v) != now.get(*k)) {
-            validate(k, v)?;
+        if let Some(v) = old.get_mut(*k).filter(|v| Some(&**v) != now.get(*k)) {
+            clamped.extend(limits::clamp(k, v, &now[*k]));
+            validate(k, v, &now[*k])?;
             limits::check(k, v, &now[*k]).map_err(ApiError::BadRequest)?;
         }
     }
     web_mode_ok(&old, &now)?;
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
+    if let Some(p) = old.get_mut("permits").filter(|_| before_handover) {
+        held.extend(hold_back_permits(p, &cur));
+    }
     if let Some(p) = old.get("permits") {
         if level < Level::Owner && p["ta"] != cur["ta"] {
             return Err(ApiError::Forbidden("only owners can roll back the TA list"));
@@ -629,12 +739,83 @@ pub async fn rollback(
         &old,
         Some(version),
         format!(
-            "{} (<@{}>) rolled config back to v{v} -> v{version}",
-            s.username, s.user_id
+            "{} (<@{}>) rolled config back to v{v} -> v{version}{}{}",
+            s.username,
+            s.user_id,
+            match clamped.is_empty() {
+                true => String::new(),
+                false => format!(", moved into range: {}", clamped.join(", ")),
+            },
+            match held.is_empty() {
+                true => String::new(),
+                false => format!(", kept from the ownership change: {}", held.join(", ")),
+            }
         ),
     )
     .await;
-    Ok(Json(json!({"version": version})))
+    Ok(Json(
+        json!({"version": version, "clamped": clamped, "held": held}),
+    ))
+}
+
+/// Whether a permit is guarded (`permits::guarded`): an ownership change pauses its roles.
+fn strong_permit(p: &Value) -> bool {
+    let list = |k: &str| -> Vec<&str> {
+        p[k].as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    };
+    tommybot_core::permits::guarded(&list("perms"), &list("whitelist"))
+}
+
+/// For a rollback to before the last ownership change: EO and TA stay as they are now, and no
+/// role becomes guarded again, judged by the old version and the current one (R-h3 round 2), so
+/// only Keep on Overview brings back what the change paused. Returns what was held.
+fn hold_back_permits(p: &mut Value, cur: &Value) -> Vec<String> {
+    let mut held = vec![];
+    for (k, what) in [("eo", "Extra Owners"), ("ta", "Trusted Admins")] {
+        if p[k] != cur[k] {
+            p[k] = cur[k].clone();
+            held.push(format!("{what} stay as they are"));
+        }
+    }
+    let now = |name: &Value| {
+        cur["custom"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["name"] == *name)
+            .cloned()
+    };
+    for c in p["custom"].as_array_mut().into_iter().flatten() {
+        if !strong_permit(c) {
+            continue;
+        }
+        let name = c["name"].as_str().unwrap_or("?").to_string();
+        match now(&c["name"]) {
+            // Guarded now too: its current roles stay, the paused ones come back only through Keep.
+            Some(n) if strong_permit(&n) => {
+                if c["roles"] != n["roles"] {
+                    c["roles"] = n["roles"].clone();
+                    held.push(format!("the roles of the permit {name} stay as they are"));
+                }
+            }
+            // Weak now: its roles stay, but without the old guarded perms and flags.
+            Some(n) => {
+                c["perms"] = n["perms"].clone();
+                c["whitelist"] = n["whitelist"].clone();
+                held.push(format!("the permit {name} keeps its current perms"));
+            }
+            None if c["roles"].as_array().is_some_and(|r| !r.is_empty()) => {
+                c["roles"] = json!([]);
+                held.push(format!("the permit {name} comes back without roles"));
+            }
+            None => {}
+        }
+    }
+    held
 }
 
 /// Deletes everything stored for the server (PRIVACY.md); the bot keeps running on defaults.
@@ -654,8 +835,26 @@ pub async fn purge(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) 
     Ok(Json(json!({})))
 }
 
+/// Anti-nuke watches @everyone and the main roles while a monitor is on, so changing the main roles
+/// then needs anti-nuke's bar (D67). `config` is the whole config whose monitors count.
+fn main_roles_guarded(config: &Value, lockdown: &Value, was: &Value) -> bool {
+    let an = &config["antinuke"];
+    lockdown["main_roles"] != was["main_roles"]
+        && (an["monitor_public_roles"] == true || an["monitor_channel_perms"] == true)
+}
+
+/// Whether going from `now` to `new` changes the main roles while either has a monitor on.
+fn main_roles_bar(new: &Value, now: &Value) -> bool {
+    [new, now]
+        .iter()
+        .any(|c| main_roles_guarded(c, &new["lockdown"], &now["lockdown"]))
+}
+
 /// The highest level any section a rollback from `now` to `old` changes needs (permits are checked apart).
 fn rollback_bar(old: &Value, now: &Value) -> Level {
+    if main_roles_bar(old, now) {
+        return access::write_bar("antinuke").0;
+    }
     let keys = |v: &Value| {
         v.as_object()
             .into_iter()
@@ -745,7 +944,7 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
                     cleared.push("logging.custom (log types without a channel removed)".into());
                 }
             }
-            validate(k, &v)?;
+            validate(k, &v, &now[k])?;
             limits::check(k, &v, &now[k]).map_err(ApiError::BadRequest)?;
         }
         new[k] = v;
@@ -756,7 +955,9 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
 /// Level and step-up an import needs: the bar of every section it changes, Admin + step-up for permits.
 fn import_bar(new: &Value, now: &Value) -> (Level, bool) {
     let permits = new.get("permits") != now.get("permits");
-    let step_up = permits || access::SENSITIVE.iter().any(|k| new.get(*k) != now.get(*k));
+    let step_up = permits
+        || main_roles_bar(new, now)
+        || access::SENSITIVE.iter().any(|k| new.get(*k) != now.get(*k));
     let floor = if permits { Level::Admin } else { Level::Editor };
     (rollback_bar(new, now).max(floor), step_up)
 }
@@ -811,12 +1012,15 @@ pub async fn import(
     Ok(Json(json!({"version": version, "cleared": cleared})))
 }
 
-/// Sections the bot parses must deserialize into its types; the rest are stored as-is.
-pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
-    use tommybot_core::sections::{
-        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
-        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
-    };
+/// Sections the bot parses must deserialize into its types; the rest are stored as-is. `old` is
+/// the stored section: an entry the bot skips is refused only when it is not stored as it is.
+pub(crate) fn validate(section: &str, v: &Value, old: &Value) -> Result<(), ApiError> {
+    // The bot skips an unknown entry (D48); a save must still refuse it.
+    if let Some(e) = tommybot_core::sections::unreadable_entry(section, v, old) {
+        return Err(ApiError::BadRequest(format!(
+            "{section}: unknown entry {e}"
+        )));
+    }
     if section == "logging" {
         for (i, c) in v["custom"].as_array().into_iter().flatten().enumerate() {
             let n = i + 1;
@@ -875,8 +1079,17 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
     if section == "misc" && v["warn_actions"].as_array().is_some_and(|a| a.len() > 5) {
         return Err(ApiError::BadRequest("at most 5 warn actions".into()));
     }
-    let v = v.clone();
-    let r = match section {
+    let r = reads(section, v.clone());
+    r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
+}
+
+/// Whether the bot's type for `section` reads `v`; one that fails runs on its defaults (D48).
+fn reads(section: &str, v: Value) -> Result<(), serde_json::Error> {
+    use tommybot_core::sections::{
+        AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
+        MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
+    };
+    match section {
         "logging" => serde_json::from_value::<tommybot_logging::LogConfig>(v).map(drop),
         "antinuke" => serde_json::from_value::<AntinukeCfg>(v).map(drop),
         "automod" => serde_json::from_value::<AutomodCfg>(v).map(drop),
@@ -901,8 +1114,20 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         "ban_sync" => serde_json::from_value::<BanSyncCfg>(v).map(drop),
         "raider_list" => serde_json::from_value::<RaiderListCfg>(v).map(drop),
         _ => Ok(()),
-    };
-    r.map_err(|e| ApiError::BadRequest(format!("invalid {section} config: {e}")))
+    }
+}
+
+/// Sections in `config` that the bot cannot read and so runs on defaults (S-h3 6).
+pub(crate) fn unread_sections(config: &Value) -> Vec<&'static str> {
+    access::SECTIONS
+        .iter()
+        .copied()
+        .filter(|k| {
+            config
+                .get(*k)
+                .is_some_and(|v| !v.is_null() && reads(k, v.clone()).is_err())
+        })
+        .collect()
 }
 
 /// Web verification's rules, checked only when a whole-config write changes verification or lockdown.
@@ -934,6 +1159,15 @@ fn heat_ok(h: &tommybot_automod::heat::HeatCfg) -> Result<(), &'static str> {
 mod logging_validate_tests {
     use super::*;
     use serde_json::json;
+
+    /// S-h3 6: a section the bot cannot read is named, so Overview and the page show it.
+    #[test]
+    fn unread_sections_are_named() {
+        let c =
+            json!({"antinuke": {"enabled": "yes"}, "automod": {}, "logging": null, "permits": {}});
+        assert_eq!(unread_sections(&c), ["antinuke"]);
+        assert!(unread_sections(&json!({"antinuke": {"enabled": true}})).is_empty());
+    }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres. Only a save also reaches the channel
     /// of the version before; other events go to the current channel alone.
@@ -970,11 +1204,17 @@ mod logging_validate_tests {
     #[test]
     fn verification_is_checked_with_the_bots_type() {
         // `channel` and `roles` are only in the bot's VerificationCfg; a bad one made the bot read it all as off.
-        assert!(validate("verification", &json!({"channel": "not an id"})).is_err());
-        assert!(validate("verification", &json!({"roles": "6"})).is_err());
         assert!(validate(
             "verification",
-            &json!({"enabled": true, "channel": "5", "roles": ["6"]})
+            &json!({"channel": "not an id"}),
+            &Value::Null
+        )
+        .is_err());
+        assert!(validate("verification", &json!({"roles": "6"}), &Value::Null).is_err());
+        assert!(validate(
+            "verification",
+            &json!({"enabled": true, "channel": "5", "roles": ["6"]}),
+            &Value::Null
         )
         .is_ok());
     }
@@ -1037,6 +1277,28 @@ mod logging_validate_tests {
             Level::Owner,
             "a dropped section counts"
         );
+    }
+
+    #[test]
+    fn main_roles_need_the_antinuke_bar_while_a_monitor_is_on() {
+        let now =
+            json!({"lockdown": {"main_roles": ["1"]}, "antinuke": {"monitor_public_roles": false}});
+        let mut new = now.clone();
+        new["lockdown"]["main_roles"] = json!(["2"]);
+        assert_eq!(rollback_bar(&new, &now), Level::Editor);
+        assert_eq!(import_bar(&new, &now), (Level::Editor, false));
+        let mut on = now.clone();
+        on["antinuke"]["monitor_channel_perms"] = json!(true);
+        let mut new_on = on.clone();
+        new_on["lockdown"]["main_roles"] = json!(["2"]);
+        assert_eq!(rollback_bar(&new_on, &on), Level::Owner);
+        assert_eq!(import_bar(&new_on, &on), (Level::Owner, true));
+        assert!(main_roles_guarded(
+            &on,
+            &new_on["lockdown"],
+            &on["lockdown"]
+        ));
+        assert!(!main_roles_guarded(&on, &on["lockdown"], &on["lockdown"]));
     }
 
     #[test]
@@ -1186,7 +1448,7 @@ mod logging_validate_tests {
 
     #[test]
     fn heat_bounds() {
-        let heat = |h| validate("automod", &json!({"heat": h}));
+        let heat = |h| validate("automod", &json!({"heat": h}), &Value::Null);
         assert!(heat(json!({})).is_ok());
         let ranged = |h| limits::check("automod", &json!({"heat": h}), &json!({}));
         assert!(ranged(json!({"max": 0})).is_err());
@@ -1198,7 +1460,13 @@ mod logging_validate_tests {
 
     #[test]
     fn discord_domains_cannot_be_blacklisted() {
-        let bad = |d| validate("automod", &json!({"filters": {"blacklisted_domains": [d]}}));
+        let bad = |d| {
+            validate(
+                "automod",
+                &json!({"filters": {"blacklisted_domains": [d]}}),
+                &Value::Null,
+            )
+        };
         assert!(bad("Discord.gg").is_err());
         assert!(bad("cdn.discordapp.com").is_err());
         assert!(bad("evil.example").is_ok());
@@ -1206,7 +1474,7 @@ mod logging_validate_tests {
 
     #[test]
     fn custom_type_needs_channel_and_events() {
-        let bad = |c| validate("logging", &json!({"custom": [c]})).is_err();
+        let bad = |c| validate("logging", &json!({"custom": [c]}), &Value::Null).is_err();
         assert!(bad(json!({"events": ["member_kick"], "channel": null})));
         assert!(bad(json!({"events": [], "channel": "5"})));
         assert!(!bad(json!({"events": ["member_kick"], "channel": "5"})));
@@ -1216,12 +1484,12 @@ mod logging_validate_tests {
 /// Handler tests on a scratch Postgres (they return early without DATABASE_URL). Discord is never
 /// called: the guild and member lookups are pre-filled in the memo, user 7 owns the server.
 #[cfg(test)]
-mod g3_handler_tests {
+pub(crate) mod g3_handler_tests {
     use super::*;
     use serde_json::json;
     use std::time::Instant;
 
-    async fn setup(base: i64) -> Option<(AppState, Sess, i64)> {
+    pub(crate) async fn setup(base: i64) -> Option<(AppState, Sess, i64)> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let db = tommybot_core::db::connect(&url).await.unwrap();
         let g = base + std::process::id() as i64;
@@ -1236,10 +1504,11 @@ mod g3_handler_tests {
         };
         {
             let mut m = discord.memo.lock().unwrap();
+            // Dated ahead, so the 2 s fresh owner read still hits it on a slow test run.
             m.insert(
                 format!("/guilds/{g}"),
                 (
-                    Instant::now(),
+                    Instant::now() + std::time::Duration::from_secs(60),
                     Some(json!({"owner_id": "7", "name": "T", "roles": []})),
                 ),
             );
@@ -1381,21 +1650,31 @@ mod g3_handler_tests {
         .await;
         put_version(&st, g, 4, json!({"panic": {"window_secs": 600}})).await;
         put_version(&st, g, 5, json!({})).await;
-        for v in [1, 2, 3] {
-            let r = rollback(
-                State(st.clone()),
-                s.clone(),
-                Path((g, v)),
-                body(json!({"expected_version": 5})),
-            )
-            .await;
-            assert!(matches!(r, Err(ApiError::BadRequest(_))), "v{v}: {r:?}");
-        }
+        let r = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 1)),
+            body(json!({"expected_version": 5})),
+        )
+        .await;
+        assert!(matches!(r, Err(ApiError::BadRequest(_))), "{r:?}");
+        // D69b: an out-of-range number is clamped and named instead of refusing the rollback.
+        let r = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 2)),
+            body(json!({"expected_version": 5})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.0["clamped"], json!(["panic.window_secs: 0 -> 1"]));
+        let (v, c) = store::current(&st.db, g).await.unwrap();
+        assert_eq!((v, &c["panic"]["window_secs"]), (6, &json!(1)));
         let ok = rollback(
             State(st.clone()),
             s.clone(),
             Path((g, 4)),
-            body(json!({"expected_version": 5})),
+            body(json!({"expected_version": 6})),
         )
         .await;
         assert!(ok.is_ok(), "{ok:?}");
@@ -1438,6 +1717,249 @@ mod g3_handler_tests {
         }
         let off = save("panic", json!({"executors": 0})).await;
         assert!(off.is_ok(), "{off:?}");
+        cleanup(&st, g).await;
+    }
+
+    /// D47 (S1): the 30 s owner memo still names user 7, but the bot already moved the server on.
+    #[tokio::test]
+    async fn a_stale_owner_memo_gives_the_previous_owner_nothing() {
+        let Some((st, s, g)) = setup(9_894_000_000).await else {
+            return;
+        };
+        let wipe = || async {
+            for t in ["guild_owners", "owner_handovers"] {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "delete from {t} where guild_id = $1"
+                )))
+                .bind(g)
+                .execute(&st.db)
+                .await
+                .unwrap();
+            }
+        };
+        wipe().await;
+        assert!(is_discord_owner(&st, &s, g).await.unwrap());
+        // R-h3 round 2, 3: the bot still names user 8 (its on_owner failed) but Discord says 7 owns
+        // it: 7 keeps Owner level, the owner-only writes wait, and a retry is queued.
+        sqlx::query("insert into guild_owners (guild_id, owner_id) values ($1, 8)")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        sqlx::query("delete from scheduled_jobs where guild_id = $1")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        assert_eq!(level_of(&st, &s, g).await.unwrap(), Level::Owner);
+        assert!(!is_discord_owner(&st, &s, g).await.unwrap());
+        let _ = level_of(&st, &s, g).await.unwrap();
+        let queued: i64 = sqlx::query_scalar(
+            "select count(*) from scheduled_jobs where guild_id = $1 and kind = 'owner_check'",
+        )
+        .bind(g)
+        .fetch_one(&st.db)
+        .await
+        .unwrap();
+        assert_eq!(queued, 1, "one retry, not one per request");
+        sqlx::query("delete from scheduled_jobs where guild_id = $1")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        // R-h3 round 3: a dropped retry is not queued again within the hour.
+        let _ = level_of(&st, &s, g).await.unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("select count(*) from scheduled_jobs where guild_id = $1")
+                .bind(g)
+                .fetch_one(&st.db)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0, "at most one owner_check per hour");
+        // S-h3 round 3: while the reset is pending the real owner may remove Extra Owners, not add.
+        sqlx::query("insert into extra_owners (guild_id, user_id) values ($1, 5)")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        let put = |eo: Value| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                let v = store::current(&st.db, g).await.unwrap().0;
+                put_permits(
+                    State(st),
+                    s,
+                    Path(g),
+                    body(
+                        json!({"expected_version": v, "value": {"eo": eo, "ta": [], "custom": []}}),
+                    ),
+                )
+                .await
+            }
+        };
+        let add = put(json!(["5", "6"])).await;
+        assert!(matches!(add, Err(ApiError::Forbidden(_))), "{add:?}");
+        let remove = put(json!([])).await;
+        assert!(remove.is_ok(), "{remove:?}");
+        // S1: the memo (10 s old) still names 7, but no fresh answer confirms it.
+        st.discord.memo.lock().unwrap().insert(
+            format!("/guilds/{g}"),
+            (
+                Instant::now() - std::time::Duration::from_secs(10),
+                Some(json!({"owner_id": "7", "name": "T", "roles": []})),
+            ),
+        );
+        wipe().await;
+        for sql in [
+            "insert into guild_owners (guild_id, owner_id) values ($1, 8)",
+            "insert into owner_handovers (guild_id, old_owner, new_owner) values ($1, 7, 8)",
+        ] {
+            sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
+            assert!(!is_discord_owner(&st, &s, g).await.unwrap(), "{sql}");
+            assert!(level_of(&st, &s, g).await.unwrap() < Level::Owner);
+            wipe().await;
+        }
+    }
+
+    async fn c_qw(st: &AppState, g: i64) -> Value {
+        store::current(&st.db, g).await.unwrap().1["antinuke"]["quarantine_whitelist"].clone()
+    }
+
+    /// D47 (R-h3 S4): a rollback to before the ownership change leaves the paused staff, the
+    /// strong permit's roles and Ban Sync as they are, says so, and the card stays.
+    #[tokio::test]
+    async fn a_rollback_to_before_the_handover_keeps_what_it_paused() {
+        let Some((st, s, g)) = setup(9_895_000_000).await else {
+            return;
+        };
+        cleanup(&st, g).await;
+        for sql in [
+            "delete from owner_handovers where guild_id = $1",
+            "delete from permits where guild_id = $1",
+            "insert into permits (guild_id, name, perms) values ($1, 'Admins', '{dashboard_edit}'), ($1, 'Mods', '{ban}'), ($1, 'Helpers', '{warn}')",
+            "insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 22 from permits where guild_id = $1 and name = 'Mods'",
+            "insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 30 from permits where guild_id = $1 and name = 'Helpers'",
+            "insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, paused_roles, at) values ($1, 3, 7, '{5}', '[{\"permit\": \"Admins\", \"role\": \"20\"}]', now() - interval '1 minute')",
+        ] {
+            sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
+        }
+        // Helpers was guarded in v1 and made weak before the handover, so its role stayed on.
+        let old = json!({"ban_sync": {"enabled": true}, "antinuke": {"quarantine_whitelist": ["9"]}, "permits": {"eo": ["5"], "ta": ["6"], "custom": [
+            {"name": "Admins", "rank": 0, "perms": ["dashboard_edit"], "limits": {}, "whitelist": [], "roles": ["20"]},
+            {"name": "Helpers", "rank": 0, "perms": ["dashboard_edit"], "limits": {}, "whitelist": ["wl_role_delete"], "roles": ["30"]},
+            {"name": "Mods", "rank": 0, "perms": ["ban"], "limits": {}, "whitelist": [], "roles": ["21"]}]}});
+        sqlx::query("insert into guild_config (guild_id, version, config, created_at) values ($1, 1, $2, now() - interval '1 hour')")
+            .bind(g).bind(old).execute(&st.db).await.unwrap();
+        put_version(&st, g, 2, json!({"ban_sync": {"enabled": false}})).await;
+        let r = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 1)),
+            body(json!({"expected_version": 2})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            r.0["held"],
+            json!([
+                "Ban Sync stays off",
+                "the quarantine whitelist stays as it is",
+                "Extra Owners stay as they are",
+                "Trusted Admins stay as they are",
+                "the roles of the permit Admins stay as they are",
+                "the permit Helpers keeps its current perms"
+            ])
+        );
+        assert_eq!(c_qw(&st, g).await, json!([]));
+        let (_, c) = store::current(&st.db, g).await.unwrap();
+        assert_eq!(c["ban_sync"]["enabled"], json!(false));
+        let p = &c["permits"];
+        assert_eq!((&p["eo"], &p["ta"]), (&json!([]), &json!([])));
+        let roles = |n: &str| {
+            p["custom"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == n)
+                .unwrap()["roles"]
+                .clone()
+        };
+        assert_eq!(
+            roles("Admins"),
+            json!([]),
+            "paused, so only Keep brings it back"
+        );
+        assert_eq!(
+            roles("Mods"),
+            json!(["21"]),
+            "a weaker permit rolls back as usual"
+        );
+        let helpers = p["custom"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Helpers")
+            .unwrap();
+        assert_eq!(
+            (&helpers["perms"], &helpers["whitelist"], &helpers["roles"]),
+            (&json!(["warn"]), &json!([]), &json!(["30"])),
+            "R2-2: never guarded again without Keep"
+        );
+        let card: i64 = sqlx::query_scalar("select count(*) from owner_handovers where guild_id = $1 and kept_at is null and extra_owners = '{5}'")
+            .bind(g).fetch_one(&st.db).await.unwrap();
+        assert_eq!(card, 1, "the card still offers the paused ones");
+        for sql in [
+            "delete from owner_handovers where guild_id = $1",
+            "delete from permits where guild_id = $1",
+        ] {
+            sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
+        }
+        cleanup(&st, g).await;
+    }
+
+    /// R-h3 2: after a downgrade, a section holding an entry only a newer version reads can
+    /// still be saved, while a new or changed such entry is refused.
+    #[tokio::test]
+    async fn a_downgraded_section_still_saves() {
+        let Some((st, s, g)) = setup(9_897_000_000).await else {
+            return;
+        };
+        cleanup(&st, g).await;
+        let stored = json!({"enabled": false, "limits": {"Future": {"per": 3}}});
+        put_version(&st, g, 1, json!({"antinuke": stored})).await;
+        let save = |value: Value, v: i32| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                put_section(
+                    State(st),
+                    s,
+                    Path((g, "antinuke".to_string())),
+                    body(json!({"expected_version": v, "value": value})),
+                )
+                .await
+            }
+        };
+        let ok = save(
+            json!({"enabled": true, "limits": {"Future": {"per": 3}}}),
+            1,
+        )
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        let changed = save(
+            json!({"enabled": true, "limits": {"Future": {"per": 4}}}),
+            2,
+        )
+        .await;
+        assert!(
+            matches!(changed, Err(ApiError::BadRequest(_))),
+            "{changed:?}"
+        );
+        let bad = save(
+            json!({"enabled": true, "limits": {"Ban": {"enabled": "no"}}}),
+            2,
+        )
+        .await;
+        assert!(matches!(bad, Err(ApiError::BadRequest(_))), "{bad:?}");
         cleanup(&st, g).await;
     }
 }

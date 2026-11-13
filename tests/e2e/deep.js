@@ -64,7 +64,7 @@ const getJson = (page, path) => page.evaluate(async (p) => {
 // ---------- 1. API matrix: nobody may change what their level does not allow ----------
 async function matrix(browser) {
   const g = `/api/guilds/${G}`;
-  const SECT = { misc: ['owner', false], antinuke: ['owner', true], panic: ['owner', true], whitelist: ['admin', true], catch: ['admin', true], ban_sync: ['discord', true], raider_list: ['owner', true] };
+  const SECT = { misc: ['owner', false], antinuke: ['owner', true], panic: ['owner', true], backups: ['owner', true], whitelist: ['admin', true], catch: ['admin', true], ban_sync: ['discord', true], raider_list: ['owner', true] };
   const sections = ['wizard', 'whitelist', 'antinuke', 'panic', 'backups', 'automod', 'filters', 'discord_automod', 'joingate', 'joinraid', 'verification', 'tickets', 'lockdown', 'catch', 'appeals', 'misc', 'logging', 'ban_sync', 'raider_list'];
   // [method, path, body(v) or null, min level, step-up, staff perms]
   const routes = () => [
@@ -91,8 +91,8 @@ async function matrix(browser) {
     ['POST', `${g}/discord-rules`, () => ({ name: 'e2e', words: ['zzz'] }), 'editor', false],
     ['POST', `${g}/discord-rules-migrate-words`, () => ({}), 'editor', false],
     ['POST', `${g}/backups`, () => ({}), 'editor', false],
-    ['POST', `${g}/backups/999999/load`, () => ({}), 'admin', true],
-    ['POST', `${g}/backups/999999/delete`, () => ({}), 'admin', true],
+    ['POST', `${g}/backups/999999/load`, () => ({}), 'owner', true],
+    ['POST', `${g}/backups/999999/delete`, () => ({}), 'owner', true],
     ['POST', `${g}/panic/start`, () => ({}), 'admin', true],
     ['POST', `${g}/panic/end`, () => ({}), 'admin', true],
     ['POST', `${g}/score/fix`, () => ({ setting: 'none' }), 'admin', true],

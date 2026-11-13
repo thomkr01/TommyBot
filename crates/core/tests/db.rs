@@ -232,6 +232,19 @@ async fn permits_resolve_levels() {
         panic!("expected Custom");
     };
     assert_eq!((rank, perms), (4, vec!["ban".to_owned()]));
+    // D72: the dashboard reads the same single permit, not the union with "low".
+    let top = permits::top_permit(&p, g, &[201, 202])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(top.1, vec!["ban".to_owned()]);
+    // A tie on rank goes to the older permit, the same for every reader.
+    permit(&p, g, "tie", 4, &["warn"], 203).await;
+    let top = permits::top_permit(&p, g, &[203, 202])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(top.1, vec!["ban".to_owned()]);
 
     assert_eq!(
         permits::resolve(&p, g, owner, 16, &[999]).await.unwrap(),

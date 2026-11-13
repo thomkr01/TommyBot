@@ -64,11 +64,25 @@ async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
         return Ok(p);
     }
     let c = app.http.channel(channel).await?.model().await?;
+    let main = match c.guild_id {
+        Some(gid) => app.cfg(gid.get()).await?.lockdown.main_roles.clone(),
+        None => vec![],
+    };
+    public_with(app, c, &main).await
+}
+
+/// [`public`] for a fetched channel with the main roles given; it reads no config, so a caller
+/// inside `App::cfg` can use it.
+pub(crate) async fn public_with(
+    app: &App,
+    c: twilight_model::channel::Channel,
+    main: &[Id<RoleMarker>],
+) -> Result<bool> {
+    let channel = c.id;
     let p = match c.guild_id {
         Some(gid) => {
             // By the permissions a lock saved: the channel is public again once it ends (D62).
             let info = crate::lockdown::unlocked_info(app, gid).await?;
-            let main = app.cfg(gid.get()).await?.lockdown.main_roles.clone();
             let perms = |r: u64| {
                 Permissions::from_bits_truncate(
                     info.role_perms.get(&Id::new(r)).copied().unwrap_or(0),
@@ -512,7 +526,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::GuildUpdate(g) => {
             app.invalidate_guild(g.id);
-            crate::bansync::on_owner(app, g.id, g.owner_id).await?
+            crate::bansync::owner_seen(app, g.id, g.owner_id).await?
         }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::AutoModerationRuleUpdate(r) => {

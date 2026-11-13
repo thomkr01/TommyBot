@@ -281,6 +281,13 @@ pub async fn load(app: &App, gid: Id<GuildMarker>, id: &str, confirm: bool) -> R
     };
     let keep = keep_set(app, gid).await?;
     if confirm {
+        // A restore during a lock or panic would undo the locked permissions (D11).
+        if locked_or_panic(app, gid).await? {
+            return Ok(
+                "Cannot load a backup while the server is locked or in panic mode. End it first."
+                    .into(),
+            );
+        }
         let n = restore(app, gid, &image, &keep, None).await?.total();
         return Ok(format!("Restored backup #{id} ({n} changes)"));
     }
@@ -341,6 +348,7 @@ pub async fn recreate(
         apply_filters(&mut p, f);
     }
     let (sum, id_map) = execute(app, gid, (&image, &live), p, true).await;
+    crate::relink::relink(app, gid, &id_map, &image).await;
     let back: HashSet<u64> = ids
         .iter()
         .copied()
@@ -452,7 +460,8 @@ pub async fn restore(
     if let Some(f) = filters {
         apply_filters(&mut p, f);
     }
-    let (mut sum, _) = execute(app, gid, (image, &live), p, respect_lock).await;
+    let (mut sum, id_map) = execute(app, gid, (image, &live), p, respect_lock).await;
+    crate::relink::relink(app, gid, &id_map, image).await;
     // Webhooks that did not exist in the image were made since (old images have no list).
     if let (Some(f), Some(old)) = (filters, &image.webhooks) {
         if f.restore && f.delete_webhooks {
@@ -701,6 +710,14 @@ pub async fn auto_backup(app: std::sync::Arc<App>) {
     }
 }
 
+/// The server is in panic mode or has a lock on: a restore or a backup delete waits until it ends.
+pub(crate) async fn locked_or_panic(app: &App, gid: Id<GuildMarker>) -> Result<bool> {
+    Ok(app.panic_runs.lock().unwrap().contains_key(&gid.get())
+        || !tommybot_automod::store::locks(&app.pool, gid.get())
+            .await?
+            .is_empty())
+}
+
 /// A nuke run or panic mode is on: a backup now would save the damage as the newest image.
 fn under_attack(app: &App, gid: u64) -> bool {
     app.panic_runs.lock().unwrap().contains_key(&gid)
@@ -814,5 +831,74 @@ mod tests {
         assert!(
             t.contains("Roles: 0 · Channels: 2 · Categories: 1 · Webhooks: 0 · Server settings: ")
         );
+    }
+
+    /// D10/D11: load and clear need owner level plus a fresh 2FA, and load is refused in panic.
+    #[tokio::test]
+    async fn load_and_clear_need_an_owner_with_2fa_and_no_panic() {
+        use crate::{bansync::tests::T, commands::backup_cmd, slash::BackupCmd};
+        use tommybot_core::permits::Level;
+        let Some(t) = T::new(200).await else { return };
+        let (g, user) = (t.g(0), Id::new(t.base + 1));
+        t.server_config(
+            0,
+            t.owner(),
+            serde_json::json!({"backups": {"enabled": true}}),
+        )
+        .await;
+        t.exec("DELETE FROM backups WHERE guild_id = $1").await;
+        t.exec(r#"INSERT INTO backups (guild_id, image, code) VALUES ($1, '{"guild": 0, "name": "x", "roles": [], "channels": []}', 'h3load')"#).await;
+        let custom = Level::Custom {
+            rank: 1,
+            perms: vec!["backups".into()],
+            whitelist: vec![],
+            limits: Default::default(),
+        };
+        let clear = || BackupCmd::Clear;
+        let load = |confirm| BackupCmd::Load {
+            id: "h3load".into(),
+            confirm,
+        };
+        let run = |l: Level, c| {
+            let app = &t.app;
+            async move { backup_cmd(app, g, (user, &l), c).await.unwrap() }
+        };
+        assert!(run(custom.clone(), clear())
+            .await
+            .starts_with("Only the owner"));
+        assert!(run(custom.clone(), load(true))
+            .await
+            .starts_with("Only the owner"));
+        assert!(run(Level::ExtraOwner, clear()).await.contains("needs 2FA"));
+        t.exec("INSERT INTO dash_session (id, user_id, username, access_token, csrf, step_up_until, expires_at) VALUES ('h3-' || $1::text, $1 + 1, 'o', 'x', 'x', now() + interval '5 minutes', now() + interval '1 day')").await;
+        t.app.panic_runs.lock().unwrap().insert(
+            g.get(),
+            crate::app::PanicRun {
+                lock_mod_commands: false,
+            },
+        );
+        assert!(run(Level::ExtraOwner, load(true))
+            .await
+            .starts_with("Cannot load a backup while"));
+        // A backup delete is a clear one at a time (S-h3 2): the same bar.
+        let delete = || BackupCmd::Delete {
+            id: "h3load".into(),
+        };
+        assert!(run(Level::ExtraOwner, delete())
+            .await
+            .starts_with("Cannot delete backups while"));
+        assert!(run(Level::ExtraOwner, clear())
+            .await
+            .starts_with("Cannot delete backups while"));
+        t.app.panic_runs.lock().unwrap().clear();
+        assert!(run(custom.clone(), delete())
+            .await
+            .starts_with("Only the owner"));
+        t.exec("UPDATE dash_session SET step_up_until = now() - interval '1 minute' WHERE id = 'h3-' || $1::text").await;
+        assert!(run(Level::Owner, delete()).await.contains("needs 2FA"));
+        t.exec("UPDATE dash_session SET step_up_until = now() + interval '5 minutes' WHERE id = 'h3-' || $1::text").await;
+        assert_eq!(run(Level::Owner, delete()).await, "Deleted backup `h3load`");
+        assert_eq!(run(Level::Owner, clear()).await, "Deleted all backups");
+        t.exec("DELETE FROM backups WHERE guild_id = $1").await;
     }
 }

@@ -49,14 +49,23 @@ pub struct GuildCfg {
     pub catch: CatchCfg,
     pub ban_sync: BanSyncCfg,
     pub raider_list: RaiderListCfg,
+    /// Sections that failed to parse and run on their defaults; the owner is told (D48).
+    pub fallbacks: Vec<&'static str>,
 }
 
-/// One dashboard section; a section that fails to parse falls back to its default.
-fn section<T: DeserializeOwned + Default>(cfg: &Value, name: &str) -> T {
+/// One dashboard section; a section that fails to parse falls back to its default and is noted.
+fn section<T: DeserializeOwned + Default>(
+    cfg: &Value,
+    name: &'static str,
+    fallbacks: &mut Vec<&'static str>,
+) -> T {
     match cfg.get(name).cloned().map(serde_json::from_value) {
         Some(Ok(v)) => v,
         Some(Err(e)) => {
             tracing::warn!(section = name, %e, "bad config section, using defaults");
+            if !fallbacks.contains(&name) {
+                fallbacks.push(name);
+            }
             T::default()
         }
         None => T::default(),
@@ -64,9 +73,13 @@ fn section<T: DeserializeOwned + Default>(cfg: &Value, name: &str) -> T {
 }
 
 /// Strict parse of one section for writes from Discord: a bad value is refused, not defaulted.
-pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
+/// `old` is the stored section: an entry the bot skips is refused only when it changed.
+pub fn check_section(name: &str, v: &Value, old: &Value) -> Result<(), String> {
     fn t<T: DeserializeOwned>(v: &Value) -> Result<(), String> {
         T::deserialize(v).map(drop).map_err(|e| e.to_string())
+    }
+    if let Some(e) = tommybot_core::sections::unreadable_entry(name, v, old) {
+        return Err(format!("unknown entry {e}"));
     }
     match name {
         "logging" => t::<LogConfig>(v),
@@ -89,32 +102,36 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
 
 impl GuildCfg {
     pub(crate) fn parse(cfg: &Value) -> Self {
-        let lockdown: LockdownCfg = section(cfg, "lockdown");
-        let mut verification: VerificationCfg = section(cfg, "verification");
+        let mut f = vec![];
+        let lockdown: LockdownCfg = section(cfg, "lockdown", &mut f);
+        let mut verification: VerificationCfg = section(cfg, "verification", &mut f);
         // Verified members get the Statics main roles unless verification names its own.
         if verification.roles.is_empty() {
             verification.roles = lockdown.main_roles.clone();
         }
-        Self {
-            logging: section(cfg, "logging"),
-            antinuke: section(cfg, "antinuke"),
-            automod: section(cfg, "automod"),
-            joingate: section(cfg, "joingate"),
-            joinraid: section(cfg, "joinraid"),
+        let mut c = Self {
+            logging: section(cfg, "logging", &mut f),
+            antinuke: section(cfg, "antinuke", &mut f),
+            automod: section(cfg, "automod", &mut f),
+            joingate: section(cfg, "joingate", &mut f),
+            joinraid: section(cfg, "joinraid", &mut f),
             lockdown,
-            lockdown_prefs: section(cfg, "lockdown"),
-            discord_automod: section(cfg, "discord_automod"),
-            panic: section(cfg, "panic"),
-            backups: section(cfg, "backups"),
-            misc: section(cfg, "misc"),
-            appeals: section(cfg, "appeals"),
-            whitelist: section(cfg, "whitelist"),
+            lockdown_prefs: section(cfg, "lockdown", &mut f),
+            discord_automod: section(cfg, "discord_automod", &mut f),
+            panic: section(cfg, "panic", &mut f),
+            backups: section(cfg, "backups", &mut f),
+            misc: section(cfg, "misc", &mut f),
+            appeals: section(cfg, "appeals", &mut f),
+            whitelist: section(cfg, "whitelist", &mut f),
             verification,
-            tickets: section(cfg, "tickets"),
-            catch: section(cfg, "catch"),
-            ban_sync: section(cfg, "ban_sync"),
-            raider_list: section(cfg, "raider_list"),
-        }
+            tickets: section(cfg, "tickets", &mut f),
+            catch: section(cfg, "catch", &mut f),
+            ban_sync: section(cfg, "ban_sync", &mut f),
+            raider_list: section(cfg, "raider_list", &mut f),
+            fallbacks: vec![],
+        };
+        c.fallbacks = f;
+        c
     }
 }
 
@@ -418,6 +435,16 @@ impl App {
             .write()
             .unwrap()
             .insert(guild, generation, cfg.clone());
+        // After the insert, so the alert's own config reads hit the cache.
+        if !cfg.fallbacks.is_empty() {
+            let alert = crate::reply::fallback_alert(
+                self,
+                Id::new(guild),
+                &cfg.fallbacks,
+                &cfg.lockdown.main_roles,
+            );
+            let _ = tokio::time::timeout(crate::reply::DM_WAIT, alert).await;
+        }
         Ok(cfg)
     }
 
@@ -500,6 +527,25 @@ mod tests {
         assert_eq!(c.logging.fallback, Some(Id::new(42)));
         assert_eq!(c.lockdown.main_roles, vec![Id::new(9)]);
         assert!(!GuildCfg::parse(&json!({})).automod.enabled);
+        assert_eq!(c.fallbacks, ["joingate"]);
+    }
+
+    /// D48: a key a newer version wrote drops only that entry; a broken section is noted.
+    #[test]
+    fn an_unknown_key_keeps_the_section_on() {
+        let c = GuildCfg::parse(&json!({
+            "antinuke": {"enabled": true, "limits": {"Ban": {"per_minute": 2}, "SoundboardNuke": {"per_minute": 1}}},
+            "logging": {"routes": {"anti_nuke": "5", "future_kind": "6"}},
+            "raider_list": {"enabled": true, "categories": ["nuke", "future"]},
+        }));
+        assert!(c.antinuke.enabled);
+        assert_eq!(c.antinuke.limit(NukeAction::Ban).unwrap().0.per_minute, 2);
+        assert_eq!(c.logging.routes.len(), 1);
+        assert!(c.raider_list.enabled && c.raider_list.categories.len() == 1);
+        assert!(c.fallbacks.is_empty());
+        let bad = GuildCfg::parse(&json!({"antinuke": {"enabled": "yes"}}));
+        assert!(!bad.antinuke.enabled);
+        assert_eq!(bad.fallbacks, ["antinuke"]);
     }
 
     /// D70. The bot's own defaults (what an empty section means) sit inside every new range.

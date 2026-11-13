@@ -473,7 +473,10 @@ pub fn schema() -> Vec<Value> {
         ),
         sx(
             "joinraid",
-            ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
+            hp(
+                ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
+                "Needs Use the auto lockdown module above to be on.",
+            ),
         ),
         hp(
             ti(fg("Auto slowmode", "auto_slowmode.enabled", "bool"), "Use the auto slowmode"),
@@ -864,7 +867,11 @@ pub fn schema() -> Vec<Value> {
             ),
             "Ban",
         ),
-        choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+        // D63: joingate only locks while Auto Mod's Auto lockdown switch is on.
+        hp(
+            choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+            "Only works while Auto lockdown is on under Auto Mod (Use the auto lockdown module). With it off, a join raid does not lock.",
+        ),
         fg("Response", "warned_roles", "roles"),
         hp(
             ti(fg("Voice Raid", "voice.enabled", "bool"), "Use the voice raid trigger"),
@@ -882,7 +889,8 @@ pub fn schema() -> Vec<Value> {
     let panic = vec![
         ti(
             pg(dv(fg("Trigger", "executors", "int"), 0), "nuke"),
-            "Quarantined accounts to trip",
+            // D70: 0 switches anti-nuke's Panic Mode trigger off on purpose; say so on the field.
+            "Quarantined accounts to trip (0 = off)",
         ),
         ti(
             pg(fg("Trigger", "heat_algorithm", "bool"), "heat"),
@@ -1568,7 +1576,7 @@ mod tests {
             }
         }
         for (name, obj) in objs {
-            api::validate(&name, &obj)
+            api::validate(&name, &obj, &Value::Null)
                 .unwrap_or_else(|e| panic!("{name} schema does not deserialize: {e:?}"));
         }
     }
@@ -1593,7 +1601,7 @@ mod tests {
                     cur = &mut cur[*p];
                 }
                 cur[parts[parts.len() - 1]] = Value::Null;
-                if let Err(e) = api::validate(name, &obj) {
+                if let Err(e) = api::validate(name, &obj, &Value::Null) {
                     bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
                 }
             }
@@ -1620,7 +1628,7 @@ mod tests {
                     cur = &mut cur[*p];
                 }
                 cur[parts[parts.len() - 1]] = sample(fd);
-                if let Err(e) = api::validate(name, &obj) {
+                if let Err(e) = api::validate(name, &obj, &Value::Null) {
                     bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
                 }
             }
