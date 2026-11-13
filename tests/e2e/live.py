@@ -594,11 +594,6 @@ def attacker_hook(name):
     return hook, f"/webhooks/{hook['id']}/{hook['token']}"
 
 
-def verified(hook):
-    """Hooks of verified bots are exempt from the webhook path, and Discord may flag the attacker as one."""
-    return call("GET", f"/users/{hook['user']['id']}").get("public_flags", 0) & 1 << 16
-
-
 def gone_within(chan, msg, tries=10):
     for _ in range(tries):
         time.sleep(2)
@@ -630,14 +625,12 @@ def g2b_hook_app_text(kind):
     sent = call("POST", base + "?wait=true&with_components=true", body=body, auth=False)
     shown = bool(sent.get("embeds") if kind == "embed" else sent.get("components"))
     gone = gone_within(chan, sent["id"])
-    skip = verified(hook)
     call("DELETE", f"/webhooks/{hook['id']}", soft=True)
     call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
     automod_back()
     print(f"cleaned: webhook e2e-g2b-{kind} and its message")
-    if skip:
-        print(f"SKIP g2b_hook_{kind}: the attacker is a verified bot, so its hook is exempt")
-        return True
+    # A verified owner only spares the hook from spam()'s webhook delete (delete_new_webhooks);
+    # its messages are filtered like any hook's (webhook_exempt checks the antinuke whitelist).
     return check(shown and gone and logged("auto_mod", since),
                  f"g2b_hook_{kind}: {kind} posted={shown}, deleted={gone}, automod logged")
 
@@ -680,10 +673,13 @@ def g2b_nsfw_hook_off(monitor=False):
                            "filters": {"nsfw_images": {"enabled": True}}})
     chan = text_channel("general")
     app = call("GET", "/applications/@me")["id"]
-    emoji = call("GET", f"/applications/{app}/emojis")["items"][0]["id"]
+    emojis = call("GET", f"/applications/{app}/emojis")["items"]
+    # A test bot with no uploaded emojis falls back to Discord's plain default avatar.
+    image = (f"https://cdn.discordapp.com/emojis/{emojis[0]['id']}.png?size=64" if emojis
+             else "https://cdn.discordapp.com/embed/avatars/0.png?size=64")
     hook, base = attacker_hook("e2e-g2b-nsfw")
     # Discord adds the preview in a MessageUpdate without edited_timestamp: the path main scanned.
-    sent = call("POST", base + "?wait=true", body={"content": f"https://cdn.discordapp.com/emojis/{emoji}.png?size=64"},
+    sent = call("POST", base + "?wait=true", body={"content": image},
                 auth=False)
     preview = False
     for _ in range(10):
@@ -691,6 +687,7 @@ def g2b_nsfw_hook_off(monitor=False):
         m = call("GET", f"/channels/{chan}/messages/{sent['id']}", soft=True)
         if m and m["embeds"]:
             preview = True
+            print(f"g2b_nsfw_hook: preview message edited_timestamp={m.get('edited_timestamp')!r}")
             break
     time.sleep(8)  # the scan queue
     rows = int(sql(scans(sent["id"])))
@@ -712,6 +709,10 @@ def g2b_hook_edit_file():
     sent = call("POST", base + "?wait=true", body={"content": "e2e g2b edit file"}, auth=False)
     time.sleep(2)
     edited = hook_file("PATCH", f"{base}/messages/{sent['id']}", {"content": "e2e g2b edit file"})
+    # Payload question: does an edit that adds a file carry edited_timestamp (REST and the stored message)?
+    stored = call("GET", f"/channels/{chan}/messages/{sent['id']}", soft=True) or {}
+    print(f"g2b_hook_edit_file: edited_timestamp in PATCH reply={edited.get('edited_timestamp')!r}, "
+          f"in GET={stored.get('edited_timestamp')!r}")
     rows = wait_for(scans(sent["id"]), lambda n: n > 0, 8)
     call("DELETE", f"/webhooks/{hook['id']}", soft=True)
     call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
