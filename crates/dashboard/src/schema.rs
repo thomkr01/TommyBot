@@ -472,7 +472,10 @@ pub fn schema() -> Vec<Value> {
         ),
         sx(
             "joinraid",
-            ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
+            hp(
+                ti(choice("JoinRaid lockdown", "lock", &["", "Server", "Blind", "Role", "All"]), "Lock when a join raid starts"),
+                "Needs Use the auto lockdown module above to be on.",
+            ),
         ),
         hp(
             ti(fg("Auto slowmode", "auto_slowmode.enabled", "bool"), "Use the auto slowmode"),
@@ -863,7 +866,11 @@ pub fn schema() -> Vec<Value> {
             ),
             "Ban",
         ),
-        choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+        // D63: joingate only locks while Auto Mod's Auto lockdown switch is on.
+        hp(
+            choice("Response", "lock", &["", "Server", "Blind", "Role", "All"]),
+            "Only works while Auto lockdown is on under Auto Mod (Use the auto lockdown module). With it off, a join raid does not lock.",
+        ),
         fg("Response", "warned_roles", "roles"),
         hp(
             ti(fg("Voice Raid", "voice.enabled", "bool"), "Use the voice raid trigger"),

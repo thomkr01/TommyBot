@@ -4,6 +4,8 @@ A step-by-step guide from an empty server to a running TommyBot with a dashboard
 
 The dashboard and the MCP server are reached through a Cloudflare Tunnel, so the server opens no ports and needs no reverse proxy or certificates.
 
+**Only Cloudflare Tunnel is supported for web verification.** The dashboard takes the visitor's IP from the `CF-Connecting-IP` header for the alt-account and VPN checks. The tunnel sets that header itself; behind any other proxy or with the port open, a visitor can send their own header and pass those checks with a made-up IP.
+
 **You need:**
 
 - A Linux server (VPS) you can reach with SSH. The published images are **arm64** (for example Oracle Cloud's free Ampere servers). On an amd64 server, build the images yourself (`docker compose up -d --build`, see [Updating](#5-updating)).
