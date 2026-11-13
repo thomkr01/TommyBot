@@ -318,6 +318,20 @@ pub const CATALOG: &[PermSection] = &[
     },
 ];
 
+// merge: unify with h1 GUARDED
+/// Whitelist flags that only exempt from content filters and reports. Every other flag (all,
+/// antinuke, quarantine, each wl_*, and any flag added later) is guarded.
+pub const WEAK_FLAGS: &[&str] = &["automod", "words", "links", "reports"];
+/// Perms that make a permit's holders owners or dashboard editors.
+pub const GUARDED_PERMS: &[&str] = &["owner", "dashboard_edit"];
+
+/// Whether a permit is guarded: an ownership change pauses its roles, and a rollback never makes
+/// a role guarded again (D47). Strong by default, so a new flag is covered without a change here.
+pub fn guarded<S: AsRef<str>>(perms: &[S], whitelist: &[S]) -> bool {
+    perms.iter().any(|p| GUARDED_PERMS.contains(&p.as_ref()))
+        || whitelist.iter().any(|w| !WEAK_FLAGS.contains(&w.as_ref()))
+}
+
 /// Keys older setups may already hold; saving them stays allowed.
 const LEGACY: &[&str] = &["lockdown", "antinuke"];
 
@@ -539,6 +553,29 @@ mod tests {
             assert_eq!(known(d.key, d.flag), d.key != "owner");
         }
         assert!(known("antinuke", true) && !known("made_up", false) && !known("ban", true));
+    }
+
+    #[test]
+    fn only_filter_flags_are_weak() {
+        let g = |p: &[&str], w: &[&str]| guarded(p, w);
+        assert!(g(&["dashboard_edit"], &[]) && g(&["owner"], &[]));
+        for f in [
+            "all",
+            "antinuke",
+            "quarantine",
+            "wl_role_delete",
+            "a_flag_from_later",
+        ] {
+            assert!(g(&[], &[f]), "{f}");
+        }
+        assert!(!g(
+            &["ban", "warn"],
+            &["automod", "words", "links", "reports"]
+        ));
+        // Every catalog flag that is not listed weak is guarded.
+        for d in CATALOG.iter().flat_map(|s| s.items).filter(|d| d.flag) {
+            assert_eq!(g(&[], &[d.key]), !WEAK_FLAGS.contains(&d.key), "{}", d.key);
+        }
     }
 
     #[test]

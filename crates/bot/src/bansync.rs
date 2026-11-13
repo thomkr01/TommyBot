@@ -1220,16 +1220,35 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
             .bind(g)
             .fetch_all(&mut *tx)
             .await?;
-    // Permits that make their roles owners, fully immune or dashboard editors are paused too;
-    // weaker ones stay on and are only listed.
+    // Guarded permits (owner-like, dashboard edit, any immunity flag but the filter ones) are
+    // paused too; weaker ones stay on and are only listed.
+    let all: Vec<(i64, Vec<String>, Vec<String>)> =
+        sqlx::query_as("SELECT id, perms, whitelist FROM permits WHERE guild_id = $1")
+            .bind(g)
+            .fetch_all(&mut *tx)
+            .await?;
+    let strong: Vec<i64> = all
+        .into_iter()
+        .filter(|(_, p, w)| tommybot_core::permits::guarded(p, w))
+        .map(|(id, ..)| id)
+        .collect();
     let paused: Vec<(String, i64)> = sqlx::query_as(
-        "DELETE FROM permit_roles r USING permits p WHERE r.permit_id = p.id AND p.guild_id = $1
-           AND (p.perms && ARRAY['owner', 'dashboard_edit'] OR p.whitelist && ARRAY['all'])
+        "DELETE FROM permit_roles r USING permits p WHERE r.permit_id = p.id AND p.id = ANY($1)
          RETURNING p.name, r.role_id",
     )
-    .bind(g)
+    .bind(&strong)
     .fetch_all(&mut *tx)
     .await?;
+    // The quarantine whitelist exempts by user id, the same kind of trust as EO/TA.
+    let qw: Vec<i64> = doc["antinuke"]["quarantine_whitelist"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| u.as_str()?.parse().ok())
+        .collect();
+    if !qw.is_empty() {
+        doc["antinuke"]["quarantine_whitelist"] = json!([]);
+    }
     let other: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM permits p WHERE guild_id = $1
            AND EXISTS (SELECT 1 FROM permit_roles r WHERE r.permit_id = p.id)
@@ -1246,11 +1265,11 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
     // owner by it, and a rollback to before it keeps what the change paused.
     sqlx::query(
         "INSERT INTO owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins,
-           ban_sync_was_on, paused_roles, other_permits)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ban_sync_was_on, paused_roles, other_permits, quarantine_whitelist)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (guild_id) DO UPDATE SET old_owner = $2, new_owner = $3, extra_owners = $4,
            trusted_admins = $5, ban_sync_was_on = $6, paused_roles = $7, other_permits = $8,
-           at = now(), kept_at = NULL",
+           quarantine_whitelist = $9, at = now(), kept_at = NULL",
     )
     .bind(g)
     .bind(old.get() as i64)
@@ -1260,6 +1279,7 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
     .bind(sync_on)
     .bind(json!(paused_json))
     .bind(&other)
+    .bind(&qw)
     .execute(&mut *tx)
     .await?;
     // A config version of its own, so History shows it and a rollback sees the removal.
@@ -1279,6 +1299,7 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
         ta: &ta,
         paused: &paused,
         other: &other,
+        qw: &qw,
     };
     if let Some(text) = handover_text(&name, &h, gid) {
         reply::dm(app, owner, &text).await;
@@ -1295,6 +1316,8 @@ struct Handover<'a> {
     paused: &'a [String],
     /// Weaker permits that stayed on.
     other: &'a [String],
+    /// Users removed from the quarantine whitelist.
+    qw: &'a [i64],
 }
 
 /// The new owner's DM after [`on_owner`], or None when it changed nothing worth telling.
@@ -1321,9 +1344,15 @@ fn handover_text(name: &str, h: &Handover, gid: Id<GuildMarker>) -> Option<Strin
     if !h.ta.is_empty() {
         done.push(format!("removed the Trusted Admin(s) {}", mentions(h.ta)));
     }
+    if !h.qw.is_empty() {
+        done.push(format!(
+            "removed {} from the quarantine whitelist",
+            mentions(h.qw)
+        ));
+    }
     if !names.is_empty() {
         done.push(format!(
-            "paused the roles of the permit(s) {} (owner, full immunity or dashboard edit)",
+            "paused the roles of the permit(s) {} (owner, dashboard edit, or an anti-nuke or quarantine exemption)",
             names.join(", ")
         ));
     }
@@ -1335,7 +1364,7 @@ fn handover_text(name: &str, h: &Handover, gid: Id<GuildMarker>) -> Option<Strin
     if !done.is_empty() {
         text.push_str(&format!(" To protect you, TommyBot {}.", done.join("; ")));
     }
-    if !(h.eo.is_empty() && h.ta.is_empty() && names.is_empty()) {
+    if !(h.eo.is_empty() && h.ta.is_empty() && h.qw.is_empty() && names.is_empty()) {
         text.push_str(&format!(" The previous owner set them. Keep only the ones you trust, one by one, on the Overview of the {link}."));
     }
     if !h.other.is_empty() {

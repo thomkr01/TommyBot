@@ -324,15 +324,16 @@ pub(crate) async fn weaker_permits(st: &AppState, guild: i64) -> Result<Vec<Stri
 /// After an ownership change the bot paused the previous owner's EO/TA and strong permit roles
 /// (D47): one Overview row per paused person or role, which the new owner keeps one by one.
 async fn handover_check(st: &AppState, guild: i64) -> Result<Vec<Check>, ApiError> {
-    type Row = (i64, Vec<i64>, Vec<i64>, Value, Vec<String>, bool);
+    type Row = (i64, Vec<i64>, Vec<i64>, Value, Vec<String>, bool, Vec<i64>);
     let row: Option<Row> = sqlx::query_as(
-        "select old_owner, extra_owners, trusted_admins, paused_roles, other_permits, ban_sync_was_on
+        "select old_owner, extra_owners, trusted_admins, paused_roles, other_permits, ban_sync_was_on,
+           quarantine_whitelist
          from owner_handovers where guild_id = $1 and kept_at is null",
     )
     .bind(guild)
     .fetch_optional(&st.db)
     .await?;
-    let Some((old, eo, ta, roles, other, sync)) = row else {
+    let Some((old, eo, ta, roles, other, sync, qw)) = row else {
         return Ok(vec![]);
     };
     let roles: Vec<(String, String)> = roles
@@ -346,7 +347,7 @@ async fn handover_check(st: &AppState, guild: i64) -> Result<Vec<Check>, ApiErro
             ))
         })
         .collect();
-    if eo.is_empty() && ta.is_empty() && roles.is_empty() && other.is_empty() {
+    if eo.is_empty() && ta.is_empty() && qw.is_empty() && roles.is_empty() && other.is_empty() {
         return Ok(vec![]);
     }
     let on = weaker_permits(st, guild).await?;
@@ -384,6 +385,7 @@ async fn handover_check(st: &AppState, guild: i64) -> Result<Vec<Check>, ApiErro
     for (kind, title, ids) in [
         ("eo", "Paused Extra Owner", &eo),
         ("ta", "Paused Trusted Admin", &ta),
+        ("qw", "Paused quarantine whitelist user", &qw),
     ] {
         for &id in ids {
             rows.push(Check {
@@ -421,17 +423,17 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
     let entry = entry.ok_or_else(|| ApiError::BadRequest("name what to keep".into()))?;
     let mut tx = st.db.begin().await?;
     // The config lock first, as the bot's on_owner takes it: the other order deadlocks (R6).
-    crate::store::locked(&mut tx, guild).await?;
-    type Paused = (Vec<i64>, Vec<i64>, Value, Vec<String>);
+    let (cur, mut config) = crate::store::locked(&mut tx, guild).await?;
+    type Paused = (Vec<i64>, Vec<i64>, Value, Vec<String>, Vec<i64>);
     let row: Option<Paused> = sqlx::query_as(
-        "select extra_owners, trusted_admins, paused_roles, other_permits from owner_handovers
-         where guild_id = $1 and new_owner = $2 and kept_at is null",
+        "select extra_owners, trusted_admins, paused_roles, other_permits, quarantine_whitelist
+         from owner_handovers where guild_id = $1 and new_owner = $2 and kept_at is null",
     )
     .bind(guild)
     .bind(s.user_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (mut eo, mut ta, roles, other) = row.ok_or(ApiError::NotFound)?;
+    let (mut eo, mut ta, roles, other, mut qw) = row.ok_or(ApiError::NotFound)?;
     let mut roles: Vec<Value> = roles.as_array().cloned().unwrap_or_default();
     let done = entry == "done";
     let what = if done {
@@ -441,6 +443,7 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
         let (list, table, label) = match kind {
             "eo" => (Some(&mut eo), "extra_owners", "Extra Owner"),
             "ta" => (Some(&mut ta), "trusted_admins", "Trusted Admin"),
+            "qw" => (Some(&mut qw), "", "quarantine whitelist user"),
             "role" => (None, "permit_roles", "permit role"),
             _ => return Err(ApiError::NotFound),
         };
@@ -450,13 +453,27 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
                 return Err(ApiError::NotFound);
             }
             list.retain(|u| *u != id);
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "insert into {table} (guild_id, user_id) values ($1, $2) on conflict do nothing"
-            )))
-            .bind(guild)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+            if table.is_empty() {
+                // The quarantine whitelist lives in the config, so this keep is a config change.
+                let w = &mut config["antinuke"]["quarantine_whitelist"];
+                if !w.is_array() {
+                    *w = json!([]);
+                }
+                if let Some(a) = w
+                    .as_array_mut()
+                    .filter(|a| !a.contains(&json!(id.to_string())))
+                {
+                    a.push(json!(id.to_string()));
+                }
+            } else {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "insert into {table} (guild_id, user_id) values ($1, $2) on conflict do nothing"
+                )))
+                .bind(guild)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            }
             Some(format!("the {label} <@{id}>"))
         } else {
             let (role, permit) = rest.split_once(':').ok_or(ApiError::NotFound)?;
@@ -492,23 +509,29 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
             Some(format!("the role <@&{role}> in the permit {permit}"))
         }
     };
-    let closed = done || (eo.is_empty() && ta.is_empty() && roles.is_empty() && other.is_empty());
+    let closed = done
+        || (eo.is_empty()
+            && ta.is_empty()
+            && qw.is_empty()
+            && roles.is_empty()
+            && other.is_empty());
     sqlx::query(
         "update owner_handovers set extra_owners = $2, trusted_admins = $3, paused_roles = $4,
-           kept_at = case when $5 then now() end where guild_id = $1",
+           quarantine_whitelist = $6, kept_at = case when $5 then now() end where guild_id = $1",
     )
     .bind(guild)
     .bind(&eo)
     .bind(&ta)
     .bind(json!(roles))
     .bind(closed)
+    .bind(&qw)
     .execute(&mut *tx)
     .await?;
     let Some(what) = what else {
         tx.commit().await?;
         return Ok(Json(json!({"ok": true})));
     };
-    let version = crate::store::bump(&mut tx, guild, s.user_id).await?;
+    let version = crate::store::commit(&mut tx, guild, cur, &config, s.user_id).await?;
     tx.commit().await?;
     log_change(
         st,
@@ -1356,8 +1379,8 @@ mod tests {
         assert!(handover_check(&st, g).await.unwrap().is_empty());
         run("insert into permits (guild_id, name, perms) values ($1, 'Admins', '{dashboard_edit}'), ($1, 'Mods', '{ban}')").await.unwrap();
         run("insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 21 from permits where guild_id = $1 and name = 'Mods'").await.unwrap();
-        run("insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, ban_sync_was_on, paused_roles, other_permits)
-             values ($1, 3, 7, '{3}', '{12, 13}', true, '[{\"permit\": \"Admins\", \"role\": \"20\"}]', '{Mods}')").await.unwrap();
+        run("insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, ban_sync_was_on, paused_roles, other_permits, quarantine_whitelist)
+             values ($1, 3, 7, '{3}', '{12, 13}', true, '[{\"permit\": \"Admins\", \"role\": \"20\"}]', '{Mods}', '{14}')").await.unwrap();
         let rows = handover_check(&st, g).await.unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(
@@ -1367,6 +1390,7 @@ mod tests {
                 "owner_handover:eo:3",
                 "owner_handover:ta:12",
                 "owner_handover:ta:13",
+                "owner_handover:qw:14",
                 "owner_handover:role:20:Admins"
             ]
         );
@@ -1384,6 +1408,10 @@ mod tests {
         let keep = |e: &'static str| keep_staff(&st, &s, g, &c, Some(e));
         let _ = keep("ta:12").await.unwrap();
         let _ = keep("role:20:Admins").await.unwrap();
+        let _ = keep("qw:14").await.unwrap();
+        let qw: Value = sqlx::query_scalar("select config->'antinuke'->'quarantine_whitelist' from guild_config where guild_id = $1 order by version desc limit 1")
+            .bind(g).fetch_one(&st.db).await.unwrap();
+        assert_eq!(qw, json!(["14"]), "kept into the config");
         assert!(
             matches!(keep("ta:12").await, Err(ApiError::NotFound)),
             "only once"

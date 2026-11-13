@@ -910,6 +910,7 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
         ("Admins", "{dashboard_edit}", "{}", 3),
         ("Immune", "{}", "{all}", 4),
         ("Mods", "{ban}", "{automod}", 5),
+        ("Nukers", "{}", "{wl_role_delete}", 6),
     ] {
         sqlx::query(
             "WITH p AS (INSERT INTO permits (guild_id, name, perms, whitelist) VALUES ($1, $2, $3::text[], $4::text[]) RETURNING id)
@@ -924,6 +925,7 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
         .await
         .unwrap();
     }
+    t.exec("UPDATE guild_config SET config = jsonb_set(config, '{antinuke}', jsonb_build_object('quarantine_whitelist', jsonb_build_array(($1 + 7)::text))) WHERE guild_id = $1").await;
     t.set(|m| {
         m.owners.insert(t.g(0).get(), new);
     });
@@ -937,6 +939,7 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
     .unwrap();
     assert_eq!(cfg["ban_sync"]["enabled"], json!(false));
     assert_eq!(cfg["ban_sync"]["receive"], json!("ban"), "the rest stays");
+    assert_eq!(cfg["antinuke"]["quarantine_whitelist"], json!([]));
     assert_eq!(
         cfg["permits"]["eo"],
         json!([]),
@@ -970,8 +973,16 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
         .sort_by_key(|p| p["role"].to_string());
     assert_eq!(
         paused,
-        json!([{"permit": "Admins", "role": (b + 3).to_string()}, {"permit": "Immune", "role": (b + 4).to_string()}])
+        json!([{"permit": "Admins", "role": (b + 3).to_string()}, {"permit": "Immune", "role": (b + 4).to_string()},
+               {"permit": "Nukers", "role": (b + 6).to_string()}])
     );
+    let qw: Vec<i64> =
+        sqlx::query_scalar("SELECT quarantine_whitelist FROM owner_handovers WHERE guild_id = $1")
+            .bind(b)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(qw, [b + 7]);
     assert_eq!(other, ["Mods"], "a weaker permit stays on");
     assert_eq!(
         t.count("SELECT count(*) FROM permit_roles WHERE guild_id = $1")
@@ -1007,11 +1018,13 @@ fn the_handover_dm_says_what_was_done() {
         ta: &[12, 13],
         paused: &p,
         other: &other,
+        qw: &[14],
     };
     let t = handover_text("S", &h, g).unwrap();
     assert!(t.contains("switched Ban Sync off") && t.contains("Extra Owner(s) <@11>"));
     assert!(t.contains("Trusted Admin(s) <@12>, <@13>") && t.contains("permit(s) Admins ("));
     assert!(t.contains("one by one") && t.contains("stay on: Mods"));
+    assert!(t.contains("removed <@14> from the quarantine whitelist"));
     assert!(t.contains("syncs only with your own servers"));
     let h = Handover {
         sync_on: false,
@@ -1019,6 +1032,7 @@ fn the_handover_dm_says_what_was_done() {
         ta: &[1],
         paused: &[],
         other: &[],
+        qw: &[],
     };
     assert!(!handover_text("S", &h, g).unwrap().contains("Ban Sync"));
     let h = Handover {
@@ -1027,6 +1041,7 @@ fn the_handover_dm_says_what_was_done() {
         ta: &[],
         paused: &[],
         other: &[],
+        qw: &[],
     };
     assert!(handover_text("S", &h, g).is_none(), "nothing to say");
 }

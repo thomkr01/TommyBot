@@ -622,6 +622,15 @@ pub async fn rollback(
         old["ban_sync"]["enabled"] = json!(false);
         held.push("Ban Sync stays off".to_string());
     }
+    // The quarantine whitelist is paused like EO/TA and comes back only through Keep.
+    let qw = |c: &Value| match &c["antinuke"]["quarantine_whitelist"] {
+        Value::Null => json!([]),
+        v => v.clone(),
+    };
+    if before_handover && old["antinuke"].is_object() && qw(&old) != qw(&now) {
+        old["antinuke"]["quarantine_whitelist"] = qw(&now);
+        held.push("the quarantine whitelist stays as it is".to_string());
+    }
     if level < rollback_bar(&old, &now) {
         return Err(ApiError::Forbidden(
             "this rollback changes a section only owners can edit",
@@ -683,14 +692,21 @@ pub async fn rollback(
     ))
 }
 
-/// A permit whose roles are owners, fully immune or dashboard editors: an ownership change pauses them.
+/// Whether a permit is guarded (`permits::guarded`): an ownership change pauses its roles.
 fn strong_permit(p: &Value) -> bool {
-    let has = |k: &str, v: &str| p[k].as_array().is_some_and(|a| a.iter().any(|x| x == v));
-    has("perms", "owner") || has("perms", "dashboard_edit") || has("whitelist", "all")
+    let list = |k: &str| -> Vec<&str> {
+        p[k].as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    };
+    tommybot_core::permits::guarded(&list("perms"), &list("whitelist"))
 }
 
-/// For a rollback to before the last ownership change: EO, TA and the roles of strong permits stay
-/// as they are now, so only Keep on Overview brings back what the change paused. Returns what was held.
+/// For a rollback to before the last ownership change: EO and TA stay as they are now, and no
+/// role becomes guarded again, judged by the old version and the current one (R-h3 round 2), so
+/// only Keep on Overview brings back what the change paused. Returns what was held.
 fn hold_back_permits(p: &mut Value, cur: &Value) -> Vec<String> {
     let mut held = vec![];
     for (k, what) in [("eo", "Extra Owners"), ("ta", "Trusted Admins")] {
@@ -699,22 +715,38 @@ fn hold_back_permits(p: &mut Value, cur: &Value) -> Vec<String> {
             held.push(format!("{what} stay as they are"));
         }
     }
-    let now_roles = |name: &Value| {
+    let now = |name: &Value| {
         cur["custom"]
             .as_array()
             .into_iter()
             .flatten()
             .find(|c| c["name"] == *name)
-            .map_or(json!([]), |c| c["roles"].clone())
+            .cloned()
     };
     for c in p["custom"].as_array_mut().into_iter().flatten() {
-        let roles = now_roles(&c["name"]);
-        if strong_permit(c) && c["roles"] != roles {
-            c["roles"] = roles;
-            held.push(format!(
-                "the roles of the permit {} stay as they are",
-                c["name"].as_str().unwrap_or("?")
-            ));
+        if !strong_permit(c) {
+            continue;
+        }
+        let name = c["name"].as_str().unwrap_or("?").to_string();
+        match now(&c["name"]) {
+            // Guarded now too: its current roles stay, the paused ones come back only through Keep.
+            Some(n) if strong_permit(&n) => {
+                if c["roles"] != n["roles"] {
+                    c["roles"] = n["roles"].clone();
+                    held.push(format!("the roles of the permit {name} stay as they are"));
+                }
+            }
+            // Weak now: its roles stay, but without the old guarded perms and flags.
+            Some(n) => {
+                c["perms"] = n["perms"].clone();
+                c["whitelist"] = n["whitelist"].clone();
+                held.push(format!("the permit {name} keeps its current perms"));
+            }
+            None if c["roles"].as_array().is_some_and(|r| !r.is_empty()) => {
+                c["roles"] = json!([]);
+                held.push(format!("the permit {name} comes back without roles"));
+            }
+            None => {}
         }
     }
     held
@@ -1651,6 +1683,10 @@ pub(crate) mod g3_handler_tests {
         }
     }
 
+    async fn c_qw(st: &AppState, g: i64) -> Value {
+        store::current(&st.db, g).await.unwrap().1["antinuke"]["quarantine_whitelist"].clone()
+    }
+
     /// D47 (R-h3 S4): a rollback to before the ownership change leaves the paused staff, the
     /// strong permit's roles and Ban Sync as they are, says so, and the card stays.
     #[tokio::test]
@@ -1662,14 +1698,17 @@ pub(crate) mod g3_handler_tests {
         for sql in [
             "delete from owner_handovers where guild_id = $1",
             "delete from permits where guild_id = $1",
-            "insert into permits (guild_id, name, perms) values ($1, 'Admins', '{dashboard_edit}'), ($1, 'Mods', '{ban}')",
+            "insert into permits (guild_id, name, perms) values ($1, 'Admins', '{dashboard_edit}'), ($1, 'Mods', '{ban}'), ($1, 'Helpers', '{warn}')",
             "insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 22 from permits where guild_id = $1 and name = 'Mods'",
+            "insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 30 from permits where guild_id = $1 and name = 'Helpers'",
             "insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, paused_roles, at) values ($1, 3, 7, '{5}', '[{\"permit\": \"Admins\", \"role\": \"20\"}]', now() - interval '1 minute')",
         ] {
             sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
         }
-        let old = json!({"ban_sync": {"enabled": true}, "permits": {"eo": ["5"], "ta": ["6"], "custom": [
+        // Helpers was guarded in v1 and made weak before the handover, so its role stayed on.
+        let old = json!({"ban_sync": {"enabled": true}, "antinuke": {"quarantine_whitelist": ["9"]}, "permits": {"eo": ["5"], "ta": ["6"], "custom": [
             {"name": "Admins", "rank": 0, "perms": ["dashboard_edit"], "limits": {}, "whitelist": [], "roles": ["20"]},
+            {"name": "Helpers", "rank": 0, "perms": ["dashboard_edit"], "limits": {}, "whitelist": ["wl_role_delete"], "roles": ["30"]},
             {"name": "Mods", "rank": 0, "perms": ["ban"], "limits": {}, "whitelist": [], "roles": ["21"]}]}});
         sqlx::query("insert into guild_config (guild_id, version, config, created_at) values ($1, 1, $2, now() - interval '1 hour')")
             .bind(g).bind(old).execute(&st.db).await.unwrap();
@@ -1686,11 +1725,14 @@ pub(crate) mod g3_handler_tests {
             r.0["held"],
             json!([
                 "Ban Sync stays off",
+                "the quarantine whitelist stays as it is",
                 "Extra Owners stay as they are",
                 "Trusted Admins stay as they are",
-                "the roles of the permit Admins stay as they are"
+                "the roles of the permit Admins stay as they are",
+                "the permit Helpers keeps its current perms"
             ])
         );
+        assert_eq!(c_qw(&st, g).await, json!([]));
         let (_, c) = store::current(&st.db, g).await.unwrap();
         assert_eq!(c["ban_sync"]["enabled"], json!(false));
         let p = &c["permits"];
@@ -1713,6 +1755,17 @@ pub(crate) mod g3_handler_tests {
             roles("Mods"),
             json!(["21"]),
             "a weaker permit rolls back as usual"
+        );
+        let helpers = p["custom"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Helpers")
+            .unwrap();
+        assert_eq!(
+            (&helpers["perms"], &helpers["whitelist"], &helpers["roles"]),
+            (&json!(["warn"]), &json!([]), &json!(["30"])),
+            "R2-2: never guarded again without Keep"
         );
         let card: i64 = sqlx::query_scalar("select count(*) from owner_handovers where guild_id = $1 and kept_at is null and extra_owners = '{5}'")
             .bind(g).fetch_one(&st.db).await.unwrap();
