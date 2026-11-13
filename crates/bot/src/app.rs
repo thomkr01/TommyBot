@@ -173,11 +173,17 @@ pub struct App {
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
     /// Category (None: no category) of each channel created or deleted, until its audit entry arrives.
     pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
-    /// Each channel's category as last seen, and when it last moved to another (D4).
     /// Permit levels [`App::whitelisted`] read in the last [`LEVEL_TTL`].
     pub(crate) levels: Mutex<LevelCache>,
     /// Newest audit entry id seen per guild, so a new gateway session can fetch what it missed (D20).
     pub last_audit: Mutex<HashMap<u64, u64>>,
+    /// The last 1000 audit entry ids seen per guild: live and catch-up handle each once (D20).
+    pub audit_recent: Mutex<HashMap<u64, std::collections::VecDeque<u64>>>,
+    /// Newest handled audit id per guild not yet written to `audit_seen` (`welcome::flush_audit`).
+    pub audit_done: Mutex<HashMap<u64, u64>>,
+    /// `last_audit` as it stood when `Ready` came in: where the catch-up starts (D20).
+    pub audit_floor: Mutex<HashMap<u64, u64>>,
+    /// Each channel's category as last seen, and when it last moved to another (D4).
     pub category_moves: Mutex<HashMap<u64, (Option<u64>, crate::hierarchy::CategoryMove)>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
@@ -296,6 +302,9 @@ impl App {
             channel_parents: Default::default(),
             category_moves: Default::default(),
             last_audit: Default::default(),
+            audit_recent: Default::default(),
+            audit_done: Default::default(),
+            audit_floor: Default::default(),
             levels: Default::default(),
             nuke_runs: Default::default(),
             lock_ops: Default::default(),

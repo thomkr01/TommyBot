@@ -107,7 +107,7 @@ pub struct Delta {
     pub channel: Option<u64>,
 }
 
-fn created_ms(id: u64) -> i64 {
+pub(crate) fn created_ms(id: u64) -> i64 {
     (id >> 22) as i64 + DISCORD_EPOCH_MS
 }
 

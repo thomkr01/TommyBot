@@ -1461,28 +1461,40 @@ async fn a_bot_adder_is_read_twice_then_the_bot_is_blocked() {
     t.cleanup().await;
 }
 
-/// D20: the last audit entry seen survives a restart, and the first `Ready` reads the entries
-/// after it, oldest first.
+/// D20: the last audit entry handled survives a restart, and the first `Ready` reads the entries
+/// after it, oldest first, each once even when the live event brings it too.
 #[tokio::test]
 async fn a_restart_reads_the_audit_entries_it_missed() {
     let Some(t) = T::new(101).await else {
         return;
     };
     let g = t.g(0);
-    crate::welcome::saw_audit(&t.app, g.get(), 5).await;
-    crate::welcome::saw_audit(&t.app, g.get(), 4).await; // never goes back
-                                                         // A second app over the same database stands for the restart.
+    crate::welcome::done_audit(&t.app, g.get(), 5);
+    crate::welcome::done_audit(&t.app, g.get(), 4); // never goes back
+    crate::welcome::flush_audit(&t.app).await;
+    // A second app over the same database stands for the restart.
     let fresh = T::new(102).await.unwrap();
     crate::welcome::load_audit_seen(&fresh.app).await.unwrap();
     let last = |t: &T| t.app.last_audit.lock().unwrap().get(&g.get()).copied();
     assert_eq!(last(&fresh), Some(5));
-    let e = |id: &str| json!({"id": id, "action_type": 22, "target_id": "8", "user_id": "9", "changes": []});
-    fresh.set(|m| m.audit = vec![e("9"), e("3"), e("7")]);
+    let e = |id: u64| json!({"id": id.to_string(), "action_type": 22, "target_id": "8", "user_id": "9", "changes": []});
+    fresh.set(|m| m.audit = vec![e(9), e(3), e(7)]);
+    // The live event for 7 came first: the catch-up skips it, and handles 9 once.
+    assert!(crate::welcome::saw_audit(&fresh.app, g.get(), 7));
     crate::welcome::catch_up_audit(&fresh.app, g, 5)
         .await
         .unwrap();
     assert_eq!(last(&fresh), Some(9));
-    assert_eq!(fresh.calls("after=5"), 1);
+    assert_eq!(fresh.calls("audit-logs"), 1, "a short page is the end");
+    assert!(!crate::welcome::saw_audit(&fresh.app, g.get(), 9), "a live 9 is skipped");
+    assert_eq!(fresh.app.audit_done.lock().unwrap().get(&g.get()), Some(&9));
+    // Full pages are read back until the cap.
+    fresh.set(|m| m.audit = (1000..1100).map(e).collect());
+    crate::welcome::catch_up_audit(&fresh.app, g, 5)
+        .await
+        .unwrap();
+    assert_eq!(fresh.calls("audit-logs"), 11);
+    assert_eq!(last(&fresh), Some(1099));
     sqlx::query("DELETE FROM audit_seen WHERE guild_id = $1")
         .bind(g.get() as i64)
         .execute(&t.app.pool)

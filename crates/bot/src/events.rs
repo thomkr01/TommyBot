@@ -367,6 +367,7 @@ pub async fn shutdown(app: &App) {
             tracing::warn!(?e, "log send failed during shutdown");
         }
     }
+    crate::welcome::flush_audit(app).await;
     app.pool.close().await;
 }
 
@@ -558,10 +559,17 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         // Anti-nuke first: the verification check can wait for the gateway delete.
         Event::GuildAuditLogEntryCreate(e) => {
-            if let Some(g) = e.0.guild_id {
-                crate::welcome::saw_audit(app, g.get(), e.0.id.get()).await;
+            // The catch-up after a reconnect may have handled this entry already (D20).
+            let g = e.0.guild_id.map(|g| g.get());
+            let new = g.is_none_or(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
+            let nuke = if new {
+                antinuke::on_audit(app, &e.0).await
+            } else {
+                Ok(())
+            };
+            if let (true, Some(g)) = (new, g) {
+                crate::welcome::done_audit(app, g, e.0.id.get());
             }
-            let nuke = antinuke::on_audit(app, &e.0).await;
             let ban = crate::bansync::on_ban(app, &e.0).await;
             let unban = crate::bansync::on_unban(app, &e.0).await;
             let allow = crate::raiders::on_unban(app, &e.0).await;

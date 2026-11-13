@@ -209,6 +209,11 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if cfg.antinuke.limit(action).is_none() {
         return Ok(());
     }
+    // An entry read after downtime counts at its own time; past the hour window it cannot trip.
+    let ago = replay_age(e.id.get());
+    if ago >= Duration::from_secs(3600) {
+        return Ok(());
+    }
     // Ticket bots open and close channels all day; the gateway event names the category first.
     // Only a bot is exempt, and not for a channel just moved in: a nuker moves channels into the
     // category and deletes them (D4). Panic's Whitelisted Categories are panic-only.
@@ -216,9 +221,12 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if let (Action::ChannelCreate | Action::ChannelDelete, Some(t)) = (action, e.target_id) {
         if tickets.is_empty() {
             app.channel_parents.lock().unwrap().remove(&t.get());
-        } else if parent_of(app, t.get())
-            .await
-            .is_some_and(|p| tickets.iter().any(|c| c.get() == p))
+        } else if (if ago.is_zero() {
+            parent_of(app, t.get()).await
+        } else {
+            replayed_parent(app, gid, t.get()).await
+        })
+        .is_some_and(|p| tickets.iter().any(|c| c.get() == p))
             && !app.moved_in(t.get(), tickets)
             && is_bot(app, actor).await
         {
@@ -245,7 +253,7 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     {
         backup::track_created(app, gid, action, t.get()).await?;
     }
-    count(
+    count_at(
         app,
         &cfg,
         gid,
@@ -255,8 +263,33 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         &inv,
         exempt,
         1,
+        ago,
     )
     .await
+}
+
+/// How long ago an audit entry was made, by its snowflake. Zero for a live entry (under 30 s, so
+/// clock skew with Discord never shifts live counting); more for one read after downtime (D20).
+fn replay_age(id: u64) -> Duration {
+    let ms = crate::automod::now_ms() - crate::voice_nuke::created_ms(id);
+    if ms < 30_000 {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(ms as u64)
+    }
+}
+
+/// The category of a channel made or deleted while the bot was down: no gateway event noted it.
+/// A channel that still exists says so itself; a deleted one is looked up in the latest backup.
+/// Not found (a ticket made and closed in the gap) counts the action (D20).
+async fn replayed_parent(app: &App, gid: Id<GuildMarker>, channel: u64) -> Option<u64> {
+    if let Ok(r) = app.http.channel(Id::new(channel)).await {
+        if let Ok(c) = r.model().await {
+            return c.parent_id.map(|p| p.get());
+        }
+    }
+    let image = backup::latest(app, gid).await.ok().flatten()?;
+    image.channels.into_iter().find(|c| c.id == channel)?.parent
 }
 
 /// A failed lookup counts as not a bot, so the action is counted.
@@ -282,6 +315,24 @@ pub(crate) async fn count(
     exempt: bool,
     n: u32,
 ) -> Result<()> {
+    count_at(app, cfg, gid, actor, action, target, inv, exempt, n, Duration::ZERO).await
+}
+
+/// As `count`, for actions made `ago` (an audit entry read after downtime, D20): logged and
+/// windowed at their own time, and no heat, which would have decayed by now.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn count_at(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    action: Action,
+    target: Option<u64>,
+    inv: &[Inverse],
+    exempt: bool,
+    n: u32,
+    ago: Duration,
+) -> Result<()> {
     let Some((_, heat)) = cfg.antinuke.limit(action) else {
         return Ok(());
     };
@@ -295,17 +346,19 @@ pub(crate) async fn count(
         };
         // `counted` puts the window back after a restart (`seed_windows`): `n` on the first row.
         for (k, i) in rows.into_iter().enumerate() {
-            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse, counted) VALUES ($1,$2,$3,$4,$5,$6)")
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse, counted, created_at) VALUES ($1,$2,$3,$4,$5,$6, now() - make_interval(secs => $7))")
                 .bind(gid.get() as i64)
                 .bind(actor.get() as i64)
                 .bind(format!("{action:?}"))
                 .bind(target.map(|t| t as i64))
                 .bind(i.map(|i| json!(i)))
                 .bind(if k == 0 { n as i32 } else { 0 })
+                .bind(ago.as_secs_f64())
                 .execute(&app.pool)
                 .await?;
         }
         hot = heat > 0
+            && ago.is_zero()
             && cfg.panic.heat_algorithm
             && add_heat(
                 app,
@@ -321,7 +374,7 @@ pub(crate) async fn count(
     let verdict = {
         let mut an = app.antinuke.lock().unwrap();
         an.limits = cfg.antinuke.watched();
-        an.on_actions(gid.get(), actor.get(), action, exempt, Instant::now(), n)
+        an.on_actions_at(gid.get(), actor.get(), action, exempt, Instant::now(), ago, n)
     };
     if let Some(why) = breach(&verdict, hot, action) {
         quarantine_and_revert(app, gid, actor, &why).await?;

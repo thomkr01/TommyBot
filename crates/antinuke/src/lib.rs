@@ -235,6 +235,23 @@ impl AntiNuke {
         now: Instant,
         n: u32,
     ) -> Verdict {
+        self.on_actions_at(guild, executor, action, exempt, now, Duration::ZERO, n)
+    }
+
+    /// As `on_actions`, for actions done `ago` before `now` (an audit entry read after downtime,
+    /// D20): they go into the window at their own time and are judged against the window as it
+    /// stood then, so a gap of hours never piles into one minute. Older than an hour: ignored.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_actions_at(
+        &mut self,
+        guild: u64,
+        executor: u64,
+        action: Action,
+        exempt: bool,
+        now: Instant,
+        ago: Duration,
+        n: u32,
+    ) -> Verdict {
         let action = action.card();
         let Some(limit) = self.limits.get(&action).copied() else {
             return Verdict::Ignore;
@@ -246,14 +263,22 @@ impl AntiNuke {
         while q.front().is_some_and(|t| now.duration_since(*t) >= HOUR) {
             q.pop_front();
         }
-        q.extend(std::iter::repeat_n(now, n.min(limit.per_hour) as usize));
-        let minute = q
-            .iter()
-            .filter(|t| now.duration_since(**t) < MINUTE)
-            .count();
+        let Some(at) = now.checked_sub(ago).filter(|_| ago < HOUR) else {
+            return Verdict::Ignore;
+        };
+        // Sorted insert: replayed entries are older than live ones counted meanwhile.
+        let i = q.partition_point(|t| *t <= at);
+        for _ in 0..n.min(limit.per_hour) {
+            q.insert(i, at);
+        }
+        let before = |w: Duration| {
+            q.iter()
+                .filter(|t| **t <= at && at.duration_since(**t) < w)
+                .count() as u32
+        };
         let c = Counts {
-            minute: minute as u32,
-            hour: q.len() as u32,
+            minute: before(MINUTE),
+            hour: before(HOUR),
         };
         if c.minute >= limit.per_minute || c.hour >= limit.per_hour {
             Verdict::Quarantine(c)
@@ -615,6 +640,31 @@ mod tests {
         );
         let v = a.on_action(1, 3, Action::Ban, false, t0);
         assert_eq!(v, Verdict::Allow(Counts { minute: 1, hour: 1 }));
+    }
+
+    #[test]
+    fn replayed_actions_count_at_their_own_time() {
+        let (mut a, t0) = (engine(3, 5), Instant::now() + 2 * HOUR);
+        let at = |m: u64| Duration::from_secs(m * 60);
+        // Four bans spread over 40 minutes of downtime, read at once: no minute holds three.
+        for m in [40, 30, 20, 10] {
+            let v = a.on_actions_at(1, 2, Action::Ban, false, t0, at(m), 1);
+            assert!(matches!(v, Verdict::Allow(c) if c.minute == 1), "{m}: {v:?}");
+        }
+        // A real burst in the gap still trips, and a live action sees all of them in its hour.
+        assert!(matches!(
+            a.on_actions_at(1, 3, Action::Ban, false, t0, at(5), 3),
+            Verdict::Quarantine(c) if c.minute == 3
+        ));
+        assert_eq!(
+            a.on_action(1, 2, Action::Ban, false, t0),
+            Verdict::Quarantine(Counts { minute: 1, hour: 5 })
+        );
+        // Older than an hour: not counted at all.
+        assert_eq!(
+            a.on_actions_at(1, 4, Action::Ban, false, t0, at(61), 9),
+            Verdict::Ignore
+        );
     }
 
     #[test]
