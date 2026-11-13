@@ -389,7 +389,10 @@ impl App {
                     };
                     if let Ok(g) = g.parse::<u64>() {
                         self.cfgs.write().unwrap().forget(Some(g));
-                        tokio::spawn(crate::automod::sync_discord_rule(self.clone(), g));
+                        let app = self.clone();
+                        tokio::spawn(
+                            async move { crate::automod::sync_discord_rule(&app, g).await },
+                        );
                         if let Some(gid) = Id::new_checked(g) {
                             tokio::spawn(on_saved(self.clone(), gid, version));
                         }

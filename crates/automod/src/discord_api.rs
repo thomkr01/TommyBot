@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 const API: &str = "https://discord.com/api/v10";
-const KEYWORD_RULE: &str = "TommyBot keywords";
+/// Name of the keyword rule the bot keeps in step with the word lists.
+pub const KEYWORD_RULE: &str = "TommyBot keywords";
 /// Discord caps one keyword rule at 1000 keywords of at most 60 chars.
 const MAX_KEYWORDS: usize = 1000;
 const MAX_KEYWORD_LEN: usize = 60;
@@ -449,16 +450,61 @@ fn invites_body(until: Option<(i64, i64)>) -> Value {
     json!({ "invites_disabled_until": until, "dms_disabled_until": until })
 }
 
-fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
-    let fit = |list: &[String], len: usize, max: usize| -> Vec<String> {
-        list.iter()
-            .filter(|w| !w.is_empty() && w.chars().count() <= len)
-            .take(max)
-            .cloned()
+/// Which entries of `list` our keyword rule sends to Discord: non-empty, within `len` chars, the first `max`.
+fn fits(list: &[String], len: usize, max: usize) -> Vec<bool> {
+    let mut n = 0;
+    list.iter()
+        .map(|w| {
+            let ok = !w.is_empty() && w.chars().count() <= len && n < max;
+            n += usize::from(ok);
+            ok
+        })
+        .collect()
+}
+
+/// Per word and per regex pattern: true when it fits in Discord's keyword rule.
+fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) {
+    (
+        fits(words, MAX_KEYWORD_LEN, MAX_KEYWORDS),
+        fits(regex, MAX_REGEX_LEN, MAX_REGEX),
+    )
+}
+
+/// The keyword rule Discord holds is the one the bot would send for these lists (order and case
+/// aside), switched on as the bot sets it.
+pub fn rule_matches(
+    words: &[String],
+    regex: &[String],
+    enabled: bool,
+    keywords: &[String],
+    patterns: &[String],
+) -> bool {
+    let body = keyword_rule_body(words, regex);
+    let set = |v: &Value| -> std::collections::BTreeSet<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str().map(str::to_lowercase))
             .collect()
     };
-    let words = fit(words, MAX_KEYWORD_LEN, MAX_KEYWORDS);
-    let regex = fit(regex, MAX_REGEX_LEN, MAX_REGEX);
+    let have = |l: &[String]| l.iter().map(|x| x.to_lowercase()).collect();
+    let meta = &body["trigger_metadata"];
+    body["enabled"] == enabled
+        && set(&meta["keyword_filter"]) == have(keywords)
+        && set(&meta["regex_patterns"]) == have(patterns)
+}
+
+fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
+    let fit = |list: &[String], ok: Vec<bool>| -> Vec<String> {
+        list.iter()
+            .zip(ok)
+            .filter(|(_, ok)| *ok)
+            .map(|(w, _)| w.clone())
+            .collect()
+    };
+    let (w_ok, r_ok) = on_discord(words, regex);
+    let words = fit(words, w_ok);
+    let regex = fit(regex, r_ok);
     json!({
         "name": KEYWORD_RULE,
         "event_type": 1,
@@ -606,6 +652,13 @@ mod tests {
         assert_eq!(v["trigger_metadata"]["keyword_filter"], json!(["bad"]));
         assert_eq!(v["enabled"], true);
         assert_eq!(keyword_rule_body(&[], &[])["enabled"], false);
+        let w = ["Bad".to_string(), "x".repeat(61)];
+        assert!(rule_matches(&w, &[], true, &["bad".into()], &[]));
+        assert!(
+            !rule_matches(&w, &[], false, &["bad".into()], &[]),
+            "switched off"
+        );
+        assert!(!rule_matches(&w, &[], true, &[], &[]), "keywords removed");
         let r = keyword_rule_body(&[], &["b[a4]d".into()]);
         assert_eq!(r["trigger_metadata"]["regex_patterns"], json!(["b[a4]d"]));
         assert_eq!(r["enabled"], true);

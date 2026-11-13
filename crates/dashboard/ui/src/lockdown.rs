@@ -429,8 +429,8 @@ pub fn DiscordRules(guild: String) -> impl IntoView {
             <button class="go" title="Turn on every rule that is off" disabled=move || rules.get().iter().all(|r| r["enabled"] == true)
                 on:click=move |_| for r in rules.get_untracked().iter().filter(|r| r["enabled"] != true) { call("POST", format!("/{}/enabled", s(&r["id"])), Some(json!({"enabled": true}))) }>"Activate"</button>
             <span class="sp"></span>
-            <button class="ghost" title="Copy the local word blacklist into a Discord rule, then clear the local lists"
-                on:click=move |_| if confirm("Copy your word blacklist into a new Discord AutoMod rule and clear the local lists? This cannot be undone.") {
+            <button class="ghost" title="Copy the local word blacklist into a Discord rule that TommyBot keeps in sync. The local lists stay for thread and reaction names"
+                on:click=move |_| if confirm("Copy your word blacklist into a Discord AutoMod rule? TommyBot keeps the rule in sync with your lists, which stay for thread and reaction names.") {
                     spawn_local(async move {
                         match api("POST", &format!("/api/guilds/{}/discord-rules-migrate-words", g.get_value()), None).await {
                             Ok(_) => { load(); msg.ok("Words migrated."); }

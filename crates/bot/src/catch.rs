@@ -47,10 +47,11 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     if c.users.contains(&uid) || roles.iter().any(|r| c.roles.contains(r)) {
         return Ok(false);
     }
-    let owner = app.guild_info(gid).await?.owner;
-    if app.level(gid, owner, uid).await? != Level::None {
+    // Only Owner, Extra Owners and Trusted Admins: a hacked mod with a permit is caught too.
+    if app.is_immune(gid, uid).await? {
         return Ok(false);
     }
+    let owner = app.guild_info(gid).await?.owner;
     let (kind, soft) = match c.action {
         CatchAction::Ban => (ModKind::Ban, false),
         CatchAction::Softban => (ModKind::Ban, true),

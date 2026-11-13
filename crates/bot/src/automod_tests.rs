@@ -387,3 +387,394 @@ async fn native_hits_of_whitelisted_members_do_not_fill_a_scope() {
     assert_eq!(t.calls("PATCH"), 0, "the owner's hit did not count");
     t.cleanup().await;
 }
+
+fn create(m: Message) -> MessageCreate {
+    MessageCreate {
+        channel_type: None,
+        message: m,
+    }
+}
+
+/// A scam link with its own Ban: an automod-permit holder is banned too (a hacked mod), the grace
+/// window after an earlier punishment does not soften it, and the same message is punished once.
+/// The permit still skips a blacklisted word.
+#[tokio::test]
+async fn a_scam_ban_skips_the_permit_and_the_grace_window() {
+    let Some(t) = T::new(251).await else { return };
+    let gid = t.g(0);
+    let cfg = json!({"automod": {"enabled": true, "filters": {
+        "scam_links": {"enabled": true, "action": "ban"},
+        "words": {"filter": {"enabled": true}, "strict": ["darn"]}}}});
+    t.server_config(0, t.owner(), cfg).await;
+    t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1, $1, 'Staff', '{}', '{automod}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 556)")
+        .await;
+    let (staff, member) = (t.base + 5, t.base + 6);
+    t.set(|m| {
+        m.members.insert((gid.get(), staff), vec![556]);
+        m.members.insert((gid.get(), member), vec![]);
+    });
+    let post = |id: &str, user: u64, content: &str| {
+        create(msg(
+            json!({"guild_id": gid.to_string(), "id": id, "content": content,
+            "author": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": "0123456789abcdef0123456789abcdef"}}),
+        ))
+    };
+    let scam = "free nitro https://discord-nitro.ru/claim";
+    on_message(&t.app, &post("100", staff, "darn it"))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("DELETE"), 0, "the permit skips the word filter");
+    let _ = on_message(&t.app, &post("101", staff, scam)).await;
+    assert_eq!(
+        t.calls(&format!("PUT /guilds/{gid}/bans/{staff}")),
+        1,
+        "permit holder banned"
+    );
+    // The member was just punished for a heat burst.
+    t.app
+        .heat
+        .lock()
+        .unwrap()
+        .entry((gid.get(), member))
+        .or_default()
+        .0
+        .punished_ms = now_ms();
+    let _ = on_message(&t.app, &post("102", member, scam)).await;
+    let ban = format!("PUT /guilds/{gid}/bans/{member}");
+    assert_eq!(t.calls(&ban), 1, "banned inside the grace window");
+    // The same message again (the NSFW scan, an edit): deleted, not punished twice.
+    let _ = on_edit(&t.app, &post("102", member, scam).message).await;
+    assert_eq!(t.calls(&ban), 1, "one message, one ban");
+    assert_eq!(t.calls("DELETE /channels/7/messages/102"), 2);
+    t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+/// A webhook exempt from spam (listed, or its bot owner on the anti-nuke whitelist) still has an
+/// invite deleted; its plain messages stay.
+#[tokio::test]
+async fn an_exempt_webhook_still_loses_an_invite() {
+    let Some(t) = T::new(252).await else { return };
+    let gid = t.g(0);
+    let cfg = json!({"whitelist": {"webhooks": ["9"]},
+        "automod": {"enabled": true, "filters": {"invites": {"enabled": true}}}});
+    t.server_config(0, t.owner(), cfg).await;
+    let hook = |id: &str, content: &str| {
+        create(msg(
+            json!({"guild_id": gid.to_string(), "id": id, "content": content, "webhook_id": "9",
+            "author": {"id": "9", "username": "hook", "discriminator": "0000", "avatar": null, "bot": true}}),
+        ))
+    };
+    on_message(&t.app, &hook("100", "hello")).await.unwrap();
+    on_message(&t.app, &hook("101", "join discord.gg/abc"))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("DELETE /channels/7/messages/100"), 0);
+    assert_eq!(t.calls("DELETE /channels/7/messages/101"), 1);
+    t.cleanup().await;
+}
+
+/// Mentions by a mention-whitelisted member never count towards the mention lockdown.
+#[tokio::test]
+async fn whitelisted_pings_do_not_lock_the_server() {
+    let Some(t) = T::new(253).await else { return };
+    let gid = t.g(0);
+    let (trusted, member) = (t.base + 5, t.base + 6);
+    let cfg = json!({"whitelist": {"mentions": {"users": [trusted.to_string()]}},
+        "automod": {"enabled": true, "anti_spam": false,
+            "auto_lockdown": {"enabled": true, "mention_count": 2}}});
+    t.server_config(0, t.owner(), cfg).await;
+    let pings = |id: &str, user: u64| {
+        let who = |u: u64| json!({"id": u.to_string(), "username": "y", "discriminator": "0", "avatar": null, "public_flags": 0});
+        create(msg(
+            json!({"guild_id": gid.to_string(), "id": id, "content": "hi",
+            "mentions": [who(1), who(2), who(3)],
+            "author": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": "0123456789abcdef0123456789abcdef"}}),
+        ))
+    };
+    let _ = on_message(&t.app, &pings("100", trusted)).await;
+    assert_eq!(t.calls("/roles"), 0, "not locked");
+    let _ = on_message(&t.app, &pings("101", member)).await;
+    assert!(t.calls("/roles") >= 1, "a member's pings lock");
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+/// A permit holder writing in the catch channel is caught; only Owner, Extra Owners and Trusted
+/// Admins are left alone.
+#[tokio::test]
+async fn the_catch_channel_catches_permit_holders() {
+    let Some(t) = T::new(254).await else { return };
+    let gid = t.g(0);
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"catch": {"enabled": true, "channel": "7", "action": "Kick"}}),
+    )
+    .await;
+    t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1, $1, 'Staff', '{}', '{automod}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 556)")
+        .await;
+    let staff = t.base + 5;
+    t.set(|m| {
+        m.members.insert((gid.get(), staff), vec![556]);
+    });
+    let post = |user: u64| {
+        create(msg(json!({"guild_id": gid.to_string(),
+            "author": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": null}})))
+    };
+    assert!(crate::catch::on_message(&t.app, &post(staff))
+        .await
+        .unwrap());
+    assert!(!crate::catch::on_message(&t.app, &post(t.owner()))
+        .await
+        .unwrap());
+    t.cleanup().await;
+}
+
+#[test]
+fn a_timeout_without_duration_uses_the_strike_length_with_strikes_off() {
+    let mut am = AutomodCfg::default();
+    let fc = FilterCfg {
+        action: Some(FilterAction::Timeout),
+        ..FilterCfg::default()
+    };
+    assert_eq!(own_action(&fc, &am), None, "the strikes decide");
+    am.strike.enabled = false;
+    let secs = am.strike.strike_timeout_ms / 1000;
+    assert_eq!(
+        own_action(&fc, &am),
+        Some((FilterAction::Timeout, Some(secs)))
+    );
+    let own = FilterCfg {
+        duration_secs: Some(30),
+        ..fc
+    };
+    assert_eq!(
+        own_action(&own, &am),
+        Some((FilterAction::Timeout, Some(30)))
+    );
+}
+
+/// Giving back a failed pass's message claim restores the old rank, but never erases a stronger
+/// claim another pass made meanwhile.
+#[test]
+fn acted_unclaim_keeps_a_newer_claim() {
+    let key = (9_990_001, 1);
+    let prev = acted_claim(key, STRIKE_RANK).unwrap();
+    acted_unclaim(key, STRIKE_RANK, Some(prev));
+    assert!(!ACTED.lock().unwrap().contains_key(&key), "given back");
+    let prev = acted_claim(key, STRIKE_RANK).unwrap();
+    assert!(
+        acted_claim(key, 4).is_some(),
+        "a stronger pass claims meanwhile"
+    );
+    acted_unclaim(key, STRIKE_RANK, Some(prev));
+    assert_eq!(
+        ACTED.lock().unwrap().get(&key),
+        Some(&4),
+        "the newer claim stays"
+    );
+}
+
+/// With "Use Discord AutoMod" on, a message that reached the bot was not blocked by Discord, so
+/// the local filter still counts its words.
+#[tokio::test]
+async fn synced_words_still_count_locally() {
+    let Some(t) = T::new(262).await else { return };
+    let cfg = json!({"automod": {"enabled": true, "filters": {"words": {
+        "filter": {"enabled": true, "action": "delete"}, "strict": ["darn"],
+        "use_discord_automod": true}}}});
+    t.server_config(0, t.owner(), cfg).await;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), t.base + 6), vec![]);
+    });
+    let _ = on_message(&t.app, &post(&t, "100", t.base + 6, "darn it")).await;
+    assert_eq!(t.calls("DELETE /channels/7/messages/100"), 1);
+    done(t).await;
+}
+
+/// With the auto timeouts off a heat strike is logged as a strike, never as a timeout.
+#[test]
+fn strikes_off_logs_no_timeout() {
+    let act = tommybot_automod::strike::StrikeAction {
+        strike: 2,
+        timeout_ms: 60_000,
+        purge: false,
+        reset_heat: false,
+    };
+    let text = |timed| {
+        serde_json::to_string(&heat_log(timed, "x", "Message spam", (5, 7), &act).build()).unwrap()
+    };
+    let off = text(false);
+    assert!(off.contains("got a strike") && off.contains("`2`"), "{off}");
+    assert!(
+        !off.contains("timed out") && !off.contains("Duration"),
+        "{off}"
+    );
+    assert!(text(true).contains("timed out"));
+}
+
+/// A guild with a scam-link filter of `action` (a strike when None), members and a permit
+/// holder (`base + 5`, role 556) known to the mock; a post by `user` with message id `id`.
+async fn scam_guild(n: u64, action: Option<&str>, extra: Value) -> Option<T> {
+    let t = T::new(n).await?;
+    let gid = t.g(0);
+    let mut cfg = json!({"automod": {"enabled": true, "filters": {
+        "scam_links": {"enabled": true, "action": action}}}});
+    for (k, v) in extra.as_object().unwrap() {
+        cfg["automod"][k] = v.clone();
+    }
+    t.server_config(0, t.owner(), cfg).await;
+    t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1, $1, 'Staff', '{}', '{automod}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 556)")
+        .await;
+    t.set(|m| {
+        m.members.insert((gid.get(), t.base + 5), vec![556]);
+        for u in 6..=8 {
+            m.members.insert((gid.get(), t.base + u), vec![]);
+        }
+    });
+    Some(t)
+}
+
+fn post(t: &T, id: &str, user: u64, content: &str) -> MessageCreate {
+    create(msg(
+        json!({"guild_id": t.g(0).to_string(), "id": id, "content": content,
+        "author": {"id": user.to_string(), "username": "x", "discriminator": "0",
+            "avatar": "0123456789abcdef0123456789abcdef"}}),
+    ))
+}
+
+/// Heat already over the max, as after a spam burst.
+fn hot() -> tommybot_automod::heat::HeatState {
+    tommybot_automod::heat::HeatState {
+        value: 1_000.0,
+        at_ms: now_ms(),
+        ..Default::default()
+    }
+}
+
+const SCAM: &str = "free nitro https://discord-nitro.ru/claim";
+
+async fn done(t: T) {
+    t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+/// A Trusted Admin's scam link is left alone: immune levels are exempt from every bot action.
+#[tokio::test]
+async fn a_trusted_admin_stays_exempt() {
+    let Some(t) = scam_guild(257, Some("ban"), json!({})).await else {
+        return;
+    };
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $1 + 7)")
+        .await;
+    let _ = on_message(&t.app, &post(&t, "100", t.base + 7, SCAM)).await;
+    assert_eq!(t.calls("/bans/"), 0, "no ban");
+    assert_eq!(t.calls("DELETE"), 0, "kept");
+    done(t).await;
+}
+
+/// A permit holder's scam link is acted on whatever the heat weight, and their exempt spam took
+/// no claim that would soften it.
+#[tokio::test]
+async fn a_permit_holder_s_scam_is_always_acted_on() {
+    let heat = json!({"heat": {"malicious": 10.0}});
+    let Some(t) = scam_guild(258, None, heat).await else {
+        return;
+    };
+    let (gid, staff) = (t.g(0), t.base + 5);
+    // Their spam trips the heat, but they are exempt from it.
+    t.app
+        .heat
+        .lock()
+        .unwrap()
+        .entry((gid.get(), staff))
+        .or_default()
+        .0 = hot();
+    on_message(&t.app, &post(&t, "100", staff, "hello"))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("DELETE"), 0, "exempt spam is kept");
+    let _ = on_message(&t.app, &post(&t, "101", staff, SCAM)).await;
+    let timeout = format!("PATCH /guilds/{gid}/members/{staff}");
+    assert_eq!(
+        t.calls(&timeout),
+        1,
+        "struck, not softened by the exempt spam"
+    );
+    done(t).await;
+}
+
+/// A strike for a message's spam, then a scam link edited into the same message with a Ban
+/// filter: the stronger punishment lands.
+#[tokio::test]
+async fn a_strike_then_a_ban_on_the_same_message_escalates() {
+    let Some(t) = scam_guild(259, Some("ban"), json!({})).await else {
+        return;
+    };
+    let (gid, member) = (t.g(0), t.base + 6);
+    t.app
+        .heat
+        .lock()
+        .unwrap()
+        .entry((gid.get(), member))
+        .or_default()
+        .0 = hot();
+    let _ = on_message(&t.app, &post(&t, "100", member, "hello")).await;
+    assert_eq!(
+        t.calls(&format!("PATCH /guilds/{gid}/members/{member}")),
+        1,
+        "strike"
+    );
+    let _ = on_edit(&t.app, &post(&t, "100", member, SCAM).message).await;
+    assert_eq!(
+        t.calls(&format!("PUT /guilds/{gid}/bans/{member}")),
+        1,
+        "escalated to the ban"
+    );
+    done(t).await;
+}
+
+/// Three scam messages in a burst with a Warn filter give one warn; the rest are deleted.
+#[tokio::test]
+async fn a_burst_of_warn_hits_warns_once() {
+    let Some(t) = scam_guild(260, Some("warn"), json!({})).await else {
+        return;
+    };
+    let member = t.base + 6;
+    for id in ["100", "101", "102"] {
+        let _ = on_message(&t.app, &post(&t, id, member, SCAM)).await;
+    }
+    let warns: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cases WHERE guild_id = $1 AND kind = 'warn'")
+            .bind(t.g(0).get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(warns, 1);
+    assert_eq!(t.calls("DELETE /channels/7/messages/"), 3);
+    done(t).await;
+}
+
+/// Two passes over one message at once (a create and its image scan) ban once.
+#[tokio::test]
+async fn concurrent_passes_punish_once() {
+    let Some(t) = scam_guild(261, Some("ban"), json!({})).await else {
+        return;
+    };
+    let member = t.base + 8;
+    let m = post(&t, "100", member, SCAM);
+    let (a, b) = tokio::join!(on_message(&t.app, &m), on_edit(&t.app, &m.message));
+    let _ = (a, b);
+    assert_eq!(t.calls(&format!("PUT /guilds/{}/bans/{member}", t.g(0))), 1);
+    done(t).await;
+}

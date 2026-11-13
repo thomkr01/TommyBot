@@ -187,6 +187,7 @@ async fn main() -> Result<()> {
         | Intents::GUILD_MEMBERS
         | Intents::GUILD_MODERATION
         | Intents::AUTO_MODERATION_EXECUTION
+        | Intents::AUTO_MODERATION_CONFIGURATION
         | Intents::GUILD_MESSAGES
         | Intents::MESSAGE_CONTENT
         | Intents::GUILD_VOICE_STATES
