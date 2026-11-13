@@ -140,13 +140,15 @@ fn taken(
     main: &[u64],
     gid: u64,
     voice: bool,
-) -> Vec<(u64, u64)> {
+) -> Vec<(u64, u64, bool)> {
     let mask = (lockdown_bits::SILENCE | if voice { lockdown_bits::VOICE } else { 0 })
         & !lockdown_bits::DANGEROUS;
     roles
         .iter()
-        .map(|r| (r.id.get(), r.permissions.bits() & mask))
-        .filter(|(id, bits)| *bits != 0 && (main.contains(id) || (main.is_empty() && *id == gid)))
+        .map(|r| (r.id.get(), r.permissions.bits() & mask, r.managed))
+        .filter(|(id, bits, _)| {
+            *bits != 0 && (main.contains(id) || (main.is_empty() && *id == gid))
+        })
         .collect()
 }
 
@@ -174,7 +176,7 @@ async fn exemptions(
     app: &App,
     gid: Id<GuildMarker>,
     category: Id<ChannelMarker>,
-    taken: &[(u64, u64)],
+    taken: &[(u64, u64, bool)],
     quarantine_role: Option<u64>,
 ) -> Result<Vec<Exemption>> {
     let ch = app.http.channel(category).await?.model().await?;
@@ -186,8 +188,10 @@ async fn exemptions(
         .filter(|o| o.kind == ModelOverwriteType::Role)
         .collect();
     let mut out = vec![];
-    for &(role, bits) in taken {
+    for &(role, bits, managed) in taken {
         let old = ows.iter().find(|o| o.id.get() == role);
+        // Quarantine keeps managed roles, so their allow would meet the Quarantine deny.
+        let quarantine_role = quarantine_role.filter(|_| !managed);
         let (allow, deny) = old.map_or((0, 0), |o| (o.allow.bits(), o.deny.bits()));
         // @everyone's allow comes before every role deny, so only a role's allow needs them.
         // Quarantined members lose their other roles, so the Quarantine role's deny never meets
@@ -201,6 +205,13 @@ async fn exemptions(
         };
         let add = give_back(bits, (allow, deny), others_deny);
         if add == 0 {
+            if give_back(bits, (allow, deny), 0) != 0 {
+                tracing::info!(
+                    category = category.get(),
+                    role,
+                    "panic: category stays locked for a main role, another role denies there"
+                );
+            }
             continue;
         }
         out.push(Exemption {
@@ -319,6 +330,22 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     {
         return Ok(());
     }
+    // An end that failed waits for its retry with its locks still on: a new start would replace its
+    // job, and with it the claim on those locks, which then never lift. That panic runs on.
+    let pending: Result<bool, _> = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end')",
+    )
+    .bind(gid.get() as i64)
+    .fetch_one(&app.pool)
+    .await;
+    match pending {
+        Ok(false) => {}
+        Ok(true) => return Ok(()),
+        Err(e) => {
+            app.panic_runs.lock().unwrap().remove(&gid.get());
+            return Err(e.into());
+        }
+    }
     let ends = crate::app::now_secs() + cfg.duration_secs as i64;
     // The dashboard reads the mod command lock from this job, so it exists before the category calls.
     // No unlock until the end: nothing is locked before the full payload is saved.
@@ -423,7 +450,10 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
                     if let Err(e) = r {
                         tracing::warn!(?e, key, "panic: locking the server failed");
                     }
-                    if !saved {
+                    if saved {
+                        // Again: a staff unlock between the first mark and the lock cleared it.
+                        own_lock(app, gid, key, true).await;
+                    } else {
                         own_lock(app, gid, key, false).await;
                         // A lock staff made first covers writing, so the categories close with it.
                         if key == SERVER_LOCK {
@@ -572,8 +602,9 @@ pub(crate) const ROLE_LOCK: &str = "locked";
 /// `panic_end` payload key: panic's own server (writing) lock.
 pub(crate) const SERVER_LOCK: &str = "locked_server";
 
-/// The main roles (or @everyone) with the bits panic's server lock would take from them now.
-async fn lock_targets(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(u64, u64)>> {
+/// The main roles (or @everyone) with the bits panic's server lock would take from them now, and
+/// whether the role is managed.
+async fn lock_targets(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(u64, u64, bool)>> {
     let cfg = app.cfg(gid.get()).await?;
     let main: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
     let roles = app.http.roles(gid).await?.models().await?;
@@ -786,9 +817,9 @@ mod tests {
             role(6, view),
         ];
         // No main roles: @everyone (the guild id) is the one locked.
-        assert_eq!(taken(&roles, &[], 9, false), [(9, send | react)]);
+        assert_eq!(taken(&roles, &[], 9, false), [(9, send | react, false)]);
         // Main roles set: only those, and a role with nothing to lose is skipped.
-        assert_eq!(taken(&roles, &[5, 6], 9, false), [(5, send)]);
+        assert_eq!(taken(&roles, &[5, 6], 9, false), [(5, send, false)]);
         // Already allowed, denied on the role or denied to @everyone: never given.
         assert_eq!(give_back(send | react, (0, 0), 0), send | react);
         assert_eq!(give_back(send | react, (0, react), 0), send);

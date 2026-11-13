@@ -993,11 +993,14 @@ pub async fn command(
     }
     let start = Instant::now();
     if lift {
-        // Lifting a lock needs the same permit as setting it.
-        let lifts = match &kind {
-            Some(k) => vec![k.clone()],
-            None => active(app, gid).await?,
-        };
+        // Lifting a lock needs the same permit as setting it, for every lock `unlock` lifts: a
+        // named kind lifts each active lock that overlaps it, also a combined one.
+        let lifts: Vec<LockKind> = active(app, gid)
+            .await?
+            .into_iter()
+            .filter(|a| kind.as_ref().is_none_or(|k| k.overlaps(a)))
+            .chain(kind.clone())
+            .collect();
         if let Some(p) = lifts.iter().find_map(|k| missing(actor, k)) {
             return Ok(fail(
                 lift,
@@ -1030,10 +1033,14 @@ pub async fn command(
             format!("Cannot lock {name}: you lack the {p} permit"),
         ));
     }
+    // The reply names what the lock takes: a combined lock skips the parts already locked.
+    let took = kind
+        .rest(&active(app, gid).await?)
+        .unwrap_or_else(|| kind.clone());
     Ok(if lock_for(app, gid, kind.clone(), duration_s).await? {
         finished(
-            Some(&kind),
-            type_name(&kind),
+            Some(&took),
+            type_name(&took),
             lift,
             start.elapsed(),
             actor_id,
