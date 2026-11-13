@@ -73,11 +73,12 @@ fn section<T: DeserializeOwned + Default>(
 }
 
 /// Strict parse of one section for writes from Discord: a bad value is refused, not defaulted.
-pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
+/// `old` is the stored section: an entry the bot skips is refused only when it changed.
+pub fn check_section(name: &str, v: &Value, old: &Value) -> Result<(), String> {
     fn t<T: DeserializeOwned>(v: &Value) -> Result<(), String> {
         T::deserialize(v).map(drop).map_err(|e| e.to_string())
     }
-    if let Some(e) = tommybot_core::sections::unreadable_entry(name, v) {
+    if let Some(e) = tommybot_core::sections::unreadable_entry(name, v, old) {
         return Err(format!("unknown entry {e}"));
     }
     match name {

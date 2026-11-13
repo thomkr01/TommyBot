@@ -24,6 +24,30 @@ where
         .collect())
 }
 
+/// A map of lists: an unreadable key or a value that is not a list drops its entry, and an
+/// unreadable item drops only itself (one unknown Discord AutoMod action keeps its rule, S-h3 5).
+pub fn map_of_lists<'de, D, K, T, M>(d: D) -> Result<M, D::Error>
+where
+    D: Deserializer<'de>,
+    K: DeserializeOwned,
+    T: DeserializeOwned,
+    M: FromIterator<(K, Vec<T>)>,
+{
+    let raw = serde_json::Map::<String, Value>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let items = v.as_array()?.iter();
+            Some((
+                serde_json::from_value(Value::String(k)).ok()?,
+                items
+                    .filter_map(|x| serde_json::from_value(x.clone()).ok())
+                    .collect(),
+            ))
+        })
+        .collect())
+}
+
 /// A list whose unreadable items are dropped.
 pub fn list<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
 where

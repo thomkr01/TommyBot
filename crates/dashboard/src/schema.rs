@@ -1576,7 +1576,7 @@ mod tests {
             }
         }
         for (name, obj) in objs {
-            api::validate(&name, &obj)
+            api::validate(&name, &obj, &Value::Null)
                 .unwrap_or_else(|e| panic!("{name} schema does not deserialize: {e:?}"));
         }
     }
@@ -1601,7 +1601,7 @@ mod tests {
                     cur = &mut cur[*p];
                 }
                 cur[parts[parts.len() - 1]] = Value::Null;
-                if let Err(e) = api::validate(name, &obj) {
+                if let Err(e) = api::validate(name, &obj, &Value::Null) {
                     bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
                 }
             }
@@ -1628,7 +1628,7 @@ mod tests {
                     cur = &mut cur[*p];
                 }
                 cur[parts[parts.len() - 1]] = sample(fd);
-                if let Err(e) = api::validate(name, &obj) {
+                if let Err(e) = api::validate(name, &obj, &Value::Null) {
                     bad.push(format!("{name}.{}: {e:?}", fd["path"].as_str().unwrap()));
                 }
             }

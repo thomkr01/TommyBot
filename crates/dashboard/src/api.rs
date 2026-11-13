@@ -403,8 +403,8 @@ pub async fn put_section(
     if !b.value.is_object() {
         return Err(ApiError::BadRequest("section must be an object".into()));
     }
-    validate(&section, &b.value)?;
     let (cur, mut config) = store::current(&st.db, guild).await?;
+    validate(&section, &b.value, &config[&section])?;
     if section == "lockdown" && main_roles_guarded(&config, &b.value, &config["lockdown"]) {
         require(&st, &s, guild, Level::Owner, true).await?;
     }
@@ -634,7 +634,7 @@ pub async fn rollback(
     for k in access::SECTIONS {
         if let Some(v) = old.get_mut(*k).filter(|v| Some(&**v) != now.get(*k)) {
             clamped.extend(limits::clamp(k, v, &now[*k]));
-            validate(k, v)?;
+            validate(k, v, &now[*k])?;
             limits::check(k, v, &now[*k]).map_err(ApiError::BadRequest)?;
         }
     }
@@ -846,7 +846,7 @@ fn import_config(file: &Value, now: &Value) -> Result<(Value, Vec<String>), ApiE
                     cleared.push("logging.custom (log types without a channel removed)".into());
                 }
             }
-            validate(k, &v)?;
+            validate(k, &v, &now[k])?;
             limits::check(k, &v, &now[k]).map_err(ApiError::BadRequest)?;
         }
         new[k] = v;
@@ -914,14 +914,15 @@ pub async fn import(
     Ok(Json(json!({"version": version, "cleared": cleared})))
 }
 
-/// Sections the bot parses must deserialize into its types; the rest are stored as-is.
-pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
+/// Sections the bot parses must deserialize into its types; the rest are stored as-is. `old` is
+/// the stored section: an entry the bot skips is refused only when it is not stored as it is.
+pub(crate) fn validate(section: &str, v: &Value, old: &Value) -> Result<(), ApiError> {
     use tommybot_core::sections::{
         AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
         MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
     };
     // The bot skips an unknown entry (D48); a save must still refuse it.
-    if let Some(e) = tommybot_core::sections::unreadable_entry(section, v) {
+    if let Some(e) = tommybot_core::sections::unreadable_entry(section, v, old) {
         return Err(ApiError::BadRequest(format!(
             "{section}: unknown entry {e}"
         )));
@@ -1079,11 +1080,17 @@ mod logging_validate_tests {
     #[test]
     fn verification_is_checked_with_the_bots_type() {
         // `channel` and `roles` are only in the bot's VerificationCfg; a bad one made the bot read it all as off.
-        assert!(validate("verification", &json!({"channel": "not an id"})).is_err());
-        assert!(validate("verification", &json!({"roles": "6"})).is_err());
         assert!(validate(
             "verification",
-            &json!({"enabled": true, "channel": "5", "roles": ["6"]})
+            &json!({"channel": "not an id"}),
+            &Value::Null
+        )
+        .is_err());
+        assert!(validate("verification", &json!({"roles": "6"}), &Value::Null).is_err());
+        assert!(validate(
+            "verification",
+            &json!({"enabled": true, "channel": "5", "roles": ["6"]}),
+            &Value::Null
         )
         .is_ok());
     }
@@ -1317,7 +1324,7 @@ mod logging_validate_tests {
 
     #[test]
     fn heat_bounds() {
-        let heat = |h| validate("automod", &json!({"heat": h}));
+        let heat = |h| validate("automod", &json!({"heat": h}), &Value::Null);
         assert!(heat(json!({})).is_ok());
         let ranged = |h| limits::check("automod", &json!({"heat": h}), &json!({}));
         assert!(ranged(json!({"max": 0})).is_err());
@@ -1329,7 +1336,13 @@ mod logging_validate_tests {
 
     #[test]
     fn discord_domains_cannot_be_blacklisted() {
-        let bad = |d| validate("automod", &json!({"filters": {"blacklisted_domains": [d]}}));
+        let bad = |d| {
+            validate(
+                "automod",
+                &json!({"filters": {"blacklisted_domains": [d]}}),
+                &Value::Null,
+            )
+        };
         assert!(bad("Discord.gg").is_err());
         assert!(bad("cdn.discordapp.com").is_err());
         assert!(bad("evil.example").is_ok());
@@ -1337,7 +1350,7 @@ mod logging_validate_tests {
 
     #[test]
     fn custom_type_needs_channel_and_events() {
-        let bad = |c| validate("logging", &json!({"custom": [c]})).is_err();
+        let bad = |c| validate("logging", &json!({"custom": [c]}), &Value::Null).is_err();
         assert!(bad(json!({"events": ["member_kick"], "channel": null})));
         assert!(bad(json!({"events": [], "channel": "5"})));
         assert!(!bad(json!({"events": ["member_kick"], "channel": "5"})));
@@ -1684,6 +1697,37 @@ pub(crate) mod g3_handler_tests {
         ] {
             sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
         }
+        cleanup(&st, g).await;
+    }
+
+    /// R-h3 2: after a downgrade, a section holding an entry only a newer version reads can
+    /// still be saved, while a new or changed such entry is refused.
+    #[tokio::test]
+    async fn a_downgraded_section_still_saves() {
+        let Some((st, s, g)) = setup(9_897_000_000).await else {
+            return;
+        };
+        cleanup(&st, g).await;
+        let stored = json!({"enabled": false, "limits": {"Future": {"per": 3}}});
+        put_version(&st, g, 1, json!({"antinuke": stored})).await;
+        let save = |value: Value, v: i32| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                put_section(
+                    State(st),
+                    s,
+                    Path((g, "antinuke".to_string())),
+                    body(json!({"expected_version": v, "value": value})),
+                )
+                .await
+            }
+        };
+        let ok = save(json!({"enabled": true, "limits": {"Future": {"per": 3}}}), 1).await;
+        assert!(ok.is_ok(), "{ok:?}");
+        let changed = save(json!({"enabled": true, "limits": {"Future": {"per": 4}}}), 2).await;
+        assert!(matches!(changed, Err(ApiError::BadRequest(_))), "{changed:?}");
+        let bad = save(json!({"enabled": true, "limits": {"Ban": {"enabled": "no"}}}), 2).await;
+        assert!(matches!(bad, Err(ApiError::BadRequest(_))), "{bad:?}");
         cleanup(&st, g).await;
     }
 }

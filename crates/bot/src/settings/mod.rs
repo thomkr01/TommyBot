@@ -601,11 +601,12 @@ pub async fn save(
     f: impl FnOnce(&mut Value) -> Result<(), String>,
 ) -> Result<Result<Value, String>> {
     let (tx, version, mut doc) = locked(app, gid).await?;
+    let before = doc.clone();
     if let Err(e) = f(&mut doc) {
         return Ok(Err(e));
     }
     for s in sections.iter().filter(|s| !doc[**s].is_null()) {
-        if let Err(e) = crate::app::check_section(s, &doc[*s]) {
+        if let Err(e) = crate::app::check_section(s, &doc[*s], &before[*s]) {
             return Ok(Err(format!("Not saved: {e}")));
         }
     }
@@ -1111,7 +1112,7 @@ mod tests {
                 let e = edit_for(r, &op, &[5], None).unwrap_or_else(|e| panic!("{e}"));
                 apply(&mut doc, r.path, e);
                 let section = r.path.split('.').next().unwrap();
-                crate::app::check_section(section, &doc[section])
+                crate::app::check_section(section, &doc[section], &Value::Null)
                     .unwrap_or_else(|e| panic!("{} {}: {e}", m.title, r.code));
                 // The panel getter reads the result back without panicking.
                 (r.get)(&GuildCfg::parse(&doc));
