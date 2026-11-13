@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 use twilight_model::{
-    guild::{Permissions, Role},
+    guild::Role,
     id::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
@@ -119,33 +119,6 @@ impl App {
             fetched: Instant::now(),
         };
         self.guilds.lock().unwrap().insert(gid, Arc::new(info));
-    }
-
-    /// Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
-    pub async fn staff_by_perms(
-        &self,
-        cfg: &crate::app::GuildCfg,
-        gid: Id<GuildMarker>,
-        roles: &[Id<RoleMarker>],
-    ) -> bool {
-        const BITS: Permissions = Permissions::ADMINISTRATOR
-            .union(Permissions::KICK_MEMBERS)
-            .union(Permissions::BAN_MEMBERS)
-            .union(Permissions::MANAGE_CHANNELS)
-            .union(Permissions::MANAGE_GUILD)
-            .union(Permissions::MANAGE_MESSAGES)
-            .union(Permissions::MANAGE_ROLES)
-            .union(Permissions::MANAGE_WEBHOOKS);
-        // A failed lookup must not switch automod off. A Role lock's stripped staff roles still
-        // count by their saved permissions (D62).
-        !cfg.misc.staff_only_permitted
-            && crate::lockdown::unlocked_info(self, gid)
-                .await
-                .is_ok_and(|info| {
-                    roles
-                        .iter()
-                        .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
-                })
     }
 
     /// The channel and category whitelists apply to: a thread's parent channel, and that

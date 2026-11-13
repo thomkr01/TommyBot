@@ -1608,3 +1608,33 @@ async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
             .unwrap();
     }
 }
+
+/// Staff come from TommyBot's permits only: a role with Administrator, live or saved by a Role
+/// lock, makes nobody exempt from slowmode or automod; the owner still is.
+#[tokio::test]
+async fn discord_permissions_make_nobody_staff() {
+    let Some(t) = T::new(104).await else {
+        return;
+    };
+    let g = t.g(0);
+    t.app.guilds.lock().unwrap().insert(
+        g,
+        Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(2),
+            roles: Default::default(),
+            role_perms: [(Id::new(5), 8)].into(),
+            managed: Default::default(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: std::time::Instant::now(),
+        }),
+    );
+    t.set(|m| {
+        m.members.insert((g.get(), 60), vec![5]);
+        m.members.insert((g.get(), 2), vec![]);
+    });
+    assert!(!crate::slowmode::exempt(&t.app, g, Id::new(60)).await, "an Administrator role");
+    assert!(crate::slowmode::exempt(&t.app, g, Id::new(2)).await, "the owner");
+}

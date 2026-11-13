@@ -794,7 +794,7 @@ async fn guard_lock(
     let Some(gid) = e.guild_id else {
         return Ok(());
     };
-    let locks = tommybot_automod::store::locks(&app.pool, gid.get()).await?;
+    let locks = crate::lockdown::active_locks(app, gid.get()).await?;
     let Some(locked) = lock_target(e, &locks) else {
         return Ok(());
     };

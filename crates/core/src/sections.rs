@@ -649,7 +649,8 @@ pub struct MiscCfg {
     pub show_reason_on_auto: bool,
     /// Delete the member's last 100 messages when automod punishes them.
     pub purge_last_100: bool,
-    /// Only owners, trusted admins and permit holders count as staff.
+    /// No effect: staff are only ever owners, Extra Owners, Trusted Admins and permit holders,
+    /// never a role's Discord permissions. Still read so old configs parse; not shown anywhere.
     pub staff_only_permitted: bool,
     pub warn_base_points: i32,
     /// Apply `warn_actions` once a member's warn points reach them.

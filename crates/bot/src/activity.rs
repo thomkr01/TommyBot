@@ -47,7 +47,7 @@ async fn words_exempt(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> 
 }
 
 /// Spam-whitelisted like a message would be: spam whitelist (of the parent channel in a thread),
-/// dangerous permissions, or the automod permit.
+/// or the automod permit.
 async fn spam_exempt(
     app: &App,
     cfg: &GuildCfg,
@@ -62,7 +62,6 @@ async fn spam_exempt(
         .spam
         .covers(user, roles, parent, category, None)
         || cfg.whitelist.partner_channels.contains(&parent)
-        || app.staff_by_perms(cfg, gid, roles).await
         || app.whitelisted(gid, user, "automod").await?)
 }
 

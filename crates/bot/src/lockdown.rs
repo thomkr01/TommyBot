@@ -128,7 +128,9 @@ pub async fn lock_saving(
     }
     let plan = plan_now(app, gid, &kind).await?;
     // Saved first so a failure halfway can still be unlocked exactly, or finished after a restart.
-    store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+    let r = store::save_lock(&app.pool, gid.get(), &plan.snapshot).await;
+    forget_locks(gid.get());
+    r?;
     *saved = true;
     if let Some(d) = secs {
         let job = serde_json::json!({ "lock": kind });
@@ -219,7 +221,9 @@ async fn apply(app: &App, gid: Id<GuildMarker>, mut plan: Plan) -> Result<()> {
         }
         if let Some(created) = exec(app, gid, op, &plan.snapshot).await? {
             plan.snapshot.locked_channel = Some(created);
-            store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+            let r = store::save_lock(&app.pool, gid.get(), &plan.snapshot).await;
+            forget_locks(gid.get());
+            r?;
         }
     }
     Ok(store::lock_done(&app.pool, gid.get(), &plan.snapshot).await?)
@@ -298,7 +302,36 @@ pub async fn unlocked_info(
     gid: Id<GuildMarker>,
 ) -> Result<std::sync::Arc<crate::hierarchy::GuildInfo>> {
     let info = app.guild_info(gid).await?;
-    Ok(with_saved(info, &store::locks(&app.pool, gid.get()).await?))
+    Ok(with_saved(info, &active_locks(app, gid.get()).await?))
+}
+
+/// The active locks of each guild, kept in memory: dangerous-role checks run per join and per
+/// audit entry, and a raid is when locks are on. Every lock write in this module forgets the
+/// guild (`forget_locks`); a read that raced a forget is not kept (generation).
+static LOCKS: std::sync::Mutex<(u64, std::collections::BTreeMap<u64, std::sync::Arc<Vec<Snapshot>>>)> =
+    std::sync::Mutex::new((0, std::collections::BTreeMap::new()));
+
+pub(crate) async fn active_locks(app: &App, guild: u64) -> Result<std::sync::Arc<Vec<Snapshot>>> {
+    let generation = {
+        let c = LOCKS.lock().unwrap();
+        if let Some(l) = c.1.get(&guild) {
+            return Ok(l.clone());
+        }
+        c.0
+    };
+    let locks = std::sync::Arc::new(store::locks(&app.pool, guild).await?);
+    let mut c = LOCKS.lock().unwrap();
+    if c.0 == generation {
+        c.1.insert(guild, locks.clone());
+    }
+    Ok(locks)
+}
+
+/// After any write to a guild's `lock_snapshots`.
+fn forget_locks(guild: u64) {
+    let mut c = LOCKS.lock().unwrap();
+    c.0 += 1;
+    c.1.remove(&guild);
 }
 
 fn with_saved(
@@ -392,7 +425,9 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             .iter()
             .map(|r| (r.id.get(), r.permissions.bits()))
             .collect();
-        if !store::take_lock(&app.pool, gid.get(), &snap).await? {
+        let took = store::take_lock(&app.pool, gid.get(), &snap).await;
+        forget_locks(gid.get());
+        if !took? {
             continue;
         }
         // The lock is claimed now, so one failed step must not leave the rest locked. A deleted
@@ -438,7 +473,9 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
                 "delete lock channel",
             );
         }
-        store::drop_lock(&app.pool, gid.get(), &snap).await?;
+        let r = store::drop_lock(&app.pool, gid.get(), &snap).await;
+        forget_locks(gid.get());
+        r?;
         if let Some(k) = &snap.kind {
             forget_timers(app, gid, k).await;
         }
@@ -998,10 +1035,10 @@ mod tests {
         store::drop_lock(&pool, gid, &p.snapshot).await.unwrap();
     }
 
-    /// Runs only when DATABASE_URL points at a scratch Postgres. During a Role lock a stripped
-    /// staff role still makes its members staff for automod and slowmode (D62).
+    /// Runs only when DATABASE_URL points at a scratch Postgres. The active locks are read once and
+    /// kept, until a lock write forgets them.
     #[tokio::test]
-    async fn staff_stay_staff_during_a_role_lock() {
+    async fn active_locks_are_kept_until_a_lock_write() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
@@ -1013,30 +1050,18 @@ mod tests {
             tommybot_automod::discord_api::Api::new(""),
             Id::new(1),
         );
-        let gid: Id<GuildMarker> = Id::new(4_100_000_000_000_000_000 + std::process::id() as u64);
-        app.guilds.lock().unwrap().insert(
-            gid,
-            std::sync::Arc::new(crate::hierarchy::GuildInfo {
-                owner: Id::new(2),
-                roles: Default::default(),
-                role_perms: [(Id::new(5), 0)].into(),
-                managed: Default::default(),
-                parents: Default::default(),
-                channels: Default::default(),
-                nsfw: Default::default(),
-                bot_top: 0,
-                fetched: Instant::now(),
-            }),
-        );
-        let cfg = crate::app::GuildCfg::default();
-        assert!(!app.staff_by_perms(&cfg, gid, &[Id::new(5)]).await);
+        let gid = 4_200_000_000_000_000_000 + std::process::id() as u64;
+        assert!(active_locks(&app, gid).await.unwrap().is_empty());
         let snap: Snapshot = serde_json::from_value(serde_json::json!({
             "kind": "Role", "role_perms": [[5, 8]], "channel_denies": [],
             "join_lock": false, "invites_paused": false
         }))
         .unwrap();
-        store::save_lock(&app.pool, gid.get(), &snap).await.unwrap();
-        assert!(app.staff_by_perms(&cfg, gid, &[Id::new(5)]).await);
-        store::drop_lock(&app.pool, gid.get(), &snap).await.unwrap();
+        store::save_lock(&app.pool, gid, &snap).await.unwrap();
+        assert!(active_locks(&app, gid).await.unwrap().is_empty(), "kept");
+        forget_locks(gid);
+        assert_eq!(active_locks(&app, gid).await.unwrap().len(), 1);
+        store::take_lock(&app.pool, gid, &snap).await.unwrap();
+        store::drop_lock(&app.pool, gid, &snap).await.unwrap();
     }
 }

@@ -1028,7 +1028,6 @@ pub fn schema() -> Vec<Value> {
         ti(dv(fg("Moderation commands", "remove_main_roles_on_timeout", "bool"), true), "Remove the main roles from the target on timeout"),
         ti(dv(fg("Auto moderation", "show_reason_on_auto", "bool"), true), "Display the reason behind the auto punishment in the message TommyBot sends"),
         ti(fg("Auto moderation", "purge_last_100", "bool"), "Always purge the messages sent by the punished member found in the recent 100 messages"),
-        ti(fg("Auto moderation", "staff_only_permitted", "bool"), "Consider only owners, trusted admins and any member with the flags (IMMUNITY|AUTOMOD IMMUNITY) to be considered staff members. Punish anyone else triggering the auto mod"),
         ti(dv(fg("Auto warn actions", "auto_warn_actions", "bool"), true), "Issue an action once a member reaches certain points"),
         ti(dv(fg("Auto warn actions", "warn_base_points", "int"), 5), "Base points"),
         ti(fg("Auto warn actions", "warn_actions", "warn_actions"), "Custom actions"),
