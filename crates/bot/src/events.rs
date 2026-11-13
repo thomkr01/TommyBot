@@ -558,7 +558,7 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         // Anti-nuke first: the verification check can wait for the gateway delete.
         Event::GuildAuditLogEntryCreate(e) => {
             if let Some(g) = e.0.guild_id {
-                crate::welcome::saw_audit(app, g.get(), e.0.id.get());
+                crate::welcome::saw_audit(app, g.get(), e.0.id.get()).await;
             }
             let nuke = antinuke::on_audit(app, &e.0).await;
             let ban = crate::bansync::on_ban(app, &e.0).await;

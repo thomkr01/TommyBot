@@ -1448,3 +1448,32 @@ async fn a_bot_adder_is_read_twice_then_the_bot_is_blocked() {
     assert!(adder(&t).await.is_err(), "no entry after the retry");
     t.cleanup().await;
 }
+
+/// D20: the last audit entry seen survives a restart, and the first `Ready` reads the entries
+/// after it, oldest first.
+#[tokio::test]
+async fn a_restart_reads_the_audit_entries_it_missed() {
+    let Some(t) = T::new(20).await else {
+        return;
+    };
+    let g = t.g(0);
+    crate::welcome::saw_audit(&t.app, g.get(), 5).await;
+    crate::welcome::saw_audit(&t.app, g.get(), 4).await; // never goes back
+                                                         // A second app over the same database stands for the restart.
+    let fresh = T::new(21).await.unwrap();
+    crate::welcome::load_audit_seen(&fresh.app).await.unwrap();
+    let last = |t: &T| t.app.last_audit.lock().unwrap().get(&g.get()).copied();
+    assert_eq!(last(&fresh), Some(5));
+    let e = |id: &str| json!({"id": id, "action_type": 22, "target_id": "8", "user_id": "9", "changes": []});
+    fresh.set(|m| m.audit = vec![e("9"), e("3"), e("7")]);
+    crate::welcome::catch_up_audit(&fresh.app, g, 5)
+        .await
+        .unwrap();
+    assert_eq!(last(&fresh), Some(9));
+    assert_eq!(fresh.calls("after=5"), 1);
+    sqlx::query("DELETE FROM audit_seen WHERE guild_id = $1")
+        .bind(g.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+}

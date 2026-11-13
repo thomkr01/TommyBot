@@ -123,6 +123,9 @@ async fn main() -> Result<()> {
         }
     });
 
+    if let Err(e) = welcome::load_audit_seen(&app).await {
+        tracing::warn!(?e, "loading the last audit entries failed");
+    }
     if let Err(e) = antinuke::seed_windows(&app).await {
         tracing::warn!(
             ?e,

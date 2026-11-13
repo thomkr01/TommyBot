@@ -73,10 +73,10 @@ pub async fn on_ready(
         .bind(&ids)
         .execute(&app.pool)
         .await?;
-    // A new session (not a resume) gets no replay of the audit entries made while the old one
-    // was gone: anti-nuke reads them from the audit log (D20).
+    // A new session (not a resume) or a restart gets no replay of the audit entries made in the
+    // gap: anti-nuke reads them from the audit log (D20).
     let seen: Vec<(u64, u64)> = app.last_audit.lock().unwrap().clone().into_iter().collect();
-    for (g, last) in seen {
+    for (g, last) in seen.into_iter().filter(|(g, _)| ids.contains(&(*g as i64))) {
         if let Err(e) = catch_up_audit(app, Id::new(g), last).await {
             tracing::warn!(?e, guild = g, "catching up on the audit log failed");
         }
@@ -84,15 +84,45 @@ pub async fn on_ready(
     Ok(())
 }
 
-/// Remembers the newest audit entry of a guild.
-pub fn saw_audit(app: &App, guild: u64, id: u64) {
-    let mut m = app.last_audit.lock().unwrap();
-    let last = m.entry(guild).or_default();
-    *last = (*last).max(id);
+/// Remembers the newest audit entry of a guild, in memory and in `audit_seen` for a restart. A
+/// failed write only means a restart reads from an older entry, which never counts twice in a run.
+pub async fn saw_audit(app: &App, guild: u64, id: u64) {
+    {
+        let mut m = app.last_audit.lock().unwrap();
+        let last = m.entry(guild).or_default();
+        if *last >= id {
+            return;
+        }
+        *last = id;
+    }
+    let kept = sqlx::query(
+        "INSERT INTO audit_seen (guild_id, last_id) VALUES ($1, $2)
+         ON CONFLICT (guild_id) DO UPDATE SET last_id = GREATEST(audit_seen.last_id, EXCLUDED.last_id)",
+    )
+    .bind(guild as i64)
+    .bind(id as i64)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "saving the last audit entry failed");
+    }
+}
+
+/// Startup, before the gateway: the last audit entry seen per guild before the restart, so the
+/// first `Ready` reads what came in while the bot was down (D20).
+pub async fn load_audit_seen(app: &App) -> Result<()> {
+    let rows: Vec<(i64, i64)> = sqlx::query_as("SELECT guild_id, last_id FROM audit_seen")
+        .fetch_all(&app.pool)
+        .await?;
+    app.last_audit
+        .lock()
+        .unwrap()
+        .extend(rows.into_iter().map(|(g, l)| (g as u64, l as u64)));
+    Ok(())
 }
 
 /// Runs anti-nuke on the entries after `last`, oldest first (at most 100: a nuke trips far sooner).
-async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -> Result<()> {
+pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -> Result<()> {
     let log = app
         .http
         .audit_log(gid)
@@ -103,7 +133,7 @@ async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -> Result<()
         .await?;
     for mut e in missed(log.entries, last) {
         e.guild_id = Some(gid);
-        saw_audit(app, gid.get(), e.id.get());
+        saw_audit(app, gid.get(), e.id.get()).await;
         if let Err(err) = crate::antinuke::on_audit(app, &e).await {
             tracing::warn!(?err, "anti-nuke on a missed audit entry failed");
         }
