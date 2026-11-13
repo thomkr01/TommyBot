@@ -215,9 +215,51 @@ fn ours(reason: Option<&str>, src: Id<GuildMarker>) -> bool {
 }
 
 /// The current ban there is a copy from `src`.
-async fn banned_by_us(app: &App, (to, user, src): Key) -> Result<bool> {
+async fn banned_by_us(app: &App, key: Key) -> Result<bool> {
+    let (to, user, _) = key;
     let ban = http_err::ban(&app.http, to, user).await?;
-    Ok(ours(ban.as_ref().and_then(|b| b.reason.as_deref()), src))
+    let Some(row) = load(app, key).await? else {
+        return Ok(false);
+    };
+    owned(app, key, &row, ban.as_ref().map(|b| b.reason.as_deref())).await
+}
+
+/// `ban` (None: no ban; Some(reason)) is the copy from `src`: our reason, or a copy laid over a
+/// local temp ban, which keeps that ban's reason (Discord ignores a second ban). The row remembers
+/// that reason, and the copy's ban dropped the temp ban's unban job, so that job still pending
+/// means the copy's ban never happened.
+async fn owned(
+    app: &App,
+    (to, user, src): Key,
+    row: &Row,
+    ban: Option<Option<&str>>,
+) -> Result<bool> {
+    let Some(reason) = ban else {
+        return Ok(false);
+    };
+    if ours(reason, src) {
+        return Ok(true);
+    }
+    if row.over_reason.as_deref() != Some(reason.unwrap_or("")) {
+        return Ok(false);
+    }
+    Ok(temp_end(app, to, user).await? != row.temp_end)
+}
+
+/// Remembers the local temp ban a copy is about to be laid over (`owned`).
+async fn over_temp(app: &App, (to, user, src): Key, reason: &str, end: Option<i64>) -> Result<()> {
+    sqlx::query(
+        "UPDATE ban_sync_links SET over_reason = $4, temp_end = to_timestamp($5::float8)
+         WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3 AND state = 'pending'",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .bind(reason)
+    .bind(end.map(|e| e as f64))
+    .execute(&app.pool)
+    .await?;
+    Ok(())
 }
 
 /// Audit `MemberBanAdd`, any actor: queues the share after the hold.
@@ -489,7 +531,7 @@ async fn offer(app: &App, (to, user, src): Key, c: &Copy) -> Result<(bool, bool)
              source_case = excluded.source_case, origin = excluded.origin, reason = excluded.reason,
              expires_at = excluded.expires_at, state = excluded.state, skip_reason = excluded.skip_reason,
              actor_id = excluded.actor_id, mod_id = excluded.mod_id, banned_at = excluded.banned_at,
-             case_no = NULL, created_at = now(), done_at = NULL
+             case_no = NULL, created_at = now(), done_at = NULL, over_reason = NULL, temp_end = NULL
          WHERE ban_sync_links.state IN ('lifted', 'cancelled', 'skipped', 'alerted')",
     )
     .bind(to.get() as i64)
@@ -679,6 +721,8 @@ struct Row {
     actor_id: Option<i64>,
     mod_id: Option<i64>,
     banned_at: Option<i64>,
+    over_reason: Option<String>,
+    temp_end: Option<i64>,
 }
 
 impl Row {
@@ -690,7 +734,8 @@ impl Row {
 async fn load(app: &App, (to, user, src): Key) -> Result<Option<Row>> {
     Ok(sqlx::query_as(
         "SELECT state, reason, extract(epoch FROM expires_at)::bigint AS expires, source_case, case_no,
-                actor_id, mod_id, extract(epoch FROM banned_at)::bigint AS banned_at
+                actor_id, mod_id, extract(epoch FROM banned_at)::bigint AS banned_at, over_reason,
+                extract(epoch FROM temp_end)::bigint AS temp_end
          FROM ban_sync_links WHERE guild_id = $1 AND user_id = $2 AND source_guild = $3",
     )
     .bind(to.get() as i64)
@@ -731,7 +776,8 @@ async fn copy(app: &App, key: Key) -> Result<()> {
     }
     // A ban made by a try or a Ban here click that stopped before the row was updated.
     let ban = http_err::ban(&app.http, to, user).await?;
-    let mine = ours(ban.as_ref().and_then(|b| b.reason.as_deref()), src);
+    let reason = ban.as_ref().map(|b| b.reason.as_deref());
+    let mine = owned(app, key, &row, reason).await?;
     let owners = Owners::default();
     match blocked(app, &owners, key, &row).await? {
         // The source no longer wants the ban: lifted while the row is still pending, so a failed
@@ -756,9 +802,13 @@ async fn copy(app: &App, key: Key) -> Result<()> {
     let skip = |why: &'static str| mark(app, key, &["pending"], "skipped", Some(why));
     // So a later unban there never lifts a ban this server made itself. A TommyBot temp ban here
     // that ends before the copy would is not a reason to skip: the copy outlasts it (its ban
-    // drops the temp ban's unban job), and the source's lift still finds a ban that is not ours.
-    if ban.is_some() && !outlasts(row.expires, temp_end(app, to, user).await?) {
-        return skip("already banned").await.map(drop);
+    // drops the temp ban's unban job), and the row remembers it so a lift can put it back.
+    if let Some(reason) = reason {
+        let local = temp_end(app, to, user).await?;
+        if !outlasts(row.expires, local) {
+            return skip("already banned").await.map(drop);
+        }
+        over_temp(app, key, reason.unwrap_or(""), local).await?;
     }
     let duration = match remaining(row.expires) {
         Ok(d) => d,
@@ -1005,15 +1055,34 @@ pub async fn lift_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()> 
 /// The rows `lift` acts on: copies, and a pending row whose ban was made by a try that stopped.
 const LIVE: &[&str] = &["pending", "banned"];
 
-/// Unbans a copy with an unban case, unless staff banned again by hand since.
+/// Unbans a copy with an unban case, unless staff banned again by hand since. A copy laid over a
+/// local temp ban that has not ended yet gives that temp ban back instead: the ban stays, with
+/// its unban job at the old end.
 async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
     let (to, user, src) = key;
     let Some(ban) = http_err::ban(&app.http, to, user).await? else {
         return mark(app, key, LIVE, "lifted", None).await.map(drop);
     };
-    if !ours(ban.reason.as_deref(), src) {
+    let Some(row) = load(app, key).await? else {
+        return Ok(());
+    };
+    if !owned(app, key, &row, Some(ban.reason.as_deref())).await? {
         let why = Some("banned again by hand");
         return mark(app, key, LIVE, "skipped", why).await.map(drop);
+    }
+    if let Some(end) = row.temp_end.filter(|e| *e > now_secs()) {
+        // Queued first, then the copy's own unban job goes, so a restart in between keeps an end.
+        let job = jobs::enqueue(
+            &app.pool,
+            to.get() as i64,
+            "unban",
+            json!({"user": user.get()}),
+            end,
+        );
+        let job = job.await?;
+        crate::scheduler::forget_jobs(app, to, user.get(), &["unban"], Some(job)).await;
+        let why = Some("the local temp ban runs on");
+        return mark(app, key, LIVE, "lifted", why).await.map(drop);
     }
     let why = format!("Ban Sync: lifted in {} ({src})", md(name));
     let audit = commands::audit_reason(Some(&why), app.me);

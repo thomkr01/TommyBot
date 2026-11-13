@@ -217,6 +217,65 @@ async fn a_synced_ban_replaces_a_shorter_local_temp_ban() {
     t.run_copies().await;
     assert_eq!(t.rows(720).await, [T::row(1, "banned", None)]);
     assert!(pending(&t, 1, "unban").await.is_empty());
+    // Discord kept the first reason, yet the copy is ours: the source's lift gives the temp ban back.
+    assert_eq!(t.banned(1, 720).as_deref(), Some("temp ban"));
+    t.set(|m| {
+        m.bans.remove(&(t.g(0).get(), 720));
+    });
+    bansync::lift_job(&t.app, t.g(0), &t.share(720, Some(77)))
+        .await
+        .unwrap();
+    let why = Some("the local temp ban runs on");
+    assert_eq!(t.rows(720).await, [T::row(1, "lifted", why)]);
+    assert_eq!(t.banned(1, 720).as_deref(), Some("temp ban"));
+    let left = pending(&t, 1, "unban").await;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!((3590..=3600).contains(&left[0].1), "the old end: {left:?}");
+    t.cleanup().await;
+}
+
+/// Live 11-13: a copy laid over a local temp ban that has ended by the source's lift is unbanned,
+/// and a retry after the copy's ban (row still pending) sees that ban as its own.
+#[tokio::test]
+async fn a_copy_over_a_temp_ban_is_ours_on_retry_and_lifted_after_its_end() {
+    let Some(t) = T::new(87).await else { return };
+    let o = t.owner();
+    t.server(0, o, "off").await;
+    t.server(1, o, "ban").await;
+    t.ban(1, 721, "temp ban");
+    enqueue(&t, 1, "unban", json!({"user": 721}), 3600).await;
+    t.ban(0, 721, "raiding");
+    bansync::share_job(&t.app, t.g(0), &t.share(721, Some(77)))
+        .await
+        .unwrap();
+    t.run_copies().await;
+    assert_eq!(t.rows(721).await, [T::row(1, "banned", None)]);
+    t.exec("UPDATE ban_sync_links SET temp_end = now() - interval '1 minute' WHERE guild_id = $1 + 1 AND user_id = 721")
+        .await;
+    t.set(|m| {
+        m.bans.remove(&(t.g(0).get(), 721));
+    });
+    bansync::lift_job(&t.app, t.g(0), &t.share(721, Some(77)))
+        .await
+        .unwrap();
+    assert_eq!(t.rows(721).await, [T::row(1, "lifted", None)]);
+    assert_eq!(t.banned(1, 721), None);
+    assert!(pending(&t, 1, "unban").await.is_empty());
+    // A try banned over the temp ban (its unban job is gone) and stopped before the row moved on.
+    t.ban(1, 722, "temp ban");
+    t.ban(0, 722, "raiding");
+    t.link(1, 722, 0, "pending").await;
+    t.exec("UPDATE ban_sync_links SET over_reason = 'temp ban', temp_end = now() + interval '1 hour' WHERE guild_id = $1 + 1 AND user_id = 722")
+        .await;
+    let copy = json!({"user": 722, "source": t.g(0).get()});
+    bansync::copy_job(&t.app, t.g(1), &copy).await.unwrap();
+    assert_eq!(t.rows(722).await, [T::row(1, "banned", None)]);
+    let cases = t
+        .count(
+            "SELECT count(*) FROM cases WHERE guild_id = $1 + 1 AND user_id = 722 AND kind = 'ban'",
+        )
+        .await;
+    assert_eq!(cases, 1, "the retry finished the copy");
     t.cleanup().await;
 }
 
