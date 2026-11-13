@@ -182,6 +182,12 @@ async fn decide(
                 .execute(&mut *tx)
                 .await?;
         }
+        // In the transaction too, so a crash after the commit never loses the Raider List allow
+        // of an accepted ban appeal (R-h3 round 2): a listed user is let back in for good.
+        if act == "accept" && kind == "ban" {
+            tommybot_core::raiders::allow(&mut *tx, gid.get() as i64, user, actor_id.get() as i64)
+                .await?;
+        }
         if act == "blacklist" {
             sqlx::query("INSERT INTO appeal_blacklist (guild_id, user_id, added_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
                 .bind(gid.get() as i64)
@@ -193,9 +199,6 @@ async fn decide(
         tx.commit().await?;
     }
     if act == "accept" && !resumed {
-        if kind == "ban" {
-            crate::raiders::lifted(app, gid, user_id, actor_id).await;
-        }
         // The appeal is already decided; a lost stats row must not report it as failed.
         let stat = async {
             tommybot_core::cases::record(
@@ -460,11 +463,32 @@ mod tests {
         super::accept_job(&t.app, g, &p).await.unwrap();
         assert_eq!(status().await.unwrap(), "open");
         assert!(t.banned(0, user).is_some());
+        // The Raider List had banned them: the accept lets them back in, in the same transaction.
+        sqlx::query(
+            "INSERT INTO raider_actions (guild_id, user_id, action) VALUES ($1, $2, 'ban')",
+        )
+        .bind(g.get() as i64)
+        .bind(user as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
         // The owner: lifted, and the undo remembers the temp ban's end.
         let p = json!({"id": id, "by": t.owner(), "reply": ""});
         super::accept_job(&t.app, g, &p).await.unwrap();
         assert_eq!(status().await.unwrap(), "accepted");
         assert!(t.banned(0, user).is_none());
+        let allowed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM raider_allow WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(g.get() as i64)
+        .bind(user as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            allowed, 1,
+            "the Raider List allow is saved with the decision"
+        );
         // R-h3 4: a retry after the writes committed but before the DM sends the DM, once, and
         // writes nothing twice.
         let dms = || t.calls("POST /users/@me/channels");
