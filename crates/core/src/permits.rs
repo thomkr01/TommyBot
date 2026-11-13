@@ -386,6 +386,25 @@ impl RateLimiter {
     }
 }
 
+impl RateLimiter {
+    /// Puts back a use from before a restart (N3). Call oldest first.
+    pub fn seed(&mut self, actor: UserId, action: &str, at: Instant) {
+        self.hits
+            .entry((actor, action.to_owned()))
+            .or_default()
+            .push_back(at);
+    }
+}
+
+/// The limit a command use counts against: the permit's own for `action`, else `fallback`
+/// (anti-nuke's limit for the same action, D5). None: unlimited (no permit, or immune).
+pub fn command_limit(level: &Level, action: &str, fallback: Option<Limit>) -> Option<Limit> {
+    match level {
+        Level::Custom { limits, .. } => limits.get(action).copied().or(fallback),
+        _ => None,
+    }
+}
+
 /// Whether `actor` may run `action` now; `false` means the caller quarantines the actor.
 pub fn command_allowed(
     rl: &mut RateLimiter,
@@ -394,12 +413,7 @@ pub fn command_allowed(
     action: &str,
     now: Instant,
 ) -> bool {
-    match level {
-        Level::Custom { limits, .. } => limits
-            .get(action)
-            .is_none_or(|l| rl.allow(actor, action, *l, now)),
-        _ => true,
-    }
+    command_limit(level, action, None).is_none_or(|l| rl.allow(actor, action, l, now))
 }
 
 /// The live EO/TA lists and custom permits as one document: the `permits` copy in each config version.
@@ -671,6 +685,18 @@ mod tests {
         assert!(!command_allowed(&mut rl, 1, &lvl, "ban", t));
         assert!(command_allowed(&mut rl, 1, &lvl, "kick", t)); // no limit configured
         assert!(command_allowed(&mut rl, 1, &Level::TrustedAdmin, "ban", t));
+        // Without its own limit, a permit takes the fallback (anti-nuke's); immune never.
+        let nuke = Limit {
+            per_min: 4,
+            per_hour: 14,
+        };
+        assert_eq!(command_limit(&lvl, "kick", Some(nuke)), Some(nuke));
+        assert_eq!(command_limit(&lvl, "ban", Some(nuke)).unwrap().per_min, 1);
+        assert_eq!(command_limit(&Level::Owner, "ban", Some(nuke)), None);
+        // A use from before a restart still counts.
+        let mut rl = RateLimiter::default();
+        rl.seed(1, "ban", t);
+        assert!(!command_allowed(&mut rl, 1, &lvl, "ban", t));
     }
 
     #[tokio::test]

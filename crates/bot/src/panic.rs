@@ -81,10 +81,24 @@ pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: b
         raiders.len(),
         embed::duration(cfg.duration_secs as i64)
     ));
+    let ids: Vec<i64> = raiders.iter().map(|r| *r as i64).collect();
     app.heat_raiders
         .lock()
         .unwrap()
         .insert(gid.get(), (raiders, until));
+    // Kept for a restart (N3, `seed_windows`); a lost row ends heat panic early on one.
+    let kept = sqlx::query(
+        "INSERT INTO heat_panic (guild_id, raiders, until) VALUES ($1, $2, $3)
+         ON CONFLICT (guild_id) DO UPDATE SET raiders = $2, until = $3",
+    )
+    .bind(gid.get() as i64)
+    .bind(&ids)
+    .bind(until)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "saving heat panic failed");
+    }
     // Heat panic is on already: a failed log must not fail the caller's punishment.
     if let Err(e) = send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await {
         tracing::warn!(?e, "heat panic log failed");

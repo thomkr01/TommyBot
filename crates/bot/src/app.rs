@@ -335,17 +335,6 @@ impl App {
         Ok(self.level(guild, owner, user).await?.whitelisted(flag))
     }
 
-    /// Records a command use against the permit's limit; `false` means the actor breached it.
-    pub fn command_allowed(&self, actor: Id<UserMarker>, level: &Level, action: &str) -> bool {
-        permits::command_allowed(
-            &mut self.rate_limiter.lock().unwrap(),
-            actor.get() as i64,
-            level,
-            action,
-            std::time::Instant::now(),
-        )
-    }
-
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {
         let generation = {
             let c = self.cfgs.read().unwrap();

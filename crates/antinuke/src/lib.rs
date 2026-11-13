@@ -204,6 +204,23 @@ impl AntiNuke {
         self.on_actions(guild, executor, action, exempt, now, 1)
     }
 
+    /// Puts back `n` actions counted `ago` before `now` in an earlier run (N3: `action_log`), so a
+    /// restart does not reset the windows. Call oldest first, before live actions.
+    pub fn seed(
+        &mut self,
+        (guild, executor, action): Key,
+        ago: Duration,
+        n: u32,
+        now: Instant,
+    ) {
+        let (Some(at), true) = (now.checked_sub(ago), ago < HOUR) else {
+            return;
+        };
+        let q = self.windows.entry((guild, executor, action.card())).or_default();
+        // The hour cap of any card is far below this; it only bounds a corrupt row.
+        q.extend(std::iter::repeat_n(at, n.min(500) as usize));
+    }
+
     /// `n` actions at once (a merged voice audit entry grew by `n`). `n` is capped at the hour
     /// limit, which already trips, so a huge count cannot make a huge loop or window.
     pub fn on_actions(
@@ -582,6 +599,19 @@ mod tests {
             a.on_actions(1, 2, Action::Ban, true, t0, 50),
             Verdict::Ignore
         );
+    }
+
+    #[test]
+    fn seeded_actions_count_after_a_restart() {
+        let (mut a, t0) = (engine(3, 100), Instant::now() + HOUR);
+        a.seed((1, 2, Action::Kick), Duration::from_secs(30), 2, t0);
+        a.seed((1, 2, Action::Ban), Duration::from_secs(2 * 3600), 50, t0); // too old
+        assert_eq!(
+            a.on_action(1, 2, Action::Ban, false, t0),
+            Verdict::Quarantine(Counts { minute: 3, hour: 3 })
+        );
+        let v = a.on_action(1, 3, Action::Ban, false, t0);
+        assert_eq!(v, Verdict::Allow(Counts { minute: 1, hour: 1 }));
     }
 
     #[test]

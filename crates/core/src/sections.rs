@@ -26,7 +26,7 @@ pub struct AntinukeCfg {
     pub quarantine_hold: bool,
     /// Quarantine whoever changes the vanity URL and put the old code back.
     pub vanity_guard: bool,
-    /// Off: a reached limit is only logged and reverted.
+    /// Off: a reached limit is only logged, reverted and counted towards panic mode.
     pub auto_quarantine: bool,
     /// Punish giving dangerous permissions to any role.
     pub strict_mode: bool,

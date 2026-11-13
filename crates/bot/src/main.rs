@@ -123,6 +123,9 @@ async fn main() -> Result<()> {
         }
     });
 
+    if let Err(e) = antinuke::seed_windows(&app).await {
+        tracing::warn!(?e, "restoring the anti-nuke and command limit windows failed");
+    }
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
     }

@@ -107,6 +107,15 @@ pub async fn purge_left(app: std::sync::Arc<App>) {
         if let Err(e) = old {
             tracing::warn!(?e, "pruning old mod stats failed");
         }
+        // Restart copies of the hour-long windows (N3).
+        for q in [
+            "DELETE FROM command_uses WHERE at < now() - interval '1 hour'",
+            "DELETE FROM heat_panic WHERE until < extract(epoch FROM now())",
+        ] {
+            if let Err(e) = sqlx::query(q).execute(&app.pool).await {
+                tracing::warn!(?e, q, "pruning restart windows failed");
+            }
+        }
         crate::raiders::sweep(&app).await;
     }
 }

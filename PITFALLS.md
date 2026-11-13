@@ -242,6 +242,22 @@ The logger tells voice joins from moves by the channel it last saw each member i
 **Heat lives in memory.** (#111, accepted)
 A restart resets running heat. Strikes and timeouts survive. This was left as is on purpose.
 
+**A restart reset every limit window.** (overlap deep dive N3, 13-11)
+Anti-nuke's per-minute/hour windows, the permit command limits and the heat panic list lived only in memory, and D51 showed a restart can be forced: a nuker at 4/5 bans who crashed the bot started again at 0. Root cause: the counted actions were already in `action_log`, but nothing read them back.
+*Avoid:* a limit that protects against an attacker is rebuilt at startup before the gateway (`antinuke::seed_windows`): anti-nuke from `action_log` rows of the last hour (`counted` holds how many actions a row adds: a merged voice entry its growth, a second inverse row 0), command limits from `command_uses`, heat panic from `heat_panic`. Both new tables are pruned hourly in `welcome::purge_left`. Personal heat (above) and Join Raid stay in memory on purpose.
+
+**A permit without its own limit had none.** (overlap deep dive D5, D22, 13-11)
+Auto Setup gives Admins and Moderators ban and kick without limits, and anti-nuke skips the bot's own audit entries, so a hacked mod could mass-ban with `t!ban id1 id2 …` where the same account in Discord's own UI would be quarantined at the anti-nuke limit. A breach of a permit limit then quarantined them but left the bans already made.
+*Avoid:* `permits::command_limit` falls back to anti-nuke's limit for the same action (`commands::nuke_fallback`: ban, kick and timeout, one less, as a permit limit trips past its value and anti-nuke at it; only with anti-nuke on). On a breach `gated` quarantines and runs `antinuke::revert_breach` (the actor's last hour, case bans included). Every staff command goes through `gated`; the dashboard's own rate limit is D24.
+
+**A nuker under every limit, or with quarantine off, never reached panic.** (overlap deep dive D13, D43, 13-11)
+Anti-nuke heat at 100 % only counted towards panic, which needs 3 distinct accounts, so one nuker who spread actions over several cards below each limit was never stopped; and Quarantine On Limit off dropped the Panic step with the quarantine. Root cause: one switch or signal fed only the step next to it.
+*Avoid:* 100 % anti-nuke heat contains and reverts like a limit (`antinuke::breach`), and `nuke_plan(false)` still ends with Panic. When a switch turns one step off, check the steps after it still run.
+
+**The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
+`/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
+*Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).
+
 **A resumable run read its intent from the state it was changing.** (Channel Setup review, 11-11)
 Push decided "this channel follows its category" from live Discord (synced with the category). Once the category's overwrites were pushed and a child's step failed, the child was no longer synced in live, read as an exception on the next push, and stayed public.
 *Avoid:* a run that is resumed by recomputing a diff stores every decision derived from the old state before its first step (Push writes `reset` into the draft for each follower), and stops at the first failed step instead of running the rest (deletes included) against a half-changed server.

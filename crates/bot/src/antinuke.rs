@@ -258,6 +258,7 @@ pub(crate) async fn count(
     let Some((_, heat)) = cfg.antinuke.limit(action) else {
         return Ok(());
     };
+    let mut hot = false;
     if !exempt {
         // One row per inverse (a name and icon change are two), still counted once below.
         let rows: Vec<Option<&Inverse>> = if inv.is_empty() {
@@ -265,17 +266,19 @@ pub(crate) async fn count(
         } else {
             inv.iter().map(Some).collect()
         };
-        for i in rows {
-            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+        // `counted` puts the window back after a restart (`seed_windows`): `n` on the first row.
+        for (k, i) in rows.into_iter().enumerate() {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse, counted) VALUES ($1,$2,$3,$4,$5,$6)")
                 .bind(gid.get() as i64)
                 .bind(actor.get() as i64)
                 .bind(format!("{action:?}"))
                 .bind(target.map(|t| t as i64))
                 .bind(i.map(|i| json!(i)))
+                .bind(if k == 0 { n as i32 } else { 0 })
                 .execute(&app.pool)
                 .await?;
         }
-        if heat > 0
+        hot = heat > 0
             && cfg.panic.heat_algorithm
             && add_heat(
                 app,
@@ -283,8 +286,8 @@ pub(crate) async fn count(
                 actor,
                 heat.saturating_mul(n),
                 cfg.panic.heat_decay,
-            )
-        {
+            );
+        if hot {
             crate::panic::note_heat(app, gid, actor).await;
         }
     }
@@ -293,8 +296,17 @@ pub(crate) async fn count(
         an.limits = cfg.antinuke.watched();
         an.on_actions(gid.get(), actor.get(), action, exempt, Instant::now(), n)
     };
-    if let Verdict::Quarantine(c) = verdict {
-        let why = format!(
+    if let Some(why) = breach(&verdict, hot, action) {
+        quarantine_and_revert(app, gid, actor, &why).await?;
+    }
+    Ok(())
+}
+
+/// Why the actor is contained: a reached limit, or 100% anti-nuke heat spread over several
+/// cards that each stayed under their limit (D13).
+fn breach(verdict: &Verdict, hot: bool, action: Action) -> Option<String> {
+    match verdict {
+        Verdict::Quarantine(c) => Some(format!(
             "{action:?} limit reached ({}/min, {}/hour){}",
             c.minute,
             c.hour,
@@ -303,8 +315,56 @@ pub(crate) async fn count(
             } else {
                 ""
             }
-        );
-        quarantine_and_revert(app, gid, actor, &why).await?;
+        )),
+        _ if hot => Some("anti-nuke heat reached 100%".into()),
+        _ => None,
+    }
+}
+
+/// Startup: the anti-nuke windows, permit command limits and heat panic from before a restart
+/// (N3), read from `action_log`, `command_uses` and `heat_panic`. Runs before the gateway.
+pub(crate) async fn seed_windows(app: &App) -> Result<()> {
+    type Row = (i64, i64, String, i32, f64);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT guild_id, actor_id, action, counted, EXTRACT(EPOCH FROM now() - created_at)::float8
+         FROM action_log WHERE created_at > now() - interval '1 hour' AND counted > 0
+         ORDER BY created_at, id",
+    )
+    .fetch_all(&app.pool)
+    .await?;
+    let now = Instant::now();
+    {
+        let mut an = app.antinuke.lock().unwrap();
+        // Only rows `count` wrote name an action; cases and the bot's own rows do not parse.
+        for (g, a, action, n, ago) in rows {
+            if let Ok(action) = serde_json::from_value::<Action>(json!(action)) {
+                let ago = Duration::from_secs_f64(ago.max(0.0));
+                an.seed((g as u64, a as u64, action), ago, n as u32, now);
+            }
+        }
+    }
+    let uses: Vec<(i64, String, f64)> = sqlx::query_as(
+        "SELECT actor_id, action, EXTRACT(EPOCH FROM now() - at)::float8 FROM command_uses
+         WHERE at > now() - interval '1 hour' ORDER BY at",
+    )
+    .fetch_all(&app.pool)
+    .await?;
+    {
+        let mut rl = app.rate_limiter.lock().unwrap();
+        for (actor, action, ago) in uses {
+            if let Some(at) = now.checked_sub(Duration::from_secs_f64(ago.max(0.0))) {
+                rl.seed(actor, &action, at);
+            }
+        }
+    }
+    let heat: Vec<(i64, Vec<i64>, i64)> =
+        sqlx::query_as("SELECT guild_id, raiders, until FROM heat_panic WHERE until > $1")
+            .bind(now_secs())
+            .fetch_all(&app.pool)
+            .await?;
+    let mut m = app.heat_raiders.lock().unwrap();
+    for (g, raiders, until) in heat {
+        m.insert(g as u64, (raiders.into_iter().map(|r| r as u64).collect(), until));
     }
     Ok(())
 }
@@ -835,6 +895,38 @@ pub(crate) async fn quarantine_actor(
     Ok(done)
 }
 
+/// After a command rate limit breach: undoes what the actor did in the last hour, also through
+/// the bot (their cases' bans and kicks), and tells staff (D22).
+pub(crate) async fn revert_breach(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    backups: &BackupsCfg,
+) -> Result<()> {
+    let sum = revert_actor(app, gid, actor, now_secs() - 3600, Some(backups)).await?;
+    if sum.ops == 0 && sum.reinvite.is_empty() {
+        return Ok(());
+    }
+    let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Responsible", actor.get())
+        .text(&format!("{YES} **Reverted their last hour**"))
+        .line("Reason", "command rate limit exceeded")
+        .line(
+            "Reverted",
+            &format!("`{}/{}`", sum.ops - sum.failed, sum.ops),
+        )
+        .line(
+            "Kicked, re-invite",
+            &if reinvite.is_empty() {
+                "None".into()
+            } else {
+                reinvite.join(" ")
+            },
+        );
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await
+}
+
 /// A `quarantines` row exists: anti-nuke, staff or verification's join quarantine holds them.
 pub(crate) async fn quarantined(
     app: &App,
@@ -977,6 +1069,10 @@ pub(crate) async fn revert_actor(
         })
         .collect();
     let mut plan = plan_revert(&log, actor.get(), since);
+    // The bot's own quarantines and cleared bot roles stay: reverting them would free a nuker (D3).
+    if actor == app.me {
+        plan.ops.retain(|op| !bot_contain_op(op));
+    }
     // The actor's oldest name and icon rows in the window, reverted or not: a late rerun that read
     // only newer renames still ends on the name before the first one.
     let firsts: Vec<(serde_json::Value,)> = sqlx::query_as(
@@ -1058,6 +1154,12 @@ pub(crate) async fn revert_actor(
         recreated: back.changes,
         stripped: back.stripped,
     })
+}
+
+/// Undoes a containment the bot made (its quarantine, a nuking bot's cleared role): never run by
+/// a revert of the bot's actions, here or in the dashboard.
+pub(crate) fn bot_contain_op(op: &Inverse) -> bool {
+    matches!(op, Inverse::Unquarantine { .. } | Inverse::RolePerms { .. })
 }
 
 /// A read row's inverse was carried out: it is in the plan and did not fail. Name and icon rows
@@ -2106,6 +2208,142 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(left, vec![("ChannelUpdate".to_string(),)]);
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Reverting the bot (`/revert
+    /// actor:@TommyBot`) never lifts its quarantines or gives a nuking bot its role back (D3).
+    #[tokio::test]
+    async fn reverting_the_bot_keeps_its_containments() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(6_470_000_000 + std::process::id() as u64);
+        for (action, inv) in [
+            ("quarantine", json!(Inverse::Unquarantine { user: 7 })),
+            ("bot_role_cleared", json!(Inverse::RolePerms { id: 8, perms: 8 })),
+            ("Kick", json!(Inverse::Reinvite { user: 9 })),
+        ] {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,1,$2,7,$3)")
+                .bind(gid.get() as i64)
+                .bind(action)
+                .bind(inv)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+        let sum = revert_actor(&app, gid, app.me, now_secs() - 60, None)
+            .await
+            .unwrap();
+        assert_eq!((sum.ops, sum.failed, sum.reinvite), (0, 0, vec![9]));
+        let left: Vec<(String,)> = sqlx::query_as(
+            "SELECT action FROM action_log WHERE guild_id=$1 AND NOT reverted ORDER BY id",
+        )
+        .bind(gid.get() as i64)
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+        let left: Vec<_> = left.into_iter().map(|r| r.0).collect();
+        assert_eq!(left, ["quarantine", "bot_role_cleared"]);
+        sqlx::query("DELETE FROM action_log WHERE guild_id=$1")
+            .bind(gid.get() as i64)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. A restart keeps the anti-nuke
+    /// window, the permit command limit and heat panic (N3).
+    #[tokio::test]
+    async fn windows_survive_a_restart() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let g = 6_480_000_000 + std::process::id() as i64;
+        // A merged entry counted twice, a second inverse row of one entry, and a case row.
+        for (action, n) in [("Ban", 2), ("Ban", 0), ("ban", 1)] {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, counted) VALUES ($1,42,$2,$3)")
+                .bind(g)
+                .bind(action)
+                .bind(n)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO command_uses (actor_id, action) VALUES ($1, 'ban')")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO heat_panic (guild_id, raiders, until) VALUES ($1, '{42}', $2)")
+            .bind(g)
+            .bind(now_secs() + 60)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        seed_windows(&app).await.unwrap();
+        let limit = tommybot_antinuke::Limit {
+            per_minute: 3,
+            per_hour: 10,
+        };
+        let v = {
+            let mut an = app.antinuke.lock().unwrap();
+            an.limits = HashMap::from([(Action::Ban, limit)]);
+            an.on_action(g as u64, 42, Action::Kick, false, Instant::now())
+        };
+        assert!(matches!(v, Verdict::Quarantine(c) if c.minute == 3), "{v:?}");
+        let one = permits::Limit {
+            per_min: 1,
+            per_hour: 5,
+        };
+        let allowed = app
+            .rate_limiter
+            .lock()
+            .unwrap()
+            .allow(g, "ban", one, Instant::now());
+        assert!(!allowed, "the use before the restart counts");
+        assert!(crate::panic::is_raider(&app, Id::new(g as u64), Id::new(42)));
+        for t in ["action_log", "heat_panic"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {t} WHERE guild_id = $1")))
+                .bind(g)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM command_uses WHERE actor_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn full_heat_contains_like_a_limit() {
+        let c = tommybot_antinuke::Counts { minute: 3, hour: 3 };
+        let allow = Verdict::Allow(c);
+        assert_eq!(breach(&allow, false, Action::Ban), None);
+        assert_eq!(
+            breach(&allow, true, Action::Ban).as_deref(),
+            Some("anti-nuke heat reached 100%")
+        );
+        assert!(breach(&Verdict::Quarantine(c), true, Action::Ban)
+            .unwrap()
+            .starts_with("Ban limit reached"));
     }
 
     #[test]
