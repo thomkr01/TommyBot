@@ -36,6 +36,10 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
     let Some(actions) = cfg.discord_automod.actions.get(&e.rule_id.to_string()) else {
         return Ok(());
     };
+    // Before counting: a whitelisted member's hits must not fill a scope for the next member.
+    if app.whitelisted(gid, e.user_id, "automod").await? {
+        return Ok(());
+    }
     if let Some(sc) = cfg.discord_automod.scopes.get(&e.rule_id.to_string()) {
         // Server scope counts everyone together, user scope each member apart.
         let who = if sc.scope == "server" {
@@ -58,7 +62,7 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
     }
     for &a in actions {
         if let Err(err) = native_action(app, &cfg, e, a).await {
-            tracing::warn!(?err, ?a, "native rule action failed");
+            crate::automod::action_failed(app, gid, e.user_id.get(), &format!("{a:?}"), &err).await;
         }
     }
     Ok(())
@@ -72,9 +76,6 @@ async fn native_action(
 ) -> Result<()> {
     const WHY: &str = "discord automod rule";
     let (gid, uid) = (e.guild_id, e.user_id);
-    if app.whitelisted(gid, uid, "automod").await? {
-        return Ok(());
-    }
     match action {
         BotAction::Report => {
             if reports::file_native(app, gid, e.channel_id, uid, &e.content, e.rule_id).await? {

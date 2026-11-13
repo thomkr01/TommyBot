@@ -350,6 +350,17 @@ async fn due(pool: &PgPool, g: i64, u: i64, joined: i64) -> Result<bool> {
     .await?)
 }
 
+/// The member's roles are held for verification.
+pub(crate) async fn pending(pool: &PgPool, g: i64, u: i64) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM member_roles WHERE guild_id = $1 AND user_id = $2 AND pending)",
+    )
+    .bind(g)
+    .bind(u)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Gives back the safe part of `saved`, checked against the roles as they are now.
 async fn restore(
     app: &App,

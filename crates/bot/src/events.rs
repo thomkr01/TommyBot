@@ -435,27 +435,25 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             }
             automod::on_message(app, m).await?;
         }
+        // A webhook or app can change its text or files without edited_timestamp (a deferred fill,
+        // a button update): new text or files are filtered (unseen files scanned and QR-read),
+        // the same ones never twice.
+        Event::MessageUpdate(m) if app_post(app, &m.0) => {
+            if automod::new_text(&m.0) {
+                automod::on_edit(app, &m.0).await?;
+            } else if !m.embeds.is_empty() {
+                scan_preview(app, &m.0).await?;
+            }
+        }
         // Discord also sends updates for link previews; only real edits are checked again.
-        Event::MessageUpdate(m)
-            if m.edited_timestamp.is_some()
-                && (!m.author.bot
-                    || m.webhook_id.is_some()
-                    || m.interaction_metadata.is_some()) =>
-        {
+        Event::MessageUpdate(m) if m.edited_timestamp.is_some() && !m.author.bot => {
             automod::on_edit(app, &m.0).await?;
         }
         // A link preview or GIF arrived after the post: only the image scan looks at it.
         Event::MessageUpdate(m)
-            if m.edited_timestamp.is_none()
-                && !m.embeds.is_empty()
-                && (!m.author.bot || m.webhook_id.is_some()) =>
+            if m.edited_timestamp.is_none() && !m.embeds.is_empty() && !m.author.bot =>
         {
-            if let Some(gid) = m.guild_id {
-                let am = &app.cfg(gid.get()).await?.automod;
-                if am.enabled && am.filters.nsfw_images.enabled {
-                    app.nsfw.enqueue(&m.0, true, false);
-                }
-            }
+            scan_preview(app, &m.0).await?;
         }
         Event::RoleCreate(r) => app.invalidate_guild(r.guild_id),
         Event::RoleUpdate(r) => {
@@ -565,17 +563,29 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         Event::AutoModerationActionExecution(e) => crate::native::on_native_hit(app, e).await?,
         Event::ReactionAdd(r) => crate::activity::on_reaction(app, r).await?,
         Event::ThreadCreate(t) => crate::activity::on_thread(app, &t.0).await?,
-        Event::ThreadUpdate(t) => {
-            if let Some(p) = t.parent_id {
-                app.note_thread(t.id, p);
-            }
-        }
+        Event::ThreadUpdate(t) => crate::activity::on_thread_update(app, &t.0).await?,
         Event::ThreadListSync(s) => s
             .threads
             .iter()
             .filter_map(|t| Some((t.id, t.parent_id?)))
             .for_each(|(t, p)| app.note_thread(t, p)),
         _ => {}
+    }
+    Ok(())
+}
+
+/// A webhook's or another app's message (not TommyBot's own).
+fn app_post(app: &App, m: &twilight_model::channel::Message) -> bool {
+    m.author.id != app.me && automod::app_message(m)
+}
+
+/// Only the image scan reads a preview update.
+async fn scan_preview(app: &App, m: &twilight_model::channel::Message) -> Result<()> {
+    if let Some(gid) = m.guild_id {
+        let am = &app.cfg(gid.get()).await?.automod;
+        if am.enabled && am.filters.nsfw_images.enabled {
+            app.nsfw.enqueue(m, !automod::files_can_be_new(m), false);
+        }
     }
     Ok(())
 }

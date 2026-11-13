@@ -20,6 +20,7 @@ use crate::{
 const REASON: &str = "Wrote in the catch channel";
 
 /// True when the message was in the catch channel by someone it punishes; nothing else should run.
+/// Log mode punishes nobody, so automod still runs.
 pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
     let Some(gid) = m.guild_id else {
         return Ok(false);
@@ -62,7 +63,7 @@ pub async fn on_message(app: &App, m: &MessageCreate) -> Result<bool> {
             if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
                 tracing::warn!(?e, "catch channel test log failed");
             }
-            return Ok(true);
+            return Ok(false);
         }
     };
     crate::http_err::best_effort(

@@ -1,5 +1,5 @@
 """Attack scenarios against a real test server, with the real bot running (see live.sh).
-Usage: live.py spam|lock|mention_lock|nuke|panic|verify_delete|dm_timing|purge|emojis|edit|restart|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke, panic, verify_delete and dm_timing also need
+Usage: live.py spam|lock|mention_lock|nuke|panic|verify_delete|dm_timing|purge|emojis|edit|restart|g2b_*|all. Needs DISCORD_TOKEN, TEST_GUILD_ID, DATABASE_URL; nuke, panic, verify_delete and dm_timing also need
 ATTACKER_TOKEN, a second bot on the test server with Administrator. Stdlib + psql only.
 Exits non-zero if the bot did not react. Never prints tokens."""
 import functools
@@ -556,13 +556,211 @@ def edit():
                  f"edit: clean message kept={first}, deleted after masked-invite edit={gone}, automod logged")
 
 
+
+# g2b: automod reads app embeds, link buttons, forwards and thread renames (live/g2b.md).
+G2B_WORD = "zqxbadword"
+
+
+def png():
+    """A plain 64x64 grey PNG, made here so no image is downloaded."""
+    import struct
+    import zlib
+    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+    raw = b"".join(b"\0" + b"\x80" * 64 * 3 for _ in range(64))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def hook_file(method, path, body):
+    """A webhook post or edit carrying png() as files[0] (multipart); the path holds the hook token."""
+    b = "e2eg2bboundary"
+    body = {**body, "attachments": [{"id": 0, "filename": "e2e.png"}]}
+    data = (f"--{b}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+            f"Content-Type: application/json\r\n\r\n{json.dumps(body)}\r\n"
+            f"--{b}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"e2e.png\"\r\n"
+            f"Content-Type: image/png\r\n\r\n").encode() + png() + f"\r\n--{b}--\r\n".encode()
+    req = urllib.request.Request(API + path, data, method=method, headers={
+        "Content-Type": f"multipart/form-data; boundary={b}", "User-Agent": "DiscordBot (tommybot-e2e, 1)"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"{method} /webhooks/...: HTTP {e.code} {e.read()[:200]!r}")
+
+
+def attacker_hook(name):
+    """(webhook, base path with token) in #general, made by the attacker so it is not exempt."""
+    hook = call("POST", f"/channels/{text_channel('general')}/webhooks", os.environ["ATTACKER_TOKEN"], {"name": name})
+    return hook, f"/webhooks/{hook['id']}/{hook['token']}"
+
+
+def verified(hook):
+    """Hooks of verified bots are exempt from the webhook path, and Discord may flag the attacker as one."""
+    return call("GET", f"/users/{hook['user']['id']}").get("public_flags", 0) & 1 << 16
+
+
+def gone_within(chan, msg, tries=10):
+    for _ in range(tries):
+        time.sleep(2)
+        if call("GET", f"/channels/{chan}/messages/{msg}", soft=True) is None:
+            return True
+    return False
+
+
+def scans(msg):
+    return f"select count(*) from nsfw_scans where guild_id = {GUILD} and message_id = {msg}"
+
+
+def automod_back():
+    set_config("automod", {"enabled": True, "anti_spam": True, "monitor_webhooks": True})
+
+
+def g2b_hook_app_text(kind):
+    """D78: an invite only in a webhook's embed (kind "embed") or link button ("button") is deleted."""
+    set_config("automod", {"enabled": True, "monitor_webhooks": True, "filters": {"invites": {"enabled": True}}})
+    since = snowflake_now()
+    chan = text_channel("general")
+    hook, base = attacker_hook(f"e2e-g2b-{kind}")
+    body = {"content": f"e2e g2b {kind}: nothing to see"}
+    if kind == "embed":
+        body["embeds"] = [{"title": "e2e", "description": "join https://discord.gg/e2etest"}]
+    else:
+        body["components"] = [{"type": 1, "components": [
+            {"type": 2, "style": 5, "label": "Join", "url": "https://discord.gg/e2etest"}]}]
+    sent = call("POST", base + "?wait=true&with_components=true", body=body, auth=False)
+    shown = bool(sent.get("embeds") if kind == "embed" else sent.get("components"))
+    gone = gone_within(chan, sent["id"])
+    skip = verified(hook)
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+    automod_back()
+    print(f"cleaned: webhook e2e-g2b-{kind} and its message")
+    if skip:
+        print(f"SKIP g2b_hook_{kind}: the attacker is a verified bot, so its hook is exempt")
+        return True
+    return check(shown and gone and logged("auto_mod", since),
+                 f"g2b_hook_{kind}: {kind} posted={shown}, deleted={gone}, automod logged")
+
+
+def g2b_thread_rename():
+    """D40: a thread renamed to a blacklisted word stays and is logged; a lookalike-letter name goes on create."""
+    set_config("automod", {"enabled": True, "filters": {"words": {"filter": {"enabled": True}, "strict": [G2B_WORD]}}})
+    since = snowflake_now()
+    chan = text_channel("general")
+    tok = os.environ["ATTACKER_TOKEN"]
+    exists = lambda t: call("GET", f"/channels/{t}", soft=True) is not None
+    clean = call("POST", f"/channels/{chan}/threads", tok, {"name": "e2e g2b clean", "type": 11})
+    time.sleep(3)
+    kept = exists(clean["id"])
+    call("PATCH", f"/channels/{clean['id']}", tok, {"name": f"e2e g2b {G2B_WORD}"}, soft=True)
+    flagged = False
+    for _ in range(6):
+        time.sleep(2)
+        if logged("auto_mod", since, "Thread name flagged"):
+            flagged = True
+            break
+    # A ThreadUpdate names no actor, so a rename is only logged.
+    renamed_kept = exists(clean["id"])
+    wide = "".join(chr(ord(c) + 0xFEE0) for c in G2B_WORD)  # fullwidth letters
+    look = call("POST", f"/channels/{chan}/threads", tok, {"name": f"e2e g2b {wide}", "type": 11})
+    time.sleep(4)
+    look_gone = not exists(look["id"])
+    for t in (clean["id"], look["id"]):
+        call("DELETE", f"/channels/{t}", soft=True)
+    automod_back()
+    print("cleaned: both e2e g2b threads")
+    return check(kept and flagged and renamed_kept and look_gone and logged("auto_mod", since, "Thread deleted"),
+                 f"g2b_thread_rename: clean kept={kept}, rename logged={flagged}, renamed kept={renamed_kept}, "
+                 f"lookalike deleted={look_gone}")
+
+
+def g2b_nsfw_hook_off(monitor=False):
+    """Follow-up: with Monitor Webhooks off a webhook's link preview image is not scanned (no row)."""
+    set_config("automod", {"enabled": True, "monitor_webhooks": monitor,
+                           "filters": {"nsfw_images": {"enabled": True}}})
+    chan = text_channel("general")
+    app = call("GET", "/applications/@me")["id"]
+    emoji = call("GET", f"/applications/{app}/emojis")["items"][0]["id"]
+    hook, base = attacker_hook("e2e-g2b-nsfw")
+    # Discord adds the preview in a MessageUpdate without edited_timestamp: the path main scanned.
+    sent = call("POST", base + "?wait=true", body={"content": f"https://cdn.discordapp.com/emojis/{emoji}.png?size=64"},
+                auth=False)
+    preview = False
+    for _ in range(10):
+        time.sleep(2)
+        m = call("GET", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+        if m and m["embeds"]:
+            preview = True
+            break
+    time.sleep(8)  # the scan queue
+    rows = int(sql(scans(sent["id"])))
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+    sql(f"delete from nsfw_scans where guild_id = {GUILD} and message_id = {sent['id']}")
+    automod_back()
+    print("cleaned: webhook e2e-g2b-nsfw, its message and scan rows")
+    want = (lambda n: n > 0) if monitor else (lambda n: n == 0)
+    return check(preview and want(rows),
+                 f"g2b_nsfw_hook_{'on' if monitor else 'off'}: preview arrived={preview}, scan rows={rows}")
+
+
+def g2b_hook_edit_file():
+    """Follow-up: a webhook edit that adds a file has the file scanned."""
+    set_config("automod", {"enabled": True, "monitor_webhooks": True, "filters": {"nsfw_images": {"enabled": True}}})
+    chan = text_channel("general")
+    hook, base = attacker_hook("e2e-g2b-editfile")
+    sent = call("POST", base + "?wait=true", body={"content": "e2e g2b edit file"}, auth=False)
+    time.sleep(2)
+    edited = hook_file("PATCH", f"{base}/messages/{sent['id']}", {"content": "e2e g2b edit file"})
+    rows = wait_for(scans(sent["id"]), lambda n: n > 0, 8)
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    call("DELETE", f"/channels/{chan}/messages/{sent['id']}", soft=True)
+    sql(f"delete from nsfw_scans where guild_id = {GUILD} and message_id = {sent['id']}")
+    automod_back()
+    print("cleaned: webhook e2e-g2b-editfile, its message and scan rows")
+    return check(bool(edited.get("attachments")) and rows > 0,
+                 f"g2b_hook_edit_file: file added={bool(edited.get('attachments'))}, scan rows={rows}")
+
+
+def g2b_forward():
+    """D33 (manual): the owner forwards a message with an image into #general; the forward is scanned."""
+    set_config("automod", {"enabled": True, "filters": {"nsfw_images": {"enabled": True}}})
+    chan = text_channel("general")
+    owner = call("GET", f"/guilds/{GUILD}")["owner_id"]
+    hook, base = attacker_hook("e2e-g2b-source")
+    src = hook_file("POST", base + "?wait=true", {"content": "e2e g2b: forward this message into #general"})
+    print(f"MANUAL: the owner forwards message {src['id']} (with the grey image) into #general within 120 s")
+    fwd = None
+    for _ in range(60):
+        time.sleep(2)
+        fwd = next((m for m in call("GET", f"/channels/{chan}/messages?after={src['id']}&limit=20")
+                    if m["author"]["id"] == owner and m.get("message_snapshots")), None)
+        if fwd:
+            break
+    rows = wait_for(scans(fwd["id"]), lambda n: n > 0, 8) if fwd else 0
+    call("DELETE", f"/webhooks/{hook['id']}", soft=True)
+    for m in (src, fwd):
+        if m:
+            call("DELETE", f"/channels/{chan}/messages/{m['id']}", soft=True)
+            sql(f"delete from nsfw_scans where guild_id = {GUILD} and message_id = {m['id']}")
+    automod_back()
+    print("cleaned: webhook e2e-g2b-source, both messages and scan rows")
+    return check(bool(fwd) and rows > 0, f"g2b_forward: forward seen={bool(fwd)}, scan rows={rows}")
+
+
 SCENARIOS = {"spam": spam, "lock": lock, "mention_lock": mention_lock, "nuke": nuke,
              "purge": purge, "emojis": emojis, "edit": edit, "restart": restart, "panic": panic,
-             "verify_delete": verify_delete, "dm_timing": dm_timing}
+             "verify_delete": verify_delete, "dm_timing": dm_timing,
+             "g2b_hook_embed": lambda: g2b_hook_app_text("embed"),
+             "g2b_hook_button": lambda: g2b_hook_app_text("button"),
+             "g2b_thread_rename": g2b_thread_rename, "g2b_nsfw_hook_off": g2b_nsfw_hook_off,
+             "g2b_nsfw_hook_on": lambda: g2b_nsfw_hook_off(True), "g2b_hook_edit_file": g2b_hook_edit_file,
+             "g2b_forward": g2b_forward}
 
 if __name__ == "__main__":
     picked = sys.argv[1:] or ["all"]
-    names = list(SCENARIOS) if picked == ["all"] else picked
+    # g2b_forward waits for the owner, so "all" leaves it out.
+    names = [n for n in SCENARIOS if n != "g2b_forward"] if picked == ["all"] else picked
     use_bot_log_channels()
     results = [SCENARIOS[n]() for n in names]
     sys.exit(0 if all(results) else 1)

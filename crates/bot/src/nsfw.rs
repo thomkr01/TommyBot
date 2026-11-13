@@ -56,6 +56,8 @@ pub struct Job {
 
 #[derive(Default)]
 pub struct Scanner {
+    /// Attachments already queued: an edit of a webhook or app message rescans only new files.
+    seen: crate::automod::Seen,
     /// (live, backlog).
     lanes: Mutex<(VecDeque<Job>, VecDeque<Job>)>,
     wake: tokio::sync::Notify,
@@ -81,20 +83,22 @@ fn discord_media(url: &str) -> bool {
             || (host.starts_with("images-ext-") && host.ends_with(".discordapp.net")))
 }
 
-/// Image URLs worth scanning: attachments (not on an edit, which cannot add any) and embed images.
+/// An image within the download cap.
+fn scannable(a: &twilight_model::channel::Attachment) -> bool {
+    a.size <= MAX_BYTES as u64
+        && a.content_type
+            .as_deref()
+            .is_some_and(|t| t.starts_with("image/"))
+}
+
+/// Image URLs worth scanning: attachments (not on an edit, which cannot add any) and embed images,
+/// also of a forwarded message.
 fn image_urls(m: &Message, edit: bool) -> Vec<String> {
-    let files = m
-        .attachments
-        .iter()
-        .filter(|_| !edit)
-        .filter(|a| a.size <= MAX_BYTES as u64)
-        .filter(|a| {
-            a.content_type
-                .as_deref()
-                .is_some_and(|t| t.starts_with("image/"))
-        })
+    let files = crate::automod::attachments(m)
+        .filter(|a| !edit && scannable(a))
         .map(|a| a.proxy_url.clone());
-    let embeds = m.embeds.iter().flat_map(|e| {
+    let forwarded = m.message_snapshots.iter().flat_map(|s| &s.message.embeds);
+    let embeds = m.embeds.iter().chain(forwarded).flat_map(|e| {
         [
             e.image.as_ref().and_then(|i| i.proxy_url.clone()),
             e.thumbnail.as_ref().and_then(|t| t.proxy_url.clone()),
@@ -119,12 +123,29 @@ fn small(url: &str) -> String {
 impl Scanner {
     /// Queues the message's images (the caller checked the filter is on). Never waits.
     pub fn enqueue(&self, m: &Message, edit: bool, backlog: bool) {
-        let urls = image_urls(m, edit);
+        // Files are marked once their scan row is saved (in `scan`).
+        let fresh = crate::automod::attachments(m)
+            .any(|a| scannable(a) && !self.seen.contains((m.id.get(), a.id.get())));
+        let urls = image_urls(m, edit || !fresh);
         if urls.is_empty() {
             return;
         }
+        // A user-installed app's reply is the member's post, as in automod. A server-installed
+        // app's stays exempt, but its hit is logged under the member who ran the command.
+        let msg = match (
+            crate::automod::as_app_user(m),
+            m.interaction_metadata.as_deref(),
+        ) {
+            (Some(u), _) => u,
+            (None, Some(meta)) if !crate::automod::clicked(m) => Message {
+                author: meta.user.clone(),
+                member: None,
+                ..m.clone()
+            },
+            _ => m.clone(),
+        };
         let job = Job {
-            msg: Box::new(m.clone()),
+            msg: Box::new(msg),
             urls,
             at_ms: crate::automod::now_ms(),
         };
@@ -239,13 +260,17 @@ pub async fn run(app: Arc<App>) {
     }
 }
 
-async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
+async fn scan(app: &App, job: Job) -> Result<()> {
     let m = job.msg;
     let Some(gid) = m.guild_id else { return Ok(()) };
     let cfg = app.cfg(gid.get()).await?;
     let f = &cfg.automod.filters;
     // Read again now: the filter may have been switched off while the job waited.
     if !cfg.automod.enabled || !f.nsfw_images.enabled {
+        return Ok(());
+    }
+    // Automod does not watch webhooks with Monitor Webhooks off: no scan, row or hit log either.
+    if m.webhook_id.is_some() && !cfg.automod.monitor_webhooks {
         return Ok(());
     }
     let (parent, _) = app.channel_scope(gid, m.channel_id).await?;
@@ -290,6 +315,9 @@ async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
             threshold,
         )
         .await?;
+        if let Some(a) = crate::automod::attachments(&m).find(|a| a.proxy_url == *url) {
+            app.nsfw.seen.first((m.id.get(), a.id.get()));
+        }
         if let (Some(id), None) = (row, hit) {
             hit = Some((id, scores));
         }
@@ -319,8 +347,34 @@ async fn scan(app: &Arc<App>, job: Job) -> Result<()> {
             });
         }
     }
-    crate::automod::on_nsfw_image(app, &msg).await?;
-    hit_log(app, gid, &msg, id, &scores).await
+    act(app, gid, &msg, (id, &scores)).await
+}
+
+/// Automod's action for a hit, then the hit log.
+async fn act(
+    app: &App,
+    gid: Id<GuildMarker>,
+    msg: &Message,
+    (id, scores): (i64, &[f32; 5]),
+) -> Result<()> {
+    let acted = crate::automod::on_nsfw_image(app, msg).await;
+    // Unless the punishment landed, a failure frees the message: all its rows and files, so the next
+    // pass (sweep, preview update, edit) scans it whole again. A failed case, log or lockdown after
+    // a landed punishment (or a saved strike) must not punish twice.
+    let failed = |e: &anyhow::Error| e.downcast_ref::<crate::automod::Punished>().is_none();
+    if acted.as_ref().is_err_and(failed) {
+        sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1 AND message_id = $2")
+            .bind(gid.get() as i64)
+            .bind(msg.id.get() as i64)
+            .execute(&app.pool)
+            .await?;
+        app.nsfw
+            .seen
+            .forget(crate::automod::attachments(msg).map(|a| (msg.id.get(), a.id.get())));
+        return acted;
+    }
+    hit_log(app, gid, msg, id, scores).await?;
+    acted
 }
 
 /// Saves one scan; Some(id) only for a new hit. One row per (message, image), so a preview update and
@@ -510,7 +564,7 @@ async fn sweep_guild(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         .collect();
         for mut m in msgs {
             if m.timestamp.as_micros() / 1000 < since
-                || (m.author.bot && m.webhook_id.is_none())
+                || (m.author.bot && m.webhook_id.is_none() && m.interaction_metadata.is_none())
                 || done.contains(&(m.id.get() as i64))
             {
                 continue;
@@ -526,6 +580,190 @@ async fn sweep_guild(app: &App, gid: Id<GuildMarker>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// Only a punishment that did not land frees the message's rows; a lockdown failing after the
+    /// strike keeps them, so the next pass does not punish again.
+    #[tokio::test]
+    async fn only_a_failed_punishment_frees_the_scan_rows() {
+        let Some(t) = crate::bansync::tests::T::new(96).await else {
+            return;
+        };
+        let gid = t.g(0);
+        let porn = [0.0, 0.0, 0.05, 0.9, 0.05];
+        let rows = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM nsfw_scans WHERE guild_id = $1 AND message_id = 100",
+            )
+            .bind(gid.get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap()
+        };
+        // A new author each time: the heat claim allows one punishment per member in 10 s.
+        let try_once = |filter: serde_json::Value, author: u64, strikes: bool| {
+            let t = &t;
+            async move {
+                let msg = crate::automod::more_tests::msg(json!({"guild_id": gid.to_string(),
+                    "author": {"id": author.to_string(), "username": "x", "discriminator": "0", "avatar": null}}));
+                t.cleanup().await;
+                sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1")
+                    .bind(gid.get() as i64)
+                    .execute(&t.app.pool)
+                    .await
+                    .unwrap();
+                t.app.forget_cfg(gid.get());
+                let cfg = json!({"automod": {"enabled": true, "auto_lockdown": {"enabled": !strikes, "strikes": 1},
+                    "strike": {"enabled": strikes}, "filters": {"nsfw_images": filter}}});
+                t.server_config(0, t.owner(), cfg).await;
+                let ids = (gid.get(), 7, 100, 50);
+                let id = record(&t.app.pool, ids, &[1; 32], &porn, 0.8)
+                    .await
+                    .unwrap();
+                record(&t.app.pool, ids, &[2; 32], &[0.0, 0.0, 1.0, 0.0, 0.0], 0.8)
+                    .await
+                    .unwrap();
+                act(&t.app, gid, &msg, (id.unwrap(), &porn)).await
+            }
+        };
+        // The filter's own timeout fails at the mock: nothing landed, both rows go.
+        let failed = try_once(
+            json!({"enabled": true, "action": "timeout", "duration_secs": 60}),
+            t.base + 5,
+            false,
+        )
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(rows().await, 0);
+        // A strike without a timeout, then the strike-cap lockdown fails: the rows stay.
+        let locked = try_once(json!({"enabled": true}), t.base + 6, false).await;
+        assert!(locked.is_err());
+        assert_eq!(rows().await, 2);
+        // The strike is saved, then its timeout fails: the rows stay, so no pass adds a second strike.
+        let timed = try_once(json!({"enabled": true}), t.base + 7, true).await;
+        assert!(timed.is_err());
+        assert_eq!(rows().await, 2);
+        // An error before any punishment (a held raider's timeout fails): the rows go, to retry.
+        let raider = t.base + 8;
+        t.app
+            .heat_raiders
+            .lock()
+            .unwrap()
+            .insert(gid.get(), ([raider].into(), crate::app::now_secs() + 600));
+        let early = try_once(json!({"enabled": true}), raider, true).await;
+        assert!(early.is_err());
+        assert_eq!(rows().await, 0);
+        sqlx::query("DELETE FROM nsfw_scans WHERE guild_id = $1")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.cleanup().await;
+    }
+
+    /// An edit of a webhook message queues only files not queued before.
+    #[test]
+    fn an_edit_rescans_only_new_files() {
+        let file = |id: &str| {
+            json!({"id": id, "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                   "proxy_url": format!("https://media.discordapp.net/{id}.png"), "content_type": "image/png"})
+        };
+        let s = Scanner::default();
+        let hook = |files: serde_json::Value| {
+            crate::automod::more_tests::msg(json!({"webhook_id": "9", "attachments": files}))
+        };
+        s.enqueue(&hook(json!([file("1")])), false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
+        // Not scanned yet (dropped, or the scan stopped early): queued again.
+        s.enqueue(&hook(json!([file("1")])), false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
+        // `scan` marks a file once its row is saved.
+        s.seen.first((100, 1));
+        s.enqueue(&hook(json!([file("1")])), false, false);
+        assert!(s.take(0).is_none(), "same file again");
+        s.enqueue(&hook(json!([file("1"), file("2")])), false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 2, "a new file came");
+        // A file the scan never queues (not an image) is no reason to fetch the seen ones again.
+        let pdf = json!({"id": "4", "filename": "a.pdf", "size": 10, "url": "https://cdn.discordapp.com/a.pdf",
+                         "proxy_url": "https://media.discordapp.net/a.pdf", "content_type": "application/pdf"});
+        s.enqueue(&hook(json!([file("1"), pdf])), false, false);
+        assert!(s.take(0).is_none(), "only a PDF is new");
+        // A forward keeps the attachment id but is another message: scanned.
+        let fwd = crate::automod::more_tests::msg(
+            json!({"id": "101", "webhook_id": "9", "attachments": [file("1")]}),
+        );
+        s.enqueue(&fwd, false, false);
+        assert_eq!(s.take(0).unwrap().urls.len(), 1);
+    }
+
+    /// With Monitor Webhooks off a webhook's image is not scanned, saved or logged.
+    #[tokio::test]
+    async fn unmonitored_webhooks_are_not_scanned() {
+        let Some(t) = crate::bansync::tests::T::new(94).await else {
+            return;
+        };
+        let gid = t.g(0);
+        let job = |hook: bool| Job {
+            msg: Box::new(crate::automod::more_tests::msg(json!({
+                "guild_id": gid.to_string(), "webhook_id": if hook { json!("9") } else { json!(null) },
+            }))),
+            urls: vec!["https://media.discordapp.net/a.png".into()],
+            at_ms: 0,
+        };
+        let on = json!({"enabled": true, "monitor_webhooks": false, "filters": {"nsfw_images": {"enabled": true}}});
+        t.server_config(0, t.owner(), json!({ "automod": on }))
+            .await;
+        scan(&t.app, job(true)).await.unwrap();
+        assert!(t.mock.lock().unwrap().log.is_empty(), "nothing fetched");
+        // A member's post in the same server is looked at (the mock refuses the channel lookup).
+        let _ = scan(&t.app, job(false)).await;
+        assert!(!t.mock.lock().unwrap().log.is_empty());
+        t.cleanup().await;
+    }
+
+    /// A user-installed app's reply is queued as the member's post, a server-installed app's not at
+    /// all; a forward's images are scanned.
+    #[test]
+    fn app_replies_and_forwards_are_queued_as_the_member_s() {
+        let file = json!({"id": "1", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                          "proxy_url": "https://media.discordapp.net/a.png", "content_type": "image/png"});
+        let meta = |owners: serde_json::Value| {
+            json!({"id": "5", "type": 2, "authorizing_integration_owners": owners,
+                   "user": {"id": "60", "username": "u", "discriminator": "0", "avatar": null}})
+        };
+        let s = Scanner::default();
+        let server = crate::automod::more_tests::msg(json!({
+            "attachments": [file], "interaction_metadata": meta(json!({"0": "1"}))}));
+        s.enqueue(&server, false, false);
+        // Log-only: still exempt (metadata kept), but credited to the member who ran it.
+        let j = s.take(0).unwrap();
+        assert_eq!(j.msg.author.id.get(), 60);
+        assert!(j.msg.interaction_metadata.is_some());
+        // A button click's message is not the clicker's: not credited to them.
+        let click = crate::automod::more_tests::msg(json!({"id": "99",
+            "attachments": [file], "interaction_metadata": {"id": "5", "type": 3,
+                "authorizing_integration_owners": {"0": "1"},
+                "user": {"id": "60", "username": "u", "discriminator": "0", "avatar": null}}}));
+        s.enqueue(&click, false, false);
+        assert_eq!(s.take(0).unwrap().msg.author.id.get(), 50);
+        let file = json!({"id": "2", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                          "proxy_url": "https://media.discordapp.net/b.png", "content_type": "image/png"});
+        let user_app = crate::automod::more_tests::msg(json!({
+            "attachments": [file], "interaction_metadata": meta(json!({"1": "60"}))}));
+        s.enqueue(&user_app, false, false);
+        assert_eq!(s.take(0).unwrap().msg.author.id.get(), 60);
+        let file = json!({"id": "3", "filename": "a.png", "size": 10, "url": "https://cdn.discordapp.com/a.png",
+                          "proxy_url": "https://media.discordapp.net/c.png", "content_type": "image/png"});
+        let forward = crate::automod::more_tests::msg(json!({"message_snapshots": [{"message": {
+            "attachments": [file], "content": "", "embeds": [], "mentions": [], "mention_roles": [],
+            "type": 0, "timestamp": "2026-01-01T00:00:00.000000+00:00", "edited_timestamp": null,
+        }}]}));
+        assert_eq!(image_urls(&forward, false).len(), 1);
+    }
 
     #[test]
     fn bundled_model_is_the_pinned_one_and_scores_a_plain_image_neutral() {
