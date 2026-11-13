@@ -413,7 +413,7 @@ pub(crate) fn needs_2fa(gid: u64) -> String {
     )
 }
 
-fn dashboard_link(gid: u64) -> String {
+pub(crate) fn dashboard_link(gid: u64) -> String {
     match std::env::var("DASHBOARD_URL")
         .ok()
         .filter(|u| !u.is_empty())
@@ -620,7 +620,7 @@ pub async fn save(
 }
 
 /// A transaction holding the guild's config lock, with the newest version and its config.
-async fn locked(
+pub(crate) async fn locked(
     app: &App,
     gid: Id<GuildMarker>,
 ) -> Result<(sqlx::Transaction<'static, sqlx::Postgres>, i32, Value)> {
@@ -641,7 +641,7 @@ async fn locked(
 }
 
 /// Saves `doc` as version `version + 1` with the live permits as its `permits` copy, then commits.
-async fn append(
+pub(crate) async fn append(
     app: &App,
     mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
     gid: Id<GuildMarker>,

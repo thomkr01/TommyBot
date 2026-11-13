@@ -21,8 +21,8 @@ use std::{
 use tommybot_antinuke::{
     security::{
         checks, expression_targets, move_under_bot, overwrite_targets, private_overwrites,
-        setting_fix, strip_targets, stripped, stripped_overwrite, synced_children, GuildSafety,
-        Setup, EXPRESSIONS, EXPRESSION_PERMS, PRIVATE, QUARANTINE_CHANNELS,
+        setting_fix, strip_targets, stripped, stripped_overwrite, synced_children, Check, Fix,
+        GuildSafety, Setup, Severity, EXPRESSIONS, EXPRESSION_PERMS, PRIVATE, QUARANTINE_CHANNELS,
     },
     Inverse, RoleImg,
 };
@@ -235,7 +235,82 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
         &l.setup,
     );
     rows.extend(crate::channels::overview_check(&st, guild).await?);
+    rows.extend(handover_check(&st, guild).await?);
     Ok(Json(json!(rows)))
+}
+
+/// The [`Fix::setting`] that gives back the Extra Owners and Trusted Admins a previous owner set.
+const KEEP_STAFF: &str = "keep_previous_staff";
+
+/// After an ownership change the bot removed the previous owner's EO/TA (D47); the new owner may keep them.
+async fn handover_check(st: &AppState, guild: i64) -> Result<Option<Check>, ApiError> {
+    let owner: i64 = st
+        .discord
+        .guild_owner(guild)
+        .await?
+        .parse()
+        .unwrap_or_default();
+    let row: Option<(i32, i32, bool)> = sqlx::query_as(
+        "select cardinality(extra_owners), cardinality(trusted_admins), ban_sync_was_on from owner_handovers
+         where guild_id = $1 and new_owner = $2 and kept_at is null
+           and cardinality(extra_owners) + cardinality(trusted_admins) > 0",
+    )
+    .bind(guild)
+    .bind(owner)
+    .fetch_optional(&st.db)
+    .await?;
+    Ok(row.map(|(eo, ta, sync)| Check {
+        id: "owner_handover".into(),
+        severity: Severity::Warn,
+        title: "Ownership changed",
+        detail: format!(
+            "When this server got a new owner, TommyBot removed the {eo} Extra Owner(s) and {ta} Trusted Admin(s) the previous owner set{}. Keep them only if you trust them. Only the server owner can keep them, and keeping them never turns Ban Sync on.",
+            if sync { " and switched Ban Sync off" } else { "" }
+        ),
+        fix: Some(Fix {
+            label: "Keep previous staff",
+            role_id: None,
+            channel_id: None,
+            setting: Some(KEEP_STAFF),
+            move_under_bot: false,
+        }),
+    }))
+}
+
+/// Puts back the Extra Owners and Trusted Admins stored at the ownership change, as a config version.
+async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value) -> Res {
+    if !crate::api::is_discord_owner(st, s, guild).await? {
+        return Err(ApiError::Forbidden(
+            "only the server owner can keep the previous owner's staff",
+        ));
+    }
+    let mut tx = st.db.begin().await?;
+    let row: Option<(Vec<i64>, Vec<i64>)> = sqlx::query_as(
+        "update owner_handovers set kept_at = now()
+         where guild_id = $1 and new_owner = $2 and kept_at is null
+         returning extra_owners, trusted_admins",
+    )
+    .bind(guild)
+    .bind(s.user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (eo, ta) = row.ok_or(ApiError::NotFound)?;
+    for (sql, ids) in [
+        ("insert into extra_owners (guild_id, user_id) select $1, unnest($2::bigint[]) on conflict do nothing", &eo),
+        ("insert into trusted_admins (guild_id, user_id) select $1, unnest($2::bigint[]) on conflict do nothing", &ta),
+    ] {
+        sqlx::query(sql).bind(guild).bind(ids).execute(&mut *tx).await?;
+    }
+    let version = crate::store::bump(&mut tx, guild, s.user_id).await?;
+    tx.commit().await?;
+    log_change(st, guild, c, Some(version),
+        format!(
+            "{} (<@{}>) kept the previous owner's {} Extra Owner(s) and {} Trusted Admin(s) -> config v{version}",
+            s.username, s.user_id, eo.len(), ta.len()
+        ),
+    )
+    .await;
+    Ok(Json(json!({"ok": true, "version": version})))
 }
 
 /// One of a row's `fix`: a role id (`*` for every strippable role and overwrite), an overwrite
@@ -274,6 +349,9 @@ async fn fix(
         )
         .await;
         return Ok(Json(json!({"ok": true, "failed": failed})));
+    }
+    if b.setting.as_deref() == Some(KEEP_STAFF) {
+        return keep_staff(&st, &s, guild, &c).await;
     }
     if b.setting.as_deref() == Some(PRIVATE) {
         return make_private(&st, &s, guild, &c, b.channel_id.as_deref()).await;
@@ -1039,6 +1117,69 @@ mod tests {
             ),
         ] {
             assert_eq!(inverse_request(5, &inv), (m, path.to_string(), body));
+        }
+    }
+
+    /// D47: the new owner sees the removed staff on Overview and can keep them once.
+    #[tokio::test]
+    async fn the_new_owner_keeps_the_previous_staff_once() {
+        let Some((st, s, g)) = crate::api::g3_handler_tests::setup(9_883_000_000).await else {
+            return;
+        };
+        let run = |sql: &'static str| sqlx::query(sql).bind(g).execute(&st.db);
+        for t in [
+            "owner_handovers",
+            "extra_owners",
+            "trusted_admins",
+            "guild_config",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
+        }
+        assert!(handover_check(&st, g).await.unwrap().is_none());
+        run("insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, ban_sync_was_on)
+             values ($1, 3, 7, '{11}', '{12, 13}', true)").await.unwrap();
+        let c = handover_check(&st, g).await.unwrap().unwrap();
+        assert!(
+            c.detail.contains("1 Extra Owner(s) and 2 Trusted Admin(s)")
+                && c.detail.contains("Ban Sync off")
+        );
+        keep_staff(&st, &s, g, &json!({})).await.unwrap();
+        let n: i64 = sqlx::query_scalar("select (select count(*) from extra_owners where guild_id = $1) + (select count(*) from trusted_admins where guild_id = $1)")
+            .bind(g).fetch_one(&st.db).await.unwrap();
+        assert_eq!(n, 3);
+        let eo: Value = sqlx::query_scalar("select config->'permits'->'eo' from guild_config where guild_id = $1 order by version desc limit 1")
+            .bind(g).fetch_one(&st.db).await.unwrap();
+        assert_eq!(eo, json!(["11"]), "kept as a config version");
+        assert!(handover_check(&st, g).await.unwrap().is_none());
+        assert!(matches!(
+            keep_staff(&st, &s, g, &json!({})).await,
+            Err(ApiError::NotFound)
+        ));
+        // Someone other than the Discord owner (user 7) is refused.
+        let other = Sess { user_id: 8, ..s };
+        assert!(matches!(
+            keep_staff(&st, &other, g, &json!({})).await,
+            Err(ApiError::Forbidden(_))
+        ));
+        for t in [
+            "owner_handovers",
+            "extra_owners",
+            "trusted_admins",
+            "guild_config",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {t} where guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
         }
     }
 

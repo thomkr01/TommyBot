@@ -1261,12 +1261,12 @@ mod logging_validate_tests {
 /// Handler tests on a scratch Postgres (they return early without DATABASE_URL). Discord is never
 /// called: the guild and member lookups are pre-filled in the memo, user 7 owns the server.
 #[cfg(test)]
-mod g3_handler_tests {
+pub(crate) mod g3_handler_tests {
     use super::*;
     use serde_json::json;
     use std::time::Instant;
 
-    async fn setup(base: i64) -> Option<(AppState, Sess, i64)> {
+    pub(crate) async fn setup(base: i64) -> Option<(AppState, Sess, i64)> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let db = tommybot_core::db::connect(&url).await.unwrap();
         let g = base + std::process::id() as i64;

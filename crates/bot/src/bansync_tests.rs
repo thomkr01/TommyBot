@@ -890,6 +890,84 @@ async fn another_owner_a_transfer_or_a_left_server_gets_no_copy() {
     t.cleanup().await;
 }
 
+/// D47: a transferred server leaves every group (Ban Sync off), loses the old owner's EO/TA, and
+/// keeps what was removed for the new owner; a later change of nothing does nothing.
+#[tokio::test]
+async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
+    let Some(t) = T::new(42).await else { return };
+    let (o, new) = (t.owner(), t.base + 8);
+    t.server(0, o, "ban").await;
+    t.server(1, o, "ban").await;
+    t.exec("INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, $1 + 1)")
+        .await;
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $1 + 2)")
+        .await;
+    t.exec("DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.set(|m| {
+        m.owners.insert(t.g(0).get(), new);
+    });
+    on_owner(&t.app, t.g(0), Id::new(new)).await.unwrap();
+    let cfg: Value = sqlx::query_scalar(
+        "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(t.g(0).get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(cfg["ban_sync"]["enabled"], json!(false));
+    assert_eq!(cfg["ban_sync"]["receive"], json!("ban"), "the rest stays");
+    assert_eq!(
+        cfg["permits"]["eo"],
+        json!([]),
+        "the version records the removal"
+    );
+    let staff = t
+        .count("SELECT count(*) FROM extra_owners WHERE guild_id = $1")
+        .await
+        + t.count("SELECT count(*) FROM trusted_admins WHERE guild_id = $1")
+            .await;
+    assert_eq!(staff, 0);
+    let (eo, ta, was_on): (Vec<i64>, Vec<i64>, bool) = sqlx::query_as(
+        "SELECT extra_owners, trusted_admins, ban_sync_was_on FROM owner_handovers WHERE guild_id = $1",
+    )
+    .bind(t.g(0).get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    let b = t.base as i64;
+    assert_eq!((eo, ta, was_on), (vec![b + 1], vec![b + 2], true));
+    // The new owner's server is in no group: a ban in the old owner's server is not sent there.
+    t.ban(1, 508, "raiding");
+    share_job(&t.app, t.g(1), &t.share(508, None))
+        .await
+        .unwrap();
+    assert!(t.rows(508).await.is_empty());
+    // Seeing the same owner again changes nothing.
+    on_owner(&t.app, t.g(0), Id::new(new)).await.unwrap();
+    assert_eq!(
+        t.count("SELECT count(*) FROM owner_handovers WHERE guild_id = $1")
+            .await,
+        1
+    );
+    t.exec("DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+#[test]
+fn the_handover_dm_says_what_was_done() {
+    let g = Id::new(5);
+    let t = handover_text("S", true, 1, 2, g);
+    assert!(
+        t.contains("switched Ban Sync off")
+            && t.contains("1 Extra Owner(s) and 2 Trusted Admin(s)")
+    );
+    assert!(t.contains("Keep previous staff") && t.contains("syncs only with your own servers"));
+    let t = handover_text("S", false, 0, 1, g);
+    assert!(!t.contains("Ban Sync"));
+}
+
 #[tokio::test]
 async fn exempt_members_are_skipped_in_the_receiving_server() {
     let Some(t) = T::new(4).await else { return };
