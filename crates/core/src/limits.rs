@@ -172,6 +172,22 @@ pub fn check(section: &str, doc: &Value, old: &Value) -> Result<(), String> {
     }
 }
 
+/// Every stored number outside its range, as `section.path = value` (D70b): saved before the
+/// limits, so the save never refused it. A 0 window or count there switches its feature off.
+pub fn stored_outside(config: &Value) -> Vec<String> {
+    let sections = [
+        "antinuke", "joingate", "automod", "panic", "joinraid", "misc",
+    ];
+    sections
+        .iter()
+        .flat_map(|s| {
+            outside(s, &config[*s], &Value::Null)
+                .into_iter()
+                .map(move |(p, v, _)| format!("{s}.{p} = {v}"))
+        })
+        .collect()
+}
+
 /// [`check`] that moves an out-of-range number to the nearest end of its range instead of refusing
 /// (a rollback to a version saved before the limits, D69b). Returns `path: old -> new` per change;
 /// a value that is not a number is left for [`check`] to refuse.
@@ -203,6 +219,13 @@ pub fn clamp(section: &str, doc: &mut Value, old: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stored_values_outside_their_range_are_listed() {
+        let c = json!({"panic": {"window_secs": 0, "executors": 0}, "joinraid": {"count": 10}});
+        assert_eq!(stored_outside(&c), ["panic.window_secs = 0"]);
+        assert!(stored_outside(&json!({})).is_empty());
+    }
 
     #[test]
     fn clamp_pulls_numbers_into_range_and_says_which() {

@@ -881,7 +881,8 @@ pub fn schema() -> Vec<Value> {
     let panic = vec![
         ti(
             pg(dv(fg("Trigger", "executors", "int"), 0), "nuke"),
-            "Quarantined accounts to trip",
+            // D70: 0 switches anti-nuke's Panic Mode trigger off on purpose; say so on the field.
+            "Quarantined accounts to trip (0 = off)",
         ),
         ti(
             pg(fg("Trigger", "heat_algorithm", "bool"), "heat"),

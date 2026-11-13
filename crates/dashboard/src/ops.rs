@@ -236,6 +236,20 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     );
     rows.extend(crate::channels::overview_check(&st, guild).await?);
     rows.extend(handover_check(&st, guild).await?);
+    // D70b: old zero values are left as they are, but the owner should see them.
+    let old = tommybot_core::limits::stored_outside(&config);
+    if !old.is_empty() {
+        rows.push(Check {
+            id: "stored_out_of_range".into(),
+            severity: Severity::Warn,
+            title: "Settings outside their range",
+            detail: format!(
+                "Saved before the limits: {}. A 0 window or count switches that protection off. Set a value in range on its page and save.",
+                old.join(", ")
+            ),
+            fix: None,
+        });
+    }
     Ok(Json(json!(rows)))
 }
 
