@@ -422,7 +422,8 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
     let mut tx = st.db.begin().await?;
     // The config lock first, as the bot's on_owner takes it: the other order deadlocks (R6).
     crate::store::locked(&mut tx, guild).await?;
-    let row: Option<(Vec<i64>, Vec<i64>, Value, Vec<String>)> = sqlx::query_as(
+    type Paused = (Vec<i64>, Vec<i64>, Value, Vec<String>);
+    let row: Option<Paused> = sqlx::query_as(
         "select extra_owners, trusted_admins, paused_roles, other_permits from owner_handovers
          where guild_id = $1 and new_owner = $2 and kept_at is null",
     )
