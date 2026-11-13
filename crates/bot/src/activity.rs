@@ -87,7 +87,7 @@ async fn heat_up(
         };
         s.apply(&b, now, &enabled_weights(am)) && s.claim(now)
     };
-    if !fresh || !am.strike.enabled {
+    if !fresh {
         return Ok(());
     }
     crate::panic::note_heat(app, gid, user).await;
@@ -100,6 +100,10 @@ async fn heat_up(
         }
     }
     let secs = act.timeout_ms / 1000;
+    // As for messages: auto timeouts off still records the strike and its strike-cap lockdown.
+    if !am.strike.enabled {
+        return strike_cap_lock(app, cfg, gid, user, act.strike).await;
+    }
     // As for messages: a failed timeout, case or log never skips the strike-cap lockdown.
     let timed = timeout(&app.http, gid, user, secs, "Automod").await;
     match &timed {
@@ -353,6 +357,35 @@ mod tests {
         assert!(r.is_err());
         assert!(t.calls("PATCH") >= 1, "timeout tried");
         assert!(t.calls("/roles") >= 1, "lockdown planned");
+        t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.cleanup().await;
+    }
+
+    /// With the auto timeouts off a reaction or thread heat trip still records the strike and
+    /// reaches the strike-cap lockdown, as a message does, but times nobody out.
+    #[tokio::test]
+    async fn strikes_off_still_records_the_strike() {
+        let Some(t) = T::new(25).await else { return };
+        let gid = t.g(0);
+        let cfg = json!({"automod": {"enabled": true, "strike": {"enabled": false},
+            "auto_lockdown": {"enabled": true, "strikes": 1}}});
+        t.server_config(0, t.owner(), cfg).await;
+        let cfg = t.app.cfg(gid.get()).await.unwrap();
+        let user = t.base + 5;
+        let _ = heat_up(&t.app, &cfg, gid, Id::new(user), 1_000.0, "Reaction spam").await;
+        let st = store::load_strikes(&t.app.pool, gid.get(), user)
+            .await
+            .unwrap();
+        assert_eq!(st.strikes, 1, "strike recorded");
+        assert_eq!(
+            t.calls(&format!("PATCH /guilds/{gid}/members/{user}")),
+            0,
+            "nobody timed out"
+        );
+        assert!(t.calls("/roles") >= 1, "strike-cap lockdown planned");
         t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
             .await;
         t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")

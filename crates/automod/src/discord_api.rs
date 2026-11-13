@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 const API: &str = "https://discord.com/api/v10";
-const KEYWORD_RULE: &str = "TommyBot keywords";
+/// Name of the keyword rule the bot keeps in step with the word lists.
+pub const KEYWORD_RULE: &str = "TommyBot keywords";
 /// Discord caps one keyword rule at 1000 keywords of at most 60 chars.
 const MAX_KEYWORDS: usize = 1000;
 const MAX_KEYWORD_LEN: usize = 60;
