@@ -315,6 +315,13 @@ pub fn dm_embed(
     e.build()
 }
 
+/// The line a quarantine DM without a reason gets while tickets are on: tickets stay open to
+/// quarantined members, so they can ask why (D27).
+fn reach_staff(kind: &str, reason: Option<&str>, tickets: bool) -> Option<&'static str> {
+    (kind == "quarantine" && reason.is_none() && tickets)
+        .then_some("You can DM TommyBot to reach this server's staff.")
+}
+
 /// What a punishment DM says, see [`dm_embed`]. `moderator` is None when staff is hidden.
 pub struct Notice<'a> {
     pub kind: &'a str,
@@ -335,13 +342,17 @@ pub async fn tell(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, n: Noti
         }),
         None => None,
     };
-    let e = dm_embed(
+    let mut e = dm_embed(
         n.kind,
         &server,
         n.reason,
         moderator.as_deref(),
         n.duration_s,
     );
+    let tickets = app.cfg(gid.get()).await.is_ok_and(|c| c.tickets.enabled);
+    if let Some(line) = reach_staff(n.kind, n.reason, tickets) {
+        e.description = Some(format!("{}\n{line}", e.description.unwrap_or_default()));
+    }
     send_dm(
         app,
         user,
@@ -823,6 +834,14 @@ mod tests {
         misc.always_dm = false;
         assert!(!wants_dm(false, &misc));
         assert!(wants_dm(true, &misc), "?dm still sends one");
+    }
+
+    #[test]
+    fn a_quarantine_dm_without_a_reason_says_how_to_reach_staff() {
+        assert!(reach_staff("quarantine", None, true).is_some());
+        assert_eq!(reach_staff("quarantine", Some("raid"), true), None);
+        assert_eq!(reach_staff("quarantine", None, false), None, "tickets off");
+        assert_eq!(reach_staff("ban", None, true), None);
     }
 
     #[test]

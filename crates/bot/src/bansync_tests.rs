@@ -355,6 +355,10 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             }
         }
         ("PUT", ["channels", _, "permissions", _]) => (204, String::new()),
+        ("POST", ["guilds", g, "channels"]) => {
+            let ch = json!({"id": "610", "type": 0, "guild_id": g, "name": "ticket"});
+            (200, ch.to_string())
+        }
         ("POST", ["channels", c, "messages"]) if m.fail_channels.contains(&n(c)) => err(403, 50001),
         ("POST", ["channels", _, "messages"]) if m.fail_message => err(403, 50013),
         ("POST", ["channels", _, "messages"]) if m.fail_message_5xx => err(502, 0),

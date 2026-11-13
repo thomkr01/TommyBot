@@ -392,7 +392,8 @@ async fn create(
         }
     }
     let pfx = &app.cfg(gid.get()).await?.misc.prefix;
-    let intro = intro(pfx, t.command_only, user, roles);
+    let quarantined = crate::antinuke::quarantined(app, gid, user.id).await?;
+    let intro = intro(pfx, t.command_only, user, roles, quarantined);
     let (pings, mentions) = pings(gid, t);
     let sent = app
         .http
@@ -637,6 +638,26 @@ mod tests {
         send_mail(&t.app, &dm("help"), gid).await.unwrap();
         assert_eq!(said("too many tickets in that server"), 1);
         assert_eq!(said(&format!("POST /guilds/{gid}/channels")), 0, "no ticket opened");
+        // A quarantined member still reaches staff; the intro tells staff they are quarantined.
+        sqlx::query("DELETE FROM tickets WHERE guild_id = $1")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles) VALUES ($1, $2, '{}')")
+            .bind(gid.get() as i64)
+            .bind(u as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        send_mail(&t.app, &dm("why am I quarantined?"), gid).await.unwrap();
+        assert_eq!(said(&format!("POST /guilds/{gid}/channels")), 1, "ticket opened");
+        assert_eq!(said("Quarantined"), 1);
+        sqlx::query("DELETE FROM ticket_users WHERE user_id = $1")
+            .bind(u as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM tickets WHERE guild_id = $1")
             .bind(gid.get() as i64)
             .execute(&t.app.pool)
