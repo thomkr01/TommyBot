@@ -1,4 +1,5 @@
-//! A verification role given by another bot (D58): while TommyBot's verification is on, the role
+//! A verification role given by another bot (D58), or by a human without a verify or
+//! quarantine permit who is not Owner, EO or TA (Thomas, 13:53): while TommyBot's verification is on, the role
 //! is taken back and nobody is punished, as the quarantine hold does for a join quarantine (#170).
 //! Switching verification off lets another bot verify instead. A role counts when it opens what
 //! a verification role opens and @everyone lacks: View Channel, or Send Messages where @everyone
@@ -275,11 +276,25 @@ async fn on_roles(app: &App, e: &AuditLogEntry) -> Result<()> {
     {
         return Ok(());
     }
-    match is_bot(app, actor).await {
-        Ok(true) => {}
-        Ok(false) => return Ok(()),
+    let bot = match is_bot(app, actor).await {
+        Ok(b) => b,
         Err(e) => return failed(app, gid, target, actor, &e).await,
+    };
+    // A human may verify by hand only with a verify or quarantine permit, or as Owner, EO or TA
+    // (Thomas, 13:53): Discord's Manage Roles alone exempts nobody. Only verification roles are
+    // judged for humans; other roles are normal staff work.
+    if !bot {
+        if !added.iter().any(|r| v.roles.contains(r)) {
+            return Ok(());
+        }
+        let owner = app.guild_info(gid).await?.owner;
+        let level = app.level(gid, owner, actor).await?;
+        if level.has("verify") || level.has("quarantine") {
+            return Ok(());
+        }
     }
+    let added: Vec<_> = added.into_iter().filter(|r| bot || v.roles.contains(r)).collect();
+    // Roles given by anyone who may not verify; the name stays from when only bots counted.
     note(&BOT_GIVEN, gid, target, &added);
     // A bot may give two verification roles in two calls: wait for both, then judge them one
     // member at a time, so neither counts as proof that the member was verified already.
@@ -297,7 +312,18 @@ async fn on_roles(app: &App, e: &AuditLogEntry) -> Result<()> {
     };
     match taken {
         Ok(t) if t.is_empty() => Ok(()),
-        Ok(_) => taken_log(app, gid, target, actor, "A verification role given by another bot was taken back").await,
+        Ok(_) if bot => taken_log(app, gid, target, actor, "A verification role given by another bot was taken back").await,
+        Ok(_) => {
+            let log = Log::new("Verification", ORANGE)
+                .user("Member", target.get())
+                .user("Given by", actor.get())
+                .text(&format!("{NO} **A verification role given without a verify permit was taken back**"))
+                .line("Why", "Only TommyBot's verification, a verify or quarantine permit, or an owner or trusted admin can verify a member.");
+            if let Err(e) = send_log(app, gid.get(), LogKind::Verification, log).await {
+                tracing::warn!(?e, "verification role log failed");
+            }
+            Ok(())
+        }
         Err(e) => failed(app, gid, target, actor, &e).await,
     }
 }

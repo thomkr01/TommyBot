@@ -1061,9 +1061,22 @@ async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
 async fn a_verification_role_from_another_bot_is_taken_back() {
     let Some(t) = T::new(168).await else { return };
     server(&t, 0, json!({"verification": web_verification()})).await;
-    let (u, bot, human) = (t.base * 10 + 1, t.base * 10 + 2, t.base * 10 + 3);
-    t.set(|m| m.bots.push(bot));
-    for (actor, kept) in [(bot, vec![]), (human, vec![VERIFIED])] {
+    const MOD: u64 = 516;
+    let [u, bot, human, staff] = [1, 2, 3, 4].map(|n| t.base * 10 + n);
+    t.set(|m| {
+        m.bots.push(bot);
+        m.roles.get_mut(&t.g(0).get()).unwrap().push((MOD, false, 0, 6));
+        m.members.insert((t.g(0).get(), human), vec![]);
+        m.members.insert((t.g(0).get(), staff), vec![MOD]);
+    });
+    t.exec("INSERT INTO permits (id, guild_id, name, perms) VALUES ($1 + 1, $1, 'Mods', '{verify}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 516)")
+        .await;
+    // Another bot, and a human with only Discord's Manage Roles, lose it; a verify permit or the
+    // owner keeps it (Thomas, 13:53).
+    let owner = t.owner();
+    for (actor, kept) in [(bot, vec![]), (human, vec![]), (staff, vec![VERIFIED]), (owner, vec![VERIFIED])] {
         t.set(|m| {
             m.members.insert((t.g(0).get(), u), vec![VERIFIED]);
         });
@@ -1071,8 +1084,11 @@ async fn a_verification_role_from_another_bot_is_taken_back() {
         crate::verify::given::on_audit(&t.app, &e).await.unwrap();
         assert_eq!(roles(&t, 0, u), Some(kept), "actor {actor}");
     }
-    assert_eq!(saved(&t, 0, bot).await, None, "nobody is punished");
+    for x in [bot, human] {
+        assert_eq!(saved(&t, 0, x).await, None, "nobody is punished");
+    }
     assert_eq!(t.calls("given by another bot was taken back"), 1);
+    assert_eq!(t.calls("given without a verify permit was taken back"), 1);
     t.cleanup().await;
 }
 
