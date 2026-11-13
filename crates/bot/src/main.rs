@@ -4,7 +4,6 @@ mod app;
 mod appeals;
 mod automod;
 mod backup;
-mod bansync;
 mod catch;
 mod commands;
 mod confirm;
@@ -24,6 +23,7 @@ mod modstats;
 mod modview;
 mod native;
 mod nsfw;
+mod owner;
 mod panic;
 mod prefix;
 mod previews;
@@ -42,6 +42,8 @@ mod slash;
 mod slowmode;
 mod sticky;
 mod targets;
+#[cfg(test)]
+mod test_support;
 mod tickets;
 mod timeout_roles;
 mod verify;
@@ -75,7 +77,7 @@ async fn bot_owner(
     match found {
         Ok(a) => a.team.map(|t| t.owner_user_id).or(a.owner.map(|o| o.id)),
         Err(e) => {
-            tracing::warn!(?e, "bot owner unknown, Ban Sync cannot exempt them");
+            tracing::warn!(?e, "bot owner unknown, the Raider List cannot exempt them");
             None
         }
     }

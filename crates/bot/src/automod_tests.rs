@@ -1,7 +1,7 @@
 //! Tests of automod's message text and its punishment paths (own file to keep automod.rs short).
-//! The DB tests run only when DATABASE_URL points at a scratch Postgres, with Ban Sync's mock Discord.
+//! The DB tests run only when DATABASE_URL points at a scratch Postgres, with the mock Discord in `test_support`.
 use super::{parts::app_text, *};
-use crate::bansync::tests::T;
+use crate::test_support::T;
 use serde_json::{json, Value};
 
 /// A guild message by user 50 in channel 7, with `extra` fields on top.

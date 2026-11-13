@@ -1,10 +1,8 @@
 //! Tests of `raiders`. The DB tests run only when DATABASE_URL points at a scratch Postgres, with
-//! Ban Sync's mock Discord.
+//! the mock Discord in `test_support`.
 use super::{join::*, review::*, tasks::*, *};
-use crate::bansync::{
-    live_owner,
-    tests::{BOT_OWNER, ME, T},
-};
+use crate::owner::live_owner;
+use crate::test_support::{BOT_OWNER, ME, T};
 use anyhow::Context;
 use serde_json::Value;
 use tommybot_core::permits::Level;
@@ -747,26 +745,6 @@ async fn only_established_servers_and_human_accounts_list_by_themselves() {
     fan_out(&t.app, &job).await.unwrap();
     assert_eq!(t.raider(z).await.unwrap().0, "confirmed");
     t.forget().await;
-}
-
-#[tokio::test]
-async fn list_bans_are_never_shared_by_ban_sync() {
-    let Some(t) = T::new(60).await else { return };
-    let o = t.owner();
-    t.server(0, o, "off").await;
-    t.server(1, o, "ban").await;
-    t.ban(0, 600, "Raider List: raid");
-    crate::bansync::share_job(&t.app, t.g(0), &t.share(600, Some(ME)))
-        .await
-        .unwrap();
-    assert!(t.rows(600).await.is_empty());
-    // The same setup shares a ban made by hand.
-    t.ban(0, 601, "raiding");
-    crate::bansync::share_job(&t.app, t.g(0), &t.share(601, Some(77)))
-        .await
-        .unwrap();
-    assert_eq!(t.rows(601).await.len(), 1);
-    t.cleanup().await;
 }
 
 #[tokio::test]

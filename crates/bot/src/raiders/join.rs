@@ -22,8 +22,9 @@ use super::{action_name, cat_name, BUTTON, PREFIX, UNVERIFIED_ALERT_ONLY};
 use crate::{
     antinuke::Applied,
     app::{App, GuildCfg},
-    bansync::{self, live_owner, md},
     commands, http_err, joingate,
+    owner::live_owner,
+    reply::md,
 };
 
 /// A confirmed, unexpired entry.
@@ -104,7 +105,7 @@ pub(super) async fn exempt(
         }
         None => app.level(gid, owner, user).await?,
     };
-    Ok(bansync::exempt(&level, user, app.me, app.bot_owner).is_some())
+    Ok(exempt_why(&level, user, app.me, app.bot_owner).is_some())
 }
 
 /// On join, right after the join lock: true when the list punished the member, so the rest of
@@ -295,4 +296,27 @@ pub(super) async fn alert_member(
         alert(app, gid, user, entry).await;
     }
     Ok(())
+}
+
+/// Why the Raider List never acts on a user in this server, if it does not.
+pub(crate) fn exempt_why(
+    level: &tommybot_core::permits::Level,
+    user: Id<UserMarker>,
+    me: Id<UserMarker>,
+    bot_owner: Option<Id<UserMarker>>,
+) -> Option<&'static str> {
+    if user == me {
+        return Some("the bot itself");
+    }
+    if Some(user) == bot_owner {
+        return Some("the bot owner");
+    }
+    use tommybot_core::permits::Level;
+    match level {
+        Level::Owner => Some("server owner"),
+        Level::ExtraOwner => Some("extra owner"),
+        Level::TrustedAdmin => Some("trusted admin"),
+        l if l.whitelisted("antinuke") => Some("on the anti-nuke whitelist"),
+        _ => None,
+    }
 }

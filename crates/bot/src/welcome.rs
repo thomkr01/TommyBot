@@ -48,7 +48,6 @@ pub async fn on_guild_delete(app: &App, ev: &GuildDelete) -> Result<()> {
             .bind(ev.id.get() as i64)
             .execute(&app.pool)
             .await?;
-        crate::bansync::on_removed(app, ev.id).await?;
     }
     Ok(())
 }
@@ -71,8 +70,8 @@ pub async fn on_ready(
     .bind(&ids)
     .execute(&app.pool)
     .await?;
-    // Ban Sync groups skip servers in guild_left; their guild_owners rows stay, so an owner
-    // change while the bot was out is caught at the next GuildCreate.
+    // The guild_owners rows stay, so an owner change while the bot was out is caught at the
+    // next GuildCreate.
     // A new session (not a resume) or a restart gets no replay of the audit entries made in the
     // gap: anti-nuke reads them from the audit log (D20). The floor was noted before this task ran.
     let (todo, gone): (Vec<(u64, u64)>, Vec<_>) = floor
@@ -442,7 +441,7 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
     let GuildCreate::Available(g) = ev else {
         return Ok(());
     };
-    crate::bansync::owner_seen(app, g.id, g.owner_id).await?;
+    crate::owner::owner_seen(app, g.id, g.owner_id).await?;
     let complete = g.member_count == Some(g.members.len() as u64);
     if let Err(e) =
         crate::joingate::requarantine_missed(app, g.id, &g.members, complete, None).await

@@ -620,7 +620,7 @@ mod tests {
     /// or lockdown or past the hourly limit. Every refusal comes before a channel is made.
     #[tokio::test]
     async fn ticket_dms_are_filtered_and_new_tickets_limited() {
-        let Some(t) = crate::bansync::tests::T::new(173).await else {
+        let Some(t) = crate::test_support::T::new(173).await else {
             return;
         };
         const CAT: u64 = 600;
@@ -719,7 +719,7 @@ mod tests {
                     .unwrap();
             }
         };
-        case(crate::bansync::tests::ME, Some("anti-nuke"), 1).await;
+        case(crate::test_support::ME, Some("anti-nuke"), 1).await;
         case(9, Some("spamming"), 2).await;
         send_mail(&t.app, &dm("let me out"), gid).await.unwrap();
         assert_eq!(said("were given the reason"), 1);

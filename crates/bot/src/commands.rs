@@ -255,7 +255,7 @@ pub async fn apply_dm(
         appeal,
     };
     // A hackban targets ids that left the server: a DM per raid id would only cost DM_WAIT each.
-    let dm = (reply::wants_dm(flags.dm, &cfg.misc) && !flags.hack && !flags.no_dm)
+    let dm = (reply::wants_dm(flags.dm, &cfg.misc) && !flags.hack)
         .then(|| reply::tell(app, gid, target, notice));
     let audit = audit_reason(reason, actor_id);
     let act = async {

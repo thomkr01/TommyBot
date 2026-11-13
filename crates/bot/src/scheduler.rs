@@ -143,7 +143,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
             send_log(app, gid.get(), LogKind::Server, log).await?;
         }
         "appeal_accept" => crate::appeals::accept_job(app, gid, &job.payload).await?,
-        "owner_check" => crate::bansync::owner_check_job(app, gid).await?,
+        "owner_check" => crate::owner::owner_check_job(app, gid).await?,
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "confirm_expire" => crate::confirm::run_expire(app, &job.payload).await?,
         "raid_punish" => crate::joingate::punish_job(app, gid, &job.payload).await?,
@@ -195,11 +195,6 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         "restore_main_roles" => crate::timeout_roles::restore(app, gid, &job.payload).await?,
         crate::sticky::KIND => crate::sticky::run_job(app, gid, &job.payload).await?,
         "slowmode_off" => crate::slowmode::off(app, gid, &job.payload).await?,
-        "ban_sync_share" => crate::bansync::share_job(app, gid, &job.payload).await?,
-        "ban_sync_copy" => crate::bansync::copy_job(app, gid, &job.payload).await?,
-        "ban_sync_lift" => crate::bansync::lift_job(app, gid, &job.payload).await?,
-        "ban_sync_import" => crate::bansync::import_job(app, &job.payload).await?,
-        "ban_sync_send_rest" => crate::bansync::send_rest_job(app, &job.payload).await?,
         "raider_check" => crate::raiders::check_job(app, gid, &job.payload).await?,
         "raider_scan" => crate::raiders::scan_job(app, gid).await?,
         "raider_lift" => crate::raiders::lift_job(app, gid, &job.payload).await?,
@@ -223,14 +218,12 @@ pub(crate) async fn raid_report(
     }
 }
 
-const ONE_TARGET: [&str; 9] = [
+const ONE_TARGET: [&str; 7] = [
     "unban",
     "raid_punish",
     "timeout_renew",
     "delete_message",
     "slowmode_off",
-    "ban_sync_copy",
-    "ban_sync_lift",
     "raider_check",
     "raider_lift",
 ];
@@ -295,9 +288,6 @@ async fn round(app: &Arc<App>, heavy: bool) {
                         let last = job.attempts >= jobs::MAX_ATTEMPTS;
                         if last {
                             give_up_log(app, &job, &e).await;
-                            if job.kind == "ban_sync_copy" {
-                                crate::bansync::copy_gave_up(app, &job, &e).await;
-                            }
                             if job.kind == "raider_lift" {
                                 crate::raiders::lift_gave_up(app, &job, &e).await;
                             }
@@ -360,3 +350,11 @@ pub async fn run_restore(app: Arc<App>) {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+pub(crate) fn id_of(p: &Value, k: &str) -> Option<u64> {
+    p[k].as_u64().or_else(|| p[k].as_str()?.parse().ok())
+}
+
+pub(crate) fn need(p: &Value, k: &str) -> Result<u64> {
+    id_of(p, k).with_context(|| format!("job payload has no {k}"))
+}

@@ -172,14 +172,6 @@ const CMDS: &[Cmd] = &[
         "jr 10 ?set 1",
     ),
     (
-        "bansync",
-        &[],
-        "*",
-        "bansync",
-        "Ban Sync settings, your server group and the last copies",
-        "",
-    ),
-    (
         "raiderlist",
         &[],
         "*",
@@ -724,7 +716,6 @@ const CATEGORIES: [(&str, &[&str]); 4] = [
             "joingate",
             "joinraid",
             "verification",
-            "bansync",
             "raiderlist",
             "misc",
             "whitelist",
