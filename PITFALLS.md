@@ -11,6 +11,9 @@ Dashboard UI (Leptos) details are in [crates/dashboard/ui/PITFALLS.md](crates/da
 **A permit guard ran only with anti-nuke on.** (live test 11-13)
 `guard_permit_roles` took back a permit role given by someone without the right to give it, but `on_audit_as` returned before it when anti-nuke was off, so with anti-nuke off a Discord Manage Roles holder could hand out a permit. *Avoid:* with anti-nuke off the guard still runs, takes the role back and punishes nobody (`punish = false`). Rules that come from "only permits act" (Thomas 11-13) must not hang on a module switch.
 
+**The other undo guards also ran only with anti-nuke on.** (plan permits-only-2, 11-13)
+`hold`, `hold_overwrite`, `guard_lock` and `guard_perms` sat after the same early return, so with anti-nuke off a quarantined member could be given roles back and a lock or strict mode was not enforced. A weak permit role was only logged, never taken back. *Avoid:* `on_audit_as` runs every guard with `punish = cfg.antinuke.enabled`; with `punish` false a guard undoes and logs "Anti-nuke is off, so nobody was punished" instead of `quarantine_and_revert`, and only the counting stops. `handled_audit` now records entries with anti-nuke off too, so a catch-up does not undo an entry twice. `verify::given::hold_takes_it` dropped its anti-nuke check with it, or verification and the hold would both act on one grant. Still gated on anti-nuke, correctly: `voice_nuke::fetch` (counting only).
+
 **A command with no valid target said it succeeded.** (live test 11-13)
 `t!warn @role` resolved no member and still replied "All members were warned!". *Avoid:* the shared target loop in `commands.rs` returns early with no targets and asks for a member when no name failed (a failed name was already answered). It is the one loop every mod command uses.
 

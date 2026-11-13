@@ -177,15 +177,9 @@ async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()>
         return Ok(());
     }
     let cfg = app.cfg(gid.get()).await?;
-    if !cfg.antinuke.enabled {
-        // Thomas 2026-11-13 22:49: a permit role still comes only from Owner, EO or TA with
-        // anti-nuke off (Discord's Manage Roles gives no more power than a member has); it is
-        // taken back, nobody is punished.
-        if e.action_type == A::MemberRoleUpdate {
-            return guard_permit_roles(app, e, actor, false).await;
-        }
-        return Ok(());
-    }
+    // Thomas 2026-11-13 22:49 and 23:35: with anti-nuke off the guards below still undo what
+    // only permits may do (Discord rights give no power), but nobody is punished or counted.
+    let punish = cfg.antinuke.enabled;
     // Each check runs whatever an earlier one returned: an error in one (a REST or DB hiccup)
     // must not skip the lock set-back or the count, which would work as "exempt" (D21, D79).
     // The first error is returned at the end.
@@ -205,32 +199,35 @@ async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()>
     ) {
         // Runs with Quarantine Hold off too: it then only keeps unverified joiners held.
         if e.action_type == A::MemberRoleUpdate {
-            keep(hold(app, e, actor).await);
+            keep(hold(app, e, actor, punish).await);
         }
         // A role rename still counts below.
-        keep(guard_perms(app, &cfg, e, actor).await);
+        keep(guard_perms(app, &cfg, e, actor, punish).await);
         if e.action_type == A::MemberRoleUpdate {
-            keep(guard_permit_roles(app, e, actor, true).await);
+            keep(guard_permit_roles(app, e, actor, punish).await);
         }
     }
     if matches!(
         e.action_type,
         A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete
     ) {
-        keep(hold_overwrite(app, e, actor).await);
+        keep(hold_overwrite(app, e, actor, punish).await);
     }
     if matches!(
         e.action_type,
         A::RoleUpdate | A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete
     ) {
-        keep(guard_lock(app, &cfg, e, actor).await);
+        keep(guard_lock(app, &cfg, e, actor, punish).await);
     }
     match e.action_type {
         A::MemberUpdate | A::MemberKick | A::MemberBanAdd if cfg.antinuke.quarantine_hold => {
-            keep(hold(app, e, actor).await)
+            keep(hold(app, e, actor, punish).await)
         }
-        A::RoleCreate => keep(guard_perms(app, &cfg, e, actor).await),
+        A::RoleCreate => keep(guard_perms(app, &cfg, e, actor, punish).await),
         _ => {}
+    }
+    if !punish {
+        return failed;
     }
     let counted = count_audit(app, &cfg, gid, actor, e, replayed).await;
     counted.and(failed)
@@ -541,12 +538,13 @@ fn add_heat(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>, heat: u32, d
 }
 
 /// Strict mode, public role and channel permission guards, and the vanity guard.
-/// Undoes the change where the bot can, then quarantines the actor.
+/// Undoes the change where the bot can, then quarantines the actor if `punish`.
 async fn guard_perms(
     app: &App,
     cfg: &GuildCfg,
     e: &AuditLogEntry,
     actor: Id<UserMarker>,
+    punish: bool,
 ) -> Result<()> {
     let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
         return Ok(());
@@ -715,6 +713,9 @@ async fn guard_perms(
     if unsure {
         return unsure_log(app, gid, actor, None, why).await;
     }
+    if !punish {
+        return undone_log(app, gid, actor, None, why, OFF).await;
+    }
     quarantine_and_revert(app, gid, actor, why).await
 }
 
@@ -758,23 +759,8 @@ async fn guard_permit_roles(
             true
         }
     };
-    let (permit, weak): (Vec<_>, Vec<_>) = roles.into_iter().partition(|r| r.1);
-    if permit.is_empty() {
-        // A weak permit (a link whitelist, say): reaction-role and level bots hand these out.
-        let names: Vec<String> = weak.iter().map(|r| format!("<@&{}>", r.0)).collect();
-        let log = Log::new("Anti Nuke", ALERT)
-            .user("Responsible", actor.get())
-            .user("Member", target.get())
-            .text("Gave a member a role that carries a permit")
-            .line("Roles", &names.join(", "))
-            .line(
-                "Action",
-                "logged only: the permit holds no moderation, dashboard or anti-nuke rights",
-            );
-        return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
-    }
     // A failed undo must not spare the actor.
-    for &(r, _) in &permit {
+    for &(r, _) in &roles {
         let undo = app
             .http
             .remove_guild_member_role(gid, target.cast(), Id::new(r as u64))
@@ -790,8 +776,16 @@ async fn guard_permit_roles(
         let what = "gave a member a role that carries a permit";
         return unsure_log(app, gid, actor, Some(target.cast()), what).await;
     }
-    if !punish {
-        let names: Vec<String> = permit.iter().map(|r| format!("<@&{}>", r.0)).collect();
+    // Only weak permits (a link whitelist, say) are taken back too, but punish nobody: they hold
+    // no moderation, dashboard or anti-nuke rights (Thomas, 11-13; bots get no exception).
+    let weak = !roles.iter().any(|r| r.1);
+    if !punish || weak {
+        let names: Vec<String> = roles.iter().map(|r| format!("<@&{}>", r.0)).collect();
+        let why = if !punish {
+            "Anti-nuke is off"
+        } else {
+            "The permits are weak"
+        };
         let log = Log::new("Anti Nuke", ALERT)
             .user("Responsible", actor.get())
             .user("Member", target.get())
@@ -799,7 +793,7 @@ async fn guard_permit_roles(
             .line("Roles", &names.join(", "))
             .line(
                 "Action",
-                "taken back: only an Owner, Extra Owner or Trusted Admin gives permit roles. Anti-nuke is off, so nobody was punished",
+                &format!("taken back: only an Owner, Extra Owner or Trusted Admin gives permit roles. {why}, so nobody was punished"),
             );
         return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
     }
@@ -890,12 +884,14 @@ fn lock_target(
 }
 
 /// During a lock, a change to a locked role or overwrite is set back (unless an Owner, Extra
-/// Owner or Trusted Admin made it), logged, and counted on the Channel or Role Updates card.
+/// Owner or Trusted Admin made it), logged, and counted on the Channel or Role Updates card
+/// if `punish` (anti-nuke on).
 async fn guard_lock(
     app: &App,
     cfg: &GuildCfg,
     e: &AuditLogEntry,
     actor: Id<UserMarker>,
+    punish: bool,
 ) -> Result<()> {
     let Some(gid) = e.guild_id else {
         return Ok(());
@@ -976,7 +972,7 @@ async fn guard_lock(
         tracing::warn!(?err, "lock change log failed");
     }
     // A rename is already counted as a Role Update by `watched`.
-    if immune || unsure || watched(e) == Some(action) {
+    if !punish || immune || unsure || watched(e) == Some(action) {
         return Ok(());
     }
     let exempt = app
@@ -2439,8 +2435,9 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
     Ok(())
 }
 
-/// Someone changed a quarantined member's roles: quarantine them too and undo the change.
-async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+/// Someone changed a quarantined member's roles: quarantine them too (if `punish`) and undo the
+/// change.
+async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>, punish: bool) -> Result<()> {
     let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
         return Ok(());
     };
@@ -2479,7 +2476,11 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         .await;
     }
     if e.action_type != A::MemberRoleUpdate {
-        return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
+        let what = "touched a quarantined member";
+        if !punish {
+            return undone_log(app, gid, actor, Some(target), what, OFF).await;
+        }
+        return quarantine_and_revert(app, gid, actor, what).await;
     }
     // An autorole bot right after a rejoin's quarantine: undone, not punished (D15, as 11-11).
     // Any number of bots and changes in the grace, but only plain roles: a dangerous or permit
@@ -2490,6 +2491,11 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     {
         undo_role_change(app, &cfg, gid, target).await;
         return Ok(());
+    }
+    if !punish {
+        undo_role_change(app, &cfg, gid, target).await;
+        let what = "changed the roles of a quarantined member";
+        return undone_log(app, gid, actor, Some(target), what, OFF).await;
     }
     // A failed undo must not spare the actor, nor wait for its retry.
     let undone = back_to_quarantine(app, &cfg, gid, target).await;
@@ -2509,6 +2515,7 @@ pub(crate) async fn hold_overwrite(
     app: &App,
     e: &AuditLogEntry,
     actor: Id<UserMarker>,
+    punish: bool,
 ) -> Result<()> {
     let (Some(gid), Some(channel), Some(o)) = (e.guild_id, e.target_id, e.options.as_ref()) else {
         return Ok(());
@@ -2581,11 +2588,14 @@ pub(crate) async fn hold_overwrite(
     if on_join || !cfg.antinuke.quarantine_hold {
         return Ok(());
     }
+    let what = "gave a quarantined member channel access";
     if unsure {
-        let what = "gave a quarantined member channel access";
         return unsure_log(app, gid, actor, Some(user), what).await;
     }
-    quarantine_and_revert(app, gid, actor, "gave a quarantined member channel access").await
+    if !punish {
+        return undone_log(app, gid, actor, Some(user), what, OFF).await;
+    }
+    quarantine_and_revert(app, gid, actor, what).await
 }
 
 /// Whether the hold spares `actor` (quarantine whitelist), and whether that could not be read.
@@ -2620,14 +2630,27 @@ async fn unsure_log(
     target: Option<Id<UserMarker>>,
     what: &str,
 ) -> Result<()> {
+    let why = "undone where it can be; not quarantined: their permits could not be read";
+    undone_log(app, gid, actor, target, what, why).await
+}
+
+/// The Action line of a guarded change undone with anti-nuke off.
+const OFF: &str = "undone where it can be. Anti-nuke is off, so nobody was punished";
+
+/// A guarded change undone without punishment, `action` saying why.
+async fn undone_log(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    target: Option<Id<UserMarker>>,
+    what: &str,
+    action: &str,
+) -> Result<()> {
     let mut log = Log::new("Anti Nuke", ALERT).user("Responsible", actor.get());
     if let Some(t) = target {
         log = log.user("Member", t.get());
     }
-    let log = log.text(&format!("**{what}**")).line(
-        "Action",
-        "undone where it can be; not quarantined: their permits could not be read",
-    );
+    let log = log.text(&format!("**{what}**")).line("Action", action);
     send_log(app, gid.get(), LogKind::AntiNuke, log).await
 }
 

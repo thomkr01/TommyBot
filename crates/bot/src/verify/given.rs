@@ -571,7 +571,7 @@ async fn on_overwrite(app: &App, e: &AuditLogEntry) -> Result<()> {
 
 /// The quarantine hold takes back every role a held member is given, except from a Quarantine
 /// Whitelist actor. It acts on a join quarantine always and on any other only with Quarantine
-/// Hold on; everything else is judged here.
+/// Hold on, with anti-nuke on or off (11-13); everything else is judged here.
 async fn hold_takes_it(
     app: &App,
     cfg: &GuildCfg,
@@ -579,9 +579,6 @@ async fn hold_takes_it(
     target: Id<UserMarker>,
     actor: Id<UserMarker>,
 ) -> Result<bool> {
-    if !cfg.antinuke.enabled {
-        return Ok(false);
-    }
     let Some(on_join) = crate::antinuke::quarantine_kind(app, gid, target).await? else {
         return Ok(false);
     };

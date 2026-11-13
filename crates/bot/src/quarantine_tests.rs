@@ -1819,3 +1819,124 @@ async fn anti_nuke_off_still_takes_back_a_permit_role() {
     assert_eq!(saved(&t, 0, actor).await, None);
     t.cleanup().await;
 }
+
+/// Thomas 2026-11-13: a role with only weak permits is taken back too, with anti-nuke on and off,
+/// and nobody is punished.
+#[tokio::test]
+async fn a_weak_permit_role_is_taken_back_unpunished() {
+    let Some(t) = T::new(280).await else { return };
+    for (i, on) in [(0, true), (1, false)] {
+        let an = json!({"enabled": on, "quarantine_role": Q.to_string()});
+        server(&t, i, json!({ "antinuke": an })).await;
+    }
+    t.exec("INSERT INTO permits (id, guild_id, name, perms) VALUES ($1 + 1, $1, 'Cases', '{cases}'), ($1 + 2, $1 + 1, 'Cases', '{cases}')")
+        .await;
+    // 501 = ROLE
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 501), ($1 + 2, $1 + 1, 501)")
+        .await;
+    let (actor, member) = (t.base * 10 + 1, t.base * 10 + 2);
+    for i in [0, 1] {
+        let g = t.g(i);
+        t.set(|m| {
+            m.members.insert((g.get(), actor), vec![]);
+            m.members.insert((g.get(), member), vec![ROLE]);
+        });
+        let mut e = role_added(&t, actor, member, ROLE);
+        e.guild_id = Some(g);
+        crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+        assert_eq!(roles(&t, i, member), Some(vec![]), "{i}: taken back");
+        assert_eq!(roles(&t, i, actor), Some(vec![]), "{i}: not quarantined");
+        assert_eq!(saved(&t, i, actor).await, None);
+    }
+    t.cleanup().await;
+}
+
+/// An audit entry: `actor` gave `role` Administrator.
+fn admin_given(t: &T, actor: u64, role: u64) -> AuditLogEntry {
+    serde_json::from_value(json!({
+        "id": "3", "action_type": 31, "guild_id": t.g(0).to_string(), "target_id": role.to_string(),
+        "user_id": actor.to_string(), "reason": null,
+        "changes": [{"key": "permissions", "old_value": "0", "new_value": "8"}],
+    }))
+    .unwrap()
+}
+
+fn role_perms(t: &T, role: u64) -> u64 {
+    t.mock.lock().unwrap().roles[&t.g(0).get()]
+        .iter()
+        .find(|r| r.0 == role)
+        .unwrap()
+        .2
+}
+
+/// Thomas 2026-11-13 (plan item 3): with anti-nuke off, a quarantined member's role change is
+/// undone, and the actor is not quarantined.
+#[tokio::test]
+async fn anti_nuke_off_still_holds_a_quarantined_member() {
+    let Some(t) = T::new(281).await else { return };
+    let an = json!({"enabled": false, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let (u, actor) = (t.base * 10 + 1, t.base * 10 + 2);
+    row(&t, 0, u, &[ROLE as i64]).await;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![Q, AUTOROLE]);
+        m.members.insert((t.g(0).get(), actor), vec![ROLE]);
+    });
+    let e = role_added(&t, actor, u, AUTOROLE);
+    crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+    assert_eq!(roles(&t, 0, u), Some(vec![Q]), "the role is taken back");
+    assert_eq!(roles(&t, 0, actor), Some(vec![ROLE]), "not quarantined");
+    assert_eq!(saved(&t, 0, actor).await, None);
+    t.cleanup().await;
+}
+
+/// Thomas 2026-11-13 (plan item 3): with anti-nuke off, a change to a locked role is set back.
+#[tokio::test]
+async fn anti_nuke_off_still_sets_a_lock_back() {
+    let Some(t) = T::new(282).await else { return };
+    let an = json!({"enabled": false, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let actor = t.base * 10 + 1;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), actor), vec![]);
+        m.roles.get_mut(&t.g(0).get()).unwrap()[2].2 = 8; // ROLE, as the actor left it
+    });
+    let lock = tommybot_automod::lockdown::Snapshot {
+        kind: Some(tommybot_automod::lockdown::LockKind::Role),
+        role_perms: vec![(ROLE, 8)],
+        ..Default::default()
+    };
+    tommybot_automod::store::save_lock(&t.app.pool, t.g(0).get(), &lock)
+        .await
+        .unwrap();
+    crate::lockdown::forget_locks(t.g(0).get());
+    let r = crate::antinuke::on_audit(&t.app, &admin_given(&t, actor, ROLE)).await;
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id = $1")
+        .await;
+    crate::lockdown::forget_locks(t.g(0).get());
+    r.unwrap();
+    assert_eq!(role_perms(&t, ROLE), 0, "set back to what the lock left");
+    assert_eq!(roles(&t, 0, actor), Some(vec![]), "not quarantined");
+    t.cleanup().await;
+}
+
+/// Thomas 2026-11-13, answer C: with anti-nuke off, strict mode still undoes a dangerous grant,
+/// and the actor is not quarantined.
+#[tokio::test]
+async fn anti_nuke_off_strict_mode_undoes_unpunished() {
+    let Some(t) = T::new(283).await else { return };
+    let an = json!({"enabled": false, "strict_mode": true, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let actor = t.base * 10 + 1;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), actor), vec![ROLE]);
+        m.roles.get_mut(&t.g(0).get()).unwrap()[2].2 = 8;
+    });
+    crate::antinuke::on_audit(&t.app, &admin_given(&t, actor, ROLE))
+        .await
+        .unwrap();
+    assert_eq!(role_perms(&t, ROLE), 0, "the grant is undone");
+    assert_eq!(roles(&t, 0, actor), Some(vec![ROLE]), "not quarantined");
+    assert_eq!(saved(&t, 0, actor).await, None);
+    t.cleanup().await;
+}

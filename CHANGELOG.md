@@ -9,6 +9,8 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 
 ### Fixed
 - With anti-nuke off, a permit role given by someone who is not an Owner, Extra Owner or Trusted Admin is still taken back; nobody is punished.
+- A role with only weak permits (cases, reports, notes, tickets, mod stats, word, link and report whitelists) given by someone who is not an Owner, Extra Owner or Trusted Admin is now taken back too, with anti-nuke on or off. Nobody is punished. Bots get no exception, so reaction-role and level bots can no longer give roles that carry a permit.
+- With anti-nuke off, the quarantine hold, the lock guard and the permission guards (strict mode, public roles, channel permissions, vanity URL, as switched on) still undo the change and log it. Nobody is quarantined, and nothing is counted.
 - A mod command with no member target (for example a role mention) no longer replies "All members were warned!".
 - A Discord AutoMod rule created or changed by someone without a permit triggers no TommyBot action until an Owner, Extra Owner, Trusted Admin or a dashboard-edit permit changes it. The change is logged. Migration 3925.
 - TommyBot acts on a Discord AutoMod rule only while the rule is as an Owner, Extra Owner, Trusted Admin or a dashboard-edit permit approved it, also when the bot cannot read the audit log. A dashboard save, a trusted change in Discord and the bot's own keyword sync approve it. Rules that exist at the update are approved once, unless the audit log showed a change without a permit. Migration 3926.
