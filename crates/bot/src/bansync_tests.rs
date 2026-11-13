@@ -138,6 +138,8 @@ pub(crate) struct Mock {
     pub(crate) fail_message_5xx: bool,
     /// Channel deletes fail with 500.
     pub(crate) fail_delete_channel: bool,
+    /// Audit log entries any audit log lookup returns.
+    pub(crate) audit: Vec<Value>,
     pub(crate) log: Vec<String>,
 }
 
@@ -267,6 +269,12 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, j.to_string())
         }
         ("DELETE", ["channels", _]) if m.fail_delete_channel => err(500, 0),
+        ("GET", ["guilds", _, "audit-logs"]) => {
+            let log = json!({"audit_log_entries": m.audit, "users": [], "webhooks": [],
+                "integrations": [], "threads": [], "application_commands": [],
+                "auto_moderation_rules": [], "guild_scheduled_events": []});
+            (200, log.to_string())
+        }
         ("DELETE", ["guilds", g, "members", u]) => match m.members.remove(&(n(g), n(u))) {
             Some(_) => (204, String::new()),
             None => err(404, 10007),

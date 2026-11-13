@@ -10,6 +10,7 @@ use twilight_http::request::channel::reaction::RequestReactionType;
 use twilight_model::{
     channel::{message::EmojiReactionType, Channel},
     gateway::payload::incoming::ReactionAdd,
+    guild::audit_log::{AuditLogChange, AuditLogEntry, AuditLogEventType},
     id::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
         Id,
@@ -214,8 +215,9 @@ pub async fn on_thread(app: &App, t: &Channel) -> Result<()> {
     heat_up(app, &cfg, gid, owner, w.base, "Thread spam").await
 }
 
-/// A rename can add a word after the create passed. Only logged: an update names no actor and also
-/// comes for a lock, tags or pins, and a delete would lose the whole thread.
+/// A rename can add a word after the create passed. An update names no actor and also comes for a
+/// lock, tags or pins, so the thread is deleted only when the audit log shows its owner renamed it;
+/// otherwise (a mod's rename, a word added to the list later) it is only logged.
 pub async fn on_thread_update(app: &App, t: &Channel) -> Result<()> {
     let (Some(gid), Some(parent)) = (t.guild_id, t.parent_id) else {
         return Ok(());
@@ -258,6 +260,7 @@ async fn thread_name_hit(
     if !delete && !FLAGGED.first(named) {
         return Ok(true);
     }
+    let delete = delete || renamed_by_owner(app, gid, t.id, name, owner).await;
     let title = if delete {
         crate::http_err::best_effort(app.http.delete_channel(t.id).await, "automod thread delete");
         "Thread deleted"
@@ -271,6 +274,54 @@ async fn thread_name_hit(
         .line("Name", &format!("`{}`", name.replace('`', "'")));
     send_log(app, gid.get(), LogKind::AutoMod, log).await?;
     Ok(true)
+}
+
+/// The audit log shows `owner` renamed `thread` to `name` within the last minute. Tried again
+/// shortly, since the entry can come after the event; a failed lookup counts as no.
+async fn renamed_by_owner(
+    app: &App,
+    gid: Id<GuildMarker>,
+    thread: Id<ChannelMarker>,
+    name: &str,
+    owner: Id<UserMarker>,
+) -> bool {
+    for wait in [0, 1_500] {
+        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        let log = app
+            .http
+            .audit_log(gid)
+            .action_type(AuditLogEventType::ThreadUpdate)
+            .limit(10)
+            .await;
+        let Ok(log) = (match log {
+            Ok(r) => r.model().await.map_err(anyhow::Error::from),
+            Err(e) => Err(e.into()),
+        }) else {
+            return false;
+        };
+        if owner_renamed(&log.entries, (thread, name, owner), now_ms()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn owner_renamed(
+    entries: &[AuditLogEntry],
+    (thread, name, owner): (Id<ChannelMarker>, &str, Id<UserMarker>),
+    now: i64,
+) -> bool {
+    entries.iter().any(|e| {
+        // Snowflake time: an older rename to this name is no proof of this update.
+        let at = (e.id.get() >> 22) as i64 + 1_420_070_400_000;
+        e.target_id.is_some_and(|t| t.get() == thread.get())
+            && e.user_id == Some(owner)
+            && now - at < 60_000
+            && e.changes.iter().any(|c| {
+                matches!(c, AuditLogChange::Name { new: Some(n), old }
+                    if n == name && old.as_deref() != Some(name))
+            })
+    })
 }
 
 #[cfg(test)]
@@ -380,6 +431,54 @@ mod tests {
         // A later update (lock, tags, pins) with the same name logs nothing new.
         let _ = on_thread_update(&t.app, &thread("ｓｃａｍ here")).await;
         assert_eq!(t.calls("/channels/55"), logged);
+        t.cleanup().await;
+    }
+
+    /// A rename to a blacklisted name is deleted when the audit log shows the owner did it just now;
+    /// a mod's rename, or an old entry, is only logged.
+    #[tokio::test]
+    async fn an_owner_s_rename_deletes_the_thread() {
+        let Some(t) = T::new(20).await else { return };
+        let gid = t.g(0);
+        let cfg = json!({"automod": {"enabled": true,
+            "filters": {"words": {"filter": {"enabled": true}, "strict": ["scam"]}}}});
+        t.server_config(0, t.owner(), cfg).await;
+        let (owner, modr) = (t.base + 5, t.base + 6);
+        let thread = |id: u64, name: &str| -> Channel {
+            serde_json::from_value(json!({
+                "id": id.to_string(), "type": 11, "guild_id": gid.to_string(), "parent_id": "7",
+                "owner_id": owner.to_string(), "name": name,
+                "thread_metadata": {"archived": false, "auto_archive_duration": 60,
+                    "archive_timestamp": "2026-01-01T00:00:00.000000+00:00", "locked": false},
+            }))
+            .unwrap()
+        };
+        let entry = |thread: u64, by: u64, ago_ms: i64| {
+            let id = ((now_ms() - ago_ms - 1_420_070_400_000) as u64) << 22;
+            json!({"id": id.to_string(), "action_type": 111, "target_id": thread.to_string(),
+                "user_id": by.to_string(), "guild_id": gid.to_string(),
+                "changes": [{"key": "name", "old_value": "hello", "new_value": "scam here"}]})
+        };
+        t.set(|m| {
+            m.audit = vec![
+                entry(41, owner, 0),
+                entry(42, modr, 0),
+                entry(43, owner, 600_000),
+            ]
+        });
+        let _ = on_thread_update(&t.app, &thread(42, "scam here")).await;
+        let _ = on_thread_update(&t.app, &thread(43, "scam here")).await;
+        assert_eq!(
+            t.calls("DELETE /channels/"),
+            0,
+            "a mod's or an old rename is kept"
+        );
+        let _ = on_thread_update(&t.app, &thread(41, "scam here")).await;
+        assert_eq!(
+            t.calls("DELETE /channels/41"),
+            1,
+            "the owner's rename is deleted"
+        );
         t.cleanup().await;
     }
 
