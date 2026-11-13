@@ -809,6 +809,20 @@ pub async fn command(
 mod tests {
     use super::*;
 
+    /// No DB needed, so CI catches a twilight upgrade that drops the vendored patch: a role read
+    /// from Discord keeps bits twilight does not know (1<<48, Set Voice Channel Status).
+    #[test]
+    fn twilight_keeps_unknown_permission_bits() {
+        let bits = (1u64 << 48) | (1 << 47) | 8;
+        let role: twilight_model::guild::Role = serde_json::from_value(serde_json::json!({
+            "id": "5", "name": "r", "color": 0, "colors": {"primary_color": 0}, "hoist": false,
+            "managed": false, "mentionable": false, "permissions": bits.to_string(),
+            "position": 1, "flags": 0
+        }))
+        .unwrap();
+        assert_eq!(role.permissions.bits(), bits);
+    }
+
     /// Runs only when DATABASE_URL points at a scratch Postgres. Lifting a lock drops its timer
     /// (not another lock's) and tells panic mode the role lock is no longer its own.
     #[tokio::test]

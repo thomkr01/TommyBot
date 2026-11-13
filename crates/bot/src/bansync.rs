@@ -237,6 +237,11 @@ async fn owned(
     let Some(reason) = ban else {
         return Ok(false);
     };
+    // A second ban keeps the first ban's reason, so a staff ban over a done copy (a TommyBot
+    // ban or tempban case by someone else since) leaves the reason as it was: it is theirs now.
+    if row.state == "banned" && hand_ban_since(app, (to, user, src)).await? {
+        return Ok(false);
+    }
     if ours(reason, src) {
         return Ok(true);
     }
@@ -244,6 +249,24 @@ async fn owned(
         return Ok(false);
     }
     Ok(temp_end(app, to, user).await? != row.temp_end)
+}
+
+/// A ban or tempban case for the user in the receiving server, by someone other than the bot,
+/// newer than the copy (its `done_at`). The copy's own case is the bot's, or a Ban here click's,
+/// which is written before the row becomes banned.
+async fn hand_ban_since(app: &App, (to, user, src): Key) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM ban_sync_links l JOIN cases c
+             ON c.guild_id = l.guild_id AND c.user_id = l.user_id
+         WHERE l.guild_id = $1 AND l.user_id = $2 AND l.source_guild = $3
+           AND c.kind IN ('ban', 'tempban') AND c.mod_id <> $4 AND c.created_at > l.done_at)",
+    )
+    .bind(to.get() as i64)
+    .bind(user.get() as i64)
+    .bind(src.get() as i64)
+    .bind(app.me.get() as i64)
+    .fetch_one(&app.pool)
+    .await?)
 }
 
 /// Remembers the local temp ban a copy is about to be laid over (`owned`).
@@ -399,13 +422,17 @@ fn outlasts(copy: Option<i64>, local: Option<i64>) -> bool {
     local.is_some_and(|l| copy.is_none_or(|c| c > l))
 }
 
-/// The end of a TommyBot temp ban: its pending unban job.
+/// The end of a TommyBot temp ban: its pending unban job, also while a failed try holds its lease
+/// (`owned` must not read a leased job as gone).
 async fn temp_end(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<Option<i64>> {
-    Ok(
-        jobs::of_user(&app.pool, gid.get() as i64, "unban", user.get())
-            .await?
-            .map(|j| j.1),
+    Ok(sqlx::query_scalar(
+        "SELECT extract(epoch FROM run_at)::bigint FROM scheduled_jobs
+         WHERE guild_id = $1 AND kind = 'unban' AND payload->>'user' = $2 ORDER BY run_at LIMIT 1",
     )
+    .bind(gid.get() as i64)
+    .bind(user.get().to_string())
+    .fetch_optional(&app.pool)
+    .await?)
 }
 
 /// The owner from Discord, not the 5-minute cache; None when the bot cannot see the server.
@@ -662,8 +689,12 @@ pub async fn share_job(app: &App, src: Id<GuildMarker>, p: &Value) -> Result<()>
 }
 
 /// Moves a row on from one of `from`; false when another run already did.
-async fn mark(
-    app: &App,
+async fn mark(app: &App, key: Key, from: &[&str], state: &str, why: Option<&str>) -> Result<bool> {
+    mark_in(&app.pool, key, from, state, why).await
+}
+
+async fn mark_in<'e>(
+    db: impl sqlx::PgExecutor<'e>,
     (to, user, src): Key,
     from: &[&str],
     state: &str,
@@ -679,7 +710,7 @@ async fn mark(
     .bind(from)
     .bind(state)
     .bind(why)
-    .execute(&app.pool)
+    .execute(db)
     .await?
     .rows_affected()
         == 1)
@@ -1071,18 +1102,23 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
         return mark(app, key, LIVE, "skipped", why).await.map(drop);
     }
     if let Some(end) = row.temp_end.filter(|e| *e > now_secs()) {
-        // Queued first, then the copy's own unban job goes, so a restart in between keeps an end.
-        let job = jobs::enqueue(
-            &app.pool,
-            to.get() as i64,
-            "unban",
-            json!({"user": user.get()}),
-            end,
-        );
-        let job = job.await?;
-        crate::scheduler::forget_jobs(app, to, user.get(), &["unban"], Some(job)).await;
-        let why = Some("the local temp ban runs on");
-        return mark(app, key, LIVE, "lifted", why).await.map(drop);
+        // One transaction: the old end's job, the copy's own unban job gone, and the row lifted.
+        let mut tx = app.pool.begin().await?;
+        let g = to.get() as i64;
+        let job = jobs::enqueue(&mut *tx, g, "unban", json!({"user": user.get()}), end).await?;
+        jobs::cancel_user(&mut *tx, g, &["unban"], user.get(), Some(job)).await?;
+        if mark_in(
+            &mut *tx,
+            key,
+            LIVE,
+            "lifted",
+            Some("the local temp ban runs on"),
+        )
+        .await?
+        {
+            tx.commit().await?;
+        }
+        return Ok(());
     }
     let why = format!("Ban Sync: lifted in {} ({src})", md(name));
     let audit = commands::audit_reason(Some(&why), app.me);
