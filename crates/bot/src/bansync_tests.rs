@@ -144,6 +144,8 @@ pub(crate) struct Mock {
     pub(crate) fail_audit: u32,
     /// Permission overwrites by channel, as a channel lookup returns them.
     pub(crate) overwrites: HashMap<u64, Vec<Value>>,
+    /// The guild an `overwrites` channel answers with; none when not set.
+    pub(crate) channel_guild: HashMap<u64, u64>,
     /// Channels the mock can GET: id -> (guild, whether @everyone may view it).
     pub(crate) text_channels: HashMap<u64, (u64, bool)>,
     /// Member role-list edits fail with 500.
@@ -335,10 +337,11 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
         // Only channels a test gave overwrites; others answer 404 as before.
         ("GET", ["channels", c]) if m.overwrites.contains_key(&n(c)) => {
             let ows = m.overwrites[&n(c)].clone();
-            (
-                200,
-                json!({"id": c, "type": 0, "permission_overwrites": ows}).to_string(),
-            )
+            let mut j = json!({"id": c, "type": 0, "permission_overwrites": ows});
+            if let Some(g) = m.channel_guild.get(&n(c)) {
+                j["guild_id"] = json!(g.to_string());
+            }
+            (200, j.to_string())
         }
         ("PATCH", ["guilds", _, "roles", _]) if m.fail_role_edit => err(403, 50013),
         ("PATCH", ["guilds", g, "roles", r]) => {

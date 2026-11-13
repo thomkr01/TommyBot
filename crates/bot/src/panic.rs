@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tommybot_antinuke::{panic_end_plan, panic_plan, PanicStep};
-use tommybot_automod::lockdown::LockKind;
+use tommybot_automod::lockdown::{self as lockdown_bits, LockKind};
 use tommybot_core::{jobs, sections::PanicCfg};
 use tommybot_logging::emoji::{PANIC, QUARANTINED};
 use tommybot_logging::{
@@ -113,15 +113,16 @@ pub(crate) async fn note_heat(app: &App, gid: Id<GuildMarker>, user: Id<UserMark
     }
 }
 
-async fn put_everyone(
+async fn put_role(
     app: &App,
     gid: Id<GuildMarker>,
     channel: Id<ChannelMarker>,
+    role: u64,
     allow: Permissions,
     deny: Permissions,
 ) -> Result<()> {
     let o = PermissionOverwrite {
-        id: Id::new(gid.get()),
+        id: Id::new(role),
         kind: PermissionOverwriteType::Role,
         allow: Some(allow),
         deny: Some(deny),
@@ -131,35 +132,64 @@ async fn put_everyone(
     Ok(())
 }
 
-/// Lets @everyone keep sending in a whitelisted category while the server is locked. Returns the
-/// overwrite it replaced, for [`unexempt`].
-async fn exempt(app: &App, gid: Id<GuildMarker>, category: Id<ChannelMarker>) -> Result<Value> {
-    let ch = app.http.channel(category).await?.model().await?;
-    let old = ch
-        .permission_overwrites
-        .unwrap_or_default()
-        .into_iter()
-        .find(|o| o.kind == ModelOverwriteType::Role && o.id.get() == gid.get());
-    let (allow, deny) = old
-        .as_ref()
-        .map_or((Permissions::empty(), Permissions::empty()), |o| {
-            (o.allow, o.deny)
-        });
-    put_everyone(
-        app,
-        gid,
-        category,
-        allow | Permissions::SEND_MESSAGES,
-        deny - Permissions::SEND_MESSAGES,
-    )
-    .await?;
-    Ok(json!({
-        "channel": category.get(), "allow": allow.bits(), "deny": deny.bits(), "had": old.is_some()
-    }))
+/// The bits panic's server lock will take from each main role (@everyone when none are set),
+/// read before the lock. A role an earlier lock already stripped has nothing left to take.
+fn taken(
+    roles: &[twilight_model::guild::Role],
+    main: &[u64],
+    gid: u64,
+    voice: bool,
+) -> Vec<(u64, u64)> {
+    let mask = lockdown_bits::SILENCE | if voice { lockdown_bits::VOICE } else { 0 };
+    roles
+        .iter()
+        .map(|r| (r.id.get(), r.permissions.bits() & mask))
+        .filter(|(id, bits)| *bits != 0 && (main.contains(id) || (main.is_empty() && *id == gid)))
+        .collect()
 }
 
-/// `channels` with panic's Send exemptions undone as [`unexempt`] would: the @everyone overwrite
-/// each whitelisted category had before (or none), from the pending `panic_end` job.
+/// The bits to allow for `role` on a category so it can do there what the server lock took
+/// (`taken`) and nothing more: never a bit the category already denied it or @everyone.
+fn give_back(taken: u64, role_ow: (u64, u64), everyone_deny: u64) -> u64 {
+    taken & !role_ow.0 & !role_ow.1 & !everyone_deny
+}
+
+/// Gives each main role back, in a whitelisted category, what panic's server lock takes, so the
+/// category stays as writable as it was. Pushes the overwrite it replaced per role onto
+/// `exempted`, for [`unexempt`], right after each change.
+async fn exempt(
+    app: &App,
+    gid: Id<GuildMarker>,
+    category: Id<ChannelMarker>,
+    taken: &[(u64, u64)],
+    exempted: &mut Vec<Value>,
+) -> Result<()> {
+    let ch = app.http.channel(category).await?.model().await?;
+    anyhow::ensure!(ch.guild_id == Some(gid), "category is not in this server");
+    let ows = ch.permission_overwrites.unwrap_or_default();
+    let of = |id: u64| {
+        ows.iter()
+            .find(|o| o.kind == ModelOverwriteType::Role && o.id.get() == id)
+    };
+    let everyone_deny = of(gid.get()).map_or(0, |o| o.deny.bits());
+    for &(role, bits) in taken {
+        let old = of(role);
+        let (allow, deny) = old.map_or((0, 0), |o| (o.allow.bits(), o.deny.bits()));
+        let add = give_back(bits, (allow, deny), everyone_deny);
+        if add == 0 {
+            continue;
+        }
+        let p = Permissions::from_bits_retain;
+        put_role(app, gid, category, role, p(allow | add), p(deny)).await?;
+        exempted.push(json!({
+            "channel": category.get(), "role": role, "allow": allow, "deny": deny, "had": old.is_some()
+        }));
+    }
+    Ok(())
+}
+
+/// `channels` with panic's category exemptions undone as [`unexempt`] would: the overwrite each
+/// main role had on a whitelisted category before (or none), from the pending `panic_end` job.
 /// shortcut: only the category itself; a child channel synced to it is read live.
 pub(crate) async fn unexempted(
     app: &App,
@@ -182,13 +212,14 @@ pub(crate) async fn unexempted(
         else {
             continue;
         };
+        let role = exempt_role(gid, saved);
         let all = c.permission_overwrites.get_or_insert_with(Vec::new);
-        all.retain(|o| o.id.get() != gid.get());
+        all.retain(|o| o.id.get() != role);
         if saved["had"].as_bool().unwrap_or(false) {
             let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
             all.push(
                 twilight_model::channel::permission_overwrite::PermissionOverwrite {
-                    id: gid.cast(),
+                    id: Id::new(role),
                     kind: ModelOverwriteType::Role,
                     allow: bits("allow"),
                     deny: bits("deny"),
@@ -199,20 +230,26 @@ pub(crate) async fn unexempted(
     Ok(())
 }
 
+/// The role a saved exemption is for; jobs from before roles were saved only exempted @everyone.
+fn exempt_role(gid: Id<GuildMarker>, saved: &Value) -> u64 {
+    saved["role"].as_u64().unwrap_or(gid.get())
+}
+
 async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> {
     let channel = Id::new(
         saved["channel"]
             .as_u64()
             .context("saved overwrite has no channel")?,
     );
+    let role = exempt_role(gid, saved);
     if saved["had"].as_bool().unwrap_or(false) {
         let bits = |k: &str| Permissions::from_bits_retain(saved[k].as_u64().unwrap_or(0));
-        put_everyone(app, gid, channel, bits("allow"), bits("deny")).await
+        put_role(app, gid, channel, role, bits("allow"), bits("deny")).await
     } else {
         crate::verify::given::mark_own(gid, channel.get());
         app.http
             .delete_channel_permission(channel)
-            .role(Id::new(gid.get()))
+            .role(Id::new(role))
             .await?;
         Ok(())
     }
@@ -257,7 +294,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     let ends = crate::app::now_secs() + cfg.duration_secs as i64;
     // The dashboard reads the mod command lock from this job, so it exists before the category calls.
     // No unlock until the end: nothing is locked before the full payload is saved.
-    let payload = |exempted: &[Value], unlock: bool| json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": unlock, "exempt": exempted, "locked": false});
+    let payload = |exempted: &[Value], unlock: bool| json!({"lock_mod_commands": cfg.lock_mod_commands, "unlock": unlock, "exempt": exempted, "locked": false, "locked_server": false});
     if let Err(e) = jobs::replace(
         &app.pool,
         gid.get() as i64,
@@ -272,17 +309,37 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     }
     let mut exempted = vec![];
     let mut saved = Ok(());
-    for &c in &cfg.whitelisted_categories {
-        match exempt(app, gid, c).await {
-            Ok(one) => {
-                exempted.push(one);
-                // After each one, so a crash leaves a job that closes every category opened so far.
-                saved = end_payload(app, gid, payload(&exempted, false)).await;
-                if saved.is_err() {
-                    break;
-                }
+    // Only a lock panic makes takes anything a category needs back.
+    let categories = if cfg.lock_on_trigger {
+        cfg.whitelisted_categories.as_slice()
+    } else {
+        &[]
+    };
+    let taken = if categories.is_empty() {
+        vec![]
+    } else {
+        match lock_targets(app, gid).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "panic: reading roles for the category exemptions failed"
+                );
+                vec![]
             }
-            Err(e) => tracing::warn!(?e, channel = c.get(), "panic: exempting category failed"),
+        }
+    };
+    for &c in categories {
+        let before = exempted.len();
+        if let Err(e) = exempt(app, gid, c, &taken, &mut exempted).await {
+            tracing::warn!(?e, channel = c.get(), "panic: exempting category failed");
+        }
+        if exempted.len() > before {
+            // After each one, so a crash leaves a job that closes every category opened so far.
+            saved = end_payload(app, gid, payload(&exempted, false)).await;
+            if saved.is_err() {
+                break;
+            }
         }
     }
     if saved.is_ok() {
@@ -314,14 +371,18 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             // A failed step is logged, so the report below is still sent.
             // Panic's end lifts only a lock this call saved, also one an error left half applied;
             // a lock from before panic, or one staff make after a failed lock, stays.
+            // Two locks, so one staff already made (say a server lock) leaves the other to panic.
+            // The role lock takes dangerous perms, the server lock takes writing from main roles.
             PanicStep::LockServer => {
-                let mut saved = false;
-                let r = lockdown::lock_saving(app, gid, LockKind::Role, None, &mut saved).await;
-                if let Err(e) = r {
-                    tracing::warn!(?e, "panic: locking the server failed");
-                }
-                if saved {
-                    own_lock(app, gid, true).await;
+                for (kind, key) in [(LockKind::Role, ROLE_LOCK), (LockKind::Server, SERVER_LOCK)] {
+                    let mut saved = false;
+                    let r = lockdown::lock_saving(app, gid, kind, None, &mut saved).await;
+                    if let Err(e) = r {
+                        tracing::warn!(?e, key, "panic: locking the server failed");
+                    }
+                    if saved {
+                        own_lock(app, gid, key, true).await;
+                    }
                 }
             }
             PanicStep::PingWarnedRoles => {
@@ -459,14 +520,28 @@ pub(crate) fn report(case: Option<&(String, Value)>, b: &Backup) -> Log {
     )
 }
 
-/// Records in the `panic_end` job whether the server lock is panic's own, so its end lifts only
-/// that one. Only logged on failure.
-pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, locked: bool) {
+/// `panic_end` payload key: panic's own role lock.
+pub(crate) const ROLE_LOCK: &str = "locked";
+/// `panic_end` payload key: panic's own server (writing) lock.
+pub(crate) const SERVER_LOCK: &str = "locked_server";
+
+/// The main roles (or @everyone) with the bits panic's server lock would take from them now.
+async fn lock_targets(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(u64, u64)>> {
+    let cfg = app.cfg(gid.get()).await?;
+    let main: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
+    let roles = app.http.roles(gid).await?.models().await?;
+    Ok(taken(&roles, &main, gid.get(), cfg.lockdown_prefs.voice))
+}
+
+/// Records in the `panic_end` job whether the lock under `key` ([`ROLE_LOCK`], [`SERVER_LOCK`]) is
+/// panic's own, so its end lifts only that one. Only logged on failure.
+pub(crate) async fn own_lock(app: &App, gid: Id<GuildMarker>, key: &str, locked: bool) {
     let r = sqlx::query(
-        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object('locked', $2::bool)
+        "UPDATE scheduled_jobs SET payload = payload || jsonb_build_object($2::text, $3::bool)
          WHERE guild_id = $1 AND kind = 'panic_end'",
     )
     .bind(gid.get() as i64)
+    .bind(key)
     .bind(locked)
     .execute(&app.pool)
     .await;
@@ -483,11 +558,22 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
             tracing::warn!(?e, "panic: restoring category overwrite failed");
         }
     }
-    // Jobs from before `locked` existed unlock as they did.
-    let ours = payload["locked"].as_bool().unwrap_or(true);
-    for step in panic_end_plan(ours && payload["unlock"].as_bool().unwrap_or(false)) {
+    // Jobs from before `locked` existed unlock the role lock as they did, and had no server lock.
+    let role = payload[ROLE_LOCK].as_bool().unwrap_or(true);
+    let server = payload[SERVER_LOCK].as_bool().unwrap_or(false);
+    for step in panic_end_plan((role || server) && payload["unlock"].as_bool().unwrap_or(false)) {
         if step == PanicStep::UnlockServer {
-            lockdown::unlock(app, gid, Some(&LockKind::Role)).await?;
+            // Both are tried, so a failed role unlock does not leave everyone muted.
+            let r = match role {
+                true => lockdown::unlock(app, gid, Some(&LockKind::Role))
+                    .await
+                    .map(drop),
+                false => Ok(()),
+            };
+            if server {
+                lockdown::unlock(app, gid, Some(&LockKind::Server)).await?;
+            }
+            r?;
         }
     }
     send_log(app, gid.get(), LogKind::Panic, end_log(payload)).await
@@ -601,6 +687,29 @@ mod tests {
             .execute(&app.pool)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn the_lock_takes_writing_from_main_roles_and_a_category_gets_only_that_back() {
+        let role = |id: u64, bits: u64| -> twilight_model::guild::Role {
+            serde_json::from_value(json!({"id": id.to_string(), "name": "r", "color": 0, "colors": {"primary_color": 0},
+                "hoist": false, "managed": false, "mentionable": false, "permissions": bits.to_string(), "position": 0, "flags": 0}))
+            .unwrap()
+        };
+        let (send, view, react) = (1u64 << 11, 1u64 << 10, 1u64 << 6);
+        let roles = [
+            role(9, view | send | react),
+            role(5, view | send),
+            role(6, view),
+        ];
+        // No main roles: @everyone (the guild id) is the one locked.
+        assert_eq!(taken(&roles, &[], 9, false), [(9, send | react)]);
+        // Main roles set: only those, and a role with nothing to lose is skipped.
+        assert_eq!(taken(&roles, &[5, 6], 9, false), [(5, send)]);
+        // Already allowed, denied on the role or denied to @everyone: never given.
+        assert_eq!(give_back(send | react, (0, 0), 0), send | react);
+        assert_eq!(give_back(send | react, (0, react), 0), send);
+        assert_eq!(give_back(send | react, (send, 0), react), 0);
     }
 
     fn text(l: Log) -> String {

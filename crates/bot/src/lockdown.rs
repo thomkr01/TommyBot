@@ -564,7 +564,10 @@ async fn forget_timers(app: &App, gid: Id<GuildMarker>, kind: &LockKind) {
         tracing::warn!(?e, "dropping the timed unlock failed");
     }
     if kind.overlaps(&LockKind::Role) {
-        crate::panic::own_lock(app, gid, false).await;
+        crate::panic::own_lock(app, gid, crate::panic::ROLE_LOCK, false).await;
+    }
+    if kind.overlaps(&LockKind::Server) {
+        crate::panic::own_lock(app, gid, crate::panic::SERVER_LOCK, false).await;
     }
 }
 
@@ -1098,7 +1101,7 @@ mod tests {
             .unwrap();
             rows
         };
-        crate::panic::own_lock(&app, gid, true).await;
+        crate::panic::own_lock(&app, gid, crate::panic::ROLE_LOCK, true).await;
         assert_eq!(jobs().await[2].1["locked"], true);
         forget_timers(&app, gid, &LockKind::Role).await;
         let left = jobs().await;

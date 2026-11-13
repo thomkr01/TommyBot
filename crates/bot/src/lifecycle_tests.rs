@@ -825,11 +825,130 @@ async fn panic_owns_only_a_lock_it_saved() {
     assert_eq!(locked(pending(&t, 1, "panic_end").await), true);
     assert_eq!(
         crate::lockdown::active(&t.app, t.g(1)).await.unwrap(),
-        [LockKind::Role]
+        [LockKind::Role, LockKind::Server]
     );
     for i in [0, 1] {
         t.app.panic_runs.lock().unwrap().remove(&t.g(i).get());
     }
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+/// Live 13-11: panic's role lock left @everyone writing. Panic now also takes a server lock from
+/// the main roles, gives a whitelisted category back only what that lock took, and its end lifts
+/// both. A server lock staff made first stays after panic.
+#[tokio::test]
+async fn panic_stops_writing_and_puts_it_back() {
+    let Some(t) = T::new(82).await else { return };
+    const SEND: u64 = 1 << 11;
+    const VIEW: u64 = 1 << 10;
+    const MENTION: u64 = 1 << 17;
+    const CAT: u64 = 50;
+    let everyone = VIEW | SEND | MENTION | (1 << 47);
+    for i in [0, 1] {
+        let g = t.g(i).get();
+        let panic = json!({"lock_on_trigger": true, "duration_secs": 600, "unlock_when_ending": true,
+                           "whitelisted_categories": [(CAT + i).to_string()]});
+        t.server_config(i, t.owner(), json!({ "panic": panic }))
+            .await;
+        t.set(|m| {
+            m.members.insert((g, bansync::tests::ME), vec![7 + i]);
+            m.roles
+                .insert(g, vec![(g, false, everyone, 0), (7 + i, false, 0, 5)]);
+            // The category already denies @everyone reactions: the exemption must not open them.
+            let deny = (1u64 << 6).to_string();
+            m.overwrites.insert(
+                CAT + i,
+                vec![json!({"id": g.to_string(), "type": 0, "allow": "0", "deny": deny})],
+            );
+            m.channel_guild.insert(CAT + i, g);
+        });
+    }
+    let perms = |i: u64| {
+        let g = t.g(i).get();
+        t.mock.lock().unwrap().roles[&g]
+            .iter()
+            .find(|r| r.0 == g)
+            .unwrap()
+            .2
+    };
+    // Server 1: staff locked the server before panic.
+    crate::lockdown::lock(&t.app, t.g(1), LockKind::Server)
+        .await
+        .unwrap();
+    assert_eq!(perms(1) & SEND, 0);
+    for i in [0, 1] {
+        let cfg = t.app.cfg(t.g(i).get()).await.unwrap().panic.clone();
+        crate::panic::start(&t.app, t.g(i), &cfg).await.unwrap();
+    }
+    assert_eq!(
+        crate::lockdown::active(&t.app, t.g(0)).await.unwrap(),
+        [LockKind::Role, LockKind::Server]
+    );
+    assert_eq!(
+        perms(0) & (SEND | MENTION),
+        0,
+        "panic left @everyone writing"
+    );
+    assert_ne!(perms(0) & (1 << 47), 0, "unknown bits are kept");
+    let end0 = pending(&t, 0, "panic_end").await[0].0.clone();
+    assert_eq!(
+        (end0["locked"].clone(), end0["locked_server"].clone()),
+        (json!(true), json!(true))
+    );
+    let ex = end0["exempt"].as_array().unwrap();
+    assert_eq!(ex.len(), 1, "{end0}");
+    assert_eq!(ex[0]["role"], json!(t.g(0).get()));
+    assert_eq!(
+        (ex[0]["had"].clone(), ex[0]["deny"].clone()),
+        (json!(true), json!(1u64 << 6))
+    );
+    let put = {
+        let m = t.mock.lock().unwrap();
+        m.log
+            .iter()
+            .filter(|l| {
+                l.starts_with("PUT ") && l.contains(&format!("channels/{CAT}/permissions/"))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(put.len(), 1, "{put:?}");
+    let body: Value = serde_json::from_str(put[0].splitn(3, ' ').nth(2).unwrap()).unwrap();
+    let allow: u64 = body["allow"].as_str().unwrap().parse().unwrap();
+    let deny: u64 = body["deny"].as_str().unwrap().parse().unwrap();
+    assert_eq!(allow & SEND, SEND, "{body}");
+    assert_eq!((allow & (1 << 6), deny), (0, 1 << 6), "{body}");
+    // Server 1: the staff lock already took writing, so panic adds only the role lock and
+    // the category, which the staff lock silenced too, is left as it is.
+    assert_eq!(
+        crate::lockdown::active(&t.app, t.g(1)).await.unwrap(),
+        [LockKind::Server, LockKind::Role]
+    );
+    let end1 = pending(&t, 1, "panic_end").await[0].0.clone();
+    assert_eq!(end1["locked_server"], json!(false));
+    assert_eq!(end1["exempt"], json!([]));
+    for i in [0, 1] {
+        let p = pending(&t, i, "panic_end").await[0].0.clone();
+        crate::panic::end(&t.app, t.g(i), &p).await.unwrap();
+    }
+    assert!(crate::lockdown::active(&t.app, t.g(0))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(perms(0), everyone);
+    assert_eq!(
+        t.calls(&format!("channels/{CAT}/permissions/")),
+        2,
+        "the category overwrite is put back"
+    );
+    assert_eq!(
+        crate::lockdown::active(&t.app, t.g(1)).await.unwrap(),
+        [LockKind::Server],
+        "panic's end lifted the staff lock"
+    );
+    assert_eq!(perms(1) & SEND, 0);
     t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
         .await;
     t.cleanup().await;
