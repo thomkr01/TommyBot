@@ -4,13 +4,14 @@
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
+use tommybot_antinuke::Image;
 use tommybot_logging::LogConfig;
 use twilight_model::id::{marker::GuildMarker, Id};
 
 use crate::app::App;
 
 /// Swaps old ids for new ones; only logs a failure, since the restore itself is done.
-pub async fn relink(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>) {
+pub async fn relink(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>, image: &Image) {
     let map: HashMap<u64, u64> = map
         .iter()
         .filter(|(o, n)| o != n)
@@ -19,14 +20,19 @@ pub async fn relink(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>) {
     if map.is_empty() {
         return;
     }
-    match run(app, gid, &map).await {
+    match run(app, gid, &map, &channels(&map, image)).await {
         Ok(0) => {}
         Ok(n) => tracing::info!(%gid, n, "config ids moved to recreated objects"),
         Err(e) => tracing::warn!(?e, %gid, "moving config ids to recreated objects failed"),
     }
 }
 
-async fn run(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>) -> Result<usize> {
+async fn run(
+    app: &App,
+    gid: Id<GuildMarker>,
+    map: &HashMap<u64, u64>,
+    channels: &[u64],
+) -> Result<usize> {
     let g = gid.get() as i64;
     let (mut tx, version, mut doc) = crate::settings::locked(app, gid).await?;
     let mut n = swap(&mut doc, map);
@@ -34,7 +40,8 @@ async fn run(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>) -> Result
     // bot version per channel): each channel's routes come back from the version just before its
     // own deletion version, never from an older one, so a route staff removed on purpose stays
     // removed (R-h3 7), and a nuke that deleted several log channels gets all of them back.
-    for old in map.keys() {
+    // Only channels: a role is never a log route, so it needs no query (R-h3 round 3).
+    for old in channels {
         let o = old.to_string();
         let before: Option<Value> = sqlx::query_scalar(
             "SELECT p.config->'logging' FROM guild_config c
@@ -73,6 +80,16 @@ async fn run(app: &App, gid: Id<GuildMarker>, map: &HashMap<u64, u64>) -> Result
     crate::settings::append(app, tx, gid, version, &mut doc, app.me.get()).await?;
     app.forget_cfg(gid.get());
     Ok(n)
+}
+
+/// The old ids in `map` that were channels in the image.
+fn channels(map: &HashMap<u64, u64>, image: &Image) -> Vec<u64> {
+    image
+        .channels
+        .iter()
+        .map(|c| c.id)
+        .filter(|c| map.contains_key(c))
+        .collect()
 }
 
 /// Replaces every id in `map` (string or number value, or object key); returns how many.
@@ -171,6 +188,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// An image whose channels are `ids`.
+    fn img(ids: &[u64]) -> Image {
+        let ch = |id| tommybot_antinuke::ChannelImg {
+            id,
+            name: "c".into(),
+            kind: 0,
+            parent: None,
+            position: 0,
+            topic: None,
+            nsfw: false,
+            overwrites: vec![],
+        };
+        Image {
+            channels: ids.iter().copied().map(ch).collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn every_id_moves_and_forgotten_log_routes_come_back() {
         let (old_ch, new_ch, old_role, new_role) = (
@@ -189,6 +224,11 @@ mod tests {
             "misc": {"count": 7},
             "logging": {"fallback": "9", "config_changes": "8"}
         });
+        assert_eq!(
+            channels(&map, &img(&[old_ch, 5])),
+            [old_ch],
+            "no log query for a role"
+        );
         assert_eq!(swap(&mut doc, &map), 5);
         assert_eq!(doc["catch"]["channel"], json!(new_ch.to_string()));
         assert_eq!(
@@ -257,7 +297,7 @@ mod tests {
             .execute(&t.app.pool)
             .await
             .unwrap();
-        relink(&t.app, g, &HashMap::from([(old, new)])).await;
+        relink(&t.app, g, &HashMap::from([(old, new)]), &img(&[old])).await;
         let (v, c): (i32, Value) = sqlx::query_as(
             "SELECT version, config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
         )
@@ -308,7 +348,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            relink(&t.app, t.g(i), &HashMap::from([(old, new)])).await;
+            relink(&t.app, t.g(i), &HashMap::from([(old, new)]), &img(&[old])).await;
             let c: Value = sqlx::query_scalar(
                 "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
             )
@@ -341,7 +381,13 @@ mod tests {
                 .await
                 .unwrap();
         }
-        relink(&t.app, t.g(3), &HashMap::from([(old, new), (o2, n2)])).await;
+        relink(
+            &t.app,
+            t.g(3),
+            &HashMap::from([(old, new), (o2, n2)]),
+            &img(&[old, o2]),
+        )
+        .await;
         let c: Value = sqlx::query_scalar(
             "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
         )
