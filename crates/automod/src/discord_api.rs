@@ -449,16 +449,38 @@ fn invites_body(until: Option<(i64, i64)>) -> Value {
     json!({ "invites_disabled_until": until, "dms_disabled_until": until })
 }
 
+/// Which entries of `list` our keyword rule sends to Discord: non-empty, within `len` chars, the first `max`.
+fn fits(list: &[String], len: usize, max: usize) -> Vec<bool> {
+    let mut n = 0;
+    list.iter()
+        .map(|w| {
+            let ok = !w.is_empty() && w.chars().count() <= len && n < max;
+            n += usize::from(ok);
+            ok
+        })
+        .collect()
+}
+
+/// Per word and per regex pattern: true when it fits in Discord's keyword rule. The rest stays
+/// with the local filter.
+pub fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) {
+    (
+        fits(words, MAX_KEYWORD_LEN, MAX_KEYWORDS),
+        fits(regex, MAX_REGEX_LEN, MAX_REGEX),
+    )
+}
+
 fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
-    let fit = |list: &[String], len: usize, max: usize| -> Vec<String> {
+    let fit = |list: &[String], ok: Vec<bool>| -> Vec<String> {
         list.iter()
-            .filter(|w| !w.is_empty() && w.chars().count() <= len)
-            .take(max)
-            .cloned()
+            .zip(ok)
+            .filter(|(_, ok)| *ok)
+            .map(|(w, _)| w.clone())
             .collect()
     };
-    let words = fit(words, MAX_KEYWORD_LEN, MAX_KEYWORDS);
-    let regex = fit(regex, MAX_REGEX_LEN, MAX_REGEX);
+    let (w_ok, r_ok) = on_discord(words, regex);
+    let words = fit(words, w_ok);
+    let regex = fit(regex, r_ok);
     json!({
         "name": KEYWORD_RULE,
         "event_type": 1,

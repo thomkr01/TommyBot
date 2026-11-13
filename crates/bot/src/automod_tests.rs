@@ -387,3 +387,198 @@ async fn native_hits_of_whitelisted_members_do_not_fill_a_scope() {
     assert_eq!(t.calls("PATCH"), 0, "the owner's hit did not count");
     t.cleanup().await;
 }
+
+fn create(m: Message) -> MessageCreate {
+    MessageCreate {
+        channel_type: None,
+        message: m,
+    }
+}
+
+/// A scam link with its own Ban: an automod-permit holder is banned too (a hacked mod), the grace
+/// window after an earlier punishment does not soften it, and the same message is punished once.
+/// The permit still skips a blacklisted word.
+#[tokio::test]
+async fn a_scam_ban_skips_the_permit_and_the_grace_window() {
+    let Some(t) = T::new(21).await else { return };
+    let gid = t.g(0);
+    let cfg = json!({"automod": {"enabled": true, "filters": {
+        "scam_links": {"enabled": true, "action": "ban"},
+        "words": {"filter": {"enabled": true}, "strict": ["darn"]}}}});
+    t.server_config(0, t.owner(), cfg).await;
+    t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1, $1, 'Staff', '{}', '{automod}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 556)")
+        .await;
+    let (staff, member) = (t.base + 5, t.base + 6);
+    t.set(|m| {
+        m.members.insert((gid.get(), staff), vec![556]);
+        m.members.insert((gid.get(), member), vec![]);
+    });
+    let post = |id: &str, user: u64, content: &str| {
+        create(msg(
+            json!({"guild_id": gid.to_string(), "id": id, "content": content,
+            "author": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": "0123456789abcdef0123456789abcdef"}}),
+        ))
+    };
+    let scam = "free nitro https://discord-nitro.ru/claim";
+    on_message(&t.app, &post("100", staff, "darn it"))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("DELETE"), 0, "the permit skips the word filter");
+    let _ = on_message(&t.app, &post("101", staff, scam)).await;
+    assert_eq!(
+        t.calls(&format!("PUT /guilds/{gid}/bans/{staff}")),
+        1,
+        "permit holder banned"
+    );
+    // The member was just punished for a heat burst.
+    t.app
+        .heat
+        .lock()
+        .unwrap()
+        .entry((gid.get(), member))
+        .or_default()
+        .0
+        .punished_ms = now_ms();
+    let _ = on_message(&t.app, &post("102", member, scam)).await;
+    let ban = format!("PUT /guilds/{gid}/bans/{member}");
+    assert_eq!(t.calls(&ban), 1, "banned inside the grace window");
+    // The same message again (the NSFW scan, an edit): deleted, not punished twice.
+    let _ = on_edit(&t.app, &post("102", member, scam).message).await;
+    assert_eq!(t.calls(&ban), 1, "one message, one ban");
+    assert_eq!(t.calls("DELETE /channels/7/messages/102"), 2);
+    t.exec("DELETE FROM automod_strikes WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+/// A webhook exempt from spam (listed, or its bot owner on the anti-nuke whitelist) still has an
+/// invite deleted; its plain messages stay.
+#[tokio::test]
+async fn an_exempt_webhook_still_loses_an_invite() {
+    let Some(t) = T::new(22).await else { return };
+    let gid = t.g(0);
+    let cfg = json!({"whitelist": {"webhooks": ["9"]},
+        "automod": {"enabled": true, "filters": {"invites": {"enabled": true}}}});
+    t.server_config(0, t.owner(), cfg).await;
+    let hook = |id: &str, content: &str| {
+        create(msg(
+            json!({"guild_id": gid.to_string(), "id": id, "content": content, "webhook_id": "9",
+            "author": {"id": "9", "username": "hook", "discriminator": "0000", "avatar": null, "bot": true}}),
+        ))
+    };
+    on_message(&t.app, &hook("100", "hello")).await.unwrap();
+    on_message(&t.app, &hook("101", "join discord.gg/abc"))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("DELETE /channels/7/messages/100"), 0);
+    assert_eq!(t.calls("DELETE /channels/7/messages/101"), 1);
+    t.cleanup().await;
+}
+
+/// Mentions by a mention-whitelisted member never count towards the mention lockdown.
+#[tokio::test]
+async fn whitelisted_pings_do_not_lock_the_server() {
+    let Some(t) = T::new(23).await else { return };
+    let gid = t.g(0);
+    let (trusted, member) = (t.base + 5, t.base + 6);
+    let cfg = json!({"whitelist": {"mentions": {"users": [trusted.to_string()]}},
+        "automod": {"enabled": true, "anti_spam": false,
+            "auto_lockdown": {"enabled": true, "mention_count": 2}}});
+    t.server_config(0, t.owner(), cfg).await;
+    let pings = |id: &str, user: u64| {
+        let who = |u: u64| json!({"id": u.to_string(), "username": "y", "discriminator": "0", "avatar": null, "public_flags": 0});
+        create(msg(
+            json!({"guild_id": gid.to_string(), "id": id, "content": "hi",
+            "mentions": [who(1), who(2), who(3)],
+            "author": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": "0123456789abcdef0123456789abcdef"}}),
+        ))
+    };
+    let _ = on_message(&t.app, &pings("100", trusted)).await;
+    assert_eq!(t.calls("/roles"), 0, "not locked");
+    let _ = on_message(&t.app, &pings("101", member)).await;
+    assert!(t.calls("/roles") >= 1, "a member's pings lock");
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
+/// A permit holder writing in the catch channel is caught; only Owner, Extra Owners and Trusted
+/// Admins are left alone.
+#[tokio::test]
+async fn the_catch_channel_catches_permit_holders() {
+    let Some(t) = T::new(24).await else { return };
+    let gid = t.g(0);
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"catch": {"enabled": true, "channel": "7", "action": "Kick"}}),
+    )
+    .await;
+    t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1, $1, 'Staff', '{}', '{automod}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $1, 556)")
+        .await;
+    let staff = t.base + 5;
+    t.set(|m| {
+        m.members.insert((gid.get(), staff), vec![556]);
+    });
+    let post = |user: u64| {
+        create(msg(json!({"guild_id": gid.to_string(),
+            "author": {"id": user.to_string(), "username": "x", "discriminator": "0", "avatar": null}})))
+    };
+    assert!(crate::catch::on_message(&t.app, &post(staff))
+        .await
+        .unwrap());
+    assert!(!crate::catch::on_message(&t.app, &post(t.owner()))
+        .await
+        .unwrap());
+    t.cleanup().await;
+}
+
+#[test]
+fn a_timeout_without_duration_uses_the_strike_length_with_strikes_off() {
+    let mut am = AutomodCfg::default();
+    let fc = FilterCfg {
+        action: Some(FilterAction::Timeout),
+        ..FilterCfg::default()
+    };
+    assert_eq!(own_action(&fc, &am), None, "the strikes decide");
+    am.strike.enabled = false;
+    let secs = am.strike.strike_timeout_ms / 1000;
+    assert_eq!(
+        own_action(&fc, &am),
+        Some((FilterAction::Timeout, Some(secs)))
+    );
+    let own = FilterCfg {
+        duration_secs: Some(30),
+        ..fc
+    };
+    assert_eq!(
+        own_action(&own, &am),
+        Some((FilterAction::Timeout, Some(30)))
+    );
+}
+
+/// With "Use Discord AutoMod" on, the local filter counts only words Discord's rule could not
+/// take, and every word while the sync fails.
+#[test]
+fn the_local_filter_covers_what_discord_does_not() {
+    let mut f = FiltersCfg::default();
+    f.words.use_discord_automod = true;
+    let long = "x".repeat(61);
+    f.words.strict = vec!["darn".into(), long.clone()];
+    let text = format!("darn {long}");
+    let guild = 4_242;
+    assert_eq!(local_word_hits(guild, &f, &text), 1, "only the long word");
+    SYNC_FAILED.lock().unwrap().insert(guild);
+    assert_eq!(
+        local_word_hits(guild, &f, &text),
+        2,
+        "all while the sync fails"
+    );
+    SYNC_FAILED.lock().unwrap().remove(&guild);
+    f.words.use_discord_automod = false;
+    assert_eq!(local_word_hits(guild, &f, &text), 2);
+}
