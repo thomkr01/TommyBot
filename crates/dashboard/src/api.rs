@@ -1769,11 +1769,12 @@ pub(crate) mod g3_handler_tests {
             .unwrap();
         // R-h3 round 3: a dropped retry is not queued again within the hour.
         let _ = level_of(&st, &s, g).await.unwrap();
-        let queued: i64 = sqlx::query_scalar("select count(*) from scheduled_jobs where guild_id = $1")
-            .bind(g)
-            .fetch_one(&st.db)
-            .await
-            .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("select count(*) from scheduled_jobs where guild_id = $1")
+                .bind(g)
+                .fetch_one(&st.db)
+                .await
+                .unwrap();
         assert_eq!(queued, 0, "at most one owner_check per hour");
         // S-h3 round 3: while the reset is pending the real owner may remove Extra Owners, not add.
         sqlx::query("insert into extra_owners (guild_id, user_id) values ($1, 5)")
@@ -1789,7 +1790,9 @@ pub(crate) mod g3_handler_tests {
                     State(st),
                     s,
                     Path(g),
-                    body(json!({"expected_version": v, "value": {"eo": eo, "ta": [], "custom": []}})),
+                    body(
+                        json!({"expected_version": v, "value": {"eo": eo, "ta": [], "custom": []}}),
+                    ),
                 )
                 .await
             }
