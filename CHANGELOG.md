@@ -11,6 +11,7 @@ All notable changes to TommyBot are listed here. The format follows [Keep a Chan
 - With anti-nuke off, a permit role given by someone who is not an Owner, Extra Owner or Trusted Admin is still taken back; nobody is punished.
 - A mod command with no member target (for example a role mention) no longer replies "All members were warned!".
 - A Discord AutoMod rule created or changed by someone without a permit triggers no TommyBot action until an Owner, Extra Owner, Trusted Admin or a dashboard-edit permit changes it. The change is logged. Migration 3925.
+- TommyBot acts on a Discord AutoMod rule only while the rule is as an Owner, Extra Owner, Trusted Admin or a dashboard-edit permit approved it, also when the bot cannot read the audit log. A dashboard save, a trusted change in Discord and the bot's own keyword sync approve it. Rules that exist at the update are approved once, unless the audit log showed a change without a permit. Migration 3926.
 - Voice logs: members already in voice when the bot starts or reconnects are read from Discord's server snapshot, so their first move is logged as a move, not a join.
 - Join Raid: a raid that starts right after another one ends no longer drops the first raid's report.
 - Ticket attachment copies time out after 15 seconds instead of possibly holding the ticket reply forever.

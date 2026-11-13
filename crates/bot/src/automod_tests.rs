@@ -369,6 +369,10 @@ async fn native_hits_of_whitelisted_members_do_not_fill_a_scope() {
         }}),
     )
     .await;
+    t.set(|m| {
+        m.rules
+            .insert(gid.get(), vec![native_rule(gid.get(), &["x"])]);
+    });
     let hit =
         |user: u64| -> twilight_model::gateway::payload::incoming::AutoModerationActionExecution {
             serde_json::from_value(json!({
@@ -400,6 +404,10 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
         json!({"discord_automod": {"actions": {"77": ["timeout"]}}}),
     )
     .await;
+    t.set(|m| {
+        m.rules
+            .insert(gid.get(), vec![native_rule(gid.get(), &["x"])]);
+    });
     let edit = |id: u64, actor: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
         serde_json::from_value(json!({
             "id": id.to_string(), "action_type": 141, "guild_id": gid.to_string(), "target_id": "77",
@@ -433,6 +441,135 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
         .unwrap();
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();
     assert!(t.calls("PATCH") >= 1, "acts again after the owner's change");
+    t.cleanup().await;
+}
+
+/// Native rule 77 as Discord's JSON, blocking `words`.
+fn native_rule(guild: u64, words: &[&str]) -> Value {
+    json!({
+        "id": "77", "guild_id": guild.to_string(), "name": "r", "creator_id": "5",
+        "event_type": 1, "trigger_type": 1, "trigger_metadata": {"keyword_filter": words},
+        "actions": [{"type": 1}], "enabled": true, "exempt_roles": [], "exempt_channels": [],
+    })
+}
+
+fn native_hit(
+    guild: u64,
+    rule: u64,
+    user: u64,
+) -> twilight_model::gateway::payload::incoming::AutoModerationActionExecution {
+    serde_json::from_value(json!({
+        "guild_id": guild.to_string(), "action": {"type": 1}, "rule_id": rule.to_string(),
+        "rule_trigger_type": 1, "user_id": user.to_string(), "content": "x",
+        "matched_keyword": null, "matched_content": null,
+    }))
+    .unwrap()
+}
+
+fn rule_edit(guild: u64, id: u64, actor: u64) -> twilight_model::guild::audit_log::AuditLogEntry {
+    serde_json::from_value(json!({
+        "id": id.to_string(), "action_type": 141, "guild_id": guild.to_string(),
+        "target_id": "77", "user_id": actor.to_string(), "reason": null, "changes": [],
+    }))
+    .unwrap()
+}
+
+/// Plan item 1: the bot acts on a native rule only in a state a trusted person approved. Rules that
+/// exist at the first fetch are approved once; a change with no audit entry (the bot lacks View
+/// Audit Log) stops actions until a trusted change. A failed fetch acts on nothing.
+#[tokio::test]
+async fn a_native_rule_acts_only_in_an_approved_state() {
+    let Some(t) = T::new(741).await else { return };
+    let g = t.g(0).get();
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"]}}}),
+    )
+    .await;
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"])]);
+        m.fail_rules = true;
+    });
+    let hit = |user: u64| {
+        let app = &t.app;
+        async move { crate::native::on_native_hit(app, &native_hit(g, 77, user)).await }
+    };
+    hit(t.base + 1).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 0, "a failed fetch takes no action");
+    t.set(|m| m.fail_rules = false);
+    hit(t.base + 2).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "approved once at the first fetch");
+    assert_eq!(
+        t.count(
+            "SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1 AND approved_by = 0"
+        )
+        .await,
+        2,
+        "rule 77 and the guild's done marker"
+    );
+    // Someone changes the rule in Discord; no audit entry comes.
+    let changed = native_rule(g, &["y"]);
+    t.set(|m| {
+        m.rules.insert(g, vec![changed.clone()]);
+    });
+    crate::native::rule_seen(&serde_json::from_value(changed).unwrap());
+    hit(t.base + 3).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "no action on a state nobody approved");
+    // The owner's change in Discord approves the rule as it is now.
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, 1, t.owner()))
+        .await
+        .unwrap();
+    hit(t.base + 4).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 2, "acts again after the owner's change");
+    t.cleanup().await;
+}
+
+/// The bot hashes twilight's model of a rule, the dashboard and the sync Discord's JSON.
+#[test]
+fn twilight_and_discord_json_give_one_fingerprint() {
+    let raw = json!({
+        "id": "77", "guild_id": "1", "name": "r", "creator_id": "5", "event_type": 1,
+        "trigger_type": 1, "enabled": true, "exempt_roles": ["3"], "exempt_channels": [],
+        "trigger_metadata": {"keyword_filter": ["a"], "regex_patterns": [], "allow_list": []},
+        "actions": [{"type": 1, "metadata": {}}, {"type": 2, "metadata": {"channel_id": "4"}}],
+    });
+    let model: twilight_model::guild::auto_moderation::AutoModerationRule =
+        serde_json::from_value(raw.clone()).unwrap();
+    let fp = tommybot_automod::discord_api::rule_fingerprint;
+    assert_eq!(fp(&raw), fp(&serde_json::to_value(model).unwrap()));
+}
+
+/// The first-start approval skips a rule an audit entry shows was changed without a permit.
+#[tokio::test]
+async fn first_start_skips_a_rule_changed_without_a_permit() {
+    let Some(t) = T::new(742).await else { return };
+    let g = t.g(0).get();
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"], "78": ["timeout"]}}}),
+    )
+    .await;
+    let mut other = native_rule(g, &["z"]);
+    other["id"] = json!("78");
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"]), other]);
+    });
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, 1, t.base + 5))
+        .await
+        .unwrap();
+    // A hit of rule 78 makes the first fetch.
+    crate::native::on_native_hit(&t.app, &native_hit(g, 78, t.base + 1))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "rule 78 was approved");
+    assert_eq!(
+        t.count("SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = 77")
+            .await,
+        0,
+        "rule 77 was not"
+    );
     t.cleanup().await;
 }
 

@@ -195,15 +195,16 @@ impl Api {
     }
 
     /// Create or update our keyword rule so it blocks exactly `words`. An empty list disables it.
+    /// The rule as Discord returns it, or `None` when there was nothing to write.
     pub async fn sync_keyword_rule(
         &self,
         guild: u64,
         words: &[String],
         regex: &[String],
-    ) -> Result<()> {
+    ) -> Result<Option<Value>> {
         let rules = self.list_rules(guild).await?;
         let body = keyword_rule_body(words, regex);
-        match rules.iter().find(|r| r.name == KEYWORD_RULE) {
+        let rule = match rules.iter().find(|r| r.name == KEYWORD_RULE) {
             Some(r) => {
                 self.send(
                     self.http.patch(format!(
@@ -214,7 +215,7 @@ impl Api {
                 )
                 .await?
             }
-            None if words.is_empty() && regex.is_empty() => return Ok(()),
+            None if words.is_empty() && regex.is_empty() => return Ok(None),
             None => {
                 self.send(
                     self.http
@@ -224,7 +225,7 @@ impl Api {
                 .await?
             }
         };
-        Ok(())
+        Ok(Some(rule))
     }
 
     pub async fn set_rule_enabled(&self, guild: u64, rule: &str, enabled: bool) -> Result<()> {
@@ -496,6 +497,87 @@ pub fn rule_matches(
         && set(&meta["regex_patterns"]) == have(patterns)
 }
 
+/// Hash of everything that decides a native rule's hits, from the rule JSON Discord returns (or
+/// twilight's model of it). Lists are sorted and a missing field reads as empty, so neither order
+/// nor form changes it.
+pub fn rule_fingerprint(v: &Value) -> String {
+    let sorted = |x: &Value| -> Vec<String> {
+        let mut l: Vec<String> = x
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| s.as_str().map_or_else(|| s.to_string(), String::from))
+            .collect();
+        l.sort();
+        l
+    };
+    let m = &v["trigger_metadata"];
+    let mut actions: Vec<String> = v["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| {
+            let md = &a["metadata"];
+            json!([
+                a["type"].as_u64(),
+                md["channel_id"].as_str().unwrap_or_default(),
+                md["custom_message"].as_str().unwrap_or_default(),
+                md["duration_seconds"].as_u64().unwrap_or(0),
+            ])
+            .to_string()
+        })
+        .collect();
+    actions.sort();
+    let canon = json!([
+        v["name"].as_str().unwrap_or_default(),
+        v["event_type"].as_u64(),
+        v["trigger_type"].as_u64(),
+        sorted(&m["keyword_filter"]),
+        sorted(&m["regex_patterns"]),
+        sorted(&m["allow_list"]),
+        sorted(&m["presets"]),
+        m["mention_total_limit"].as_u64().unwrap_or(0),
+        m["mention_raid_protection_enabled"]
+            .as_bool()
+            .unwrap_or(false),
+        actions,
+        v["enabled"].as_bool().unwrap_or(false),
+        sorted(&v["exempt_roles"]),
+        sorted(&v["exempt_channels"]),
+    ]);
+    use sha2::Digest;
+    sha2::Sha256::digest(canon.to_string())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `rule` (Discord's JSON) as `by` approved it: the bot acts on its hits while it stays so. `by`
+/// is 0 for the one approval at the update to permit-checked rules.
+pub async fn approve_rule(
+    db: &sqlx::PgPool,
+    guild: i64,
+    rule: &Value,
+    by: i64,
+) -> sqlx::Result<()> {
+    let Some(id) = rule["id"].as_str().and_then(|i| i.parse::<i64>().ok()) else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO automod_rule_approved (guild_id, rule_id, fingerprint, approved_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (guild_id, rule_id) DO UPDATE
+           SET fingerprint = $3, approved_by = $4, at = now()",
+    )
+    .bind(guild)
+    .bind(id)
+    .bind(rule_fingerprint(rule))
+    .bind(by)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
     let fit = |list: &[String], ok: Vec<bool>| -> Vec<String> {
         list.iter()
@@ -664,5 +746,33 @@ mod tests {
         let r = keyword_rule_body(&[], &["b[a4]d".into()]);
         assert_eq!(r["trigger_metadata"]["regex_patterns"], json!(["b[a4]d"]));
         assert_eq!(r["enabled"], true);
+    }
+
+    #[test]
+    fn fingerprint_ignores_order_and_form_but_not_content() {
+        let a = json!({
+            "id": "5", "name": "r", "event_type": 1, "trigger_type": 1, "enabled": true,
+            "trigger_metadata": {"keyword_filter": ["a", "b"], "allow_list": []},
+            "actions": [{"type": 1, "metadata": {}}, {"type": 3, "metadata": {"duration_seconds": 60}}],
+            "exempt_roles": ["2", "1"], "exempt_channels": [], "creator_id": "9",
+        });
+        let b = json!({
+            "id": "5", "name": "r", "event_type": 1, "trigger_type": 1, "enabled": true,
+            "trigger_metadata": {"keyword_filter": ["b", "a"], "regex_patterns": []},
+            "actions": [{"type": 3, "metadata": {"duration_seconds": 60}}, {"type": 1}],
+            "exempt_roles": ["1", "2"], "creator_id": "8",
+        });
+        assert_eq!(rule_fingerprint(&a), rule_fingerprint(&b));
+        for (k, v) in [
+            ("name", json!("s")),
+            ("enabled", json!(false)),
+            ("exempt_channels", json!(["3"])),
+            ("trigger_metadata", json!({"keyword_filter": ["a", "c"]})),
+            ("actions", json!([{"type": 1}])),
+        ] {
+            let mut c = a.clone();
+            c[k] = v;
+            assert_ne!(rule_fingerprint(&a), rule_fingerprint(&c), "{k}");
+        }
     }
 }

@@ -1150,9 +1150,20 @@ pub async fn sync_discord_rule(app: &App, guild: u64) {
         let cfg = app.cfg(guild).await?;
         let f = &cfg.automod.filters;
         if f.words.use_discord_automod {
-            app.api
+            let rule = app
+                .api
                 .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice())
                 .await?;
+            // The rule as written from TommyBot's own config.
+            if let Some(rule) = rule {
+                tommybot_automod::discord_api::approve_rule(
+                    &app.pool,
+                    guild as i64,
+                    &rule,
+                    app.me.get() as i64,
+                )
+                .await?;
+            }
         }
         anyhow::Ok(())
     };

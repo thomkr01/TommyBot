@@ -65,6 +65,10 @@ pub(crate) struct Mock {
     pub(crate) channels: HashMap<u64, Value>,
     /// Audit log entries by guild, newest first; `audit` when not set.
     pub(crate) audit_by_guild: HashMap<u64, Vec<Value>>,
+    /// Native AutoMod rules by guild, as Discord's JSON.
+    pub(crate) rules: HashMap<u64, Vec<Value>>,
+    /// AutoMod rule lookups fail with 500.
+    pub(crate) fail_rules: bool,
     pub(crate) log: Vec<String>,
 }
 
@@ -232,6 +236,23 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             let mut j = user(u);
             j["bot"] = json!(m.bots.iter().any(|b| b.to_string() == *u));
             (200, j.to_string())
+        }
+        ("GET", ["guilds", _, "auto-moderation", ..]) if m.fail_rules => err(500, 0),
+        ("GET", ["guilds", g, "auto-moderation", "rules"]) => (
+            200,
+            json!(m.rules.get(&n(g)).cloned().unwrap_or_default()).to_string(),
+        ),
+        ("GET", ["guilds", g, "auto-moderation", "rules", r]) => {
+            match m
+                .rules
+                .get(&n(g))
+                .into_iter()
+                .flatten()
+                .find(|x| x["id"] == *r)
+            {
+                Some(x) => (200, x.to_string()),
+                None => err(404, 10066),
+            }
         }
         ("GET", ["guilds", g, "roles"]) => {
             let all = m.roles.get(&n(g)).cloned().unwrap_or_default();
@@ -530,6 +551,7 @@ impl T {
             "DELETE FROM raider_actions WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_allow WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM automod_rule_untrusted WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM automod_rule_approved WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM guild_left WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9",
         ] {
