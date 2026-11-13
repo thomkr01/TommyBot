@@ -668,6 +668,16 @@ pub fn BanSyncGroup(guild: String, enrolled: ReadSignal<bool>) -> impl IntoView 
         run_act(async move { api("POST", &path, Some(body)).await }, msg, need, move |_| msg.ok(done));
     };
     view! {
+        {move || {
+            let prev: Vec<String> = data.get()["previous_permits"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
+            (!prev.is_empty()).then(|| view! {
+                <div class="card">
+                    <h3 class="warn">"Permits from the previous owner"</h3>
+                    <p>"This server changed owner. These permits were set before that and stay on. Before you switch Ban Sync on, check who holds their roles: their bans are copied to your other servers."</p>
+                    <ul>{prev.into_iter().map(|p| view! { <li>{p}</li> }).collect_view()}</ul>
+                </div>
+            })
+        }}
         <div class="card">
             <h3>"Your other servers"</h3>
             <p class="muted">"Bans are shared only with servers that have the same Discord owner and Ban Sync on."</p>

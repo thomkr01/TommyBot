@@ -505,12 +505,14 @@ async fn same_owner(
     a: Id<GuildMarker>,
     b: Id<GuildMarker>,
 ) -> Result<bool> {
-    let stored: Vec<i64> =
-        sqlx::query_scalar("SELECT owner_id FROM guild_owners WHERE guild_id = ANY($1)")
-            .bind([a.get() as i64, b.get() as i64].as_slice())
-            .fetch_all(&app.pool)
-            .await?;
-    // A server the bot left has no row any more: no Discord call for it.
+    let stored: Vec<i64> = sqlx::query_scalar(
+        "SELECT owner_id FROM guild_owners WHERE guild_id = ANY($1)
+             AND guild_id NOT IN (SELECT guild_id FROM guild_left)",
+    )
+    .bind([a.get() as i64, b.get() as i64].as_slice())
+    .fetch_all(&app.pool)
+    .await?;
+    // A server the bot left is in guild_left: no Discord call for it.
     if stored.len() != 2 || stored[0] != stored[1] {
         return Ok(false);
     }
@@ -537,7 +539,8 @@ async fn grouped(
 async fn group(app: &App, gid: Id<GuildMarker>) -> Result<Vec<Id<GuildMarker>>> {
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT o.guild_id FROM guild_owners o JOIN guild_owners s ON s.owner_id = o.owner_id
-         WHERE s.guild_id = $1 AND o.guild_id <> $1 ORDER BY o.guild_id",
+         WHERE s.guild_id = $1 AND o.guild_id <> $1
+           AND o.guild_id NOT IN (SELECT guild_id FROM guild_left) ORDER BY o.guild_id",
     )
     .bind(gid.get() as i64)
     .fetch_all(&app.pool)
@@ -1182,7 +1185,8 @@ async fn lift(app: &App, key: Key, name: &str) -> Result<()> {
 /// its old group at once: its pending copies are cancelled and both owners hear about it.
 /// The server's sync becomes the new owner's own (D47): Ban Sync is switched off, so it is in no
 /// group until they turn it on again with 2FA, and the Extra Owners and Trusted Admins the previous
-/// owner set are removed. What was removed is kept in `owner_handovers`, so the new owner can keep
+/// owner set are removed, with the roles of their owner, full immunity and dashboard-edit permits.
+/// What was removed is kept in `owner_handovers`, so the new owner can keep
 /// it from the dashboard's Overview; keeping it never turns Ban Sync on.
 pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) -> Result<()> {
     // One transaction under the config lock: a crash cannot record the new owner without the reset.
@@ -1216,82 +1220,140 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
             .bind(g)
             .fetch_all(&mut *tx)
             .await?;
-    let reset = sync_on || !eo.is_empty() || !ta.is_empty();
-    if reset {
-        sqlx::query(
-            "INSERT INTO owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, ban_sync_was_on)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (guild_id) DO UPDATE SET old_owner = $2, new_owner = $3, extra_owners = $4,
-               trusted_admins = $5, ban_sync_was_on = $6, at = now(), kept_at = NULL",
-        )
-        .bind(g)
-        .bind(old.get() as i64)
-        .bind(owner.get() as i64)
-        .bind(&eo)
-        .bind(&ta)
-        .bind(sync_on)
-        .execute(&mut *tx)
-        .await?;
-        // A config version of its own, so History shows it and a rollback sees the removal.
-        crate::settings::append(app, tx, gid, version, &mut doc, app.me.get()).await?;
-        app.forget_cfg(gid.get());
-    } else {
-        tx.commit().await?;
-    }
+    // Permits that make their roles owners, fully immune or dashboard editors are paused too;
+    // weaker ones stay on and are only listed.
+    let paused: Vec<(String, i64)> = sqlx::query_as(
+        "DELETE FROM permit_roles r USING permits p WHERE r.permit_id = p.id AND p.guild_id = $1
+           AND (p.perms && ARRAY['owner', 'dashboard_edit'] OR p.whitelist && ARRAY['all'])
+         RETURNING p.name, r.role_id",
+    )
+    .bind(g)
+    .fetch_all(&mut *tx)
+    .await?;
+    let other: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM permits p WHERE guild_id = $1
+           AND EXISTS (SELECT 1 FROM permit_roles r WHERE r.permit_id = p.id)
+         ORDER BY rank DESC, name",
+    )
+    .bind(g)
+    .fetch_all(&mut *tx)
+    .await?;
+    let paused_json: Vec<Value> = paused
+        .iter()
+        .map(|(permit, role)| json!({"permit": permit, "role": role.to_string()}))
+        .collect();
+    // Recorded on every change, even with nothing to reset: the dashboard refuses the previous
+    // owner by it, and a rollback to before it keeps what the change paused.
+    sqlx::query(
+        "INSERT INTO owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins,
+           ban_sync_was_on, paused_roles, other_permits)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (guild_id) DO UPDATE SET old_owner = $2, new_owner = $3, extra_owners = $4,
+           trusted_admins = $5, ban_sync_was_on = $6, paused_roles = $7, other_permits = $8,
+           at = now(), kept_at = NULL",
+    )
+    .bind(g)
+    .bind(old.get() as i64)
+    .bind(owner.get() as i64)
+    .bind(&eo)
+    .bind(&ta)
+    .bind(sync_on)
+    .bind(json!(paused_json))
+    .bind(&other)
+    .execute(&mut *tx)
+    .await?;
+    // A config version of its own, so History shows it and a rollback sees the removal.
+    crate::settings::append(app, tx, gid, version, &mut doc, app.me.get()).await?;
+    app.forget_cfg(gid.get());
     app.invalidate_guild(gid);
     cancel(app, gid, "owner changed").await?;
-    if !reset {
-        return Ok(());
-    }
     let name = md(&verify::guild_name(app, gid).await);
     if sync_on {
         let text = format!("**{name}** has a new owner, so it left your Ban Sync group: bans are no longer copied between it and your other servers. Copies already made stay as normal bans.");
         reply::dm(app, old, &text).await;
     }
-    reply::dm(
-        app,
-        owner,
-        &handover_text(&name, sync_on, eo.len(), ta.len(), gid),
-    )
-    .await;
+    let paused: Vec<String> = paused.into_iter().map(|p| p.0).collect();
+    let h = Handover {
+        sync_on,
+        eo: &eo,
+        ta: &ta,
+        paused: &paused,
+        other: &other,
+    };
+    if let Some(text) = handover_text(&name, &h, gid) {
+        reply::dm(app, owner, &text).await;
+    }
     Ok(())
 }
 
-/// The new owner's DM after [`on_owner`] reset the server.
-fn handover_text(name: &str, sync_on: bool, eo: usize, ta: usize, gid: Id<GuildMarker>) -> String {
+/// What [`on_owner`] did at an ownership change, for the new owner's DM.
+struct Handover<'a> {
+    sync_on: bool,
+    eo: &'a [i64],
+    ta: &'a [i64],
+    /// Names of the permits whose roles were paused, once per role.
+    paused: &'a [String],
+    /// Weaker permits that stayed on.
+    other: &'a [String],
+}
+
+/// The new owner's DM after [`on_owner`], or None when it changed nothing worth telling.
+fn handover_text(name: &str, h: &Handover, gid: Id<GuildMarker>) -> Option<String> {
+    let mentions = |ids: &[i64]| {
+        ids.iter()
+            .map(|u| format!("<@{u}>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut names: Vec<&str> = h.paused.iter().map(String::as_str).collect();
+    names.sort();
+    names.dedup();
     let mut done = vec![];
-    if sync_on {
+    if h.sync_on {
         done.push(
             "switched Ban Sync off, so no bans are shared with the previous owner's servers"
                 .to_string(),
         );
     }
-    if eo + ta > 0 {
+    if !h.eo.is_empty() {
+        done.push(format!("removed the Extra Owner(s) {}", mentions(h.eo)));
+    }
+    if !h.ta.is_empty() {
+        done.push(format!("removed the Trusted Admin(s) {}", mentions(h.ta)));
+    }
+    if !names.is_empty() {
         done.push(format!(
-            "removed the {eo} Extra Owner(s) and {ta} Trusted Admin(s) the previous owner set"
+            "paused the roles of the permit(s) {} (owner, full immunity or dashboard edit)",
+            names.join(", ")
         ));
     }
-    let mut text = format!(
-        "You are the new owner of **{name}**. To protect you, TommyBot {}.",
-        done.join(" and ")
-    );
-    if eo + ta > 0 {
-        text.push_str(" If you trust them, you can keep them with **Keep previous staff** on the Overview of the ");
-        text.push_str(&crate::settings::dashboard_link(gid.get()));
-        text.push('.');
+    if done.is_empty() && h.other.is_empty() {
+        return None;
     }
-    if sync_on {
+    let link = crate::settings::dashboard_link(gid.get());
+    let mut text = format!("You are the new owner of **{name}**.");
+    if !done.is_empty() {
+        text.push_str(&format!(" To protect you, TommyBot {}.", done.join("; ")));
+    }
+    if !(h.eo.is_empty() && h.ta.is_empty() && names.is_empty()) {
+        text.push_str(&format!(" The previous owner set them. Keep only the ones you trust, one by one, on the Overview of the {link}."));
+    }
+    if !h.other.is_empty() {
+        text.push_str(&format!(
+            " These permits from the previous owner stay on: {}. Check who holds their roles.",
+            h.other.join(", ")
+        ));
+    }
+    if h.sync_on {
         text.push_str(" Ban Sync can be switched on again on its dashboard page (it needs 2FA); it then syncs only with your own servers.");
     }
-    text
+    Some(text)
 }
 
 /// The bot left the server: it is out of the group, and its pending copies are cancelled.
+/// Its `guild_owners` row stays (groups skip servers in `guild_left`), so an owner change while
+/// the bot was out is still caught when it comes back.
 pub async fn on_removed(app: &App, gid: Id<GuildMarker>) -> Result<()> {
-    sqlx::query("DELETE FROM guild_owners WHERE guild_id = $1")
-        .bind(gid.get() as i64)
-        .execute(&app.pool)
-        .await?;
     cancel(app, gid, "bot removed").await
 }
 

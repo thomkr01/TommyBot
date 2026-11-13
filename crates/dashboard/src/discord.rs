@@ -185,6 +185,16 @@ impl Discord {
         Ok(g.and_then(|g| g["name"].as_str().map(String::from)))
     }
 
+    /// A role's name, or None when the server or the role is unknown.
+    pub async fn role_name(&self, guild: i64, role: &str) -> Result<Option<String>> {
+        let g = self.memo_get(format!("/guilds/{guild}")).await?;
+        Ok(g.and_then(|g| {
+            g["roles"].as_array()?.iter().find(|r| r["id"] == role)?["name"]
+                .as_str()
+                .map(String::from)
+        }))
+    }
+
     /// The server's name and approximate member count, or None when the bot is not in it.
     pub async fn guild_size(&self, guild: i64) -> Result<Option<(String, u64)>> {
         let g = self

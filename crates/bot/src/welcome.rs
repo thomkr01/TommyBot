@@ -62,17 +62,15 @@ pub async fn on_ready(
     tracing::info!(guilds = ev.guilds.len(), "gateway ready");
     let ids: Vec<i64> = ev.guilds.iter().map(|g| g.id.get() as i64).collect();
     sqlx::query(
-        "INSERT INTO guild_left (guild_id) SELECT DISTINCT guild_id FROM guild_config \
-         WHERE guild_id <> ALL($1) ON CONFLICT DO NOTHING",
+        "INSERT INTO guild_left (guild_id) SELECT guild_id FROM guild_config \
+         WHERE guild_id <> ALL($1) UNION SELECT guild_id FROM guild_owners WHERE guild_id <> ALL($1) \
+         ON CONFLICT DO NOTHING",
     )
     .bind(&ids)
     .execute(&app.pool)
     .await?;
-    // Ban Sync groups only servers the bot is still in.
-    sqlx::query("DELETE FROM guild_owners WHERE guild_id <> ALL($1)")
-        .bind(&ids)
-        .execute(&app.pool)
-        .await?;
+    // Ban Sync groups skip servers in guild_left; their guild_owners rows stay, so an owner
+    // change while the bot was out is caught at the next GuildCreate.
     Ok(())
 }
 

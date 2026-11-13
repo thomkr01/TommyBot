@@ -253,82 +253,262 @@ async fn score(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     Ok(Json(json!(rows)))
 }
 
-/// The [`Fix::setting`] that gives back the Extra Owners and Trusted Admins a previous owner set.
+/// The [`Fix::setting`] that gives back one thing the previous owner set (`role_id` names it:
+/// `eo:<user>`, `ta:<user>`, `role:<role>:<permit>`), or with `role_id` "done" closes the card.
 const KEEP_STAFF: &str = "keep_previous_staff";
 
-/// After an ownership change the bot removed the previous owner's EO/TA (D47); the new owner may keep them.
-async fn handover_check(st: &AppState, guild: i64) -> Result<Option<Check>, ApiError> {
-    let owner: i64 = st
-        .discord
-        .guild_owner(guild)
-        .await?
-        .parse()
-        .unwrap_or_default();
-    let row: Option<(i32, i32, bool)> = sqlx::query_as(
-        "select cardinality(extra_owners), cardinality(trusted_admins), ban_sync_was_on from owner_handovers
-         where guild_id = $1 and new_owner = $2 and kept_at is null
-           and cardinality(extra_owners) + cardinality(trusted_admins) > 0",
+/// "name (id)" for a user, or the id alone when Discord does not answer.
+async fn user_label(st: &AppState, id: i64) -> String {
+    match st.discord.user(id).await.ok().flatten() {
+        Some(u) if u["username"].is_string() => {
+            format!("{} ({id})", u["username"].as_str().unwrap_or_default())
+        }
+        _ => id.to_string(),
+    }
+}
+
+async fn role_label(st: &AppState, guild: i64, role: &str) -> String {
+    match st.discord.role_name(guild, role).await.ok().flatten() {
+        Some(n) => format!("@{n} ({role})"),
+        None => role.to_string(),
+    }
+}
+
+fn keep(entry: String) -> Option<Fix> {
+    Some(Fix {
+        label: "Keep",
+        role_id: Some(entry),
+        channel_id: None,
+        setting: Some(KEEP_STAFF),
+        move_under_bot: false,
+    })
+}
+
+/// The weaker permits from before the last ownership change that still have roles, as
+/// "name (@role (id), ...)": they stayed on, so the card and the Ban Sync page list them (D47).
+pub(crate) async fn weaker_permits(st: &AppState, guild: i64) -> Result<Vec<String>, ApiError> {
+    let held: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "select p.name, array_agg(r.role_id::text order by r.role_id) from owner_handovers h
+         join permits p on p.guild_id = h.guild_id and p.name = any(h.other_permits)
+         join permit_roles r on r.permit_id = p.id
+         where h.guild_id = $1 group by p.name, p.rank order by p.rank desc, p.name",
     )
     .bind(guild)
-    .bind(owner)
+    .fetch_all(&st.db)
+    .await?;
+    let mut on = vec![];
+    for (name, ids) in held {
+        let mut labels = vec![];
+        for r in &ids {
+            labels.push(role_label(st, guild, r).await);
+        }
+        on.push(format!("{name} ({})", labels.join(", ")));
+    }
+    Ok(on)
+}
+
+/// After an ownership change the bot paused the previous owner's EO/TA and strong permit roles
+/// (D47): one Overview row per paused person or role, which the new owner keeps one by one.
+async fn handover_check(st: &AppState, guild: i64) -> Result<Vec<Check>, ApiError> {
+    type Row = (i64, Vec<i64>, Vec<i64>, Value, Vec<String>, bool);
+    let row: Option<Row> = sqlx::query_as(
+        "select old_owner, extra_owners, trusted_admins, paused_roles, other_permits, ban_sync_was_on
+         from owner_handovers where guild_id = $1 and kept_at is null",
+    )
+    .bind(guild)
     .fetch_optional(&st.db)
     .await?;
-    Ok(row.map(|(eo, ta, sync)| Check {
+    let Some((old, eo, ta, roles, other, sync)) = row else {
+        return Ok(vec![]);
+    };
+    let roles: Vec<(String, String)> = roles
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r["role"].as_str()?.to_string(),
+                r["permit"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    if eo.is_empty() && ta.is_empty() && roles.is_empty() && other.is_empty() {
+        return Ok(vec![]);
+    }
+    let on = weaker_permits(st, guild).await?;
+    let old_label = user_label(st, old).await;
+    let mut detail = format!(
+        "When this server got a new owner, TommyBot paused what the previous owner, {old_label}, set{}. Each row below is one person or role: keep only the ones you trust. Only the server owner can keep them, and keeping never turns Ban Sync on.",
+        if sync { ", and switched Ban Sync off" } else { "" }
+    );
+    if !on.is_empty() {
+        detail.push_str(&format!(
+            " These permits from before the change stay on: {}.",
+            on.join("; ")
+        ));
+    }
+    let mut rows = vec![Check {
         id: "owner_handover".into(),
         severity: Severity::Warn,
         title: "Ownership changed",
-        detail: format!(
-            "When this server got a new owner, TommyBot removed the {eo} Extra Owner(s) and {ta} Trusted Admin(s) the previous owner set{}. Keep them only if you trust them. Only the server owner can keep them, and keeping them never turns Ban Sync on.",
-            if sync { " and switched Ban Sync off" } else { "" }
-        ),
+        detail,
         fix: Some(Fix {
-            label: "Keep previous staff",
-            role_id: None,
+            label: "Dismiss, keep nothing more",
+            role_id: Some("done".into()),
             channel_id: None,
             setting: Some(KEEP_STAFF),
             move_under_bot: false,
         }),
-    }))
+    }];
+    let mark = |id: i64| {
+        if id == old {
+            ". This is the previous owner."
+        } else {
+            ""
+        }
+    };
+    for (kind, title, ids) in [
+        ("eo", "Paused Extra Owner", &eo),
+        ("ta", "Paused Trusted Admin", &ta),
+    ] {
+        for &id in ids {
+            rows.push(Check {
+                id: format!("owner_handover:{kind}:{id}"),
+                severity: Severity::Warn,
+                title,
+                detail: format!("{}{}", user_label(st, id).await, mark(id)),
+                fix: keep(format!("{kind}:{id}")),
+            });
+        }
+    }
+    for (role, permit) in roles {
+        rows.push(Check {
+            id: format!("owner_handover:role:{role}:{permit}"),
+            severity: Severity::Warn,
+            title: "Paused permit role",
+            detail: format!(
+                "{} in the permit {permit}",
+                role_label(st, guild, &role).await
+            ),
+            fix: keep(format!("role:{role}:{permit}")),
+        });
+    }
+    Ok(rows)
 }
 
-/// Puts back the Extra Owners and Trusted Admins stored at the ownership change, as a config version.
-async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value) -> Res {
+/// Gives back one paused entry stored at the ownership change, as a config version; "done"
+/// closes the card and leaves the rest removed.
+async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Option<&str>) -> Res {
     if !crate::api::is_discord_owner(st, s, guild).await? {
         return Err(ApiError::Forbidden(
             "only the server owner can keep the previous owner's staff",
         ));
     }
+    let entry = entry.ok_or_else(|| ApiError::BadRequest("name what to keep".into()))?;
     let mut tx = st.db.begin().await?;
-    let row: Option<(Vec<i64>, Vec<i64>)> = sqlx::query_as(
-        "update owner_handovers set kept_at = now()
-         where guild_id = $1 and new_owner = $2 and kept_at is null
-         returning extra_owners, trusted_admins",
+    // The config lock first, as the bot's on_owner takes it: the other order deadlocks (R6).
+    crate::store::locked(&mut tx, guild).await?;
+    let row: Option<(Vec<i64>, Vec<i64>, Value, Vec<String>)> = sqlx::query_as(
+        "select extra_owners, trusted_admins, paused_roles, other_permits from owner_handovers
+         where guild_id = $1 and new_owner = $2 and kept_at is null",
     )
     .bind(guild)
     .bind(s.user_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (eo, ta) = row.ok_or(ApiError::NotFound)?;
-    for (sql, ids) in [
-        ("insert into extra_owners (guild_id, user_id) select $1, unnest($2::bigint[]) on conflict do nothing", &eo),
-        ("insert into trusted_admins (guild_id, user_id) select $1, unnest($2::bigint[]) on conflict do nothing", &ta),
-    ] {
-        sqlx::query(sql).bind(guild).bind(ids).execute(&mut *tx).await?;
-    }
+    let (mut eo, mut ta, roles, other) = row.ok_or(ApiError::NotFound)?;
+    let mut roles: Vec<Value> = roles.as_array().cloned().unwrap_or_default();
+    let done = entry == "done";
+    let what = if done {
+        None
+    } else {
+        let (kind, rest) = entry.split_once(':').ok_or(ApiError::NotFound)?;
+        let (list, table, label) = match kind {
+            "eo" => (Some(&mut eo), "extra_owners", "Extra Owner"),
+            "ta" => (Some(&mut ta), "trusted_admins", "Trusted Admin"),
+            "role" => (None, "permit_roles", "permit role"),
+            _ => return Err(ApiError::NotFound),
+        };
+        if let Some(list) = list {
+            let id: i64 = rest.parse().map_err(|_| ApiError::NotFound)?;
+            if !list.contains(&id) {
+                return Err(ApiError::NotFound);
+            }
+            list.retain(|u| *u != id);
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "insert into {table} (guild_id, user_id) values ($1, $2) on conflict do nothing"
+            )))
+            .bind(guild)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            Some(format!("the {label} <@{id}>"))
+        } else {
+            let (role, permit) = rest.split_once(':').ok_or(ApiError::NotFound)?;
+            let at = roles
+                .iter()
+                .position(|r| r["role"] == role && r["permit"] == permit)
+                .ok_or(ApiError::NotFound)?;
+            roles.remove(at);
+            let role: i64 = role.parse().map_err(|_| ApiError::NotFound)?;
+            let n = sqlx::query(
+                "insert into permit_roles (permit_id, guild_id, role_id)
+                 select id, $1, $3 from permits where guild_id = $1 and name = $2 on conflict do nothing",
+            )
+            .bind(guild)
+            .bind(permit)
+            .bind(role)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if n == 0
+                && !sqlx::query_scalar::<_, bool>(
+                    "select exists(select 1 from permits where guild_id = $1 and name = $2)",
+                )
+                .bind(guild)
+                .bind(permit)
+                .fetch_one(&mut *tx)
+                .await?
+            {
+                return Err(ApiError::BadRequest(format!(
+                    "the permit {permit} was deleted since"
+                )));
+            }
+            Some(format!("the role <@&{role}> in the permit {permit}"))
+        }
+    };
+    let closed = done || (eo.is_empty() && ta.is_empty() && roles.is_empty() && other.is_empty());
+    sqlx::query(
+        "update owner_handovers set extra_owners = $2, trusted_admins = $3, paused_roles = $4,
+           kept_at = case when $5 then now() end where guild_id = $1",
+    )
+    .bind(guild)
+    .bind(&eo)
+    .bind(&ta)
+    .bind(json!(roles))
+    .bind(closed)
+    .execute(&mut *tx)
+    .await?;
+    let Some(what) = what else {
+        tx.commit().await?;
+        return Ok(Json(json!({"ok": true})));
+    };
     let version = crate::store::bump(&mut tx, guild, s.user_id).await?;
     tx.commit().await?;
-    log_change(st, guild, c, Some(version),
+    log_change(
+        st,
+        guild,
+        c,
+        Some(version),
         format!(
-            "{} (<@{}>) kept the previous owner's {} Extra Owner(s) and {} Trusted Admin(s) -> config v{version}",
-            s.username, s.user_id, eo.len(), ta.len()
+            "{} (<@{}>) kept the previous owner's {what} -> config v{version}",
+            s.username, s.user_id
         ),
     )
     .await;
     Ok(Json(json!({"ok": true, "version": version})))
 }
 
-/// One of a row's `fix`: a role id (`*` for every strippable role and overwrite), an overwrite
-/// (`channel_id` + its target in `role_id`), or a server setting.
 #[derive(Deserialize)]
 struct FixBody {
     role_id: Option<String>,
@@ -365,7 +545,7 @@ async fn fix(
         return Ok(Json(json!({"ok": true, "failed": failed})));
     }
     if b.setting.as_deref() == Some(KEEP_STAFF) {
-        return keep_staff(&st, &s, guild, &c).await;
+        return keep_staff(&st, &s, guild, &c, b.role_id.as_deref()).await;
     }
     if b.setting.as_deref() == Some(PRIVATE) {
         return make_private(&st, &s, guild, &c, b.channel_id.as_deref()).await;
@@ -946,6 +1126,8 @@ async fn claim_key(
     (key, code): (Option<&str>, Option<&str>),
 ) -> Result<(), ApiError> {
     let mut tx = db.begin().await?;
+    // The config lock before any row lock, the order the bot's on_owner uses (R6).
+    crate::store::locked(&mut tx, guild).await?;
     // Both are needed: the key alone (a leaked note) or the phone alone is not enough.
     let secret: Option<Option<String>> = sqlx::query_scalar(
         "select totp_secret from rescue_key where guild_id = $1 and key_hash = $2 for update",
@@ -1134,9 +1316,9 @@ mod tests {
         }
     }
 
-    /// D47: the new owner sees the removed staff on Overview and can keep them once.
+    /// D47: the new owner sees each paused person and role on Overview and keeps them one by one.
     #[tokio::test]
-    async fn the_new_owner_keeps_the_previous_staff_once() {
+    async fn the_new_owner_keeps_the_previous_staff_one_by_one() {
         let Some((st, s, g)) = crate::api::g3_handler_tests::setup(9_893_000_000).await else {
             return;
         };
@@ -1146,6 +1328,7 @@ mod tests {
             "extra_owners",
             "trusted_admins",
             "guild_config",
+            "permits",
         ] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "delete from {t} where guild_id = $1"
@@ -1155,37 +1338,92 @@ mod tests {
             .await
             .unwrap();
         }
-        assert!(handover_check(&st, g).await.unwrap().is_none());
-        run("insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, ban_sync_was_on)
-             values ($1, 3, 7, '{11}', '{12, 13}', true)").await.unwrap();
-        let c = handover_check(&st, g).await.unwrap().unwrap();
-        assert!(
-            c.detail.contains("1 Extra Owner(s) and 2 Trusted Admin(s)")
-                && c.detail.contains("Ban Sync off")
+        assert!(handover_check(&st, g).await.unwrap().is_empty());
+        run("insert into permits (guild_id, name, perms) values ($1, 'Admins', '{dashboard_edit}'), ($1, 'Mods', '{ban}')").await.unwrap();
+        run("insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 21 from permits where guild_id = $1 and name = 'Mods'").await.unwrap();
+        run("insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, trusted_admins, ban_sync_was_on, paused_roles, other_permits)
+             values ($1, 3, 7, '{3}', '{12, 13}', true, '[{\"permit\": \"Admins\", \"role\": \"20\"}]', '{Mods}')").await.unwrap();
+        let rows = handover_check(&st, g).await.unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "owner_handover",
+                "owner_handover:eo:3",
+                "owner_handover:ta:12",
+                "owner_handover:ta:13",
+                "owner_handover:role:20:Admins"
+            ]
         );
-        let _ = keep_staff(&st, &s, g, &json!({})).await.unwrap();
+        assert!(
+            rows[0].detail.contains("Ban Sync off")
+                && rows[0].detail.contains("stay on: Mods (21)")
+        );
+        assert!(
+            rows[1].detail.contains("This is the previous owner"),
+            "{}",
+            rows[1].detail
+        );
+        assert!(!rows[2].detail.contains("previous owner"));
+        let c = json!({});
+        let keep = |e: &'static str| keep_staff(&st, &s, g, &c, Some(e));
+        let _ = keep("ta:12").await.unwrap();
+        let _ = keep("role:20:Admins").await.unwrap();
+        assert!(
+            matches!(keep("ta:12").await, Err(ApiError::NotFound)),
+            "only once"
+        );
+        assert!(
+            matches!(keep("eo:99").await, Err(ApiError::NotFound)),
+            "only a paused one"
+        );
         let n: i64 = sqlx::query_scalar("select (select count(*) from extra_owners where guild_id = $1) + (select count(*) from trusted_admins where guild_id = $1)")
             .bind(g).fetch_one(&st.db).await.unwrap();
-        assert_eq!(n, 3);
-        let eo: Value = sqlx::query_scalar("select config->'permits'->'eo' from guild_config where guild_id = $1 order by version desc limit 1")
+        assert_eq!(n, 1, "only the kept TA");
+        let p: Value = sqlx::query_scalar("select config->'permits' from guild_config where guild_id = $1 order by version desc limit 1")
             .bind(g).fetch_one(&st.db).await.unwrap();
-        assert_eq!(eo, json!(["11"]), "kept as a config version");
-        assert!(handover_check(&st, g).await.unwrap().is_none());
-        assert!(matches!(
-            keep_staff(&st, &s, g, &json!({})).await,
-            Err(ApiError::NotFound)
-        ));
+        assert_eq!(p["ta"], json!(["12"]), "kept as a config version");
+        assert!(p["custom"].to_string().contains("\"20\""), "{p}");
+        let ids: Vec<String> = handover_check(&st, g)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "owner_handover",
+                "owner_handover:eo:3",
+                "owner_handover:ta:13"
+            ]
+        );
         // Someone other than the Discord owner (user 7) is refused.
-        let other = Sess { user_id: 8, ..s };
+        let other = Sess {
+            user_id: 8,
+            ..s.clone()
+        };
         assert!(matches!(
-            keep_staff(&st, &other, g, &json!({})).await,
+            keep_staff(&st, &other, g, &json!({}), Some("ta:13")).await,
             Err(ApiError::Forbidden(_))
         ));
+        let _ = keep("done").await.unwrap();
+        assert!(
+            handover_check(&st, g).await.unwrap().is_empty(),
+            "dismissed"
+        );
+        let n: i64 = sqlx::query_scalar("select count(*) from extra_owners where guild_id = $1")
+            .bind(g)
+            .fetch_one(&st.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "dismissing keeps nothing more");
         for t in [
             "owner_handovers",
             "extra_owners",
             "trusted_admins",
             "guild_config",
+            "permits",
         ] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "delete from {t} where guild_id = $1"

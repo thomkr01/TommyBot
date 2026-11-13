@@ -608,6 +608,20 @@ pub async fn rollback(
     let level = require(&st, &s, guild, Level::Admin, true).await?;
     let mut old = version(&st, guild, v).await?;
     let (_, now) = store::current(&st.db, guild).await?;
+    // A version from before the last ownership change would bring back what the change paused (D47).
+    let before_handover: bool = sqlx::query_scalar(
+        "select exists(select 1 from owner_handovers h join guild_config c on c.guild_id = h.guild_id
+           where h.guild_id = $1 and c.version = $2 and c.created_at < h.at)",
+    )
+    .bind(guild)
+    .bind(v)
+    .fetch_one(&st.db)
+    .await?;
+    let mut held = vec![];
+    if before_handover && old["ban_sync"]["enabled"] == true && now["ban_sync"]["enabled"] != true {
+        old["ban_sync"]["enabled"] = json!(false);
+        held.push("Ban Sync stays off".to_string());
+    }
     if level < rollback_bar(&old, &now) {
         return Err(ApiError::Forbidden(
             "this rollback changes a section only owners can edit",
@@ -627,6 +641,9 @@ pub async fn rollback(
     web_mode_ok(&old, &now)?;
     let mut tx = st.db.begin().await?;
     let cur = store::read_permits(&mut tx, guild).await?;
+    if let Some(p) = old.get_mut("permits").filter(|_| before_handover) {
+        held.extend(hold_back_permits(p, &cur));
+    }
     if let Some(p) = old.get("permits") {
         if level < Level::Owner && p["ta"] != cur["ta"] {
             return Err(ApiError::Forbidden("only owners can roll back the TA list"));
@@ -647,17 +664,60 @@ pub async fn rollback(
         &old,
         Some(version),
         format!(
-            "{} (<@{}>) rolled config back to v{v} -> v{version}{}",
+            "{} (<@{}>) rolled config back to v{v} -> v{version}{}{}",
             s.username,
             s.user_id,
             match clamped.is_empty() {
                 true => String::new(),
                 false => format!(", moved into range: {}", clamped.join(", ")),
+            },
+            match held.is_empty() {
+                true => String::new(),
+                false => format!(", kept from the ownership change: {}", held.join(", ")),
             }
         ),
     )
     .await;
-    Ok(Json(json!({"version": version, "clamped": clamped})))
+    Ok(Json(
+        json!({"version": version, "clamped": clamped, "held": held}),
+    ))
+}
+
+/// A permit whose roles are owners, fully immune or dashboard editors: an ownership change pauses them.
+fn strong_permit(p: &Value) -> bool {
+    let has = |k: &str, v: &str| p[k].as_array().is_some_and(|a| a.iter().any(|x| x == v));
+    has("perms", "owner") || has("perms", "dashboard_edit") || has("whitelist", "all")
+}
+
+/// For a rollback to before the last ownership change: EO, TA and the roles of strong permits stay
+/// as they are now, so only Keep on Overview brings back what the change paused. Returns what was held.
+fn hold_back_permits(p: &mut Value, cur: &Value) -> Vec<String> {
+    let mut held = vec![];
+    for (k, what) in [("eo", "Extra Owners"), ("ta", "Trusted Admins")] {
+        if p[k] != cur[k] {
+            p[k] = cur[k].clone();
+            held.push(format!("{what} stay as they are"));
+        }
+    }
+    let now_roles = |name: &Value| {
+        cur["custom"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| c["name"] == *name)
+            .map_or(json!([]), |c| c["roles"].clone())
+    };
+    for c in p["custom"].as_array_mut().into_iter().flatten() {
+        let roles = now_roles(&c["name"]);
+        if strong_permit(c) && c["roles"] != roles {
+            c["roles"] = roles;
+            held.push(format!(
+                "the roles of the permit {} stay as they are",
+                c["name"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+    held
 }
 
 /// Deletes everything stored for the server (PRIVACY.md); the bot keeps running on defaults.
@@ -1530,11 +1590,13 @@ pub(crate) mod g3_handler_tests {
         };
         let wipe = || async {
             for t in ["guild_owners", "owner_handovers"] {
-                sqlx::query(sqlx::AssertSqlSafe(format!("delete from {t} where guild_id = $1")))
-                    .bind(g)
-                    .execute(&st.db)
-                    .await
-                    .unwrap();
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "delete from {t} where guild_id = $1"
+                )))
+                .bind(g)
+                .execute(&st.db)
+                .await
+                .unwrap();
             }
         };
         wipe().await;
@@ -1548,5 +1610,80 @@ pub(crate) mod g3_handler_tests {
             assert!(level_of(&st, &s, g).await.unwrap() < Level::Owner);
             wipe().await;
         }
+    }
+
+    /// D47 (R-h3 S4): a rollback to before the ownership change leaves the paused staff, the
+    /// strong permit's roles and Ban Sync as they are, says so, and the card stays.
+    #[tokio::test]
+    async fn a_rollback_to_before_the_handover_keeps_what_it_paused() {
+        let Some((st, s, g)) = setup(9_895_000_000).await else {
+            return;
+        };
+        cleanup(&st, g).await;
+        for sql in [
+            "delete from owner_handovers where guild_id = $1",
+            "delete from permits where guild_id = $1",
+            "insert into permits (guild_id, name, perms) values ($1, 'Admins', '{dashboard_edit}'), ($1, 'Mods', '{ban}')",
+            "insert into permit_roles (permit_id, guild_id, role_id) select id, $1, 22 from permits where guild_id = $1 and name = 'Mods'",
+            "insert into owner_handovers (guild_id, old_owner, new_owner, extra_owners, paused_roles, at) values ($1, 3, 7, '{5}', '[{\"permit\": \"Admins\", \"role\": \"20\"}]', now() - interval '1 minute')",
+        ] {
+            sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
+        }
+        let old = json!({"ban_sync": {"enabled": true}, "permits": {"eo": ["5"], "ta": ["6"], "custom": [
+            {"name": "Admins", "rank": 0, "perms": ["dashboard_edit"], "limits": {}, "whitelist": [], "roles": ["20"]},
+            {"name": "Mods", "rank": 0, "perms": ["ban"], "limits": {}, "whitelist": [], "roles": ["21"]}]}});
+        sqlx::query("insert into guild_config (guild_id, version, config, created_at) values ($1, 1, $2, now() - interval '1 hour')")
+            .bind(g).bind(old).execute(&st.db).await.unwrap();
+        put_version(&st, g, 2, json!({"ban_sync": {"enabled": false}})).await;
+        let r = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 1)),
+            body(json!({"expected_version": 2})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            r.0["held"],
+            json!([
+                "Ban Sync stays off",
+                "Extra Owners stay as they are",
+                "Trusted Admins stay as they are",
+                "the roles of the permit Admins stay as they are"
+            ])
+        );
+        let (_, c) = store::current(&st.db, g).await.unwrap();
+        assert_eq!(c["ban_sync"]["enabled"], json!(false));
+        let p = &c["permits"];
+        assert_eq!((&p["eo"], &p["ta"]), (&json!([]), &json!([])));
+        let roles = |n: &str| {
+            p["custom"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == n)
+                .unwrap()["roles"]
+                .clone()
+        };
+        assert_eq!(
+            roles("Admins"),
+            json!([]),
+            "paused, so only Keep brings it back"
+        );
+        assert_eq!(
+            roles("Mods"),
+            json!(["21"]),
+            "a weaker permit rolls back as usual"
+        );
+        let card: i64 = sqlx::query_scalar("select count(*) from owner_handovers where guild_id = $1 and kept_at is null and extra_owners = '{5}'")
+            .bind(g).fetch_one(&st.db).await.unwrap();
+        assert_eq!(card, 1, "the card still offers the paused ones");
+        for sql in [
+            "delete from owner_handovers where guild_id = $1",
+            "delete from permits where guild_id = $1",
+        ] {
+            sqlx::query(sql).bind(g).execute(&st.db).await.unwrap();
+        }
+        cleanup(&st, g).await;
     }
 }

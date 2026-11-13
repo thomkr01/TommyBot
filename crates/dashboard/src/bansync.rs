@@ -31,7 +31,8 @@ pub(crate) async fn siblings(st: &AppState, guild: i64) -> Result<Vec<i64>, ApiE
         return Ok(vec![]);
     };
     let ids: Vec<i64> = sqlx::query_scalar(
-        "select guild_id from guild_owners where owner_id = $1 and guild_id <> $2 order by guild_id",
+        "select guild_id from guild_owners where owner_id = $1 and guild_id <> $2
+           and guild_id not in (select guild_id from guild_left) order by guild_id",
     )
     .bind(owner_id)
     .bind(guild)
@@ -71,7 +72,11 @@ async fn group(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> R
     .bind(guild)
     .fetch_one(&st.db)
     .await?;
-    Ok(Json(json!({"servers": servers, "waiting": waiting})))
+    // Shown at the switch: these permits came with the server and stayed on (D47).
+    let previous = crate::ops::weaker_permits(&st, guild).await?;
+    Ok(Json(
+        json!({"servers": servers, "waiting": waiting, "previous_permits": previous}),
+    ))
 }
 
 /// The Discord owner after 2FA, with Ban Sync on here: what both buttons need.

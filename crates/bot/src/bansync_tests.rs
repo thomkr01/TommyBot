@@ -622,6 +622,8 @@ impl T {
             "DELETE FROM dash_session WHERE user_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_actions WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_allow WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM guild_left WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9",
         ] {
             self.exec(sql).await;
         }
@@ -872,6 +874,8 @@ async fn another_owner_a_transfer_or_a_left_server_gets_no_copy() {
         "cache dropped"
     );
     // The bot left server 3 (no row) and cannot see server 4 any more (403/404): both are skipped.
+    t.exec("INSERT INTO guild_left (guild_id) VALUES ($1 + 3)")
+        .await;
     on_removed(&t.app, t.g(3)).await.unwrap();
     t.set(|m| {
         m.owners.remove(&t.g(4).get());
@@ -902,8 +906,24 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
         .await;
     t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $1 + 2)")
         .await;
-    t.exec("DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9")
-        .await;
+    for (name, perms, wl, role) in [
+        ("Admins", "{dashboard_edit}", "{}", 3),
+        ("Immune", "{}", "{all}", 4),
+        ("Mods", "{ban}", "{automod}", 5),
+    ] {
+        sqlx::query(
+            "WITH p AS (INSERT INTO permits (guild_id, name, perms, whitelist) VALUES ($1, $2, $3::text[], $4::text[]) RETURNING id)
+             INSERT INTO permit_roles (permit_id, guild_id, role_id) SELECT id, $1, $1 + $5 FROM p",
+        )
+        .bind(t.base as i64)
+        .bind(name)
+        .bind(perms)
+        .bind(wl)
+        .bind(role as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    }
     t.set(|m| {
         m.owners.insert(t.g(0).get(), new);
     });
@@ -937,6 +957,27 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
     .unwrap();
     let b = t.base as i64;
     assert_eq!((eo, ta, was_on), (vec![b + 1], vec![b + 2], true));
+    let (mut paused, other): (Value, Vec<String>) = sqlx::query_as(
+        "SELECT paused_roles, other_permits FROM owner_handovers WHERE guild_id = $1",
+    )
+    .bind(b)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    paused
+        .as_array_mut()
+        .unwrap()
+        .sort_by_key(|p| p["role"].to_string());
+    assert_eq!(
+        paused,
+        json!([{"permit": "Admins", "role": (b + 3).to_string()}, {"permit": "Immune", "role": (b + 4).to_string()}])
+    );
+    assert_eq!(other, ["Mods"], "a weaker permit stays on");
+    assert_eq!(
+        t.count("SELECT count(*) FROM permit_roles WHERE guild_id = $1")
+            .await,
+        1
+    );
     // The new owner's server is in no group: a ban in the old owner's server is not sent there.
     t.ban(1, 508, "raiding");
     share_job(&t.app, t.g(1), &t.share(508, None))
@@ -958,14 +999,66 @@ async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
 #[test]
 fn the_handover_dm_says_what_was_done() {
     let g = Id::new(5);
-    let t = handover_text("S", true, 1, 2, g);
-    assert!(
-        t.contains("switched Ban Sync off")
-            && t.contains("1 Extra Owner(s) and 2 Trusted Admin(s)")
+    let p = ["Admins".to_string(), "Admins".to_string()];
+    let other = ["Mods".to_string()];
+    let h = Handover {
+        sync_on: true,
+        eo: &[11],
+        ta: &[12, 13],
+        paused: &p,
+        other: &other,
+    };
+    let t = handover_text("S", &h, g).unwrap();
+    assert!(t.contains("switched Ban Sync off") && t.contains("Extra Owner(s) <@11>"));
+    assert!(t.contains("Trusted Admin(s) <@12>, <@13>") && t.contains("permit(s) Admins ("));
+    assert!(t.contains("one by one") && t.contains("stay on: Mods"));
+    assert!(t.contains("syncs only with your own servers"));
+    let h = Handover {
+        sync_on: false,
+        eo: &[],
+        ta: &[1],
+        paused: &[],
+        other: &[],
+    };
+    assert!(!handover_text("S", &h, g).unwrap().contains("Ban Sync"));
+    let h = Handover {
+        sync_on: false,
+        eo: &[],
+        ta: &[],
+        paused: &[],
+        other: &[],
+    };
+    assert!(handover_text("S", &h, g).is_none(), "nothing to say");
+}
+
+/// D47: an owner change while the bot was out of the server is caught when it is added back.
+#[tokio::test]
+async fn an_owner_change_while_the_bot_was_out_is_caught_on_return() {
+    let Some(t) = T::new(204).await else { return };
+    let (o, new) = (t.owner(), t.base + 8);
+    t.server(0, o, "ban").await;
+    t.exec("INSERT INTO extra_owners (guild_id, user_id) VALUES ($1, $1 + 1)")
+        .await;
+    t.exec("INSERT INTO guild_left (guild_id) VALUES ($1)")
+        .await;
+    on_removed(&t.app, t.g(0)).await.unwrap();
+    t.exec("DELETE FROM guild_left WHERE guild_id = $1").await;
+    t.set(|m| {
+        m.owners.insert(t.g(0).get(), new);
+    });
+    on_owner(&t.app, t.g(0), Id::new(new)).await.unwrap();
+    assert_eq!(
+        t.count("SELECT count(*) FROM extra_owners WHERE guild_id = $1")
+            .await,
+        0
     );
-    assert!(t.contains("Keep previous staff") && t.contains("syncs only with your own servers"));
-    let t = handover_text("S", false, 0, 1, g);
-    assert!(!t.contains("Ban Sync"));
+    assert_eq!(
+        t.count("SELECT count(*) FROM owner_handovers WHERE guild_id = $1 AND old_owner = $1 + 9")
+            .await,
+        1,
+        "the kept guild_owners row named the previous owner"
+    );
+    t.cleanup().await;
 }
 
 #[tokio::test]
