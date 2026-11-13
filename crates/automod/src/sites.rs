@@ -178,8 +178,9 @@ pub struct Sites {
     phishing: RwLock<SiteList>,
     nsfw: RwLock<SiteList>,
     http: reqwest::Client,
-    /// Shortener lookups: one request, no redirect followed.
-    short: reqwest::Client,
+    /// Shortener lookups: no redirect followed. None when it did not build: no unrolling then,
+    /// never a client that follows redirects.
+    short: Option<reqwest::Client>,
     shrink: ShrinkGuard,
 }
 
@@ -193,13 +194,27 @@ pub(crate) fn client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-/// Client for shortener lookups: public addresses only, one request, no redirect followed.
-fn short_client(b: reqwest::ClientBuilder) -> reqwest::Client {
+/// Client for shortener lookups: public addresses only, no redirect followed.
+fn short_client(b: reqwest::ClientBuilder) -> Option<reqwest::Client> {
     b.timeout(Duration::from_secs(4))
         .dns_resolver(std::sync::Arc::new(PublicOnly))
         .redirect(Policy::none())
         .build()
-        .unwrap_or_default()
+        .map_err(|e| {
+            tracing::warn!(
+                ?e,
+                "shortener client did not build, short links are not unrolled"
+            )
+        })
+        .ok()
+}
+
+/// Most shortener hops one link may take (a shortener pointing at another shortener).
+const MAX_HOPS: usize = 3;
+
+fn host_of(u: &reqwest::Url) -> Option<String> {
+    let host = u.host_str()?.to_lowercase();
+    Some(host.trim_start_matches("www.").to_string())
 }
 
 impl Default for Sites {
@@ -274,24 +289,29 @@ impl Sites {
         Ok(SiteList::parse(&String::from_utf8_lossy(&body)))
     }
 
-    /// Host a shortener link points at: one HEAD to the shortener itself, its `Location` read and
-    /// never followed, so the target's server never sees the bot (its address, or a different answer
-    /// to the bot than to members).
+    /// Host a shortener link points at: a HEAD to the shortener itself and its `Location` read.
+    /// Only while that points at another known shortener is it asked too (up to [`MAX_HOPS`]); the
+    /// final host is never contacted, so its server never sees the bot (its address, or a different
+    /// answer to the bot than to members).
     pub async fn unshorten(&self, url: &str) -> Option<String> {
-        let u = reqwest::Url::parse(url).ok()?;
-        crate::filters::has_shortener(&[u.host_str()?.to_lowercase()]).then_some(())?;
-        self.location_host(u).await
+        let mut u = reqwest::Url::parse(url).ok()?;
+        for _ in 0..MAX_HOPS {
+            if !crate::filters::has_shortener(&[host_of(&u)?]) {
+                break;
+            }
+            u = self.location(&u).await?;
+        }
+        host_of(&u)
     }
 
-    async fn location_host(&self, u: reqwest::Url) -> Option<String> {
-        let res = self.short.head(u.clone()).send().await.ok()?;
+    async fn location(&self, u: &reqwest::Url) -> Option<reqwest::Url> {
+        let res = self.short.as_ref()?.head(u.clone()).send().await.ok()?;
         let to = res
             .headers()
             .get(reqwest::header::LOCATION)?
             .to_str()
             .ok()?;
-        let host = u.join(to).ok()?.host_str()?.to_lowercase();
-        Some(host.trim_start_matches("www.").to_string())
+        u.join(to).ok()
     }
 }
 
@@ -299,10 +319,10 @@ impl Sites {
 mod tests {
     use super::*;
 
-    /// One request: the redirect target is read from `Location`, never fetched; a relative
-    /// `Location` stays on the shortener; a non-shortener URL is not fetched at all.
+    /// The redirect target is read from `Location`, never fetched; a relative `Location` stays on
+    /// the shortener; a non-shortener URL is not fetched at all.
     #[tokio::test]
-    async fn unshorten_reads_location_without_following() {
+    async fn location_is_read_without_following() {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
@@ -325,22 +345,27 @@ mod tests {
             ..Sites::default()
         };
         let url = reqwest::Url::parse(&format!("{base}/x")).unwrap();
-        assert_eq!(
-            s.location_host(url.clone()).await.as_deref(),
-            Some("127.0.0.1")
-        );
-        assert_eq!(s.location_host(url).await.as_deref(), Some("127.0.0.1"));
+        let path = |u: Option<reqwest::Url>| u.map(|u| u.path().to_string());
+        assert_eq!(path(s.location(&url).await).as_deref(), Some("/second"));
+        assert_eq!(path(s.location(&url).await).as_deref(), Some("/relative"));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(
             hits.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "no hop followed"
         );
+        // Not a shortener: no request, its own host.
         assert_eq!(
-            s.unshorten(&format!("{base}/x")).await,
-            None,
-            "not a shortener"
+            s.unshorten(&format!("{base}/x")).await.as_deref(),
+            Some("127.0.0.1")
         );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // No client: nothing is unrolled.
+        let none = Sites {
+            short: None,
+            ..Sites::default()
+        };
+        assert_eq!(none.unshorten("https://bit.ly/x").await, None);
     }
 
     #[test]
@@ -424,7 +449,7 @@ mod tests {
             phishing: Default::default(),
             nsfw: Default::default(),
             http: reqwest::Client::builder().no_proxy().build().unwrap(),
-            short: Default::default(),
+            short: None,
             shrink: Default::default(),
         };
         let hit = |h: &str| s.phishing(&[h.to_string()]);
