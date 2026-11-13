@@ -617,6 +617,67 @@ async fn a_raid_retry_skips_staff_and_allowed_users() {
     t.cleanup().await;
 }
 
+/// D60b: when the staff lookup for an earlier flagged joiner fails, the raid retries later
+/// instead of punishing now, and the retry checks immunity again.
+#[tokio::test]
+async fn a_failed_staff_lookup_in_a_raid_retries_instead_of_punishing() {
+    let Some(t) = T::new(40).await else { return };
+    t.server_config(0, t.owner(), raid_cfg()).await;
+    join(&t, 0, 401).await;
+    join(&t, 0, 402).await;
+    // Discord fails every member lookup: neither earlier joiner can be checked.
+    t.set(|m| m.fail_member = true);
+    join(&t, 0, 403).await;
+    assert_eq!((t.banned(0, 401), t.banned(0, 402)), (None, None));
+    assert!(t.banned(0, 403).is_some(), "the joiner itself is punished");
+    // D57: the raid punished the joiner before this join's invite lookup.
+    let at = |what: &str| t.mock.lock().unwrap().log.iter().rposition(|l| l.contains(what));
+    let g = t.g(0);
+    assert!(at(&format!("PUT /guilds/{g}/bans/403")) < at(&format!("GET /guilds/{g}/invites")));
+    let retries = pending(&t, 0, "raid_punish").await;
+    assert_eq!(retries.len(), 2, "{retries:?}");
+    // Made a Trusted Admin meanwhile: the retry spares them.
+    t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, 401)")
+        .await;
+    t.set(|m| m.fail_member = false);
+    for (payload, _) in retries {
+        super::dispatch(&t.app, &raid_job(&t, payload)).await.unwrap();
+    }
+    assert_eq!(t.banned(0, 401), None, "staff was banned");
+    assert!(t.banned(0, 402).is_some());
+    t.cleanup().await;
+}
+
+/// D56: a Raider List hit counts towards a Join Raid but is not punished a second time.
+#[tokio::test]
+async fn a_raider_list_hit_counts_in_a_raid_but_is_punished_once() {
+    let Some(t) = T::new(41).await else { return };
+    let mut cfg = raid_cfg();
+    cfg["raider_list"] = json!({"enabled": true, "action": "kick"});
+    t.server_config(0, t.owner(), cfg).await;
+    let listed = t.base * 10 + 1;
+    let add = "INSERT INTO raiders (user_id, status, category, reviewed_at, verified)
+               VALUES ($1, 'confirmed', 'raid', now(), true)";
+    sqlx::query(add)
+        .bind(listed as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    join(&t, 0, listed).await;
+    join(&t, 0, 412).await;
+    // The third join triggers only because the listed one counted.
+    join(&t, 0, 413).await;
+    assert!(t.banned(0, 412).is_some() && t.banned(0, 413).is_some());
+    assert_eq!(t.banned(0, listed), None, "kicked by the list, not banned again");
+    assert_eq!(t.calls(&format!("DELETE /guilds/{}/members/{listed}", t.g(0))), 1);
+    sqlx::query("DELETE FROM raiders WHERE user_id = $1")
+        .bind(listed as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.cleanup().await;
+}
+
 /// D8 review: panic's end lifts only a lock its own lock call saved. A lock that failed before
 /// saving (here: the bot's member cannot be read) is not panic's, so a later staff lock stays.
 #[tokio::test]
