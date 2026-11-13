@@ -476,8 +476,8 @@ pub const WEAK_PERMS: &[&str] = &[
     "notes_manage",
     "tickets",
 ];
-/// Whitelist flags of the same kind: automod-style exemptions, not anti-nuke ones.
-pub const WEAK_WHITELIST: &[&str] = &["automod", "words", "links", "reports"];
+/// Whitelist flags of the same kind. Not `automod`: an automod-immune role lets raid accounts skip spam heat and slowmode (Thomas).
+pub const WEAK_WHITELIST: &[&str] = &["words", "links", "reports"];
 
 /// Roles of the guild's permits that hold `perm` (staff for tickets).
 pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx::Result<Vec<i64>> {
