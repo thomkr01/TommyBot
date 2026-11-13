@@ -293,6 +293,9 @@ pub struct Problem {
     pub id: String,
     pub text: String,
     pub fix: Option<Fix>,
+    /// Apply Fix runs this fix only when the user ticked it: an @everyone allow beside the main
+    /// roles can be on purpose (a greeting channel), and the bot cannot undo it (D76b).
+    pub opt_in: bool,
 }
 
 pub fn tshoot(
@@ -320,6 +323,7 @@ pub fn tshoot(
                     r.id
                 ),
                 fix: None,
+                opt_in: false,
             });
         } else if r.perms & (VIEW_CHANNEL | SEND_MESSAGES) != VIEW_CHANNEL | SEND_MESSAGES {
             out.push(Problem {
@@ -332,6 +336,7 @@ pub fn tshoot(
                     role: r.id,
                     perms: r.perms | VIEW_CHANNEL | SEND_MESSAGES,
                 }),
+                opt_in: false,
             });
         }
     }
@@ -344,6 +349,7 @@ pub fn tshoot(
                     r.id
                 ),
                 fix: None,
+                opt_in: false,
             });
         } else if r.perms & WRITE != 0 {
             let fixable = r.position < bot_position;
@@ -358,6 +364,7 @@ pub fn tshoot(
                     role: r.id,
                     perms: r.perms & !WRITE,
                 }),
+                opt_in: false,
             });
         }
     }
@@ -386,6 +393,9 @@ pub fn tshoot(
                 allow: o.allow & !WRITE,
                 ..*o
             })),
+            // Only the main roles are changed by Apply Fix itself; @everyone (when main roles are set)
+            // is listed with its fix, for the user to tick.
+            opt_in: !main.contains(&o.role),
         });
     }
     out
@@ -746,6 +756,13 @@ mod tests {
         );
         let fixable: Vec<bool> = p[2..].iter().map(|p| p.fix.is_some()).collect();
         assert_eq!(fixable, [true, false, false, true]);
+        // D76b: @everyone beside set main roles is ticked by hand; with no main roles it is the main role.
+        let opt: Vec<bool> = p[2..].iter().map(|p| p.opt_in).collect();
+        assert_eq!(opt, [false, true, true, true]);
+        let solo = tshoot(G, &[], &roles(), &[o(G, false)], 5);
+        assert!(solo
+            .iter()
+            .any(|p| p.id == format!("overwrite_7_{G}") && !p.opt_in));
         assert!(p[4].text.contains("<@99>") && p[5].text.contains("for @everyone"));
         assert_eq!(
             p[0].fix,
