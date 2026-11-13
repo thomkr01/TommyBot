@@ -62,14 +62,14 @@ fn lock_key(snap: &Snapshot) -> String {
 /// When the active lock of `kind` was saved (unix secs), to tell one lock from a later lock of the
 /// same kind. `None` when there is none.
 pub async fn lock_created(db: &PgPool, guild: u64, kind: &LockKind) -> Result<Option<f64>> {
-    Ok(sqlx::query_scalar(
+    sqlx::query_scalar(
         "SELECT extract(epoch from created_at)::float8 FROM lock_snapshots
          WHERE guild_id=$1 AND kind=$2 AND state<>'unlocking'",
     )
     .bind(guild as i64)
     .bind(format!("{:?}", Some(kind)))
     .fetch_optional(db)
-    .await?)
+    .await
 }
 
 /// Rewrites an active lock's snapshot and nothing else (not its state or age).

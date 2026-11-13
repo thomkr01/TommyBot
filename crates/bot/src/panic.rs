@@ -710,11 +710,11 @@ pub(crate) async fn relock(
         let made = created(app, gid, &kind).await;
         own_lock(app, gid, key, true).await;
         // Panic may have ended between the check above and the lock, and its end did not see it.
-        if !app.panic_runs.lock().unwrap().contains_key(&gid.get()) || !ends_later(app, gid).await {
-            if made.is_some() && created(app, gid, &kind).await == made {
-                if let Err(e) = lockdown::unlock_now(app, gid, Some(&kind)).await {
-                    tracing::warn!(?e, "panic: lifting a lock after the end failed");
-                }
+        let ended =
+            !app.panic_runs.lock().unwrap().contains_key(&gid.get()) || !ends_later(app, gid).await;
+        if ended && made.is_some() && created(app, gid, &kind).await == made {
+            if let Err(e) = lockdown::unlock_now(app, gid, Some(&kind)).await {
+                tracing::warn!(?e, "panic: lifting a lock after the end failed");
             }
         }
     }
