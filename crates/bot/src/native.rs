@@ -43,6 +43,34 @@ async fn untrusted(app: &App, gid: Id<GuildMarker>, rule: u64) -> Result<bool> {
     .await?)
 }
 
+/// Per (guild, rule): when Discord last sent a rule create or update, and whether its audit entry
+/// was handled since. The gateway event and the audit entry come in their own tasks, so hits in
+/// between are held: the rule may have just been changed by someone without a permit.
+static CHANGED: std::sync::LazyLock<std::sync::Mutex<HashMap<(u64, u64), i64>>> =
+    std::sync::LazyLock::new(Default::default);
+/// How long a changed rule's hits wait for its audit entry.
+const HOLD_MS: i64 = 30_000;
+
+/// The gateway's rule create or update: hits wait for its audit entry (at most [`HOLD_MS`]).
+pub(crate) fn rule_changed(guild: u64, rule: u64) {
+    let mut m = CHANGED.lock().unwrap();
+    let now = crate::automod::now_ms();
+    m.retain(|_, t| now - *t < HOLD_MS);
+    m.insert((guild, rule), now);
+}
+
+fn seen_audit(guild: u64, rule: u64) {
+    CHANGED.lock().unwrap().remove(&(guild, rule));
+}
+
+fn held(guild: u64, rule: u64) -> bool {
+    CHANGED
+        .lock()
+        .unwrap()
+        .get(&(guild, rule))
+        .is_some_and(|t| crate::automod::now_ms() - t < HOLD_MS)
+}
+
 /// Who may change what a native rule triggers: Owner, EO, TA or a dashboard-edit permit, the same
 /// people who set its TommyBot actions.
 fn trusted(level: &Level) -> bool {
@@ -68,21 +96,38 @@ pub(crate) async fn on_rule_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
                 .await?;
         }
         A::AutoModerationRuleCreate | A::AutoModerationRuleUpdate => {
+            if actor == app.me {
+                // The bot's keyword sync rewrites only part of a rule, and a dashboard edit is
+                // trusted by the dashboard itself, so the bot's own entry keeps the verdict.
+                sqlx::query(
+                    "INSERT INTO automod_rule_untrusted (guild_id, rule_id, audit_id, actor, trusted)
+                     VALUES ($1, $2, $3, $4, true)
+                     ON CONFLICT (guild_id, rule_id) DO UPDATE
+                       SET audit_id = greatest(automod_rule_untrusted.audit_id, $3)",
+                )
+                .bind(g)
+                .bind(r)
+                .bind(e.id.get() as i64)
+                .bind(actor.get() as i64)
+                .execute(&app.pool)
+                .await?;
+                seen_audit(gid.get(), rule.get());
+                return Ok(());
+            }
             // A failed lookup counts as untrusted: a trusted edit clears it later.
-            let ok = actor == app.me
-                || match app.guild_info(gid).await {
-                    Ok(info) => match app.level(gid, info.owner, actor).await {
-                        Ok(level) => trusted(&level),
-                        Err(err) => {
-                            tracing::warn!(?err, "permit lookup for an AutoMod rule edit failed");
-                            false
-                        }
-                    },
+            let ok = match app.guild_info(gid).await {
+                Ok(info) => match app.level(gid, info.owner, actor).await {
+                    Ok(level) => trusted(&level),
                     Err(err) => {
-                        tracing::warn!(?err, "owner lookup for an AutoMod rule edit failed");
+                        tracing::warn!(?err, "permit lookup for an AutoMod rule edit failed");
                         false
                     }
-                };
+                },
+                Err(err) => {
+                    tracing::warn!(?err, "owner lookup for an AutoMod rule edit failed");
+                    false
+                }
+            };
             let won = sqlx::query(
                 "INSERT INTO automod_rule_untrusted (guild_id, rule_id, audit_id, actor, trusted)
                  VALUES ($1, $2, $3, $4, $5)
@@ -99,6 +144,7 @@ pub(crate) async fn on_rule_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             .await?
             .rows_affected()
                 == 1;
+            seen_audit(gid.get(), rule.get());
             if won && !ok {
                 let log = Log::new("Discord AutoMod Rule Changed Without A Permit", ORANGE)
                     .user("Responsible", actor.get())
@@ -125,7 +171,7 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
     let Some(actions) = cfg.discord_automod.actions.get(&e.rule_id.to_string()) else {
         return Ok(());
     };
-    if untrusted(app, gid, e.rule_id.get()).await? {
+    if held(gid.get(), e.rule_id.get()) || untrusted(app, gid, e.rule_id.get()).await? {
         return Ok(());
     }
     // Before counting: a whitelisted member's hits must not fill a scope for the next member.

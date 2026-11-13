@@ -531,7 +531,11 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
             crate::owner::owner_seen(app, g.id, g.owner_id).await?
         }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
+        Event::AutoModerationRuleCreate(r) => {
+            crate::native::rule_changed(r.0.guild_id.get(), r.0.id.get())
+        }
         Event::AutoModerationRuleUpdate(r) => {
+            crate::native::rule_changed(r.0.guild_id.get(), r.0.id.get());
             crate::automod::on_rule_change(app, &r.0, false).await
         }
         Event::AutoModerationRuleDelete(r) => crate::automod::on_rule_change(app, &r.0, true).await,

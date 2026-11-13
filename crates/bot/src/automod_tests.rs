@@ -421,9 +421,14 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
     crate::native::on_rule_audit(&t.app, &edit(1, t.owner()))
         .await
         .unwrap();
+    // The bot's own sync of the rule keeps the verdict.
+    crate::native::on_rule_audit(&t.app, &edit(3, crate::test_support::ME))
+        .await
+        .unwrap();
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();
     assert_eq!(t.calls("PATCH"), 0, "no action after an untrusted change");
-    crate::native::on_rule_audit(&t.app, &edit(3, t.owner()))
+    crate::native::rule_changed(gid.get(), 77);
+    crate::native::on_rule_audit(&t.app, &edit(4, t.owner()))
         .await
         .unwrap();
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();

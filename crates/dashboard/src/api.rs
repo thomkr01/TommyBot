@@ -648,6 +648,10 @@ pub async fn rollback(
     // Config may hold sensitive sections and permits, so a rollback needs the same bar as editing them.
     let level = require(&st, &s, guild, Level::Admin, true).await?;
     let mut old = version(&st, guild, v).await?;
+    // Ban Sync is removed: an old version does not bring its section back.
+    if let Some(m) = old.as_object_mut() {
+        m.remove("ban_sync");
+    }
     let (_, now) = store::current(&st.db, guild).await?;
     // A version from before the last ownership change would bring back what the change paused (D47).
     let before_handover: bool = sqlx::query_scalar(
