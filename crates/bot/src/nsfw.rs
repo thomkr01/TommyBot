@@ -60,6 +60,9 @@ pub struct Scanner {
     seen: crate::automod::Seen,
     /// (live, backlog).
     lanes: Mutex<(VecDeque<Job>, VecDeque<Job>)>,
+    /// (turn counter, guild -> turn it was last served): servers take turns, so one server's
+    /// flood never holds up the others.
+    turns: Mutex<(u64, HashMap<u64, u64>)>,
     wake: tokio::sync::Notify,
     /// Image hash -> scores, shared by every server (the threshold is applied per server).
     cache: Mutex<HashMap<[u8; 32], [f32; 5]>>,
@@ -184,8 +187,25 @@ impl Scanner {
             let j = live.pop_front().unwrap();
             push_capped(old, j, BACKLOG_CAP);
         }
-        // Newest backlog first: what is still on screen matters more than what scrolled away.
-        live.pop_front().or_else(|| old.pop_back())
+        let mut t = self.turns.lock().unwrap();
+        let (tick, served) = &mut *t;
+        let turn = |j: &Job| served.get(&guild(j)).copied().unwrap_or(0);
+        // The server served longest ago goes next: its oldest live job, or else its newest backlog
+        // job (what is still on screen matters more than what scrolled away).
+        let job = match live.iter().enumerate().min_by_key(|(_, j)| turn(j)) {
+            Some((i, _)) => live.remove(i)?,
+            None => {
+                let (i, _) = old.iter().enumerate().rev().min_by_key(|(_, j)| turn(j))?;
+                old.remove(i)?
+            }
+        };
+        // shortcut: past the cap the turns start over; fairness only resets.
+        if served.len() > 10_000 {
+            served.clear();
+        }
+        *tick += 1;
+        served.insert(guild(&job), *tick);
+        Some(job)
     }
 
     async fn next(&self) -> Job {
@@ -212,10 +232,22 @@ impl Scanner {
     }
 }
 
+fn guild(j: &Job) -> u64 {
+    j.msg.guild_id.map_or(0, |g| g.get())
+}
+
+/// A full lane drops the oldest job of the server with the most jobs in it, so one server's flood
+/// drops its own jobs, not the others'.
 fn push_capped(q: &mut VecDeque<Job>, j: Job, cap: usize) {
     if q.len() >= cap {
-        q.pop_front();
-        tracing::debug!("NSFW scan backlog full, dropped the oldest job");
+        let mut per: HashMap<u64, usize> = HashMap::new();
+        for x in q.iter() {
+            *per.entry(guild(x)).or_default() += 1;
+        }
+        let most = per.into_iter().max_by_key(|e| e.1).map(|e| e.0);
+        let i = q.iter().position(|x| Some(guild(x)) == most).unwrap_or(0);
+        q.remove(i);
+        tracing::debug!("NSFW scan backlog full, dropped a job");
     }
     q.push_back(j);
 }
@@ -962,6 +994,51 @@ mod tests {
             .collect();
         // Fresh live first, then the backlog newest first (the stale live job went to its end).
         assert_eq!(order, [4, 3, 2, 1]);
+    }
+
+    /// Job `n` in guild `g`.
+    fn in_guild(n: u64, g: u64) -> Job {
+        let mut j = job(0, n);
+        j.msg.guild_id = Some(Id::new(g));
+        j
+    }
+
+    /// A flood from one server does not hold up the next server's job, in either lane, and a full
+    /// lane drops the flooding server's job.
+    #[test]
+    fn servers_take_turns() {
+        let s = Scanner::default();
+        {
+            let mut l = s.lanes.lock().unwrap();
+            for n in 1..=3 {
+                l.0.push_back(in_guild(n, 10));
+            }
+            l.0.push_back(in_guild(4, 20));
+            l.0.push_back(in_guild(5, 30));
+        }
+        let order: Vec<u64> = std::iter::from_fn(|| s.take(0))
+            .map(|j| j.msg.id.get())
+            .collect();
+        assert_eq!(order, [1, 4, 5, 2, 3]);
+        {
+            let mut l = s.lanes.lock().unwrap();
+            for n in 6..=8 {
+                l.1.push_back(in_guild(n, 10));
+            }
+            l.1.push_front(in_guild(9, 20));
+        }
+        let order: Vec<u64> = std::iter::from_fn(|| s.take(0))
+            .map(|j| j.msg.id.get())
+            .collect();
+        // Guild 10 was served last above, so guild 20 goes first; then newest first.
+        assert_eq!(order, [9, 8, 7, 6]);
+        let mut q = VecDeque::new();
+        push_capped(&mut q, in_guild(1, 20), 3);
+        push_capped(&mut q, in_guild(2, 10), 3);
+        push_capped(&mut q, in_guild(3, 10), 3);
+        push_capped(&mut q, in_guild(4, 10), 3);
+        let ids: Vec<u64> = q.iter().map(|j| j.msg.id.get()).collect();
+        assert_eq!(ids, [1, 3, 4]);
     }
 
     #[test]
