@@ -294,6 +294,17 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
     }
 }
 
+/// Marks panic's start as done however `start` returns, so [`relock`] works for the rest of it.
+struct Started<'a>(&'a App, Id<GuildMarker>);
+
+impl Drop for Started<'_> {
+    fn drop(&mut self) {
+        if let Some(run) = self.0.panic_runs.lock().unwrap().get_mut(&self.1.get()) {
+            run.starting = false;
+        }
+    }
+}
+
 /// While `start` still runs, its `panic_end` job stays at least this far ahead, so a panic shorter than
 /// the category calls cannot end in the middle of the start and leave its lockdown without an end job.
 const START_MARGIN_SECS: i64 = 60;
@@ -320,6 +331,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     // second saves the already exempted overwrites and the categories stay open after panic ends.
     let run = PanicRun {
         lock_mod_commands: cfg.lock_mod_commands,
+        starting: true,
     };
     if app
         .panic_runs
@@ -330,6 +342,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
     {
         return Ok(());
     }
+    let _started = Started(app, gid);
     // An end that failed waits for its retry with its locks still on: a new start would replace its
     // job, and with it the claim on those locks, which then never lift. That panic runs on.
     let pending: Result<bool, _> = sqlx::query_scalar(
@@ -433,6 +446,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
         return Err(e);
     }
     crate::reply::alert_owner(app, gid, "Panic mode started").await;
+    let mut owned = vec![];
     for step in panic_plan(cfg.lock_on_trigger, cfg.lock_mod_commands) {
         match step {
             // A failed step is logged, so the report below is still sent.
@@ -442,23 +456,12 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             // The role lock takes dangerous perms, the server lock takes writing from main roles.
             PanicStep::LockServer => {
                 for (kind, key) in [(LockKind::Role, ROLE_LOCK), (LockKind::Server, SERVER_LOCK)] {
-                    // Marked first: a crash between the lock and the mark must not leave a lock
-                    // that panic's end never lifts (everyone muted). Cleared when no lock was saved.
-                    own_lock(app, gid, key, true).await;
-                    let mut saved = false;
-                    let r = lockdown::lock_saving(app, gid, kind, None, &mut saved).await;
-                    if let Err(e) = r {
-                        tracing::warn!(?e, key, "panic: locking the server failed");
-                    }
+                    let saved = take_lock(app, gid, kind.clone(), key).await;
                     if saved {
-                        // Again: a staff unlock between the first mark and the lock cleared it.
-                        own_lock(app, gid, key, true).await;
-                    } else {
-                        own_lock(app, gid, key, false).await;
+                        owned.push(kind);
+                    } else if key == SERVER_LOCK {
                         // A lock staff made first covers writing, so the categories close with it.
-                        if key == SERVER_LOCK {
-                            drop_exemptions(app, gid, &exempted).await;
-                        }
+                        drop_exemptions(app, gid, &exempted).await;
                     }
                 }
             }
@@ -509,6 +512,17 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
             }
             PanicStep::UnlockServer => {}
         }
+    }
+    // Staff can end panic from the dashboard while this ran (D74): its end then read flags this
+    // call had not set yet, or never saw these locks. Whatever the end missed is lifted here.
+    if !ends_later(app, gid).await {
+        for kind in &owned {
+            if let Err(e) = lockdown::unlock(app, gid, Some(kind)).await {
+                tracing::warn!(?e, "panic: lifting a lock after an early end failed");
+            }
+        }
+        drop_exemptions(app, gid, &exempted).await;
+        return Ok(());
     }
     let log = Log::new("Panic Mode Lockdown", ALERT)
         .text(&format!("{YES} **The server has been locked down.**"));
@@ -609,6 +623,81 @@ async fn lock_targets(app: &App, gid: Id<GuildMarker>) -> Result<Vec<(u64, u64, 
     let main: Vec<u64> = cfg.lockdown.main_roles.iter().map(|r| r.get()).collect();
     let roles = app.http.roles(gid).await?.models().await?;
     Ok(taken(&roles, &main, gid.get(), cfg.lockdown_prefs.voice))
+}
+
+/// While panic runs with its lock on: which of its locks (role, server) it holds now. `None` when
+/// panic does not run, does not lock, or the job cannot be read.
+pub(crate) async fn held(app: &App, gid: Id<GuildMarker>) -> Option<(bool, bool)> {
+    if !app.panic_runs.lock().unwrap().contains_key(&gid.get()) {
+        return None;
+    }
+    if !app.cfg(gid.get()).await.ok()?.panic.lock_on_trigger {
+        return None;
+    }
+    let p: Value = sqlx::query_scalar(
+        "SELECT payload FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'",
+    )
+    .bind(gid.get() as i64)
+    .fetch_optional(&app.pool)
+    .await
+    .ok()??;
+    let flag = |k: &str| p[k].as_bool().unwrap_or(false);
+    Some((flag(ROLE_LOCK), flag(SERVER_LOCK)))
+}
+
+/// After an unlock during panic: takes the parts panic did not hold before it (a lock from before
+/// panic covered them, say a timed one whose timer just ran). A lock of panic's own that staff
+/// lifted stays lifted. Only logged on failure.
+pub(crate) async fn relock(app: &App, gid: Id<GuildMarker>, held: (bool, bool)) {
+    if !app
+        .panic_runs
+        .lock()
+        .unwrap()
+        .get(&gid.get())
+        .is_some_and(|r| !r.starting)
+    {
+        return;
+    }
+    for (kind, key, had) in [
+        (LockKind::Role, ROLE_LOCK, held.0),
+        (LockKind::Server, SERVER_LOCK, held.1),
+    ] {
+        if had {
+            continue;
+        }
+        // Marked only once saved: a second unlock at the same time must not clear the first's mark.
+        let mut saved = false;
+        if let Err(e) = lockdown::lock_saving(app, gid, kind, None, &mut saved).await {
+            tracing::warn!(?e, key, "panic: locking again failed");
+        }
+        if saved {
+            own_lock(app, gid, key, true).await;
+        }
+    }
+}
+
+/// One of panic's locks, with its owner flag marked before and after (see [`start`]).
+async fn take_lock(app: &App, gid: Id<GuildMarker>, kind: LockKind, key: &'static str) -> bool {
+    own_lock(app, gid, key, true).await;
+    let mut saved = false;
+    if let Err(e) = lockdown::lock_saving(app, gid, kind, None, &mut saved).await {
+        tracing::warn!(?e, key, "panic: locking the server failed");
+    }
+    own_lock(app, gid, key, saved).await;
+    saved
+}
+
+/// Whether the `panic_end` job is still waiting: neither gone (an early end ran) nor taken by the
+/// scheduler (an early end runs now). A failed read counts as waiting, so nothing is lifted.
+pub(crate) async fn ends_later(app: &App, gid: Id<GuildMarker>) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'
+                       AND (locked_until IS NULL OR locked_until < now()))",
+    )
+    .bind(gid.get() as i64)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap_or(true)
 }
 
 /// Puts the categories back at once when panic's server lock was not made, and empties the job's
@@ -724,6 +813,7 @@ pub async fn restore(app: &App) -> Result<()> {
             guild as u64,
             PanicRun {
                 lock_mod_commands: payload["lock_mod_commands"].as_bool().unwrap_or(false),
+                starting: false,
             },
         );
     }

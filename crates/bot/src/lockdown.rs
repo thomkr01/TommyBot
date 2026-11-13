@@ -572,8 +572,86 @@ async fn forget_timers(app: &App, gid: Id<GuildMarker>, kind: &LockKind) {
     }
 }
 
+/// A role a restore made again (old id -> new id) under an active lock comes with the backup's
+/// permissions, so it would be the one main role still writing. Locks it as the lock locked the
+/// old one and moves the snapshot's entry to the new id, so the unlock gives it back. Only logged.
+pub async fn relink_roles(
+    app: &App,
+    gid: Id<GuildMarker>,
+    map: &std::collections::HashMap<u64, u64>,
+) {
+    if let Err(e) = relink_roles_now(app, gid, map).await {
+        tracing::warn!(?e, "locking recreated roles failed");
+    }
+}
+
+async fn relink_roles_now(
+    app: &App,
+    gid: Id<GuildMarker>,
+    map: &std::collections::HashMap<u64, u64>,
+) -> Result<()> {
+    let _one = exclusive(app, gid).await;
+    let locks = store::locks(&app.pool, gid.get()).await?;
+    if !locks
+        .iter()
+        .any(|s| s.role_perms.iter().any(|(r, _)| map.contains_key(r)))
+    {
+        return Ok(());
+    }
+    let live: Vec<(u64, u64)> = app
+        .http
+        .roles(gid)
+        .await?
+        .models()
+        .await?
+        .iter()
+        .map(|r| (r.id.get(), r.permissions.bits()))
+        .collect();
+    for mut snap in locks {
+        let takes = snap.takes();
+        let mut moved = false;
+        for i in 0..snap.role_perms.len() {
+            let Some(&new) = map.get(&snap.role_perms[i].0) else {
+                continue;
+            };
+            let Some(&(_, now)) = live.iter().find(|(r, _)| *r == new) else {
+                continue;
+            };
+            let op = Op::SetRolePerms {
+                role: new,
+                perms: now & !takes,
+            };
+            exec(app, gid, &op, &snap).await?;
+            snap.role_perms[i] = (new, now);
+            moved = true;
+        }
+        if moved {
+            let r = store::save_lock(&app.pool, gid.get(), &snap).await;
+            let r = match r {
+                Ok(()) => store::lock_done(&app.pool, gid.get(), &snap).await,
+                e => e,
+            };
+            forget_locks(gid.get());
+            r?;
+        }
+    }
+    Ok(())
+}
+
 /// Lifts the active locks that overlap `which`, or all of them; returns how many were lifted.
+/// A lock lifted during panic that covered a part panic does not hold is taken again by panic.
 pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
+    let before = crate::panic::held(app, gid).await;
+    let r = unlock_now(app, gid, which).await;
+    if matches!(r, Ok(n) if n > 0) {
+        if let Some(held) = before {
+            crate::panic::relock(app, gid, held).await;
+        }
+    }
+    r
+}
+
+async fn unlock_now(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -> Result<usize> {
     if let Some(k) = which {
         if lock_thread(app, gid, k, false).await? {
             return Ok(1);

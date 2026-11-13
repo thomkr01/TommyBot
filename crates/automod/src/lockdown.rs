@@ -213,6 +213,22 @@ pub struct Snapshot {
     pub voice: bool,
 }
 
+impl Snapshot {
+    /// The bits this lock takes from a role it covers, as [`plan`] does (union of both parts).
+    pub fn takes(&self) -> u64 {
+        let Some(kind) = &self.kind else { return 0 };
+        let (channels, roles, _) = kind.covers();
+        let silence = SILENCE
+            | if matches!(kind, LockKind::Blind) {
+                VIEW_CHANNEL
+            } else {
+                0
+            }
+            | if self.voice { VOICE } else { 0 };
+        (if channels { silence } else { 0 }) | (if roles { DANGEROUS } else { 0 })
+    }
+}
+
 pub struct Plan {
     pub ops: Vec<Op>,
     pub snapshot: Snapshot,

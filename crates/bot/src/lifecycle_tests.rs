@@ -959,6 +959,85 @@ async fn panic_stops_writing_and_puts_it_back() {
     t.cleanup().await;
 }
 
+/// Thomas 13-11: a lock from before panic that is lifted during panic (its timer ran) is taken
+/// again by panic, which then owns it; a role a restore made again under a lock is locked too;
+/// an end that ran or is running while panic started is seen by the start.
+#[tokio::test]
+async fn panic_takes_back_what_an_older_lock_gave_up() {
+    let Some(t) = T::new(83).await else { return };
+    const SEND: u64 = 1 << 11;
+    let (g, gid) = (t.g(0).get(), t.g(0));
+    let panic = json!({"lock_on_trigger": true, "duration_secs": 600, "unlock_when_ending": true});
+    t.server_config(0, t.owner(), json!({ "panic": panic }))
+        .await;
+    t.set(|m| {
+        m.members.insert((g, bansync::tests::ME), vec![7]);
+        m.roles
+            .insert(g, vec![(g, false, SEND | (1 << 10), 0), (7, false, 0, 5)]);
+    });
+    let perms = |id: u64| {
+        t.mock.lock().unwrap().roles[&g]
+            .iter()
+            .find(|r| r.0 == id)
+            .unwrap()
+            .2
+    };
+    crate::lockdown::lock(&t.app, gid, LockKind::Server)
+        .await
+        .unwrap();
+    let cfg = t.app.cfg(g).await.unwrap().panic.clone();
+    crate::panic::start(&t.app, gid, &cfg).await.unwrap();
+    let flags = || async {
+        let p = pending(&t, 0, "panic_end").await[0].0.clone();
+        (p["locked"].clone(), p["locked_server"].clone())
+    };
+    assert_eq!(flags().await, (json!(true), json!(false)));
+    // The staff lock's timer runs during panic.
+    crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Server))
+        .await
+        .unwrap();
+    assert_eq!(perms(g) & SEND, 0, "everyone writes again during panic");
+    assert_eq!(flags().await, (json!(true), json!(true)));
+    // Staff lifting panic's own lock is not undone.
+    crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Server))
+        .await
+        .unwrap();
+    assert_ne!(perms(g) & SEND, 0);
+    assert_eq!(flags().await, (json!(true), json!(false)));
+    // A restore made the locked role 7 again as 70, with the backup's Send.
+    crate::lockdown::lock(&t.app, gid, LockKind::Server)
+        .await
+        .unwrap();
+    t.set(|m| m.roles.get_mut(&g).unwrap().push((70, false, SEND, 1)));
+    t.exec("UPDATE lock_snapshots SET snapshot = jsonb_set(snapshot, '{role_perms}', '[[7, 2048]]') WHERE guild_id = $1 AND kind = 'Some(Server)'").await;
+    crate::lockdown::forget_locks(g);
+    crate::lockdown::relink_roles(&t.app, gid, &[(7, 70)].into_iter().collect()).await;
+    assert_eq!(
+        perms(70) & SEND,
+        0,
+        "the recreated role writes during the lock"
+    );
+    crate::lockdown::unlock(&t.app, gid, Some(&LockKind::Server))
+        .await
+        .unwrap();
+    assert_ne!(
+        perms(70) & SEND,
+        0,
+        "the unlock gave the recreated role nothing back"
+    );
+    // An end the scheduler took (or that ran) is no longer "later".
+    assert!(crate::panic::ends_later(&t.app, gid).await);
+    t.exec("UPDATE scheduled_jobs SET locked_until = now() + interval '1 minute' WHERE guild_id = $1 AND kind = 'panic_end'").await;
+    assert!(!crate::panic::ends_later(&t.app, gid).await);
+    t.exec("DELETE FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'panic_end'")
+        .await;
+    assert!(!crate::panic::ends_later(&t.app, gid).await);
+    t.app.panic_runs.lock().unwrap().remove(&g);
+    t.exec("DELETE FROM lock_snapshots WHERE guild_id BETWEEN $1 AND $1 + 9")
+        .await;
+    t.cleanup().await;
+}
+
 /// Live 11-13: a role lock and unlock keep permission bits twilight does not know (1<<48, Set
 /// Voice Channel Status), on the role and on a channel overwrite.
 #[tokio::test]

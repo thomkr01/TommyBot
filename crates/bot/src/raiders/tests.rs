@@ -879,6 +879,7 @@ async fn allow_is_gated_like_the_other_buttons() {
     });
     let locked = crate::app::PanicRun {
         lock_mod_commands: true,
+        starting: false,
     };
     t.app.panic_runs.lock().unwrap().insert(g, locked);
     let said = click(
