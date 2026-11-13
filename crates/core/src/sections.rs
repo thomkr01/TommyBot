@@ -1,5 +1,6 @@
 //! Typed per-guild config sections shared by the bot (reads them) and the dashboard (validates writes).
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use tommybot_antinuke::{Action as NukeAction, Limit};
 use tommybot_automod::{
@@ -498,6 +499,59 @@ impl WhitelistList {
     }
 }
 
+/// The first entry in `v` that the bot's lenient readers would skip (an unknown key or enum
+/// value, D48), as `path: value`. Writes refuse it, so only a newer version's data is skipped.
+pub fn unreadable_entry(section: &str, v: &Value) -> Option<String> {
+    use serde::de::DeserializeOwned;
+    fn bad<T: DeserializeOwned>(x: &Value) -> bool {
+        serde_json::from_value::<T>(x.clone()).is_err()
+    }
+    let key = |k: &String| Value::String(k.clone());
+    let keys = |m: &Value| {
+        m.as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, _)| k.clone())
+            .collect::<Vec<_>>()
+    };
+    let items = |a: &Value| a.as_array().cloned().unwrap_or_default();
+    match section {
+        "antinuke" => keys(&v["limits"])
+            .into_iter()
+            .find(|k| bad::<NukeAction>(&key(k)))
+            .map(|k| format!("limits: {k}")),
+        "logging" => {
+            use tommybot_logging::{LogEvent, LogKind};
+            let route = keys(&v["routes"])
+                .into_iter()
+                .find(|k| bad::<LogKind>(&key(k)));
+            let event = keys(&v["events"])
+                .into_iter()
+                .find(|k| bad::<LogEvent>(&key(k)));
+            let custom = items(&v["custom"])
+                .iter()
+                .flat_map(|c| items(&c["events"]))
+                .find(bad::<LogEvent>);
+            route
+                .map(|k| format!("routes: {k}"))
+                .or(event.map(|k| format!("events: {k}")))
+                .or(custom.map(|e| format!("custom events: {e}")))
+        }
+        "raider_list" => items(&v["categories"])
+            .into_iter()
+            .find(bad::<RaiderCategory>)
+            .map(|c| format!("categories: {c}")),
+        "discord_automod" => v["actions"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .flat_map(|(_, a)| items(a))
+            .find(bad::<tommybot_automod::discord_api::BotAction>)
+            .map(|a| format!("actions: {a}")),
+        _ => None,
+    }
+}
+
 pub const MAX_APPEAL_FIELDS: usize = 6;
 
 /// Sections the dashboard saves only after a TOTP step-up, so prefix panels may not edit them.
@@ -930,6 +984,33 @@ pub enum RaiderCategory {
 
 impl RaiderCategory {
     pub const ALL: [RaiderCategory; 4] = [Self::Nuke, Self::Raid, Self::Scam, Self::Spam];
+}
+
+#[cfg(test)]
+mod unreadable_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn writes_see_what_reads_skip() {
+        let an = json!({"limits": {"Ban": {}, "Future": {}}});
+        assert_eq!(
+            unreadable_entry("antinuke", &an).as_deref(),
+            Some("limits: Future")
+        );
+        let log =
+            json!({"routes": {"panic": "1"}, "custom": [{"events": ["nope"], "channel": "2"}]});
+        assert_eq!(
+            unreadable_entry("logging", &log).as_deref(),
+            Some("custom events: \"nope\"")
+        );
+        assert!(unreadable_entry("raider_list", &json!({"categories": ["nuke"]})).is_none());
+        assert!(unreadable_entry("discord_automod", &json!({"actions": {"1": ["zap"]}})).is_some());
+        // The lenient read keeps the rest of the section.
+        let a: AntinukeCfg =
+            serde_json::from_value(json!({"enabled": true, "limits": {"Future": {}}})).unwrap();
+        assert!(a.enabled && a.limits.is_empty());
+    }
 }
 
 #[cfg(test)]

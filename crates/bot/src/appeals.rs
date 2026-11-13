@@ -405,7 +405,7 @@ mod tests {
     async fn a_queued_accept_is_checked_and_a_revert_keeps_the_temp_ban_temp() {
         use crate::bansync::tests::T;
         use serde_json::json;
-        let Some(t) = T::new(41).await else { return };
+        let Some(t) = T::new(201).await else { return };
         let (g, user) = (t.g(0), t.base + 5);
         t.server_config(0, t.owner(), json!({})).await;
         t.exec("DELETE FROM appeals WHERE guild_id BETWEEN $1 AND $1 + 9")

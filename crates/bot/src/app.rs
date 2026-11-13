@@ -77,6 +77,9 @@ pub fn check_section(name: &str, v: &Value) -> Result<(), String> {
     fn t<T: DeserializeOwned>(v: &Value) -> Result<(), String> {
         T::deserialize(v).map(drop).map_err(|e| e.to_string())
     }
+    if let Some(e) = tommybot_core::sections::unreadable_entry(name, v) {
+        return Err(format!("unknown entry {e}"));
+    }
     match name {
         "logging" => t::<LogConfig>(v),
         "antinuke" => t::<AntinukeCfg>(v),

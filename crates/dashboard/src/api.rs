@@ -847,6 +847,12 @@ pub(crate) fn validate(section: &str, v: &Value) -> Result<(), ApiError> {
         AntinukeCfg, AppealsCfg, AutomodCfg, BackupsCfg, BanSyncCfg, CatchCfg, LockdownCfg,
         MiscCfg, PanicCfg, RaiderListCfg, TicketsCfg, WhitelistCfg,
     };
+    // The bot skips an unknown entry (D48); a save must still refuse it.
+    if let Some(e) = tommybot_core::sections::unreadable_entry(section, v) {
+        return Err(ApiError::BadRequest(format!(
+            "{section}: unknown entry {e}"
+        )));
+    }
     if section == "logging" {
         for (i, c) in v["custom"].as_array().into_iter().flatten().enumerate() {
             let n = i + 1;

@@ -278,6 +278,8 @@ impl Default for MentionScope {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct DiscordAutomodCfg {
+    /// A rule whose list holds an action this version does not know is skipped, not the section.
+    #[serde(deserialize_with = "tommybot_logging::lenient::map")]
     pub actions: std::collections::HashMap<String, Vec<BotAction>>,
     /// Rule id -> its mention scope.
     pub scopes: std::collections::HashMap<String, MentionScope>,
@@ -320,7 +322,6 @@ pub struct RuleSpec {
     pub timeout_s: u32,
     pub exempt_roles: Vec<String>,
     pub exempt_channels: Vec<String>,
-    #[serde(deserialize_with = "tommybot_logging::lenient::list")]
     pub bot_actions: Vec<BotAction>,
     /// Submode of the Lock bot action, see `DiscordAutomodCfg::locks`.
     pub lock: String,

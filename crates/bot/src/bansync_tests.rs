@@ -894,7 +894,7 @@ async fn another_owner_a_transfer_or_a_left_server_gets_no_copy() {
 /// keeps what was removed for the new owner; a later change of nothing does nothing.
 #[tokio::test]
 async fn an_owner_change_switches_sync_off_and_stores_the_old_staff() {
-    let Some(t) = T::new(42).await else { return };
+    let Some(t) = T::new(202).await else { return };
     let (o, new) = (t.owner(), t.base + 8);
     t.server(0, o, "ban").await;
     t.server(1, o, "ban").await;

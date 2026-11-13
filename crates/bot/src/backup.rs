@@ -840,7 +840,7 @@ mod tests {
     async fn load_and_clear_need_an_owner_with_2fa_and_no_panic() {
         use crate::{bansync::tests::T, commands::backup_cmd, slash::BackupCmd};
         use tommybot_core::permits::Level;
-        let Some(t) = T::new(40).await else { return };
+        let Some(t) = T::new(200).await else { return };
         let (g, user) = (t.g(0), Id::new(t.base + 1));
         t.server_config(
             0,
