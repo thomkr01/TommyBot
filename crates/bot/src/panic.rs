@@ -151,13 +151,20 @@ async fn unexempt(app: &App, gid: Id<GuildMarker>, saved: &Value) -> Result<()> 
     }
 }
 
-/// Rewrites the pending `panic_end` job's payload in place (one statement, so it is never missing).
+/// While `start` still runs, its `panic_end` job stays at least this far ahead, so a panic shorter than
+/// the category calls cannot end in the middle of the start and leave its lockdown without an end job.
+const START_MARGIN_SECS: i64 = 60;
+
+/// Rewrites the pending `panic_end` job's payload in place (one statement, so it is never missing),
+/// and moves it to at least [`START_MARGIN_SECS`] from now.
 async fn end_payload(app: &App, gid: Id<GuildMarker>, payload: Value) -> Result<()> {
     let n = sqlx::query(
-        "UPDATE scheduled_jobs SET payload = $2 WHERE guild_id = $1 AND kind = 'panic_end'",
+        "UPDATE scheduled_jobs SET payload = $2, run_at = greatest(run_at, now() + make_interval(secs => $3))
+         WHERE guild_id = $1 AND kind = 'panic_end'",
     )
     .bind(gid.get() as i64)
     .bind(payload)
+    .bind(START_MARGIN_SECS as f64)
     .execute(&app.pool)
     .await?
     .rows_affected();
@@ -189,7 +196,7 @@ pub async fn start(app: &App, gid: Id<GuildMarker>, cfg: &PanicCfg) -> Result<()
         gid.get() as i64,
         "panic_end",
         payload(&[], false),
-        ends,
+        ends.max(crate::app::now_secs() + START_MARGIN_SECS),
     )
     .await
     {
@@ -467,6 +474,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             [one]
         );
+        // A job already due (a panic shorter than the start) moves out of the scheduler's reach.
+        sqlx::query("UPDATE scheduled_jobs SET run_at = now() WHERE guild_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        end_payload(&app, gid, json!({})).await.unwrap();
+        let ahead: f64 = sqlx::query_scalar(
+            "SELECT extract(epoch from run_at - now())::float8 FROM scheduled_jobs WHERE guild_id = $1",
+        )
+        .bind(g)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        assert!(ahead > 55.0, "{ahead}");
         sqlx::query("DELETE FROM scheduled_jobs WHERE guild_id = $1")
             .bind(g)
             .execute(&app.pool)
