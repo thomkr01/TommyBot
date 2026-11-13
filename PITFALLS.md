@@ -283,6 +283,9 @@ Discord replays missed events only on a resume. After a new session (`Ready`) th
 **Staff could take a lock apart one channel at a time.** (overlap deep dive D79, 13-11)
 During an active lock, deleting a locked overwrite, removing its deny or giving a stripped role its permissions back went unwatched: overwrite changes are not a watched action, a role's permission change counted only as a rename, and nothing reapplied the lock. *Avoid:* `antinuke::guard_lock` checks every role update and overwrite update or delete against the active locks' snapshots (`role_perms`, `channel_denies`, `prior`): the change is set back to its old values from the audit entry, logged, and counted on the Channel Updates or Role Updates card (when that card is on). An Owner, Extra Owner or Trusted Admin is only logged.
 
+**Panic's backup load deleted what the bot made after the backup.** (overlap deep dive N2, 13-11)
+A restore deletes every live role and channel missing from the image, and protected only the Quarantine role and the log channels. Open ticket channels, a remade verification channel and Auto Setup's roles made after the last backup were deleted by panic mode. *Avoid:* `sections::restore_keep` keeps every id the config names, the permit roles and open tickets' channels; the bot's restore (panic, `/backup load`) and the dashboard's preview both use it.
+
 **The bot's own rows were undone like anyone's.** (overlap deep dive D3, 13-11)
 `/revert actor:@TommyBot` lifted every quarantine the bot made, gave a nuking bot its managed role's Administrator back, and unbanned automatic bans, for anyone with the revert permit.
 *Avoid:* the bot counts as an immune target (Owner or Extra Owner with `include_owners`, as for an owner's actions), and a revert of the bot's rows never runs Unquarantine or RolePerms (`antinuke::bot_contain_op`; the dashboard's Revert Center skips both and lists the bot as immune too).

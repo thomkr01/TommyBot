@@ -929,9 +929,60 @@ impl RaiderCategory {
     pub const ALL: [RaiderCategory; 4] = [Self::Nuke, Self::Raid, Self::Scam, Self::Spam];
 }
 
+/// Live ids a backup restore must never delete: every role and channel the config names (the
+/// quarantine role, log, ticket and verification channels, Auto Setup's roles), the permit roles
+/// and the open tickets' channels. They can be newer than the backup, and a nuke does not make
+/// them (N2). Shared by the bot's restore and the dashboard's preview.
+pub async fn restore_keep(
+    pool: &sqlx::PgPool,
+    guild: i64,
+    config: &serde_json::Value,
+) -> sqlx::Result<std::collections::HashSet<u64>> {
+    let mut keep = std::collections::HashSet::new();
+    config_ids(config, &mut keep);
+    let open: Vec<i64> = sqlx::query_scalar(
+        "SELECT channel_id FROM tickets WHERE guild_id = $1 AND closed_at IS NULL AND channel_id IS NOT NULL",
+    )
+    .bind(guild)
+    .fetch_all(pool)
+    .await?;
+    let permits = crate::permits::permit_roles(pool, guild).await?;
+    keep.extend(open.into_iter().chain(permits).map(|i| i as u64));
+    Ok(keep)
+}
+
+/// Every snowflake string in the config (17 to 20 digits): ids are stored as strings.
+fn config_ids(v: &serde_json::Value, out: &mut std::collections::HashSet<u64>) {
+    match v {
+        serde_json::Value::String(s) if (17..=20).contains(&s.len()) => {
+            out.extend(s.parse::<u64>().ok());
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|v| config_ids(v, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|v| config_ids(v, out)),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restore_keeps_every_id_the_config_names() {
+        let mut keep = std::collections::HashSet::new();
+        config_ids(
+            &json!({
+                "antinuke": {"quarantine_role": "1570002257523511317"},
+                "verification": {"channel": "1570002257523511318", "roles": ["1570002257523511319"]},
+                "misc": {"timeout": "600", "name": "x"}
+            }),
+            &mut keep,
+        );
+        assert_eq!(
+            keep,
+            [1570002257523511317, 1570002257523511318, 1570002257523511319].into()
+        );
+    }
     use serde_json::{json, Value};
 
     #[test]
