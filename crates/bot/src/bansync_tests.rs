@@ -422,6 +422,7 @@ pub(crate) struct T {
 }
 
 impl T {
+    /// `n` picks this test's guild ids, so it must be unique across every test file using `T`.
     pub(crate) async fn new(n: u64) -> Option<T> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = tommybot_core::db::connect(&url).await.unwrap();

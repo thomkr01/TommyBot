@@ -89,7 +89,7 @@ fn web_verification() -> Value {
 /// re-armed nuker is contained again (and today's roles saved), not only reverted.
 #[tokio::test]
 async fn a_stale_quarantine_row_does_not_count_as_contained() {
-    let Some(t) = T::new(70).await else { return };
+    let Some(t) = T::new(20).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(),
                     "limits": {"Ban": {"per_minute": 1, "per_hour": 1}}});
     server(&t, 0, json!({ "antinuke": an })).await;
@@ -138,7 +138,7 @@ async fn a_stale_quarantine_row_does_not_count_as_contained() {
 /// roles Discord will not take off) and staff are told the role is missing.
 #[tokio::test]
 async fn a_deleted_quarantine_role_still_strips_the_member() {
-    let Some(t) = T::new(71).await else { return };
+    let Some(t) = T::new(21).await else { return };
     // 599 is not a role of the server any more.
     let an = json!({"enabled": true, "quarantine_role": "599"});
     server(&t, 0, json!({ "antinuke": an })).await;
@@ -158,7 +158,7 @@ async fn a_deleted_quarantine_role_still_strips_the_member() {
 /// verification does not let them out.
 #[tokio::test]
 async fn a_raider_list_quarantine_of_a_roleless_joiner_cannot_be_verified_out() {
-    let Some(t) = T::new(72).await else { return };
+    let Some(t) = T::new(22).await else { return };
     let cfg = json!({
         "antinuke": {"quarantine_role": Q.to_string()},
         "raider_list": {"enabled": true, "action": "quarantine"},
@@ -201,7 +201,7 @@ async fn a_raider_list_quarantine_of_a_roleless_joiner_cannot_be_verified_out() 
 /// D2: an autorole landing before verification's join quarantine does not turn it into a real one.
 #[tokio::test]
 async fn a_join_quarantine_with_an_autorole_still_lifts_on_verify() {
-    let Some(t) = T::new(73).await else { return };
+    let Some(t) = T::new(23).await else { return };
     let mut v = web_verification();
     v["quarantine_on_join"] = json!(true);
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v});
@@ -222,7 +222,7 @@ async fn a_join_quarantine_with_an_autorole_still_lifts_on_verify() {
 /// N1: turning "quarantine on join" off while someone waits does not strand them in quarantine.
 #[tokio::test]
 async fn turning_quarantine_on_join_off_does_not_strand_a_verifying_member() {
-    let Some(t) = T::new(74).await else { return };
+    let Some(t) = T::new(24).await else { return };
     let mut v = web_verification();
     v["quarantine_on_join"] = json!(true);
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v.clone()});
@@ -254,7 +254,7 @@ async fn turning_quarantine_on_join_off_does_not_strand_a_verifying_member() {
 /// leaves it.
 #[tokio::test]
 async fn a_raider_list_quarantine_of_a_bot_clears_its_role() {
-    let Some(t) = T::new(75).await else { return };
+    let Some(t) = T::new(25).await else { return };
     let cfg = json!({
         "antinuke": {"quarantine_role": Q.to_string()},
         "raider_list": {"enabled": true, "action": "quarantine"},
@@ -303,7 +303,7 @@ async fn a_raider_list_quarantine_of_a_bot_clears_its_role() {
 /// D12: a failed undo (the role is above the bot) does not spare the actor.
 #[tokio::test]
 async fn a_failed_undo_still_quarantines_the_actor() {
-    let Some(t) = T::new(76).await else { return };
+    let Some(t) = T::new(26).await else { return };
     let an = json!({"enabled": true, "strict_mode": true, "quarantine_role": Q.to_string()});
     server(&t, 0, json!({ "antinuke": an })).await;
     let actor = t.base * 10 + 1;
@@ -327,7 +327,7 @@ async fn a_failed_undo_still_quarantines_the_actor() {
 /// D18: a managed role Discord will not take off does not keep enforce_permits from the rest.
 #[tokio::test]
 async fn enforce_permits_skips_managed_roles() {
-    let Some(t) = T::new(77).await else { return };
+    let Some(t) = T::new(27).await else { return };
     server(&t, 0, json!({"misc": {"enforce_permits": true}})).await;
     let (u, managed, plain) = (t.base * 10 + 1, 510, 511);
     t.set(|m| {
@@ -360,7 +360,7 @@ async fn enforce_permits_skips_managed_roles() {
 #[tokio::test]
 async fn enforce_quarantine_gives_the_verification_channel_its_shape() {
     use tommybot_core::sections::{QUARANTINE_DENY, VERIFY_ALLOW, VERIFY_DENY};
-    let Some(t) = T::new(78).await else { return };
+    let Some(t) = T::new(28).await else { return };
     let q = json!({"quarantine_role": Q.to_string()});
     let misc = json!({"enforce_quarantine_perms": true});
     let mut unsaved = web_verification();
@@ -427,7 +427,7 @@ async fn enforce_quarantine_gives_the_verification_channel_its_shape() {
 /// Round 2, item 1: a failed member read counts as not contained, so the nuker gets the full run.
 #[tokio::test]
 async fn a_failed_member_read_does_not_count_as_contained() {
-    let Some(t) = T::new(81).await else { return };
+    let Some(t) = T::new(31).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string(),
                     "limits": {"Ban": {"per_minute": 1, "per_hour": 1}}});
     server(&t, 0, json!({ "antinuke": an })).await;
@@ -532,7 +532,7 @@ async fn a_join_quarantine_ends_on_rejoin_when_verification_is_off() {
 /// N5: a report log the bot cannot post (the nuker hid the channel) still DMs the owner.
 #[tokio::test]
 async fn a_failed_report_log_still_alerts_the_owner() {
-    let Some(t) = T::new(79).await else { return };
+    let Some(t) = T::new(29).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
     server(&t, 0, json!({ "antinuke": an })).await;
     let actor = t.base * 10 + 1;
@@ -615,7 +615,7 @@ async fn migration_3900_marks_only_empty_saved_rows_as_join() {
 /// held: their sticky roles wait for verification instead of being dropped.
 #[tokio::test]
 async fn a_join_quarantine_rejoin_keeps_sticky_roles_for_verification() {
-    let Some(t) = T::new(80).await else { return };
+    let Some(t) = T::new(30).await else { return };
     let mut v = web_verification();
     v["quarantine_on_join"] = json!(true);
     let cfg = json!({"antinuke": {"quarantine_role": Q.to_string()}, "verification": v,
