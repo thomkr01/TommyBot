@@ -136,13 +136,16 @@ impl App {
             .union(Permissions::MANAGE_MESSAGES)
             .union(Permissions::MANAGE_ROLES)
             .union(Permissions::MANAGE_WEBHOOKS);
-        // A failed lookup must not switch automod off.
+        // A failed lookup must not switch automod off. A Role lock's stripped staff roles still
+        // count by their saved permissions (D62).
         !cfg.misc.staff_only_permitted
-            && self.guild_info(gid).await.is_ok_and(|info| {
-                roles
-                    .iter()
-                    .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
-            })
+            && crate::lockdown::unlocked_info(self, gid)
+                .await
+                .is_ok_and(|info| {
+                    roles
+                        .iter()
+                        .any(|r| info.role_perms.get(r).is_some_and(|p| p & BITS.bits() != 0))
+                })
     }
 
     /// The channel and category whitelists apply to: a thread's parent channel, and that

@@ -86,15 +86,18 @@ async fn exempt(
         .union(Permissions::MANAGE_MESSAGES)
         .union(Permissions::MANAGE_CHANNELS)
         .bits();
-    // A failed lookup counts as exempt: no slowmode is better than a wrong one.
-    app.guild_info(gid).await.map_or(true, |info| {
-        info.owner == user
-            || roles
-                .iter()
-                .copied()
-                .chain([gid.cast()])
-                .any(|r| info.role_perms.get(&r).is_some_and(|p| p & BITS != 0))
-    })
+    // A failed lookup counts as exempt: no slowmode is better than a wrong one. Staff roles a
+    // Role lock stripped count by their saved permissions (D62).
+    crate::lockdown::unlocked_info(app, gid)
+        .await
+        .map_or(true, |info| {
+            info.owner == user
+                || roles
+                    .iter()
+                    .copied()
+                    .chain([gid.cast()])
+                    .any(|r| info.role_perms.get(&r).is_some_and(|p| p & BITS != 0))
+        })
 }
 
 /// A slowmode only goes up, never down.

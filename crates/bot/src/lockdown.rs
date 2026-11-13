@@ -997,4 +997,46 @@ mod tests {
         assert_eq!(load_join_lock(&pool, gid).await.unwrap(), None);
         store::drop_lock(&pool, gid, &p.snapshot).await.unwrap();
     }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. During a Role lock a stripped
+    /// staff role still makes its members staff for automod and slowmode (D62).
+    #[tokio::test]
+    async fn staff_stay_staff_during_a_role_lock() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid: Id<GuildMarker> = Id::new(4_100_000_000_000_000_000 + std::process::id() as u64);
+        app.guilds.lock().unwrap().insert(
+            gid,
+            std::sync::Arc::new(crate::hierarchy::GuildInfo {
+                owner: Id::new(2),
+                roles: Default::default(),
+                role_perms: [(Id::new(5), 0)].into(),
+                managed: Default::default(),
+                parents: Default::default(),
+                channels: Default::default(),
+                nsfw: Default::default(),
+                bot_top: 0,
+                fetched: Instant::now(),
+            }),
+        );
+        let cfg = crate::app::GuildCfg::default();
+        assert!(!app.staff_by_perms(&cfg, gid, &[Id::new(5)]).await);
+        let snap: Snapshot = serde_json::from_value(serde_json::json!({
+            "kind": "Role", "role_perms": [[5, 8]], "channel_denies": [],
+            "join_lock": false, "invites_paused": false
+        }))
+        .unwrap();
+        store::save_lock(&app.pool, gid.get(), &snap).await.unwrap();
+        assert!(app.staff_by_perms(&cfg, gid, &[Id::new(5)]).await);
+        store::drop_lock(&app.pool, gid.get(), &snap).await.unwrap();
+    }
 }

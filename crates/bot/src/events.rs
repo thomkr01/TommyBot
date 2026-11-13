@@ -66,7 +66,8 @@ async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
     let c = app.http.channel(channel).await?.model().await?;
     let p = match c.guild_id {
         Some(gid) => {
-            let info = app.guild_info(gid).await?;
+            // By the permissions a lock saved: the channel is public again once it ends (D62).
+            let info = crate::lockdown::unlocked_info(app, gid).await?;
             let main = app.cfg(gid.get()).await?.lockdown.main_roles.clone();
             let perms = |r: u64| {
                 Permissions::from_bits_truncate(
