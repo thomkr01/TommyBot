@@ -10,7 +10,10 @@ use twilight_model::{
         AllowedMentions, MessageFlags,
     },
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
-    id::{marker::GuildMarker, Id},
+    id::{
+        marker::{GuildMarker, UserMarker},
+        Id,
+    },
 };
 
 use crate::app::App;
@@ -34,17 +37,15 @@ pub fn note(cfg: &AppealsCfg, message: &str, guild: Id<GuildMarker>) -> Option<S
 
 const MODAL: &str = "appealm:";
 
-/// Applies a decision from the buttons on an appeal log. `Err` is the private refusal text.
+/// Applies a decision from the buttons on an appeal log or the dashboard (job `appeal_accept`).
+/// `Err` is the refusal text.
 async fn decide(
     app: &App,
-    i: &Interaction,
+    (gid, actor_id): (Id<GuildMarker>, Id<UserMarker>),
     id: i64,
     act: &str,
     reply: &str,
 ) -> Result<std::result::Result<(String, u32), String>> {
-    let (Some(gid), Some(actor_id)) = (i.guild_id, i.author_id()) else {
-        return Ok(Err("Server only".into()));
-    };
     let owner = app.guild_info(gid).await?.owner;
     let actor = app.level(gid, owner, actor_id).await?;
     let row: Option<(i64, String)> = sqlx::query_as(
@@ -72,18 +73,39 @@ async fn decide(
     }
     let user_id = Id::new(user as u64);
     // What the lift can be undone with, as in the dashboard's action log.
-    let mut inverse = Some(serde_json::json!({"op": "ban", "user": user}));
+    let mut inverse = None;
     if act == "accept" {
-        if kind == "timeout" {
-            let until = app.http.guild_member(gid, user_id).await;
-            let until = match until {
-                Ok(m) => m
-                    .model()
-                    .await?
-                    .communication_disabled_until
-                    .map(|t| t.as_secs()),
-                Err(_) => None,
-            };
+        // The real end, so a revert gives the same punishment back (D23b): a temp ban's pending
+        // unban, a long timeout's renewal target (Discord shows at most 28 days).
+        let end = |sql: &'static str| {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(gid.get() as i64)
+                .bind(user.to_string())
+                .fetch_optional(&app.pool)
+        };
+        if kind == "ban" {
+            let until = end(
+                "SELECT EXTRACT(EPOCH FROM run_at)::BIGINT FROM scheduled_jobs
+                WHERE guild_id = $1 AND kind = 'unban' AND payload->>'user' = $2
+                ORDER BY run_at DESC LIMIT 1",
+            )
+            .await?;
+            inverse = Some(serde_json::json!({"op": "ban", "user": user, "until": until}));
+        } else {
+            let mut until = end("SELECT (payload->>'until_secs')::BIGINT FROM scheduled_jobs
+                WHERE guild_id = $1 AND kind = 'timeout_renew' AND payload->>'user' = $2
+                ORDER BY run_at DESC LIMIT 1")
+            .await?;
+            if until.is_none() {
+                until = match app.http.guild_member(gid, user_id).await {
+                    Ok(m) => m
+                        .model()
+                        .await?
+                        .communication_disabled_until
+                        .map(|t| t.as_secs()),
+                    Err(_) => None,
+                };
+            }
             inverse = until
                 .map(|until| serde_json::json!({"op": "timeout", "user": user, "until": until}));
         }
@@ -96,11 +118,16 @@ async fn decide(
                 .await
                 .map(drop)
         };
-        if let Err(e) = lifted {
-            tracing::warn!(?e, "lifting the punishment failed");
-            return Ok(Err(
-                "Could not lift the punishment, it may already be lifted".into(),
-            ));
+        // A 404 means it was already lifted by hand; an outage is retried (job) or reported.
+        if let Err(e) = lifted.map_err(anyhow::Error::new) {
+            if crate::http_err::refused(&e) && !crate::http_err::gone_any(&e) {
+                tracing::warn!(?e, "lifting the punishment was refused");
+                let why = crate::http_err::why(&e);
+                return Ok(Err(format!("Could not lift the punishment: {why}")));
+            }
+            if !crate::http_err::gone_any(&e) {
+                return Err(e);
+            }
         }
         // A ban's `lifted` below drops a pending raid punishment retry; a timeout has none.
         let jobs: &[&str] = if kind == "ban" {
@@ -262,7 +289,10 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
         allowed_mentions: Some(AllowedMentions::default()),
         ..Default::default()
     };
-    let kind = match decide(app, i, id, act, &reply).await {
+    let (Some(gid), Some(actor_id)) = (i.guild_id, i.author_id()) else {
+        return Ok(false);
+    };
+    let kind = match decide(app, (gid, actor_id), id, act, &reply).await {
         Ok(Ok((line, color))) => {
             if let Some(mut e) = i.message.as_ref().and_then(|m| m.embeds.first().cloned()) {
                 e.color = Some(color);
@@ -305,8 +335,132 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
     Ok(true)
 }
 
+/// Job `appeal_accept`: a dashboard accept runs here, so it goes through the same permit, panic
+/// lock and command rate limit as the log button (D24). A refusal is posted in the appeal log.
+pub async fn accept_job(app: &App, gid: Id<GuildMarker>, p: &serde_json::Value) -> Result<()> {
+    use anyhow::Context;
+    let id = p["id"].as_i64().context("job payload has no id")?;
+    let by = p["by"]
+        .as_u64()
+        .filter(|b| *b > 0)
+        .context("job payload has no by")?;
+    let reply = p["reply"].as_str().unwrap_or_default();
+    match decide(app, (gid, Id::new(by)), id, "accept", reply).await? {
+        Ok((line, color)) => close_log(app, id, &line, color).await,
+        Err(why) => {
+            let log = tommybot_logging::Log::new("Appeal Not Accepted", RED)
+                .line("Appeal", &format!("#{id}"))
+                .line("Staff", &format!("<@{by}>"))
+                .text(&why);
+            crate::events::send_log(app, gid.get(), tommybot_logging::LogKind::Appeal, log).await?;
+        }
+    }
+    Ok(())
+}
+
+/// What the log button's answer does for a decision made elsewhere: Decision field, colour, no buttons.
+async fn close_log(app: &App, id: i64, line: &str, color: u32) {
+    let row: Option<(Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT log_channel, log_message FROM appeals WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&app.pool)
+            .await
+            .ok()
+            .flatten();
+    let Some((Some(ch), Some(msg))) = row else {
+        return;
+    };
+    let (ch, msg) = (Id::new(ch as u64), Id::new(msg as u64));
+    let closed = async {
+        let m = app.http.message(ch, msg).await?.model().await?;
+        let mut embeds = m.embeds;
+        if let Some(e) = embeds.first_mut() {
+            e.color = Some(color);
+            if e.fields.len() < 25 {
+                e.fields.push(EmbedField {
+                    inline: false,
+                    name: "Decision".into(),
+                    value: line.chars().take(1024).collect(),
+                });
+            }
+        }
+        embeds.truncate(1);
+        app.http
+            .update_message(ch, msg)
+            .embeds(Some(&embeds))
+            .components(Some(&[]))
+            .await?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = closed.await {
+        tracing::warn!(?e, "closing the appeal log failed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// D24/D23b: a dashboard accept runs through the bot's checks, and a revert gives the temp ban
+    /// back with its old end.
+    #[tokio::test]
+    async fn a_queued_accept_is_checked_and_a_revert_keeps_the_temp_ban_temp() {
+        use crate::bansync::tests::T;
+        use serde_json::json;
+        let Some(t) = T::new(41).await else { return };
+        let (g, user) = (t.g(0), t.base + 5);
+        t.server_config(0, t.owner(), json!({})).await;
+        t.exec("DELETE FROM appeals WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+        t.ban(0, user, "spam");
+        let end = crate::app::now_secs() + 3_600;
+        let job = json!({ "user": user });
+        tommybot_core::jobs::enqueue(&t.app.pool, g.get() as i64, "unban", job, end)
+            .await
+            .unwrap();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO appeals (guild_id, user_id, username, kind, answers) VALUES ($1, $2, 'u', 'ban', '[]') RETURNING id",
+        )
+        .bind(g.get() as i64)
+        .bind(user as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+        let status = || {
+            sqlx::query_scalar::<_, String>("SELECT status FROM appeals WHERE id = $1")
+                .bind(id)
+                .fetch_one(&t.app.pool)
+        };
+        // No permit: refused, nothing lifted.
+        let p = json!({"id": id, "by": t.base + 6, "reply": ""});
+        super::accept_job(&t.app, g, &p).await.unwrap();
+        assert_eq!(status().await.unwrap(), "open");
+        assert!(t.banned(0, user).is_some());
+        // The owner: lifted, and the undo remembers the temp ban's end.
+        let p = json!({"id": id, "by": t.owner(), "reply": ""});
+        super::accept_job(&t.app, g, &p).await.unwrap();
+        assert_eq!(status().await.unwrap(), "accepted");
+        assert!(t.banned(0, user).is_none());
+        let inv: serde_json::Value = sqlx::query_scalar(
+            "SELECT inverse FROM action_log WHERE guild_id = $1 AND action = 'unban'",
+        )
+        .bind(g.get() as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+        assert_eq!(inv["until"], json!(end));
+        assert!(
+            t.take("unban").await.is_empty(),
+            "the lift drops the old unban"
+        );
+        let inv = serde_json::from_value(inv).unwrap();
+        crate::antinuke::run_inverse(&t.app, g, &inv).await.unwrap();
+        assert!(t.banned(0, user).is_some());
+        let unbans = t.take("unban").await;
+        assert_eq!(unbans.len(), 1);
+        assert!((unbans[0].2 - 3_600).abs() < 30, "{unbans:?}");
+        t.exec("DELETE FROM appeals WHERE guild_id BETWEEN $1 AND $1 + 9")
+            .await;
+    }
+
     #[test]
     fn link_has_no_double_slash() {
         let g = twilight_model::id::Id::new(5);

@@ -1610,8 +1610,18 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
                     .await?;
             }
         }
-        Inverse::Ban { user } => {
+        // A temp ban comes back with its old end; one that would have ended by now is not redone.
+        Inverse::Ban { user, until } => {
+            if until.is_some_and(|t| t <= now_secs()) {
+                return Ok(());
+            }
+            let mut job = None;
+            if let Some(t) = until {
+                let p = serde_json::json!({ "user": user });
+                job = Some(jobs::enqueue(&app.pool, gid.get() as i64, "unban", p, *t).await?);
+            }
             app.http.create_ban(gid, Id::new(*user)).await?;
+            crate::scheduler::forget_jobs(app, gid, *user, crate::scheduler::BANNED, job).await;
         }
         Inverse::Timeout { user, until } => {
             crate::commands::timeout_until(app, gid, Id::new(*user), *until, "Restored timeout")

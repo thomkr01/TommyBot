@@ -314,9 +314,12 @@ pub enum Inverse {
     Unquarantine {
         user: u64,
     },
-    /// Undoes an accepted ban appeal.
+    /// Undoes an accepted ban appeal; `until` (unix seconds) is a temp ban's end, kept so the ban
+    /// comes back temporary (D23b).
     Ban {
         user: u64,
+        #[serde(default)]
+        until: Option<i64>,
     },
     /// Undoes an accepted timeout appeal; `until` is unix seconds.
     Timeout {
@@ -454,7 +457,21 @@ mod tests {
     #[test]
     fn appeal_inverses_match_the_json_the_dashboard_stores() {
         let ban: Inverse = serde_json::from_str(r#"{"op":"ban","user":7}"#).unwrap();
-        assert_eq!(ban, Inverse::Ban { user: 7 });
+        assert_eq!(
+            ban,
+            Inverse::Ban {
+                user: 7,
+                until: None
+            }
+        );
+        let temp: Inverse = serde_json::from_str(r#"{"op":"ban","user":7,"until":99}"#).unwrap();
+        assert_eq!(
+            temp,
+            Inverse::Ban {
+                user: 7,
+                until: Some(99)
+            }
+        );
         let t: Inverse = serde_json::from_str(r#"{"op":"timeout","user":7,"until":99}"#).unwrap();
         assert_eq!(t, Inverse::Timeout { user: 7, until: 99 });
     }

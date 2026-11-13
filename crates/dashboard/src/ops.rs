@@ -597,21 +597,64 @@ async fn run_inverse(st: &AppState, guild: i64, inv: &Inverse) -> anyhow::Result
         }
         _ => inverse_request(guild, inv),
     };
-    st.discord.call(m, &path, body).await.map(|_| true)
+    // An appeal's punishment comes back as it was (D23b): a temp ban with its unban, a timeout
+    // over 28 days with its renewal. One that would have ended by now is not redone.
+    let now = chrono::Utc::now().timestamp();
+    let follow = match *inv {
+        Inverse::Ban { until: Some(t), .. } | Inverse::Timeout { until: t, .. } if t <= now => {
+            return Ok(true)
+        }
+        Inverse::Ban {
+            user,
+            until: Some(t),
+        } => Some(("unban", json!({"user": user}), t)),
+        Inverse::Timeout { user, until } if until > now + MAX_TIMEOUT_S => Some((
+            "timeout_renew",
+            json!({"user": user, "until_secs": until}),
+            now + MAX_TIMEOUT_S - 86_400,
+        )),
+        _ => None,
+    };
+    let job = match &follow {
+        Some((kind, p, at)) => {
+            Some(tommybot_core::jobs::enqueue(&st.db, guild, kind, p.clone(), *at).await?)
+        }
+        None => None,
+    };
+    if let Err(e) = st.discord.call(m, &path, body).await {
+        if let Some(id) = job {
+            sqlx::query("delete from scheduled_jobs where id = $1")
+                .bind(id)
+                .execute(&st.db)
+                .await?;
+        }
+        return Err(e);
+    }
+    if let (Some((kind, p, _)), Some(id)) = (follow, job) {
+        let user = p["user"].as_u64().unwrap_or_default();
+        tommybot_core::jobs::cancel_user(&st.db, guild, &[kind], user, Some(id)).await?;
+    }
+    Ok(true)
 }
+
+/// Discord's longest timeout; a longer one is renewed by the bot's `timeout_renew` job.
+const MAX_TIMEOUT_S: i64 = 28 * 86_400;
 
 /// The Discord call that undoes `inv`.
 fn inverse_request(guild: i64, inv: &Inverse) -> (Method, String, Option<Value>) {
     match inv {
         Inverse::Unban { user } => (Method::DELETE, format!("/guilds/{guild}/bans/{user}"), None),
-        Inverse::Ban { user } => (Method::PUT, format!("/guilds/{guild}/bans/{user}"), None),
-        Inverse::Timeout { user, until } => (
-            Method::PATCH,
-            format!("/guilds/{guild}/members/{user}"),
-            Some(
-                json!({"communication_disabled_until": chrono::DateTime::from_timestamp(*until, 0).map(|t| t.to_rfc3339())}),
-            ),
-        ),
+        Inverse::Ban { user, .. } => (Method::PUT, format!("/guilds/{guild}/bans/{user}"), None),
+        Inverse::Timeout { user, until } => {
+            let until = (*until).min(chrono::Utc::now().timestamp() + MAX_TIMEOUT_S);
+            (
+                Method::PATCH,
+                format!("/guilds/{guild}/members/{user}"),
+                Some(
+                    json!({"communication_disabled_until": chrono::DateTime::from_timestamp(until, 0).map(|t| t.to_rfc3339())}),
+                ),
+            )
+        }
         Inverse::DeleteChannel { id } => (Method::DELETE, format!("/channels/{id}"), None),
         Inverse::DeleteRole { id } => (Method::DELETE, format!("/guilds/{guild}/roles/{id}"), None),
         Inverse::DeleteWebhook { id } => (Method::DELETE, format!("/webhooks/{id}"), None),
@@ -997,6 +1040,26 @@ mod tests {
         ] {
             assert_eq!(inverse_request(5, &inv), (m, path.to_string(), body));
         }
+    }
+
+    #[test]
+    fn a_long_timeout_is_restored_in_a_28_day_chunk() {
+        let far = chrono::Utc::now().timestamp() + 90 * 86_400;
+        let (_, _, body) = inverse_request(
+            5,
+            &Inverse::Timeout {
+                user: 7,
+                until: far,
+            },
+        );
+        let set = body.unwrap()["communication_disabled_until"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let set = chrono::DateTime::parse_from_rfc3339(&set)
+            .unwrap()
+            .timestamp();
+        assert!((set - (far - 62 * 86_400)).abs() < 30);
     }
 
     #[tokio::test]
