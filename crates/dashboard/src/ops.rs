@@ -449,6 +449,12 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
             if !list.contains(&id) {
                 return Err(ApiError::NotFound);
             }
+            // A bot is refused here as in any save of these lists: only users (Thomas 11-13).
+            let w = match kind {
+                "qw" => json!({"antinuke": {"quarantine_whitelist": [rest]}}),
+                k => json!({"permits": {k: [rest]}}),
+            };
+            crate::api::users_only(st, &w, &json!({})).await?;
             list.retain(|u| *u != id);
             if table.is_empty() {
                 // The quarantine whitelist lives in the config, so this keep is a config change.
@@ -1404,6 +1410,9 @@ mod tests {
         );
         assert!(!rows[2].detail.contains("previous owner"));
         let c = json!({});
+        crate::api::g3_handler_tests::seed_user(&st, 12, false);
+        crate::api::g3_handler_tests::seed_user(&st, 14, false);
+        crate::api::g3_handler_tests::seed_user(&st, 13, true);
         let keep = |e: &'static str| keep_staff(&st, &s, g, &c, Some(e));
         let _ = keep("ta:12").await.unwrap();
         let _ = keep("role:20:Admins").await.unwrap();
@@ -1449,6 +1458,12 @@ mod tests {
             keep_staff(&st, &other, g, &json!({}), Some("ta:13")).await,
             Err(ApiError::Forbidden(_))
         ));
+        // 13 is a bot: keeping it as TA is refused, so it stays paused (Thomas 11-13).
+        let r = keep("ta:13").await;
+        assert!(
+            matches!(&r, Err(ApiError::BadRequest(m)) if m.contains("bot role")),
+            "{r:?}"
+        );
         let _ = keep("done").await.unwrap();
         assert!(
             handover_check(&st, g).await.unwrap().is_empty(),

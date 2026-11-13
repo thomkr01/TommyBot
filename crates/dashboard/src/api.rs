@@ -401,6 +401,45 @@ async fn check_ids(
     }
 }
 
+/// Only users can be Extra Owner, Trusted Admin or on the quarantine whitelist (Thomas 11-13): every
+/// id `new` adds to those lists over `old` must be a Discord user that is not a bot. A failed lookup refuses.
+pub(crate) async fn users_only(st: &AppState, new: &Value, old: &Value) -> Result<(), ApiError> {
+    for (p, what) in [
+        ("/permits/eo", "an Extra Owner"),
+        ("/permits/ta", "a Trusted Admin"),
+        (
+            "/antinuke/quarantine_whitelist",
+            "on the quarantine whitelist",
+        ),
+    ] {
+        let list = |v: &Value| v.pointer(p).and_then(Value::as_array).cloned();
+        let had = list(old).unwrap_or_default();
+        for v in list(new)
+            .unwrap_or_default()
+            .iter()
+            .filter(|v| !had.contains(v))
+        {
+            let Some(id) = v
+                .as_str()
+                .and_then(|s| s.parse::<i64>().ok())
+                .or(v.as_i64())
+            else {
+                continue; // not an id: the save drops it
+            };
+            match st.discord.user(id).await {
+                Ok(Some(u)) if u["bot"] != true => {}
+                Ok(Some(_)) => return Err(ApiError::BadRequest(format!(
+                    "<@{id}> is a bot, and only users can be {what}. Give the bot a permit on its own bot role (the role Discord made for it) instead: it gets exactly the exemptions you pick."
+                ))),
+                _ => return Err(ApiError::BadRequest(format!(
+                    "could not check that {id} is a user and not a bot, so the change was refused. Try again."
+                ))),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The quarantine role and main roles the section adds (`roles::unfit`, the bot's rule too).
 /// Ids already stored are left alone, as in [`check_ids`].
 async fn check_held_roles(
@@ -465,6 +504,7 @@ pub async fn put_section(
     }
     check_ids(&st, guild, &section, &b.value, &config[&section]).await?;
     check_held_roles(&st, guild, &section, &b.value, &config[&section]).await?;
+    users_only(&st, &json!({ (section.as_str()): &b.value }), &config).await?;
     limits::check(&section, &b.value, &config[&section]).map_err(ApiError::BadRequest)?;
     // Turning Tickets on is the whole setup: its category and log channel are made here.
     let tickets_on = section == "tickets"
@@ -526,6 +566,12 @@ pub async fn put_permits(
             ));
         }
     }
+    users_only(
+        &st,
+        &json!({"permits": &b.value}),
+        &json!({"permits": &old}),
+    )
+    .await?;
     store::write_permits(&mut tx, guild, &b.value).await?;
     keep_exemptions(&mut tx, guild, level, &old).await?;
     let (_, config) = store::current(&st.db, guild).await?;
@@ -693,6 +739,12 @@ pub async fn rollback(
     if let Some(p) = old.get_mut("permits").filter(|_| before_handover) {
         held.extend(hold_back_permits(p, &cur));
     }
+    users_only(
+        &st,
+        &old,
+        &json!({"permits": &cur, "antinuke": &now["antinuke"]}),
+    )
+    .await?;
     if let Some(p) = old.get("permits") {
         if level < Level::Owner && p["ta"] != cur["ta"] {
             return Err(ApiError::Forbidden("only owners can roll back the TA list"));
@@ -1501,6 +1553,13 @@ pub(crate) mod g3_handler_tests {
         Some((st, s, g))
     }
 
+    /// A Discord user lookup the handlers will find in the memo; any id not seeded fails to look up.
+    pub(crate) fn seed_user(st: &AppState, id: i64, bot: bool) {
+        let u = json!({"id": id.to_string(), "bot": bot});
+        let mut m = st.discord.memo.lock().unwrap();
+        m.insert(format!("/users/{id}"), (Instant::now(), Some(u)));
+    }
+
     async fn put_version(st: &AppState, g: i64, v: i32, c: Value) {
         sqlx::query("insert into guild_config (guild_id, version, config) values ($1, $2, $3)")
             .bind(g)
@@ -1548,6 +1607,7 @@ pub(crate) mod g3_handler_tests {
         put_version(&st, g, 2, with("b!", json!(["55"]))).await;
         // The Discord removal as the bot now does it: row gone, v3 with the live permits.
         put_version(&st, g, 3, with("b!", json!([]))).await;
+        seed_user(&st, 55, false);
         let stale = put_permits(
             State(st.clone()),
             s.clone(),
@@ -1922,6 +1982,88 @@ pub(crate) mod g3_handler_tests {
         )
         .await;
         assert!(matches!(bad, Err(ApiError::BadRequest(_))), "{bad:?}");
+        cleanup(&st, g).await;
+    }
+
+    /// Thomas 11-13 (item 4): a bot cannot be added as TA or EO or to the quarantine whitelist by a
+    /// Permits save, a section save or a rollback; a failed lookup refuses too; a user still saves.
+    #[tokio::test]
+    async fn a_bot_is_refused_as_ta_eo_or_quarantine_whitelisted() {
+        let Some((st, s, g)) = setup(9_898_000_000).await else {
+            return;
+        };
+        seed_user(&st, 30, true);
+        seed_user(&st, 31, false);
+        let permits = |v: i32, eo: Value, ta: Value| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                put_permits(
+                    State(st),
+                    s,
+                    Path(g),
+                    body(
+                        json!({"expected_version": v, "value": {"eo": eo, "ta": ta, "custom": []}}),
+                    ),
+                )
+                .await
+            }
+        };
+        let bad = |r: &Res, what: &str| match r {
+            Err(ApiError::BadRequest(m)) => m.contains(what),
+            _ => false,
+        };
+        let r = permits(0, json!([]), json!(["30"])).await;
+        assert!(bad(&r, "bot role"), "{r:?}");
+        let r = permits(0, json!(["30"]), json!([])).await;
+        assert!(bad(&r, "only users can be an Extra Owner"), "{r:?}");
+        let r = permits(0, json!([]), json!(["32"])).await;
+        assert!(
+            bad(&r, "could not check"),
+            "an unknown lookup fails closed: {r:?}"
+        );
+        assert!(tas(&st, g).await.is_empty());
+        let ok = permits(0, json!([]), json!(["31"])).await;
+        assert!(ok.is_ok(), "{ok:?}");
+        let qw = |w: Value| {
+            let (st, s) = (st.clone(), s.clone());
+            async move {
+                put_section(
+                    State(st),
+                    s,
+                    Path((g, "antinuke".to_string())),
+                    body(json!({"expected_version": 1, "value": {"quarantine_whitelist": w}})),
+                )
+                .await
+            }
+        };
+        let r = qw(json!(["31", "30"])).await;
+        assert!(bad(&r, "on the quarantine whitelist"), "{r:?}");
+        let ok = qw(json!(["31"])).await;
+        assert!(ok.is_ok(), "{ok:?}");
+        // An old version that listed the bot cannot bring it back.
+        put_version(
+            &st,
+            g,
+            3,
+            json!({"permits": {"eo": [], "ta": ["30"], "custom": []}}),
+        )
+        .await;
+        put_version(
+            &st,
+            g,
+            4,
+            json!({"permits": {"eo": [], "ta": ["31"], "custom": []}}),
+        )
+        .await;
+        let r = rollback(
+            State(st.clone()),
+            s.clone(),
+            Path((g, 3)),
+            body(json!({"expected_version": 4})),
+        )
+        .await;
+        assert!(bad(&r, "bot role"), "{r:?}");
+        assert_eq!(tas(&st, g).await, vec![31]);
         cleanup(&st, g).await;
     }
 }

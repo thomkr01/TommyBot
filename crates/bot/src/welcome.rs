@@ -445,6 +445,9 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
         return Ok(());
     };
     crate::owner::owner_seen(app, g.id, g.owner_id).await?;
+    if let Err(e) = crate::users_only::drop_bots(app, g.id).await {
+        tracing::warn!(?e, "removing bots from the user-only lists failed");
+    }
     let complete = g.member_count == Some(g.members.len() as u64);
     if let Err(e) =
         crate::joingate::requarantine_missed(app, g.id, &g.members, complete, None).await
