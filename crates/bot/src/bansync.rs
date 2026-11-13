@@ -1268,7 +1268,11 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|u| u.as_str()?.parse().ok())
+        .filter_map(|u| {
+            u.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| u.as_i64())
+        })
         .collect();
     if !qw.is_empty() {
         doc["antinuke"]["quarantine_whitelist"] = json!([]);
@@ -1306,11 +1310,14 @@ pub async fn on_owner(app: &App, gid: Id<GuildMarker>, owner: Id<UserMarker>) ->
     .bind(&qw)
     .execute(&mut *tx)
     .await?;
+    // In the transaction: a failure after the commit would leave the old group's pending copies,
+    // and the retry would find the owner already recorded and do nothing (R-h3 round 3, 2).
+    cancel(&mut *tx, gid, "owner changed").await?;
     // A config version of its own, so History shows it and a rollback sees the removal.
     crate::settings::append(app, tx, gid, version, &mut doc, app.me.get()).await?;
+    // From here on nothing can fail: only cache drops and best-effort DMs.
     app.forget_cfg(gid.get());
     app.invalidate_guild(gid);
-    cancel(app, gid, "owner changed").await?;
     let name = md(&verify::guild_name(app, gid).await);
     if sync_on {
         let text = format!("**{name}** has a new owner, so it left your Ban Sync group: bans are no longer copied between it and your other servers. Copies already made stay as normal bans.");
@@ -1407,17 +1414,17 @@ fn handover_text(name: &str, h: &Handover, gid: Id<GuildMarker>) -> Option<Strin
 /// Its `guild_owners` row stays (groups skip servers in `guild_left`), so an owner change while
 /// the bot was out is still caught when it comes back.
 pub async fn on_removed(app: &App, gid: Id<GuildMarker>) -> Result<()> {
-    cancel(app, gid, "bot removed").await
+    cancel(&app.pool, gid, "bot removed").await
 }
 
-async fn cancel(app: &App, gid: Id<GuildMarker>, why: &str) -> Result<()> {
+async fn cancel<'e>(db: impl sqlx::PgExecutor<'e>, gid: Id<GuildMarker>, why: &str) -> Result<()> {
     sqlx::query(
         "UPDATE ban_sync_links SET state = 'cancelled', skip_reason = $2, done_at = now()
          WHERE state IN ('pending', 'alerted') AND (guild_id = $1 OR source_guild = $1)",
     )
     .bind(gid.get() as i64)
     .bind(why)
-    .execute(&app.pool)
+    .execute(db)
     .await?;
     Ok(())
 }
