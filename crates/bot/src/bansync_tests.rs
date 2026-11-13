@@ -140,6 +140,10 @@ pub(crate) struct Mock {
     pub(crate) fail_delete_channel: bool,
     /// Audit log entries any audit log lookup returns.
     pub(crate) audit: Vec<Value>,
+    /// The next this many audit log lookups fail with 500.
+    pub(crate) fail_audit: u32,
+    /// Permission overwrites by channel, as a channel lookup returns them.
+    pub(crate) overwrites: HashMap<u64, Vec<Value>>,
     pub(crate) log: Vec<String>,
 }
 
@@ -269,6 +273,10 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, j.to_string())
         }
         ("DELETE", ["channels", _]) if m.fail_delete_channel => err(500, 0),
+        ("GET", ["guilds", _, "audit-logs"]) if m.fail_audit > 0 => {
+            m.fail_audit -= 1;
+            err(500, 0)
+        }
         ("GET", ["guilds", _, "audit-logs"]) => {
             let log = json!({"audit_log_entries": m.audit, "users": [], "webhooks": [],
                 "integrations": [], "threads": [], "application_commands": [],
@@ -301,6 +309,14 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, json!(all).to_string())
         }
         ("GET", ["guilds", _, "channels"]) => (200, "[]".into()),
+        // Only channels a test gave overwrites; others answer 404 as before.
+        ("GET", ["channels", c]) if m.overwrites.contains_key(&n(c)) => {
+            let ows = m.overwrites[&n(c)].clone();
+            (
+                200,
+                json!({"id": c, "type": 0, "permission_overwrites": ows}).to_string(),
+            )
+        }
         ("PATCH", ["guilds", _, "roles", _]) if m.fail_role_edit => err(403, 50013),
         ("PATCH", ["guilds", g, "roles", r]) => {
             let perms = serde_json::from_str::<Value>(body).unwrap_or_default()["permissions"]
@@ -1424,4 +1440,332 @@ async fn a_discord_outage_on_the_ban_retries_instead_of_skipping() {
     copy_job(&t.app, t.g(1), &copy).await.unwrap();
     assert_eq!(t.rows(620).await, [T::row(1, "banned", None)]);
     t.cleanup().await;
+}
+
+/// D59: the unauthorized-bot filter reads who added a bot once more after 1.5 s, and a lookup
+/// that fails or finds nothing twice blocks the bot.
+#[tokio::test]
+async fn a_bot_adder_is_read_twice_then_the_bot_is_blocked() {
+    let Some(t) = T::new(100).await else {
+        return;
+    };
+    let (g, bot) = (t.g(0), Id::new(77));
+    let entry =
+        json!({"id": "5", "action_type": 28, "target_id": "77", "user_id": "9", "changes": []});
+    let app = &t.app;
+    let adder = |_: &T| crate::welcome::bot_adder_retry(app, g, bot);
+    t.set(|m| m.audit = vec![entry.clone()]);
+    assert_eq!(adder(&t).await.unwrap(), Id::new(9));
+    t.set(|m| m.fail_audit = 1);
+    assert_eq!(adder(&t).await.unwrap(), Id::new(9), "the retry reads it");
+    t.set(|m| m.fail_audit = 2);
+    assert!(adder(&t).await.is_err(), "failed twice");
+    t.set(|m| m.audit.clear());
+    assert!(adder(&t).await.is_err(), "no entry after the retry");
+    t.cleanup().await;
+}
+
+/// D20: the last audit entry handled survives a restart, and the first `Ready` reads the entries
+/// after it, oldest first, each once even when the live event brings it too.
+#[tokio::test]
+async fn a_restart_reads_the_audit_entries_it_missed() {
+    let Some(t) = T::new(101).await else {
+        return;
+    };
+    let g = t.g(0);
+    crate::welcome::done_audit(&t.app, g.get(), 5);
+    crate::welcome::done_audit(&t.app, g.get(), 4); // never goes back
+    crate::welcome::flush_audit(&t.app).await;
+    // A second app over the same database stands for the restart.
+    let fresh = T::new(102).await.unwrap();
+    crate::welcome::load_audit_seen(&fresh.app).await.unwrap();
+    let last = |t: &T| t.app.last_audit.lock().unwrap().get(&g.get()).copied();
+    assert_eq!(last(&fresh), Some(5));
+    let e = |id: u64| json!({"id": id.to_string(), "action_type": 22, "target_id": "8", "user_id": "9", "changes": []});
+    fresh.set(|m| m.audit = vec![e(9), e(3), e(7)]);
+    // The live event for 7 came first: the catch-up skips it, and handles 9 once.
+    let live = crate::welcome::saw_audit(&fresh.app, g.get(), 7);
+    assert!(live.is_some());
+    drop(live);
+    crate::welcome::catch_up_audit(&fresh.app, g, 5)
+        .await
+        .unwrap();
+    assert_eq!(last(&fresh), Some(9));
+    assert_eq!(fresh.calls("audit-logs"), 1, "a short page is the end");
+    assert!(
+        crate::welcome::saw_audit(&fresh.app, g.get(), 9).is_none(),
+        "a live 9 is skipped"
+    );
+    assert_eq!(fresh.app.audit_done.lock().unwrap().get(&g.get()), Some(&9));
+    // Full pages are read back until the cap.
+    fresh.set(|m| m.audit = (1000..1100).map(e).collect());
+    crate::welcome::catch_up_audit(&fresh.app, g, 5)
+        .await
+        .unwrap();
+    assert_eq!(fresh.calls("audit-logs"), 11);
+    assert_eq!(last(&fresh), Some(1099));
+    sqlx::query("DELETE FROM audit_handled WHERE guild_id = $1")
+        .bind(g.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM audit_seen WHERE guild_id = $1")
+        .bind(g.get() as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+}
+
+/// D14: a managed role's overwrite that gives more access in a channel is denied to the really
+/// quarantined members who hold that role, with their own overwrite saved for unquarantine.
+#[tokio::test]
+async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
+    let Some(t) = T::new(103).await else {
+        return;
+    };
+    let g = t.g(0);
+    t.app.guilds.lock().unwrap().insert(
+        g,
+        Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(2),
+            roles: Default::default(),
+            role_perms: Default::default(),
+            managed: [Id::new(6)].into(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: std::time::Instant::now(),
+        }),
+    );
+    for (u, on_join) in [(50, false), (51, true)] {
+        sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, '{6, 7}', $3)")
+            .bind(g.get() as i64)
+            .bind(u)
+            .bind(on_join)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+    }
+    let own = json!({"id": "50", "type": 1, "allow": "0", "deny": "2"});
+    t.set(|m| {
+        m.overwrites.insert(30, vec![own]);
+    });
+    let entry = |role: &str| -> AuditLogEntry {
+        serde_json::from_value(json!({
+            "action_type": 13, "id": "1", "user_id": "9", "target_id": "30", "guild_id": g.to_string(),
+            "options": {"id": role, "type": "0"},
+            "changes": [{"key": "allow", "new_value": "1024"}]
+        }))
+        .unwrap()
+    };
+    crate::antinuke::hold_overwrite(&t.app, &entry("7"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions"),
+        0,
+        "not a managed role"
+    );
+    crate::antinuke::hold_overwrite(&t.app, &entry("6"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 1);
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/51"),
+        0,
+        "a join quarantine"
+    );
+    assert!(
+        t.calls(r#""deny":"1026""#) == 1,
+        "their deny and the new bits"
+    );
+    let saved: (bool, i64, i64) = sqlx::query_as(
+        "SELECT had, allow, deny FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = 50",
+    )
+    .bind(g.get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(saved, (true, 0, 2));
+    // Taking that deny away again is a grant too: a managed role's deny removed, or the member
+    // overwrite the quarantine put there deleted (type 15), gets the deny back.
+    let lift = |kind: u8, id: &str, of: &str| -> AuditLogEntry {
+        serde_json::from_value(json!({
+            "action_type": kind, "id": "2", "user_id": "9", "target_id": "30", "guild_id": g.to_string(),
+            "options": {"id": id, "type": of},
+            "changes": [{"key": "deny", "old_value": "1026"}, {"key": "allow", "old_value": "0"}]
+        }))
+        .unwrap()
+    };
+    crate::antinuke::hold_overwrite(&t.app, &lift(15, "6", "0"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/50"),
+        2,
+        "role deny deleted"
+    );
+    t.set(|m| {
+        m.overwrites.insert(30, vec![]);
+    });
+    let _ = crate::antinuke::hold_overwrite(&t.app, &lift(15, "50", "1"), Id::new(9)).await;
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/50"),
+        3,
+        "member deny deleted"
+    );
+    assert_eq!(t.calls(r#""deny":"1026""#), 3, "put back as it was");
+    // The actor's permits cannot be read: undone all the same, nobody quarantined (D12b).
+    t.set(|m| m.fail_member = true);
+    crate::antinuke::hold_overwrite(&t.app, &lift(15, "50", "1"), Id::new(10))
+        .await
+        .unwrap();
+    t.set(|m| m.fail_member = false);
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 4);
+    let held: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM quarantines WHERE guild_id = $1 AND user_id = 10")
+            .bind(g.get() as i64)
+            .fetch_one(&t.app.pool)
+            .await
+            .unwrap();
+    assert_eq!(held, 0);
+    // A deny the quarantine did not put there is not the hold's matter.
+    let _ = crate::antinuke::hold_overwrite(&t.app, &lift(14, "52", "1"), Id::new(9)).await;
+    assert_eq!(t.calls("PUT /channels/30/permissions/52"), 0);
+    for q in [
+        "DELETE FROM quarantines WHERE guild_id = $1",
+        "DELETE FROM quarantine_overwrites WHERE guild_id = $1",
+    ] {
+        sqlx::query(q)
+            .bind(g.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// Staff come from TommyBot's permits only: a role with Administrator, live or saved by a Role
+/// lock, makes nobody exempt from slowmode or automod; the owner still is.
+#[tokio::test]
+async fn discord_permissions_make_nobody_staff() {
+    let Some(t) = T::new(104).await else {
+        return;
+    };
+    let g = t.g(0);
+    t.app.guilds.lock().unwrap().insert(
+        g,
+        Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(2),
+            roles: Default::default(),
+            role_perms: [(Id::new(5), 8)].into(),
+            managed: Default::default(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: std::time::Instant::now(),
+        }),
+    );
+    t.set(|m| {
+        m.members.insert((g.get(), 60), vec![5]);
+        m.members.insert((g.get(), 2), vec![]);
+    });
+    assert!(
+        !crate::slowmode::exempt(&t.app, g, Id::new(60)).await,
+        "an Administrator role"
+    );
+    assert!(
+        crate::slowmode::exempt(&t.app, g, Id::new(2)).await,
+        "the owner"
+    );
+}
+
+/// D20: the saved last audit id never passes an older entry still being handled, nor a gap whose
+/// catch-up has not succeeded; a second `Ready` keeps the first gap's start.
+#[tokio::test]
+async fn the_saved_audit_id_waits_for_older_entries_and_unread_gaps() {
+    let Some(t) = T::new(105).await else {
+        return;
+    };
+    let (g, h) = (t.g(0).get(), t.g(1).get());
+    let saved = |guild: u64| {
+        let pool = t.app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT last_id FROM audit_seen WHERE guild_id = $1")
+                .bind(guild as i64)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let app = &t.app;
+    let e20 = crate::welcome::saw_audit(app, g, 20).unwrap();
+    drop(crate::welcome::saw_audit(app, g, 21).unwrap());
+    crate::welcome::done_audit(app, g, 21);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(19), "20 is still being handled");
+    drop(e20); // its handling ended (or its task panicked)
+    crate::welcome::done_audit(app, g, 20);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(21));
+    // A leaked id stops holding the saved id after the safety expiry.
+    let long_ago = std::time::Instant::now() - std::time::Duration::from_secs(1801);
+    app.audit_inflight
+        .lock()
+        .unwrap()
+        .entry(g)
+        .or_default()
+        .insert(22, long_ago);
+    t.server_config(0, t.owner(), json!({"antinuke": {"enabled": true}}))
+        .await;
+    let e23: AuditLogEntry = serde_json::from_value(
+        json!({"id": "23", "action_type": 22, "user_id": "9", "target_id": "8", "changes": []}),
+    )
+    .unwrap();
+    crate::welcome::handled_audit(app, g, &e23).await;
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(g).await, Some(23));
+    let handled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_handled WHERE guild_id = $1 AND audit_id = 23",
+    )
+    .bind(g as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(handled, 1, "recorded, so no catch-up runs it again");
+    // Anti-nuke off there: nothing to record.
+    crate::welcome::handled_audit(app, h, &e23).await;
+    let off: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_handled WHERE guild_id = $1")
+        .bind(h as i64)
+        .fetch_one(&t.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(off, 0);
+    // Two Readies before the catch-up: the floor stays at the first gap, and so does the save.
+    app.last_audit.lock().unwrap().insert(h, 50);
+    crate::welcome::note_ready(app);
+    app.last_audit.lock().unwrap().insert(h, 80);
+    crate::welcome::note_ready(app);
+    assert_eq!(app.audit_floor.lock().unwrap().get(&h), Some(&50));
+    drop(crate::welcome::saw_audit(app, h, 90).unwrap());
+    crate::welcome::done_audit(app, h, 90);
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(h).await, Some(50), "the gap is not read yet");
+    t.set(|m| m.audit = vec![]);
+    crate::welcome::catch_up_audit(app, Id::new(h), 50)
+        .await
+        .unwrap();
+    crate::welcome::flush_audit(app).await;
+    assert_eq!(saved(h).await, Some(90));
+    sqlx::query("DELETE FROM audit_handled WHERE guild_id = ANY($1)")
+        .bind(vec![g as i64, h as i64])
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM audit_seen WHERE guild_id = ANY($1)")
+        .bind(vec![g as i64, h as i64])
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
 }

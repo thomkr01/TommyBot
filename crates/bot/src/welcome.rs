@@ -61,6 +61,8 @@ pub async fn on_ready(
 ) -> Result<()> {
     tracing::info!(guilds = ev.guilds.len(), "gateway ready");
     let ids: Vec<i64> = ev.guilds.iter().map(|g| g.id.get() as i64).collect();
+    // Before the first await: a second `Ready` meanwhile adds to the floor, never replaces it.
+    let floor = std::mem::take(&mut *app.audit_floor.lock().unwrap());
     sqlx::query(
         "INSERT INTO guild_left (guild_id) SELECT DISTINCT guild_id FROM guild_config \
          WHERE guild_id <> ALL($1) ON CONFLICT DO NOTHING",
@@ -73,7 +75,309 @@ pub async fn on_ready(
         .bind(&ids)
         .execute(&app.pool)
         .await?;
+    // A new session (not a resume) or a restart gets no replay of the audit entries made in the
+    // gap: anti-nuke reads them from the audit log (D20). The floor was noted before this task ran.
+    let (todo, gone): (Vec<(u64, u64)>, Vec<_>) = floor
+        .into_iter()
+        .partition(|(g, _)| ids.contains(&(*g as i64)));
+    {
+        let mut pinned = app.audit_pinned.lock().unwrap();
+        for (g, _) in gone {
+            pinned.remove(&g);
+        }
+    }
+    catch_up_retrying(app, todo).await;
     Ok(())
+}
+
+/// In the gateway loop, before the `Ready` task is spawned: where each guild's catch-up starts.
+/// Taken later, a live entry right after `Ready` could raise it past the gap (D20).
+/// A gap not read yet (its catch-up still retrying, or failed) keeps its older start, here and in
+/// what `flush_audit` saves (`audit_pinned`), so neither a reconnect nor a restart skips it.
+pub fn note_ready(app: &App) {
+    let seen = app.last_audit.lock().unwrap().clone();
+    let mut pinned = app.audit_pinned.lock().unwrap();
+    let mut floor = app.audit_floor.lock().unwrap();
+    for (g, last) in seen {
+        let start = pinned.get(&g).map_or(last, |p| (*p).min(last));
+        let f = floor.entry(g).or_insert(start);
+        *f = (*f).min(start);
+        pinned.insert(g, *f);
+    }
+}
+
+/// True the first time an audit entry is seen this run, false for one already handled: the live
+/// event and the catch-up can bring the same entry, and anti-nuke must count it once (D20).
+/// Memory only; `done_audit` saves it for a restart after it was handled.
+pub fn saw_audit(app: &App, guild: u64, id: u64) -> Option<InFlight<'_>> {
+    let mut recent = app.audit_recent.lock().unwrap();
+    let ids = recent.entry(guild).or_default();
+    if ids.contains(&id) {
+        return None;
+    }
+    // Larger than a whole catch-up plus the live entries meanwhile (CATCH_UP_MAX + 100).
+    if ids.len() >= 2500 {
+        ids.pop_front();
+    }
+    ids.push_back(id);
+    app.audit_inflight
+        .lock()
+        .unwrap()
+        .entry(guild)
+        .or_default()
+        .insert(id, std::time::Instant::now());
+    let mut last = app.last_audit.lock().unwrap();
+    let l = last.entry(guild).or_default();
+    *l = (*l).max(id);
+    Some(InFlight { app, guild, id })
+}
+
+/// An audit entry being handled: `flush_audit` saves nothing past it until this drops, when its
+/// handling ends or its task panics.
+pub struct InFlight<'a> {
+    app: &'a App,
+    guild: u64,
+    id: u64,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.app.audit_inflight.lock() {
+            if let Some(f) = m.get_mut(&self.guild) {
+                f.remove(&self.id);
+            }
+        }
+    }
+}
+
+/// After anti-nuke handled an entry: records it in `audit_handled`, so no catch-up runs it again
+/// (a distinct row per entry, no shared row lock), then `done_audit`. Not recorded when
+/// anti-nuke did nothing with it: anti-nuke off, or the bot's own entry.
+pub async fn handled_audit(
+    app: &App,
+    guild: u64,
+    e: &twilight_model::guild::audit_log::AuditLogEntry,
+) {
+    let id = e.id.get();
+    let on = app.cfg(guild).await.is_ok_and(|c| c.antinuke.enabled);
+    if !on || e.user_id == Some(app.me) {
+        return done_audit(app, guild, id);
+    }
+    let kept = sqlx::query(
+        "INSERT INTO audit_handled (guild_id, audit_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(guild as i64)
+    .bind(id as i64)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "recording a handled audit entry failed");
+    }
+    done_audit(app, guild, id);
+}
+
+/// Queues a handled entry's id for `audit_seen`. The write is batched by
+/// `flush_audit`, so a nuke's entries never wait on that row's lock (D20).
+pub fn done_audit(app: &App, guild: u64, id: u64) {
+    let mut m = app.audit_done.lock().unwrap();
+    let d = m.entry(guild).or_default();
+    *d = (*d).max(id);
+}
+
+/// Writes the queued last audit ids. A failed write is queued again; it only means a restart
+/// reads from an older entry, which the catch-up handles.
+pub async fn flush_audit(app: &App) {
+    let done = std::mem::take(&mut *app.audit_done.lock().unwrap());
+    for (guild, id) in done {
+        // Never past an older entry still being handled, nor past an unread gap: a restart
+        // reads from here, and `action_log.audit_id` skips what was already counted.
+        // `InFlight` clears its id, a panic included; the expiry only bounds a leak.
+        let inflight = app
+            .audit_inflight
+            .lock()
+            .unwrap()
+            .get_mut(&guild)
+            .and_then(|f| {
+                f.retain(|_, at| at.elapsed() < std::time::Duration::from_secs(1800));
+                f.keys().next().copied()
+            });
+        let pinned = app.audit_pinned.lock().unwrap().get(&guild).copied();
+        let safe = [Some(id), inflight.map(|i| i - 1), pinned]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(id);
+        if safe < id {
+            // Kept for the next flush, once the older entry is done or the gap read.
+            done_audit(app, guild, id);
+        }
+        let id = safe;
+        let kept = sqlx::query(
+            "INSERT INTO audit_seen (guild_id, last_id) VALUES ($1, $2)
+             ON CONFLICT (guild_id) DO UPDATE SET last_id = GREATEST(audit_seen.last_id, EXCLUDED.last_id)",
+        )
+        .bind(guild as i64)
+        .bind(id as i64)
+        .execute(&app.pool)
+        .await;
+        if let Err(e) = kept {
+            tracing::warn!(?e, "saving the last audit entry failed");
+            done_audit(app, guild, id);
+        }
+    }
+}
+
+/// Background: `flush_audit` every 2 s.
+pub async fn flush_audit_loop(app: std::sync::Arc<App>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    loop {
+        tick.tick().await;
+        flush_audit(&app).await;
+    }
+}
+
+/// Startup, before the gateway: the last audit entry seen per guild before the restart, so the
+/// first `Ready` reads what came in while the bot was down (D20).
+pub async fn load_audit_seen(app: &App) -> Result<()> {
+    let rows: Vec<(i64, i64)> = sqlx::query_as("SELECT guild_id, last_id FROM audit_seen")
+        .fetch_all(&app.pool)
+        .await?;
+    app.last_audit
+        .lock()
+        .unwrap()
+        .extend(rows.into_iter().map(|(g, l)| (g as u64, l as u64)));
+    Ok(())
+}
+
+/// How many entries one catch-up reads at most. A nuke trips long before; past it, staff are told.
+const CATCH_UP_MAX: usize = 1000;
+
+/// `catch_up_audit` for each guild, the failed ones tried again 5 times over about 2.5 minutes.
+/// When all fail, staff are told the gap was not checked, instead of a log line only.
+async fn catch_up_retrying(app: &App, mut todo: Vec<(u64, u64)>) {
+    for wait in [5, 10, 20, 40, 80, 0] {
+        let mut failed = Vec::new();
+        for (g, last) in todo {
+            if let Err(e) = catch_up_audit(app, Id::new(g), last).await {
+                tracing::warn!(?e, guild = g, "catching up on the audit log failed");
+                failed.push((g, last));
+            }
+        }
+        if failed.is_empty() {
+            return;
+        }
+        if wait == 0 {
+            for (g, _) in failed {
+                // Declared unchecked: holding the saved id back for it would replay days of entries.
+                app.audit_pinned.lock().unwrap().remove(&g);
+                gap_alert(
+                    app,
+                    Id::new(g),
+                    "TommyBot could not read the audit log after a restart or reconnect",
+                )
+                .await;
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        todo = failed;
+    }
+}
+
+async fn gap_alert(app: &App, gid: Id<GuildMarker>, why: &str) {
+    let log = tommybot_logging::Log::new("Anti Nuke", tommybot_logging::embed::ALERT)
+        .text(&format!("**{why}.** Actions made while it was away were not all checked by anti-nuke. Check the audit log."));
+    if let Err(e) =
+        crate::events::send_log(app, gid.get(), tommybot_logging::LogKind::AntiNuke, log).await
+    {
+        tracing::warn!(?e, "audit gap alert failed");
+    }
+}
+
+/// Runs anti-nuke on the entries after `last`, oldest first. Pages back from the newest with
+/// `before`, which Discord always returns newest first, until it reaches `last` or
+/// `CATCH_UP_MAX`; past the cap the newest entries are read and staff are told.
+pub(crate) async fn catch_up_audit(app: &App, gid: Id<GuildMarker>, last: u64) -> Result<()> {
+    let mut all = Vec::new();
+    let mut before = None;
+    let reached = loop {
+        let mut req = app.http.audit_log(gid).limit(100);
+        if let Some(b) = before {
+            req = req.before(b);
+        }
+        let page = req.await?.model().await?.entries;
+        let full = page.len() == 100;
+        let oldest = page.iter().map(|e| e.id.get()).min();
+        let done = !full || oldest.is_none_or(|o| o <= last);
+        all.extend(page.into_iter().filter(|e| e.id.get() > last));
+        if done {
+            break true;
+        }
+        if all.len() >= CATCH_UP_MAX {
+            break false;
+        }
+        before = oldest;
+    };
+    if !reached {
+        tracing::warn!(
+            guild = gid.get(),
+            "more than {CATCH_UP_MAX} audit entries missed"
+        );
+        gap_alert(
+            app,
+            gid,
+            &format!(
+                "More than {CATCH_UP_MAX} audit log entries were made while TommyBot was away"
+            ),
+        )
+        .await;
+    }
+    let entries = missed(all, last);
+    // Handled before a crash or restart that lost the batched saved id; an entry counted by a
+    // handling that crashed before it was recorded is in `action_log`.
+    let ids: Vec<i64> = entries.iter().map(|e| e.id.get() as i64).collect();
+    let handled: Vec<i64> = sqlx::query_scalar(
+        "SELECT audit_id FROM audit_handled WHERE guild_id = $1 AND audit_id = ANY($2)
+         UNION SELECT audit_id FROM action_log WHERE guild_id = $1 AND audit_id = ANY($2)",
+    )
+    .bind(gid.get() as i64)
+    .bind(&ids)
+    .fetch_all(&app.pool)
+    .await?;
+    let mut stale = 0;
+    for mut e in entries {
+        e.guild_id = Some(gid);
+        let Some(_inflight) = saw_audit(app, gid.get(), e.id.get()) else {
+            continue;
+        };
+        if handled.contains(&(e.id.get() as i64)) {
+            done_audit(app, gid.get(), e.id.get());
+            continue;
+        }
+        stale += usize::from(crate::antinuke::too_old(&e));
+        if let Err(err) = crate::antinuke::on_replayed(app, &e).await {
+            tracing::warn!(?err, "anti-nuke on a missed audit entry failed");
+        }
+        handled_audit(app, gid.get(), &e).await;
+    }
+    if stale > 0 {
+        let why =
+            format!("{stale} entries from the outage were older than an hour and were not counted");
+        gap_alert(app, gid, &why).await;
+    }
+    app.audit_pinned.lock().unwrap().remove(&gid.get());
+    Ok(())
+}
+
+/// The entries newer than `last`, oldest first, each once.
+fn missed(
+    mut entries: Vec<twilight_model::guild::audit_log::AuditLogEntry>,
+    last: u64,
+) -> Vec<twilight_model::guild::audit_log::AuditLogEntry> {
+    entries.retain(|e| e.id.get() > last);
+    entries.sort_by_key(|e| e.id);
+    entries.dedup_by_key(|e| e.id);
+    entries
 }
 
 /// Deletes the data of servers the bot left more than `KEEP_DAYS` ago, hourly.
@@ -106,6 +410,17 @@ pub async fn purge_left(app: std::sync::Arc<App>) {
                 .await;
         if let Err(e) = old {
             tracing::warn!(?e, "pruning old mod stats failed");
+        }
+        // Restart copies of the hour-long windows (N3).
+        for q in [
+            "DELETE FROM command_uses WHERE at < now() - interval '1 hour'",
+            // A catch-up only reads past the saved id, which trails the handled entries by seconds.
+            "DELETE FROM audit_handled WHERE at < now() - interval '1 day'",
+            "DELETE FROM heat_panic WHERE until < extract(epoch FROM now())",
+        ] {
+            if let Err(e) = sqlx::query(q).execute(&app.pool).await {
+                tracing::warn!(?e, q, "pruning restart windows failed");
+            }
         }
         crate::raiders::sweep(&app).await;
     }
@@ -225,24 +540,68 @@ pub async fn bot_adder(
     gid: Id<GuildMarker>,
     bot: Id<UserMarker>,
 ) -> Option<Id<UserMarker>> {
-    let log = app
-        .http
-        .audit_log(gid)
-        .action_type(AuditLogEventType::BotAdd)
-        .limit(10)
-        .await
-        .ok()?
-        .model()
-        .await
-        .ok()?;
-    log.entries
-        .iter()
-        .find(|e| e.target_id.is_some_and(|t| t.get() == bot.get()))
-        .and_then(|e| e.user_id)
+    find_bot_adder(app, gid, bot).await.ok().flatten()
+}
+
+/// [`bot_adder`] for the unauthorized-bot filter (D59): a failed lookup or a missing entry (the
+/// audit log can lag the join) is tried once more after 1.5 s; Err when that fails too, and the
+/// caller blocks the bot.
+pub async fn bot_adder_retry(
+    app: &App,
+    gid: Id<GuildMarker>,
+    bot: Id<UserMarker>,
+) -> Result<Id<UserMarker>> {
+    if let Ok(Some(a)) = find_bot_adder(app, gid, bot).await {
+        return Ok(a);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    find_bot_adder(app, gid, bot)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no audit entry names who added the bot"))
+}
+
+/// One audit lookup, bounded: it runs on the join path (PITFALLS: a REST call on the join path).
+async fn find_bot_adder(
+    app: &App,
+    gid: Id<GuildMarker>,
+    bot: Id<UserMarker>,
+) -> Result<Option<Id<UserMarker>>> {
+    let read = async {
+        let log = app
+            .http
+            .audit_log(gid)
+            .action_type(AuditLogEventType::BotAdd)
+            .limit(10)
+            .await?
+            .model()
+            .await?;
+        anyhow::Ok(
+            log.entries
+                .iter()
+                .find(|e| e.target_id.is_some_and(|t| t.get() == bot.get()))
+                .and_then(|e| e.user_id),
+        )
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), read).await?
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missed_entries_replay_oldest_first() {
+        let e = |id: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
+            serde_json::from_value(
+                serde_json::json!({"action_type": 22, "changes": [], "id": id.to_string()}),
+            )
+            .unwrap()
+        };
+        let got: Vec<u64> = super::missed(vec![e(9), e(5), e(7), e(3)], 5)
+            .iter()
+            .map(|e| e.id.get())
+            .collect();
+        assert_eq!(got, [7, 9]);
+    }
+
     #[test]
     fn wizard_link_uses_hash_route() {
         assert_eq!(

@@ -123,6 +123,16 @@ async fn main() -> Result<()> {
         }
     });
 
+    if let Err(e) = welcome::load_audit_seen(&app).await {
+        tracing::warn!(?e, "loading the last audit entries failed");
+    }
+    tokio::spawn(welcome::flush_audit_loop(app.clone()));
+    if let Err(e) = antinuke::seed_windows(&app).await {
+        tracing::warn!(
+            ?e,
+            "restoring the anti-nuke and command limit windows failed"
+        );
+    }
     if let Err(e) = panic::restore(&app).await {
         tracing::warn!(?e, "restoring panic mode failed");
     }
@@ -211,6 +221,9 @@ async fn main() -> Result<()> {
                 if let Some(d) = shard.latency().average() {
                     metrics::LATENCY_MS
                         .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                if matches!(event, Event::Ready(_)) {
+                    welcome::note_ready(&app);
                 }
                 tokio::spawn(events::handle(app.clone(), event, extra));
             }

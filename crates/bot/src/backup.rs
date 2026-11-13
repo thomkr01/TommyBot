@@ -182,23 +182,17 @@ pub async fn latest(app: &App, gid: Id<GuildMarker>) -> Result<Option<Image>> {
     Ok(row.map(|(Json(i),)| i))
 }
 
-/// Live ids a restore must never delete: the quarantine role and the log channels.
+/// Live ids a restore must never delete (`sections::restore_keep`, N2).
 async fn keep_set(app: &App, gid: Id<GuildMarker>) -> Result<HashSet<u64>> {
-    let cfg = app.cfg(gid.get()).await?;
-    let mut keep: HashSet<u64> = cfg
-        .antinuke
-        .quarantine_role
-        .iter()
-        .map(|r| r.get())
-        .collect();
-    keep.extend(
-        cfg.logging
-            .fallback
-            .iter()
-            .chain(cfg.logging.routes.values())
-            .map(|c| c.get()),
-    );
-    Ok(keep)
+    let g = gid.get() as i64;
+    let cfg: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT config FROM guild_config WHERE guild_id = $1 ORDER BY version DESC LIMIT 1",
+    )
+    .bind(g)
+    .fetch_optional(&app.pool)
+    .await?;
+    let cfg = cfg.map(|c| c.0).unwrap_or_default();
+    Ok(tommybot_core::sections::restore_keep(&app.pool, g, &cfg).await?)
 }
 
 /// Panic-mode restore: sync to the latest image and keep the server lock. `None` means there is

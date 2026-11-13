@@ -603,7 +603,7 @@ pub(crate) async fn grant(
 ) -> Result<()> {
     // Verifying is open to anyone, so it never hands out a permit role or one with kick/ban/admin-like rights,
     // whoever put that role in the config.
-    let info = app.guild_info(gid).await?;
+    let info = crate::lockdown::unlocked_info(app, gid).await?;
     let permit_roles = tommybot_core::permits::permit_roles(&app.pool, gid.get() as i64).await?;
     let roles: Vec<_> = v
         .roles

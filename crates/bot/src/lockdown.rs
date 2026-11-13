@@ -128,7 +128,9 @@ pub async fn lock_saving(
     }
     let plan = plan_now(app, gid, &kind).await?;
     // Saved first so a failure halfway can still be unlocked exactly, or finished after a restart.
-    store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+    let r = store::save_lock(&app.pool, gid.get(), &plan.snapshot).await;
+    forget_locks(gid.get());
+    r?;
     *saved = true;
     if let Some(d) = secs {
         let job = serde_json::json!({ "lock": kind });
@@ -219,7 +221,9 @@ async fn apply(app: &App, gid: Id<GuildMarker>, mut plan: Plan) -> Result<()> {
         }
         if let Some(created) = exec(app, gid, op, &plan.snapshot).await? {
             plan.snapshot.locked_channel = Some(created);
-            store::save_lock(&app.pool, gid.get(), &plan.snapshot).await?;
+            let r = store::save_lock(&app.pool, gid.get(), &plan.snapshot).await;
+            forget_locks(gid.get());
+            r?;
         }
     }
     Ok(store::lock_done(&app.pool, gid.get(), &plan.snapshot).await?)
@@ -288,6 +292,67 @@ pub async fn active(app: &App, gid: Id<GuildMarker>) -> Result<Vec<LockKind>> {
         .into_iter()
         .filter_map(|s| s.kind)
         .collect())
+}
+
+/// Guild info whose role permissions include what an active lock saved (D62): a Role lock strips
+/// them, and a role it stripped is dangerous again once the lock ends. For every check that judges
+/// a role dangerous; a failed lock read fails the check.
+pub async fn unlocked_info(
+    app: &App,
+    gid: Id<GuildMarker>,
+) -> Result<std::sync::Arc<crate::hierarchy::GuildInfo>> {
+    let info = app.guild_info(gid).await?;
+    Ok(with_saved(info, &active_locks(app, gid.get()).await?))
+}
+
+/// The active locks of each guild, kept in memory: dangerous-role checks run per join and per
+/// audit entry, and a raid is when locks are on. Every lock write in this module forgets the
+/// guild (`forget_locks`); a read that raced a forget is not kept (generation).
+type LockCache = (
+    u64,
+    std::collections::BTreeMap<u64, std::sync::Arc<Vec<Snapshot>>>,
+);
+static LOCKS: std::sync::Mutex<LockCache> =
+    std::sync::Mutex::new((0, std::collections::BTreeMap::new()));
+
+pub(crate) async fn active_locks(app: &App, guild: u64) -> Result<std::sync::Arc<Vec<Snapshot>>> {
+    let generation = {
+        let c = LOCKS.lock().unwrap();
+        if let Some(l) = c.1.get(&guild) {
+            return Ok(l.clone());
+        }
+        c.0
+    };
+    let locks = std::sync::Arc::new(store::locks(&app.pool, guild).await?);
+    let mut c = LOCKS.lock().unwrap();
+    if c.0 == generation {
+        c.1.insert(guild, locks.clone());
+    }
+    Ok(locks)
+}
+
+/// After any write to a guild's `lock_snapshots`.
+fn forget_locks(guild: u64) {
+    let mut c = LOCKS.lock().unwrap();
+    c.0 += 1;
+    c.1.remove(&guild);
+}
+
+fn with_saved(
+    info: std::sync::Arc<crate::hierarchy::GuildInfo>,
+    locks: &[Snapshot],
+) -> std::sync::Arc<crate::hierarchy::GuildInfo> {
+    let saved: Vec<&(u64, u64)> = locks.iter().flat_map(|l| &l.role_perms).collect();
+    if saved.is_empty() {
+        return info;
+    }
+    let mut i = (*info).clone();
+    for (r, p) in saved {
+        if let Some(live) = i.role_perms.get_mut(&Id::new(*r)) {
+            *live |= p;
+        }
+    }
+    std::sync::Arc::new(i)
 }
 
 /// Join lock of the guild's stored snapshot, if it has one.
@@ -364,7 +429,9 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
             .iter()
             .map(|r| (r.id.get(), r.permissions.bits()))
             .collect();
-        if !store::take_lock(&app.pool, gid.get(), &snap).await? {
+        let took = store::take_lock(&app.pool, gid.get(), &snap).await;
+        forget_locks(gid.get());
+        if !took? {
             continue;
         }
         // The lock is claimed now, so one failed step must not leave the rest locked. A deleted
@@ -410,7 +477,9 @@ pub async fn unlock(app: &App, gid: Id<GuildMarker>, which: Option<&LockKind>) -
                 "delete lock channel",
             );
         }
-        store::drop_lock(&app.pool, gid.get(), &snap).await?;
+        let r = store::drop_lock(&app.pool, gid.get(), &snap).await;
+        forget_locks(gid.get());
+        r?;
         if let Some(k) = &snap.kind {
             forget_timers(app, gid, k).await;
         }
@@ -913,6 +982,34 @@ mod tests {
     }
 
     #[test]
+    fn a_stripped_role_is_judged_by_its_saved_permissions() {
+        let info = std::sync::Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(1),
+            roles: Default::default(),
+            role_perms: [(Id::new(5), 1 << 10), (Id::new(6), 0)].into(),
+            managed: Default::default(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: Instant::now(),
+        });
+        let lock: Snapshot = serde_json::from_value(serde_json::json!({
+            "kind": null, "role_perms": [[5, 8], [9, 8]], "channel_denies": [],
+            "join_lock": false, "invites_paused": false
+        }))
+        .unwrap();
+        let got = with_saved(info.clone(), &[lock]);
+        assert_eq!(got.role_perms[&Id::new(5)], (1 << 10) | 8);
+        assert_eq!(got.role_perms[&Id::new(6)], 0);
+        assert!(!got.role_perms.contains_key(&Id::new(9)), "deleted since");
+        assert!(std::sync::Arc::ptr_eq(
+            &with_saved(info.clone(), &[]),
+            &info
+        ));
+    }
+
+    #[test]
     fn join_lock_maps_from_kind() {
         assert_eq!(
             join_lock_of(&LockKind::Join(JoinLock::Kick)),
@@ -940,5 +1037,35 @@ mod tests {
         store::take_lock(&pool, gid, &p.snapshot).await.unwrap();
         assert_eq!(load_join_lock(&pool, gid).await.unwrap(), None);
         store::drop_lock(&pool, gid, &p.snapshot).await.unwrap();
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. The active locks are read once and
+    /// kept, until a lock write forgets them.
+    #[tokio::test]
+    async fn active_locks_are_kept_until_a_lock_write() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = 4_200_000_000_000_000_000 + std::process::id() as u64;
+        assert!(active_locks(&app, gid).await.unwrap().is_empty());
+        let snap: Snapshot = serde_json::from_value(serde_json::json!({
+            "kind": "Role", "role_perms": [[5, 8]], "channel_denies": [],
+            "join_lock": false, "invites_paused": false
+        }))
+        .unwrap();
+        store::save_lock(&app.pool, gid, &snap).await.unwrap();
+        assert!(active_locks(&app, gid).await.unwrap().is_empty(), "kept");
+        forget_locks(gid);
+        assert_eq!(active_locks(&app, gid).await.unwrap().len(), 1);
+        store::take_lock(&app.pool, gid, &snap).await.unwrap();
+        store::drop_lock(&app.pool, gid, &snap).await.unwrap();
     }
 }

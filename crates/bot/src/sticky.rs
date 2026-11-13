@@ -196,7 +196,7 @@ pub async fn on_join(
         return claim(&app.pool, g, u, joined, false).await.map(drop);
     }
     // Read before the claim: a failure after it would lose the claimed roles.
-    let info = app.guild_info(gid).await?;
+    let info = crate::lockdown::unlocked_info(app, gid).await?;
     let permit = permits::permit_roles(&app.pool, g).await?;
     let saved = claim(&app.pool, g, u, joined, verifying).await?;
     let Some(saved) = saved.filter(|s| !s.is_empty()) else {
@@ -227,7 +227,7 @@ pub async fn restore_pending(app: &App, gid: Id<GuildMarker>, user: Id<UserMarke
     if !app.cfg(gid.get()).await?.misc.sticky_roles {
         return Ok(());
     }
-    let info = app.guild_info(gid).await?;
+    let info = crate::lockdown::unlocked_info(app, gid).await?;
     let permit = permits::permit_roles(&app.pool, gid.get() as i64).await?;
     // Web verification and staff /verify work during a timeout, which holds the main roles: read
     // it before the claim.
@@ -327,7 +327,7 @@ pub async fn run_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()> {
         joined,
         tries: p["tries"].as_u64().unwrap_or(0),
     };
-    let info = app.guild_info(gid).await?;
+    let info = crate::lockdown::unlocked_info(app, gid).await?;
     let permit = permits::permit_roles(&app.pool, g).await?;
     let timeout = member.communication_disabled_until.map(|t| t.as_secs());
     // An error retries this job through the scheduler's attempt limit.

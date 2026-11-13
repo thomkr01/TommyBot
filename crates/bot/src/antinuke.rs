@@ -69,6 +69,7 @@ fn watched(e: &AuditLogEntry) -> Option<Action> {
             Action::Timeout
         }
         A::ChannelUpdate => Action::ChannelUpdate,
+        A::ThreadDelete => Action::ThreadDelete,
         A::RoleUpdate if changed(|c| matches!(c, AuditLogChange::Name { .. })) => {
             Action::RoleUpdate
         }
@@ -151,7 +152,24 @@ fn whitelist_flag(a: Action) -> &'static str {
     }
 }
 
+/// A live audit entry: counted now, whatever the host clock says of its snowflake.
 pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
+    on_audit_as(app, e, false).await
+}
+
+/// An entry the catch-up read after a gap (D20): counted at its own time.
+pub(crate) async fn on_replayed(app: &App, e: &AuditLogEntry) -> Result<()> {
+    on_audit_as(app, e, true).await
+}
+
+/// A replayed entry anti-nuke watches that is past the hour window: logged, not counted.
+pub(crate) fn too_old(e: &AuditLogEntry) -> bool {
+    watched(e).is_some() && replay_age(e.id.get(), true) >= HOUR
+}
+
+const HOUR: Duration = Duration::from_secs(3600);
+
+async fn on_audit_as(app: &App, e: &AuditLogEntry, replayed: bool) -> Result<()> {
     let (Some(gid), Some(actor)) = (e.guild_id, e.user_id) else {
         return Ok(());
     };
@@ -162,6 +180,15 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if !cfg.antinuke.enabled {
         return Ok(());
     }
+    // Each check runs whatever an earlier one returned: an error in one (a REST or DB hiccup)
+    // must not skip the lock set-back or the count, which would work as "exempt" (D21, D79).
+    // The first error is returned at the end.
+    let mut failed = Ok(());
+    let mut keep = |r: Result<()>| {
+        if let (Err(e), true) = (r, failed.is_ok()) {
+            failed = Err(e);
+        }
+    };
     if matches!(
         e.action_type,
         A::MemberRoleUpdate
@@ -172,20 +199,48 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     ) {
         // Runs with Quarantine Hold off too: it then only keeps unverified joiners held.
         if e.action_type == A::MemberRoleUpdate {
-            hold(app, e, actor).await?;
+            keep(hold(app, e, actor).await);
         }
         // A role rename still counts below.
-        guard_perms(app, &cfg, e, actor).await?;
+        keep(guard_perms(app, &cfg, e, actor).await);
+        if e.action_type == A::MemberRoleUpdate {
+            keep(guard_permit_roles(app, e, actor).await);
+        }
+    }
+    if matches!(
+        e.action_type,
+        A::ChannelOverwriteCreate | A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete
+    ) {
+        keep(hold_overwrite(app, e, actor).await);
+    }
+    if matches!(
+        e.action_type,
+        A::RoleUpdate | A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete
+    ) {
+        keep(guard_lock(app, &cfg, e, actor).await);
     }
     match e.action_type {
         A::MemberUpdate | A::MemberKick | A::MemberBanAdd if cfg.antinuke.quarantine_hold => {
-            hold(app, e, actor).await?
+            keep(hold(app, e, actor).await)
         }
-        A::RoleCreate => guard_perms(app, &cfg, e, actor).await?,
+        A::RoleCreate => keep(guard_perms(app, &cfg, e, actor).await),
         _ => {}
     }
+    let counted = count_audit(app, &cfg, gid, actor, e, replayed).await;
+    counted.and(failed)
+}
+
+/// The counting half of `on_audit`: voice, then the watched cards.
+async fn count_audit(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    e: &AuditLogEntry,
+    replayed: bool,
+) -> Result<()> {
     if matches!(e.action_type, A::MemberDisconnect | A::MemberMove) {
-        return crate::voice_nuke::note(app, &cfg, gid, e).await;
+        return crate::voice_nuke::note(app, cfg, gid, e).await;
     }
     let Some(action) = watched(e) else {
         return Ok(());
@@ -193,43 +248,51 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     if cfg.antinuke.limit(action).is_none() {
         return Ok(());
     }
+    // An entry read after downtime counts at its own time; past the hour window it cannot trip,
+    // but is still logged (counted 0) for /revert and the Revert Center.
+    let ago = replay_age(e.id.get(), replayed);
     // Ticket bots open and close channels all day; the gateway event names the category first.
-    let exempt_categories: Vec<u64> = cfg
-        .antinuke
-        .ticket_categories
-        .iter()
-        .chain(&cfg.panic.whitelisted_categories)
-        .map(|c| c.get())
-        .collect();
+    // Only a bot is exempt, and not for a channel just moved in: a nuker moves channels into the
+    // category and deletes them (D4). Panic's Whitelisted Categories are panic-only.
+    let tickets = &cfg.antinuke.ticket_categories;
     if let (Action::ChannelCreate | Action::ChannelDelete, Some(t)) = (action, e.target_id) {
-        if exempt_categories.is_empty() {
+        if tickets.is_empty() {
             app.channel_parents.lock().unwrap().remove(&t.get());
-        } else if parent_of(app, t.get())
-            .await
-            .is_some_and(|p| exempt_categories.contains(&p))
+        } else if (if ago.is_zero() {
+            parent_of(app, t.get()).await
+        } else {
+            replayed_parent(app, gid, t.get()).await
+        })
+        .is_some_and(|p| tickets.iter().any(|c| c.get() == p))
+            && !app.moved_in(t.get(), tickets)
+            && is_bot(app, actor).await
         {
             return Ok(());
         }
     }
-    // A webhook on the webhook whitelist is exempt whatever its creator may do.
-    let exempt = app.whitelisted(gid, actor, whitelist_flag(action)).await?
-        || (action == Action::WebhookCreate
-            && e.target_id.is_some_and(|t| {
-                cfg.whitelist
-                    .spam
-                    .webhooks
-                    .iter()
-                    .any(|w| w.get() == t.get())
-            }));
+    // A webhook on the webhook whitelist is exempt whatever its creator may do. A failed lookup
+    // counts the action, so a Discord error cannot hide a nuke (D21).
+    let listed = app.whitelisted(gid, actor, whitelist_flag(action)).await;
+    let exempt = listed.unwrap_or_else(|e| {
+        tracing::warn!(?e, "whitelist lookup failed, counting the action");
+        false
+    }) || (action == Action::WebhookCreate
+        && e.target_id.is_some_and(|t| {
+            cfg.whitelist
+                .spam
+                .webhooks
+                .iter()
+                .any(|w| w.get() == t.get())
+        }));
     let inv = inverse(action, e);
     if let (true, Some(t), Action::ChannelCreate | Action::RoleCreate) =
         (exempt, e.target_id, action)
     {
         backup::track_created(app, gid, action, t.get()).await?;
     }
-    count(
+    count_at(
         app,
-        &cfg,
+        cfg,
         gid,
         actor,
         action,
@@ -237,8 +300,43 @@ pub async fn on_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
         &inv,
         exempt,
         1,
+        ago,
+        Some(e.id.get()),
     )
     .await
+}
+
+/// How long ago a replayed audit entry was made, by its snowflake (D20). A live one is zero:
+/// a host clock that runs fast must never make live entries look old.
+fn replay_age(id: u64, replayed: bool) -> Duration {
+    let ms = crate::automod::now_ms() - crate::voice_nuke::created_ms(id);
+    if replayed {
+        Duration::from_millis(ms.max(0) as u64)
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// The category of a channel made or deleted while the bot was down: no gateway event noted it.
+/// A channel that still exists says so itself; a deleted one is looked up in the latest backup.
+/// Not found (a ticket made and closed in the gap) counts the action (D20).
+async fn replayed_parent(app: &App, gid: Id<GuildMarker>, channel: u64) -> Option<u64> {
+    if let Ok(r) = app.http.channel(Id::new(channel)).await {
+        if let Ok(c) = r.model().await {
+            return c.parent_id.map(|p| p.get());
+        }
+    }
+    let image = backup::latest(app, gid).await.ok().flatten()?;
+    image.channels.into_iter().find(|c| c.id == channel)?.parent
+}
+
+/// A failed lookup counts as not a bot, so the action is counted.
+async fn is_bot(app: &App, user: Id<UserMarker>) -> bool {
+    let read = async { anyhow::Ok(app.http.user(user).await?.model().await?.bot) };
+    read.await.unwrap_or_else(|e| {
+        tracing::warn!(?e, "reading a ticket category actor failed, counting it");
+        false
+    })
 }
 
 /// Logs, heats and counts `n` actions of one audit entry, and contains the actor at the limit.
@@ -255,9 +353,42 @@ pub(crate) async fn count(
     exempt: bool,
     n: u32,
 ) -> Result<()> {
+    count_at(
+        app,
+        cfg,
+        gid,
+        actor,
+        action,
+        target,
+        inv,
+        exempt,
+        n,
+        Duration::ZERO,
+        None,
+    )
+    .await
+}
+
+/// As `count`, for actions made `ago` (an audit entry read after downtime, D20): logged and
+/// windowed at their own time, and no heat, which would have decayed by now.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn count_at(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    action: Action,
+    target: Option<u64>,
+    inv: &[Inverse],
+    exempt: bool,
+    n: u32,
+    ago: Duration,
+    audit: Option<u64>,
+) -> Result<()> {
     let Some((_, heat)) = cfg.antinuke.limit(action) else {
         return Ok(());
     };
+    let mut hot = false;
     if !exempt {
         // One row per inverse (a name and icon change are two), still counted once below.
         let rows: Vec<Option<&Inverse>> = if inv.is_empty() {
@@ -265,17 +396,22 @@ pub(crate) async fn count(
         } else {
             inv.iter().map(Some).collect()
         };
-        for i in rows {
-            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,$2,$3,$4,$5)")
+        // `counted` puts the window back after a restart (`seed_windows`): `n` on the first row.
+        for (k, i) in rows.into_iter().enumerate() {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse, counted, created_at, audit_id) VALUES ($1,$2,$3,$4,$5,$6, now() - make_interval(secs => $7), $8)")
                 .bind(gid.get() as i64)
                 .bind(actor.get() as i64)
                 .bind(format!("{action:?}"))
                 .bind(target.map(|t| t as i64))
                 .bind(i.map(|i| json!(i)))
+                .bind(if k == 0 && ago < HOUR { n as i32 } else { 0 })
+                .bind(ago.as_secs_f64())
+                .bind(audit.map(|a| a as i64))
                 .execute(&app.pool)
                 .await?;
         }
-        if heat > 0
+        hot = heat > 0
+            && ago.is_zero()
             && cfg.panic.heat_algorithm
             && add_heat(
                 app,
@@ -283,18 +419,35 @@ pub(crate) async fn count(
                 actor,
                 heat.saturating_mul(n),
                 cfg.panic.heat_decay,
-            )
-        {
+            );
+        if hot {
             crate::panic::note_heat(app, gid, actor).await;
         }
     }
     let verdict = {
         let mut an = app.antinuke.lock().unwrap();
         an.limits = cfg.antinuke.watched();
-        an.on_actions(gid.get(), actor.get(), action, exempt, Instant::now(), n)
+        an.on_actions_at(
+            gid.get(),
+            actor.get(),
+            action,
+            exempt,
+            Instant::now(),
+            ago,
+            n,
+        )
     };
-    if let Verdict::Quarantine(c) = verdict {
-        let why = format!(
+    if let Some(why) = breach(&verdict, hot, action) {
+        quarantine_and_revert(app, gid, actor, &why).await?;
+    }
+    Ok(())
+}
+
+/// Why the actor is contained: a reached limit, or 100% anti-nuke heat spread over several
+/// cards that each stayed under their limit (D13).
+fn breach(verdict: &Verdict, hot: bool, action: Action) -> Option<String> {
+    match verdict {
+        Verdict::Quarantine(c) => Some(format!(
             "{action:?} limit reached ({}/min, {}/hour){}",
             c.minute,
             c.hour,
@@ -303,8 +456,59 @@ pub(crate) async fn count(
             } else {
                 ""
             }
+        )),
+        _ if hot => Some("anti-nuke heat reached 100%".into()),
+        _ => None,
+    }
+}
+
+/// Startup: the anti-nuke windows, permit command limits and heat panic from before a restart
+/// (N3), read from `action_log`, `command_uses` and `heat_panic`. Runs before the gateway.
+pub(crate) async fn seed_windows(app: &App) -> Result<()> {
+    type Row = (i64, i64, String, i32, f64);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT guild_id, actor_id, action, counted, EXTRACT(EPOCH FROM now() - created_at)::float8
+         FROM action_log WHERE created_at > now() - interval '1 hour' AND counted > 0
+         ORDER BY created_at, id",
+    )
+    .fetch_all(&app.pool)
+    .await?;
+    let now = Instant::now();
+    {
+        let mut an = app.antinuke.lock().unwrap();
+        // Only rows `count` wrote name an action; cases and the bot's own rows do not parse.
+        for (g, a, action, n, ago) in rows {
+            if let Ok(action) = serde_json::from_value::<Action>(json!(action)) {
+                let ago = Duration::from_secs_f64(ago.max(0.0));
+                an.seed((g as u64, a as u64, action), ago, n as u32, now);
+            }
+        }
+    }
+    let uses: Vec<(i64, String, f64)> = sqlx::query_as(
+        "SELECT actor_id, action, EXTRACT(EPOCH FROM now() - at)::float8 FROM command_uses
+         WHERE at > now() - interval '1 hour' ORDER BY at",
+    )
+    .fetch_all(&app.pool)
+    .await?;
+    {
+        let mut rl = app.rate_limiter.lock().unwrap();
+        for (actor, action, ago) in uses {
+            if let Some(at) = now.checked_sub(Duration::from_secs_f64(ago.max(0.0))) {
+                rl.seed(actor, &action, at);
+            }
+        }
+    }
+    let heat: Vec<(i64, Vec<i64>, i64)> =
+        sqlx::query_as("SELECT guild_id, raiders, until FROM heat_panic WHERE until > $1")
+            .bind(now_secs())
+            .fetch_all(&app.pool)
+            .await?;
+    let mut m = app.heat_raiders.lock().unwrap();
+    for (g, raiders, until) in heat {
+        m.insert(
+            g as u64,
+            (raiders.into_iter().map(|r| r as u64).collect(), until),
         );
-        quarantine_and_revert(app, gid, actor, &why).await?;
     }
     Ok(())
 }
@@ -357,9 +561,21 @@ async fn guard_perms(
         || an.monitor_channel_perms
         || an.vanity_guard
         || an.quarantine_role == Some(target.cast());
-    if !guarded || app.whitelisted(gid, actor, "antinuke").await? {
+    if !guarded {
         return Ok(());
     }
+    // Unread, the change is undone but nobody punished (Thomas, D12b).
+    let unsure = match app.whitelisted(gid, actor, "antinuke").await {
+        Ok(true) => return Ok(()),
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "anti-nuke whitelist lookup failed, undoing without punishment"
+            );
+            true
+        }
+    };
     let public = |id: u64| id == gid.get() || cfg.lockdown.main_roles.iter().any(|r| r.get() == id);
     let gained = |old: Option<Permissions>, new: Option<Permissions>| {
         let bits = |p: Option<Permissions>| p.map_or(0, |p| p.bits());
@@ -402,7 +618,7 @@ async fn guard_perms(
             "gave a role dangerous permissions"
         }
         A::MemberRoleUpdate if an.strict_member_roles => {
-            let info = app.guild_info(gid).await?;
+            let info = crate::lockdown::unlocked_info(app, gid).await?;
             let added: Vec<Id<RoleMarker>> = e
                 .changes
                 .iter()
@@ -499,7 +715,261 @@ async fn guard_perms(
     if let Err(err) = undo {
         tracing::warn!(?err, why, "undoing a guarded change failed");
     }
+    if unsure {
+        return unsure_log(app, gid, actor, None, why).await;
+    }
     quarantine_and_revert(app, gid, actor, why).await
+}
+
+/// Giving a member a role that carries a permit hands out a permit, and with it any whitelist:
+/// undone and the actor quarantined, unless an Owner, Extra Owner or Trusted Admin did it (D16).
+async fn guard_permit_roles(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+    let (Some(gid), Some(target)) = (e.guild_id, e.target_id) else {
+        return Ok(());
+    };
+    let added: Vec<i64> = e
+        .changes
+        .iter()
+        .filter_map(|c| match c {
+            AuditLogChange::RoleAdded { new, .. } => Some(new),
+            _ => None,
+        })
+        .flatten()
+        .map(|r| r.id.get() as i64)
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+    let roles = permit_roles_in(&app.pool, gid.get() as i64, &added).await?;
+    if roles.is_empty() {
+        return Ok(());
+    }
+    // Unread, the role is taken back but nobody punished (Thomas, D12b).
+    let unsure = match app.is_immune(gid, actor).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "immunity lookup failed, taking the permit role back without punishment"
+            );
+            true
+        }
+    };
+    let (permit, weak): (Vec<_>, Vec<_>) = roles.into_iter().partition(|r| r.1);
+    if permit.is_empty() {
+        // A weak permit (a link whitelist, say): reaction-role and level bots hand these out.
+        let names: Vec<String> = weak.iter().map(|r| format!("<@&{}>", r.0)).collect();
+        let log = Log::new("Anti Nuke", ALERT)
+            .user("Responsible", actor.get())
+            .user("Member", target.get())
+            .text("Gave a member a role that carries a permit")
+            .line("Roles", &names.join(", "))
+            .line(
+                "Action",
+                "logged only: the permit holds no moderation, dashboard or anti-nuke rights",
+            );
+        return send_log(app, gid.get(), LogKind::AntiNuke, log).await;
+    }
+    // A failed undo must not spare the actor.
+    for (r, _) in permit {
+        let undo = app
+            .http
+            .remove_guild_member_role(gid, target.cast(), Id::new(r as u64))
+            .reason(
+                "Anti-nuke: a permit role is given only by an Owner, Extra Owner or Trusted Admin",
+            )
+            .await;
+        if let Err(err) = undo {
+            tracing::warn!(?err, "taking a permit role back failed");
+        }
+    }
+    if unsure {
+        let what = "gave a member a role that carries a permit";
+        return unsure_log(app, gid, actor, Some(target.cast()), what).await;
+    }
+    quarantine_and_revert(
+        app,
+        gid,
+        actor,
+        "gave a member a role that carries a permit",
+    )
+    .await
+}
+
+/// Which of `roles` carry a permit in the guild, and whether one of their permits is guarded
+/// (any perm or flag outside `permits::WEAK_PERMS`, `WEAK_WHITELIST`).
+async fn permit_roles_in(pool: &PgPool, guild: i64, roles: &[i64]) -> Result<Vec<(i64, bool)>> {
+    Ok(sqlx::query_as(
+        "SELECT r.role_id, bool_or(NOT (p.perms <@ $3 AND p.whitelist <@ $4)) FROM permit_roles r
+         JOIN permits p ON p.id = r.permit_id
+         WHERE r.guild_id = $1 AND r.role_id = ANY($2) GROUP BY r.role_id",
+    )
+    .bind(guild)
+    .bind(roles)
+    .bind(permits::WEAK_PERMS)
+    .bind(permits::WEAK_WHITELIST)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// A change to something an active lock holds (D79).
+#[derive(Debug, PartialEq)]
+enum Locked {
+    /// A stripped role's permissions changed: `old` is what the lock left.
+    Role { id: u64, old: Permissions },
+    /// A locked overwrite changed or was deleted: its values before, None where unchanged.
+    Overwrite {
+        channel: u64,
+        role: u64,
+        allow: Option<Permissions>,
+        deny: Option<Permissions>,
+        deleted: bool,
+    },
+}
+
+/// What `e` changed of the active locks' targets, if anything.
+fn lock_target(
+    e: &AuditLogEntry,
+    locks: &[tommybot_automod::lockdown::Snapshot],
+) -> Option<Locked> {
+    let target = e.target_id?.get();
+    match e.action_type {
+        A::RoleUpdate => {
+            let old = e.changes.iter().find_map(|c| match c {
+                AuditLogChange::Permissions { old, .. } => *old,
+                _ => None,
+            })?;
+            let held = locks
+                .iter()
+                .any(|l| l.role_perms.iter().any(|(r, _)| *r == target));
+            held.then_some(Locked::Role { id: target, old })
+        }
+        A::ChannelOverwriteUpdate | A::ChannelOverwriteDelete => {
+            let role = e.options.as_ref()?.id?.get();
+            let held = locks.iter().any(|l| {
+                l.channel_denies.contains(&(target, role))
+                    || l.prior.iter().any(|p| (p.0, p.1) == (target, role))
+            });
+            let find = |deny: bool| {
+                e.changes.iter().find_map(|c| match c {
+                    AuditLogChange::Allow { old, .. } if !deny => {
+                        Some(old.unwrap_or(Permissions::empty()))
+                    }
+                    AuditLogChange::Deny { old, .. } if deny => {
+                        Some(old.unwrap_or(Permissions::empty()))
+                    }
+                    _ => None,
+                })
+            };
+            held.then(|| Locked::Overwrite {
+                channel: target,
+                role,
+                allow: find(false),
+                deny: find(true),
+                deleted: e.action_type == A::ChannelOverwriteDelete,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// During a lock, a change to a locked role or overwrite is set back (unless an Owner, Extra
+/// Owner or Trusted Admin made it), logged, and counted on the Channel or Role Updates card.
+async fn guard_lock(
+    app: &App,
+    cfg: &GuildCfg,
+    e: &AuditLogEntry,
+    actor: Id<UserMarker>,
+) -> Result<()> {
+    let Some(gid) = e.guild_id else {
+        return Ok(());
+    };
+    let locks = crate::lockdown::active_locks(app, gid.get()).await?;
+    let Some(locked) = lock_target(e, &locks) else {
+        return Ok(());
+    };
+    // Unknown is set back as for anyone, but not counted: undo, not punish (D12b).
+    let lookup = app.is_immune(gid, actor).await;
+    let unsure = lookup.is_err();
+    let immune = lookup.unwrap_or(false);
+    let set_back: Result<()> = async {
+        match &locked {
+            _ if immune => {}
+            Locked::Role { id, old } => {
+                app.http
+                    .update_role(gid, Id::new(*id))
+                    .permissions(*old)
+                    .await?;
+            }
+            Locked::Overwrite {
+                channel,
+                role,
+                allow,
+                deny,
+                deleted,
+            } => {
+                let live = if *deleted {
+                    None
+                } else {
+                    app.http
+                        .channel(Id::new(*channel))
+                        .await?
+                        .model()
+                        .await?
+                        .permission_overwrites
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|o| o.id.get() == *role)
+                };
+                let o = PermissionOverwrite {
+                    id: Id::new(*role),
+                    kind: PermissionOverwriteType::Role,
+                    allow: allow.or(live.as_ref().map(|o| o.allow)),
+                    deny: deny.or(live.as_ref().map(|o| o.deny)),
+                };
+                app.http
+                    .update_channel_permission(Id::new(*channel), &o)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let (what, action) = match &locked {
+        Locked::Role { id, .. } => (format!("<@&{id}>"), Action::RoleUpdate),
+        Locked::Overwrite { channel, role, .. } => {
+            (format!("<#{channel}> (<@&{role}>)"), Action::ChannelUpdate)
+        }
+    };
+    let result = match (&set_back, immune) {
+        (_, true) => "left as is (Owner, Extra Owner or Trusted Admin)".to_string(),
+        (Ok(()), _) if unsure => {
+            "set back; not counted: their permits could not be read".to_string()
+        }
+        (Ok(()), _) => "set back".to_string(),
+        (Err(err), _) => format!("could not be set back: {}", crate::http_err::why(err)),
+    };
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Responsible", actor.get())
+        .text(&format!(
+            "{NO} **Changed a locked target during a lockdown**"
+        ))
+        .line("Target", &what)
+        .line("Change", &result);
+    if let Err(err) = send_log(app, gid.get(), LogKind::AntiNuke, log).await {
+        tracing::warn!(?err, "lock change log failed");
+    }
+    // A rename is already counted as a Role Update by `watched`.
+    if immune || unsure || watched(e) == Some(action) {
+        return Ok(());
+    }
+    let exempt = app
+        .whitelisted(gid, actor, "antinuke")
+        .await
+        .unwrap_or(false);
+    let target = e.target_id.map(|t| t.get());
+    count(app, cfg, gid, actor, action, target, &[], exempt, 1).await
 }
 
 /// Roles of `member` that carry dangerous permissions and sit below the bot, so it can take them.
@@ -523,7 +993,7 @@ pub async fn enforce_permits(app: &App, m: &MemberUpdate) -> Result<()> {
     if m.user.bot || !app.cfg(gid.get()).await?.misc.enforce_permits {
         return Ok(());
     }
-    let info = app.guild_info(gid).await?;
+    let info = crate::lockdown::unlocked_info(app, gid).await?;
     let (managed, bad): (Vec<_>, Vec<_>) =
         dangerous_below_bot(&m.roles, &info.role_perms, &info.roles, info.bot_top)
             .into_iter()
@@ -835,6 +1305,38 @@ pub(crate) async fn quarantine_actor(
     Ok(done)
 }
 
+/// After a command rate limit breach: undoes what the actor did in the last hour, also through
+/// the bot (their cases' bans and kicks), and tells staff (D22).
+pub(crate) async fn revert_breach(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    backups: &BackupsCfg,
+) -> Result<()> {
+    let sum = revert_actor(app, gid, actor, now_secs() - 3600, Some(backups)).await?;
+    if sum.ops == 0 && sum.reinvite.is_empty() {
+        return Ok(());
+    }
+    let reinvite: Vec<String> = sum.reinvite.iter().map(|u| format!("<@{u}>")).collect();
+    let log = Log::new("Anti Nuke", ALERT)
+        .user("Responsible", actor.get())
+        .text(&format!("{YES} **Reverted their last hour**"))
+        .line("Reason", "command rate limit exceeded")
+        .line(
+            "Reverted",
+            &format!("`{}/{}`", sum.ops - sum.failed, sum.ops),
+        )
+        .line(
+            "Kicked, re-invite",
+            &if reinvite.is_empty() {
+                "None".into()
+            } else {
+                reinvite.join(" ")
+            },
+        );
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await
+}
+
 /// A `quarantines` row exists: anti-nuke, staff or verification's join quarantine holds them.
 pub(crate) async fn quarantined(
     app: &App,
@@ -977,6 +1479,10 @@ pub(crate) async fn revert_actor(
         })
         .collect();
     let mut plan = plan_revert(&log, actor.get(), since);
+    // The bot's own quarantines and cleared bot roles stay: reverting them would free a nuker (D3).
+    if actor == app.me {
+        plan.ops.retain(|op| !bot_contain_op(op));
+    }
     // The actor's oldest name and icon rows in the window, reverted or not: a late rerun that read
     // only newer renames still ends on the name before the first one.
     let firsts: Vec<(serde_json::Value,)> = sqlx::query_as(
@@ -1060,6 +1566,12 @@ pub(crate) async fn revert_actor(
     })
 }
 
+/// Undoes a containment the bot made (its quarantine, a nuking bot's cleared role): never run by
+/// a revert of the bot's actions, here or in the dashboard.
+pub(crate) fn bot_contain_op(op: &Inverse) -> bool {
+    matches!(op, Inverse::Unquarantine { .. } | Inverse::RolePerms { .. })
+}
+
 /// A read row's inverse was carried out: it is in the plan and did not fail. Name and icon rows
 /// went into one op of their kind (`settle_guild`), so they follow that op. Kicks only report a
 /// re-invite, which the caller sends.
@@ -1112,9 +1624,25 @@ pub(crate) async fn contain(
     reason: Option<&str>,
     kind: Kind,
 ) -> Result<Contained> {
+    contain_with(app, gid, actor, reason, kind, true).await
+}
+
+/// [`contain`]; `hide` false leaves [`hide_channels`] to the caller, so a nuke's revert does not
+/// wait for one overwrite write per channel (`revert_and_report` hides after the revert).
+async fn contain_with(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    reason: Option<&str>,
+    kind: Kind,
+    hide: bool,
+) -> Result<Contained> {
     let member = app.http.guild_member(gid, actor).await?.model().await?;
     if !member.user.bot {
         quarantine_as(app, gid, actor, reason, kind).await?;
+        if hide {
+            hide_channels_best_effort(app, gid, actor, &member.roles, kind).await;
+        }
         return Ok(Contained {
             applied: Applied::Quarantined,
             bot_role: None,
@@ -1144,6 +1672,9 @@ pub(crate) async fn contain(
         },
     )
     .await?;
+    if hide && done.applied == Applied::Quarantined {
+        hide_channels_best_effort(app, gid, actor, &member.roles, kind).await;
+    }
     // Logged only once the bot stays: a kick deletes its managed role, leaving nothing to restore.
     if let (Applied::Quarantined, Some(true), Some((id, perms))) =
         (done.applied, done.bot_role, found)
@@ -1154,6 +1685,149 @@ pub(crate) async fn contain(
         }
     }
     Ok(done)
+}
+
+/// D14, kept apart from [`contain`]'s role steps: a real quarantine also takes the channel access
+/// the member has through their own overwrites or a managed role's (booster, bot role), which the
+/// quarantine role cannot override. A failure is only logged: the member is already quarantined.
+async fn hide_channels_best_effort(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    roles: &[Id<RoleMarker>],
+    kind: Kind,
+) {
+    if matches!(kind, Kind::Join | Kind::Deadline | Kind::Again(true)) {
+        return;
+    }
+    if let Err(e) = hide_channels(app, gid, user, roles).await {
+        tracing::warn!(?e, "taking a quarantined member's channel access failed");
+    }
+}
+
+async fn hide_channels(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    roles: &[Id<RoleMarker>],
+) -> Result<()> {
+    let info = app.guild_info(gid).await?;
+    let managed: Vec<u64> = roles
+        .iter()
+        .filter(|r| info.managed.contains(r))
+        .map(|r| r.get())
+        .collect();
+    for c in app.http.guild_channels(gid).await?.models().await? {
+        let ows = c.permission_overwrites.unwrap_or_default();
+        let Some((bits, own)) = channel_grant(&ows, user.get(), &managed) else {
+            continue;
+        };
+        deny_member(app, gid, user, c.id, bits, own).await?;
+    }
+    Ok(())
+}
+
+/// Puts a member overwrite denying `bits` (and allowing nothing) over a quarantined member in
+/// `channel`, after saving their own overwrite `own` for unquarantine. The first save wins: a
+/// later call sees the deny an earlier one put there.
+async fn deny_member(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    channel: Id<twilight_model::id::marker::ChannelMarker>,
+    bits: Permissions,
+    own: Option<(Permissions, Permissions)>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO quarantine_overwrites (guild_id, user_id, channel_id, had, allow, deny)
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get() as i64)
+    .bind(channel.get() as i64)
+    .bind(own.is_some())
+    .bind(own.map_or(0, |o| o.0.bits()) as i64)
+    .bind(own.map_or(0, |o| o.1.bits()) as i64)
+    .execute(&app.pool)
+    .await?;
+    let o = PermissionOverwrite {
+        id: user.cast(),
+        kind: PermissionOverwriteType::Member,
+        allow: Some(Permissions::empty()),
+        deny: Some(own.map_or(Permissions::empty(), |o| o.1) | bits),
+    };
+    app.http.update_channel_permission(channel, &o).await?;
+    Ok(())
+}
+
+/// What a channel grants `user` through their own overwrite or one of `managed` roles' (None:
+/// nothing), and their own overwrite's (allow, deny).
+fn channel_grant(
+    ows: &[twilight_model::channel::permission_overwrite::PermissionOverwrite],
+    user: u64,
+    managed: &[u64],
+) -> Option<(Permissions, Option<(Permissions, Permissions)>)> {
+    use twilight_model::channel::permission_overwrite::PermissionOverwriteType as K;
+    let own = ows
+        .iter()
+        .find(|o| o.kind == K::Member && o.id.get() == user)
+        .map(|o| (o.allow, o.deny));
+    let bits = ows
+        .iter()
+        .filter(|o| o.kind == K::Role && managed.contains(&o.id.get()))
+        .fold(own.map_or(Permissions::empty(), |o| o.0), |b, o| {
+            b | o.allow
+        });
+    (!bits.is_empty()).then_some((bits, own))
+}
+
+/// Puts back the channel overwrites [`hide_channels`] replaced, on unquarantine. A failed one is
+/// kept for the next release.
+async fn unhide_channels(app: &App, gid: Id<GuildMarker>, user: u64) -> Result<()> {
+    let rows: Vec<(i64, bool, i64, i64)> = sqlx::query_as(
+        "SELECT channel_id, had, allow, deny FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = $2",
+    )
+    .bind(gid.get() as i64)
+    .bind(user as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    for (channel, had, allow, deny) in rows {
+        let ch = Id::new(channel as u64);
+        let put = if had {
+            let o = PermissionOverwrite {
+                id: Id::new(user),
+                kind: PermissionOverwriteType::Member,
+                allow: Some(Permissions::from_bits_retain(allow as u64)),
+                deny: Some(Permissions::from_bits_retain(deny as u64)),
+            };
+            app.http.update_channel_permission(ch, &o).await.map(drop)
+        } else {
+            app.http
+                .delete_channel_permission(ch)
+                .member(Id::new(user))
+                .await
+                .map(drop)
+        };
+        if let Err(e) = put.map_err(anyhow::Error::from) {
+            if !crate::http_err::gone_any(&e) {
+                tracing::warn!(
+                    ?e,
+                    channel,
+                    "restoring a quarantined member's overwrite failed"
+                );
+                continue;
+            }
+        }
+        sqlx::query(
+            "DELETE FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = $2 AND channel_id = $3",
+        )
+        .bind(gid.get() as i64)
+        .bind(user as i64)
+        .bind(channel)
+        .execute(&app.pool)
+        .await?;
+    }
+    Ok(())
 }
 
 /// A bot loses its managed role's permissions, then is quarantined. A failed step, or a failed
@@ -1418,7 +2092,7 @@ pub(crate) async fn revert_and_report(
         match step {
             // A failed quarantine (bot role too low) must not stop the revert.
             NukeStep::Contain => {
-                done = contain(app, gid, actor, None, Kind::Real)
+                done = contain_with(app, gid, actor, None, Kind::Real, false)
                     .await
                     .unwrap_or_else(|e| {
                         tracing::warn!(?e, "quarantine failed");
@@ -1429,7 +2103,20 @@ pub(crate) async fn revert_and_report(
                     })
             }
             NukeStep::Revert => {
-                sum = Some(revert_actor(app, gid, actor, since, Some(&cfg.backups)).await?)
+                let r = revert_actor(app, gid, actor, since, Some(&cfg.backups)).await;
+                // The overwrite part of the containment, after the channels are back (D14).
+                if done.applied == Applied::Quarantined {
+                    let m = async {
+                        anyhow::Ok(app.http.guild_member(gid, actor).await?.model().await?)
+                    };
+                    match m.await {
+                        Ok(m) => {
+                            hide_channels_best_effort(app, gid, actor, &m.roles, Kind::Real).await
+                        }
+                        Err(e) => tracing::warn!(?e, "reading a nuker to hide channels failed"),
+                    }
+                }
+                sum = Some(r?)
             }
             NukeStep::Report => {
                 let sum = sum.as_ref().context("the revert runs before the report")?;
@@ -1609,6 +2296,10 @@ pub(crate) async fn run_inverse(app: &App, gid: Id<GuildMarker>, op: &Inverse) -
                     .execute(&app.pool)
                     .await?;
             }
+            // Released: their own channel access comes back too (D14).
+            if let Err(e) = unhide_channels(app, gid, *user).await {
+                tracing::warn!(?e, "restoring a released member's overwrites failed");
+            }
         }
         Inverse::Ban { user } => {
             app.http.create_ban(gid, Id::new(*user)).await?;
@@ -1700,8 +2391,7 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         return Ok(());
     };
     let cfg = app.cfg(gid.get()).await?;
-    let whitelisted = cfg.antinuke.quarantine_whitelist.contains(&actor)
-        || app.whitelisted(gid, actor, "quarantine").await?;
+    let (whitelisted, unsure) = hold_whitelisted(app, &cfg, gid, actor).await;
     if !hold_violation(actor.get(), target.get(), true, whitelisted) {
         return Ok(());
     }
@@ -1717,6 +2407,19 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
     if !cfg.antinuke.quarantine_hold {
         return Ok(());
     }
+    if unsure {
+        if e.action_type == A::MemberRoleUpdate {
+            back_to_quarantine(app, &cfg, gid, target).await?;
+        }
+        return unsure_log(
+            app,
+            gid,
+            actor,
+            Some(target),
+            "touched a quarantined member",
+        )
+        .await;
+    }
     if e.action_type != A::MemberRoleUpdate {
         return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
     }
@@ -1725,6 +2428,201 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         tracing::warn!(?err, "undoing a quarantined member's role change failed");
     }
     quarantine_and_revert(app, gid, actor, "changed the roles of a quarantined member").await
+}
+
+/// A member overwrite that gives a quarantined member channel access is the hold's matter too
+/// (D14): undone, and the actor quarantined as for a role change. A join quarantine only undoes.
+/// Lifting the quarantine's own deny (clearing its bits or deleting the overwrite) is a grant too.
+pub(crate) async fn hold_overwrite(
+    app: &App,
+    e: &AuditLogEntry,
+    actor: Id<UserMarker>,
+) -> Result<()> {
+    let (Some(gid), Some(channel), Some(o)) = (e.guild_id, e.target_id, e.options.as_ref()) else {
+        return Ok(());
+    };
+    // A create has no old values and a delete no new ones: both read as empty.
+    let bits = |allow: bool| {
+        e.changes.iter().find_map(|c| match c {
+            AuditLogChange::Allow { old, new } if allow => Some((*old, *new)),
+            AuditLogChange::Deny { old, new } if !allow => Some((*old, *new)),
+            _ => None,
+        })
+    };
+    let empty = Permissions::empty();
+    let allow = bits(true);
+    let (old_allow, new_allow) = allow.unwrap_or((None, None));
+    let (old_deny, new_deny) = bits(false).map_or((empty, empty), |(o, n)| {
+        (o.unwrap_or(empty), n.unwrap_or(empty))
+    });
+    let gained = new_allow.unwrap_or(empty) - old_allow.unwrap_or(empty);
+    // Removing a deny grants as much as adding an allow (a delete removes all of it).
+    let lost = old_deny - new_deny;
+    if gained.is_empty() && lost.is_empty() {
+        return Ok(());
+    }
+    let user = match (o.id, o.kind.as_deref()) {
+        (Some(user), Some("1")) => user.cast::<UserMarker>(),
+        (Some(role), Some("0")) => {
+            return hold_role_overwrite(app, gid, channel.cast(), role.cast(), gained | lost).await
+        }
+        _ => return Ok(()),
+    };
+    // A member's lost deny matters only where the quarantine put it (`quarantine_overwrites`).
+    if gained.is_empty() && !hid_channel(app, gid, user, channel.get()).await? {
+        return Ok(());
+    }
+    let Some(on_join) = quarantine_kind(app, gid, user).await? else {
+        return Ok(());
+    };
+    let cfg = app.cfg(gid.get()).await?;
+    let (whitelisted, unsure) = hold_whitelisted(app, &cfg, gid, actor).await;
+    if !hold_violation(actor.get(), user.get(), true, whitelisted) {
+        return Ok(());
+    }
+    let undo = async {
+        let live = app.http.channel(channel.cast()).await?.model().await?;
+        let now = live
+            .permission_overwrites
+            .unwrap_or_default()
+            .into_iter()
+            .find(|o| o.id.get() == user.get());
+        // The allow as it was, and the lost deny back on top of what is there now.
+        let o = PermissionOverwrite {
+            id: user.cast(),
+            kind: PermissionOverwriteType::Member,
+            allow: Some(match allow {
+                Some((old, _)) => old.unwrap_or(empty),
+                None => now.as_ref().map_or(empty, |o| o.allow),
+            }),
+            deny: Some(now.map_or(empty, |o| o.deny) | lost),
+        };
+        app.http
+            .update_channel_permission(channel.cast(), &o)
+            .await?;
+        anyhow::Ok(())
+    };
+    // A failed undo must not spare the actor.
+    if let Err(err) = undo.await {
+        tracing::warn!(?err, "undoing a quarantined member's overwrite failed");
+    }
+    if on_join || !cfg.antinuke.quarantine_hold {
+        return Ok(());
+    }
+    if unsure {
+        let what = "gave a quarantined member channel access";
+        return unsure_log(app, gid, actor, Some(user), what).await;
+    }
+    quarantine_and_revert(app, gid, actor, "gave a quarantined member channel access").await
+}
+
+/// Whether the hold spares `actor` (quarantine whitelist), and whether that could not be read.
+/// Unread, the hold undoes but punishes nobody: a lookup error must not quarantine staff (#97),
+/// nor leave the quarantined member what they were given (Thomas, D12b: undo, not punish).
+async fn hold_whitelisted(
+    app: &App,
+    cfg: &GuildCfg,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+) -> (bool, bool) {
+    if cfg.antinuke.quarantine_whitelist.contains(&actor) {
+        return (true, false);
+    }
+    match app.whitelisted(gid, actor, "quarantine").await {
+        Ok(w) => (w, false),
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                "quarantine whitelist lookup failed, undoing without punishment"
+            );
+            (false, true)
+        }
+    }
+}
+
+/// A guarded change undone without punishment, because the actor's permits could not be read.
+async fn unsure_log(
+    app: &App,
+    gid: Id<GuildMarker>,
+    actor: Id<UserMarker>,
+    target: Option<Id<UserMarker>>,
+    what: &str,
+) -> Result<()> {
+    let mut log = Log::new("Anti Nuke", ALERT).user("Responsible", actor.get());
+    if let Some(t) = target {
+        log = log.user("Member", t.get());
+    }
+    let log = log.text(&format!("**{what}**")).line(
+        "Action",
+        "undone where it can be; not quarantined: their permits could not be read",
+    );
+    send_log(app, gid.get(), LogKind::AntiNuke, log).await
+}
+
+/// Whether the quarantine put a deny on `user`'s overwrite in `channel` (`hide_channels`).
+async fn hid_channel(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    channel: u64,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = $2 AND channel_id = $3)",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get() as i64)
+    .bind(channel as i64)
+    .fetch_one(&app.pool)
+    .await?)
+}
+
+/// A managed role's overwrite (booster, a bot's role) that now grants more in a channel: the
+/// members it holds who are really quarantined get a member deny over those bits, as at contain
+/// (D14). Nobody is punished: staff set up booster channels as normal work.
+async fn hold_role_overwrite(
+    app: &App,
+    gid: Id<GuildMarker>,
+    channel: Id<twilight_model::id::marker::ChannelMarker>,
+    role: Id<RoleMarker>,
+    gained: Permissions,
+) -> Result<()> {
+    if !app.guild_info(gid).await?.managed.contains(&role) {
+        return Ok(());
+    }
+    // A quarantined member keeps their managed roles, and the saved list holds them.
+    let held: Vec<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM quarantines WHERE guild_id = $1 AND NOT on_join AND $2 = ANY(saved_roles)",
+    )
+    .bind(gid.get() as i64)
+    .bind(role.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    if held.is_empty() {
+        return Ok(());
+    }
+    let ows = app
+        .http
+        .channel(channel)
+        .await?
+        .model()
+        .await?
+        .permission_overwrites
+        .unwrap_or_default();
+    for u in held {
+        let user = Id::new(u as u64);
+        let own = ows
+            .iter()
+            .find(|o| o.id.get() == user.get())
+            .map(|o| (o.allow, o.deny));
+        if let Err(e) = deny_member(app, gid, user, channel, gained, own).await {
+            tracing::warn!(
+                ?e,
+                user = u,
+                "denying a quarantined member a role's new access failed"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Sets a quarantined member's roles back to what [`quarantine_roles`] leaves.
@@ -2017,6 +2915,7 @@ mod tests {
                 vec![Inverse::DeleteScheduledEvent { id: 3 }],
             ),
             (132, Action::SoundboardDelete, vec![]),
+            (112, Action::ThreadDelete, vec![]),
         ] {
             let e = entry(t, json!([]));
             assert_eq!(watched(&e), Some(a), "{t}");
@@ -2106,6 +3005,295 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(left, vec![("ChannelUpdate".to_string(),)]);
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. Reverting the bot (`/revert
+    /// actor:@TommyBot`) never lifts its quarantines or gives a nuking bot its role back (D3).
+    #[tokio::test]
+    async fn reverting_the_bot_keeps_its_containments() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let gid = Id::new(6_460_000_000 + std::process::id() as u64);
+        for (action, inv) in [
+            ("quarantine", json!(Inverse::Unquarantine { user: 7 })),
+            (
+                "bot_role_cleared",
+                json!(Inverse::RolePerms { id: 8, perms: 8 }),
+            ),
+            ("Kick", json!(Inverse::Reinvite { user: 9 })),
+        ] {
+            sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id, inverse) VALUES ($1,1,$2,7,$3)")
+                .bind(gid.get() as i64)
+                .bind(action)
+                .bind(inv)
+                .execute(&app.pool)
+                .await
+                .unwrap();
+        }
+        let sum = revert_actor(&app, gid, app.me, now_secs() - 60, None)
+            .await
+            .unwrap();
+        assert_eq!((sum.ops, sum.failed, sum.reinvite), (0, 0, vec![9]));
+        let left: Vec<(String,)> = sqlx::query_as(
+            "SELECT action FROM action_log WHERE guild_id=$1 AND NOT reverted ORDER BY id",
+        )
+        .bind(gid.get() as i64)
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+        let left: Vec<_> = left.into_iter().map(|r| r.0).collect();
+        assert_eq!(left, ["quarantine", "bot_role_cleared"]);
+        sqlx::query("DELETE FROM action_log WHERE guild_id=$1")
+            .bind(gid.get() as i64)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. A restart keeps the anti-nuke
+    /// window, the permit command limit and heat panic (N3).
+    #[tokio::test]
+    async fn windows_survive_a_restart() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let app = App::new(
+            twilight_http::Client::new(String::new()),
+            twilight_http::Client::new(String::new()),
+            pool,
+            tommybot_automod::discord_api::Api::new(""),
+            Id::new(1),
+        );
+        let g = 6_480_000_000 + std::process::id() as i64;
+        // A merged entry counted twice, a second inverse row of one entry, and a case row.
+        for (action, n) in [("Ban", 2), ("Ban", 0), ("ban", 1)] {
+            sqlx::query(
+                "INSERT INTO action_log (guild_id, actor_id, action, counted) VALUES ($1,42,$2,$3)",
+            )
+            .bind(g)
+            .bind(action)
+            .bind(n)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO command_uses (actor_id, action) VALUES ($1, 'ban')")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO heat_panic (guild_id, raiders, until) VALUES ($1, '{42}', $2)")
+            .bind(g)
+            .bind(now_secs() + 60)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        seed_windows(&app).await.unwrap();
+        let limit = tommybot_antinuke::Limit {
+            per_minute: 3,
+            per_hour: 10,
+        };
+        let v = {
+            let mut an = app.antinuke.lock().unwrap();
+            an.limits = HashMap::from([(Action::Ban, limit)]);
+            an.on_action(g as u64, 42, Action::Kick, false, Instant::now())
+        };
+        assert!(
+            matches!(v, Verdict::Quarantine(c) if c.minute == 3),
+            "{v:?}"
+        );
+        let one = permits::Limit {
+            per_min: 1,
+            per_hour: 5,
+        };
+        let allowed = app
+            .rate_limiter
+            .lock()
+            .unwrap()
+            .allow(g, "ban", one, Instant::now());
+        assert!(!allowed, "the use before the restart counts");
+        assert!(crate::panic::is_raider(
+            &app,
+            Id::new(g as u64),
+            Id::new(42)
+        ));
+        for t in ["action_log", "heat_panic"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {t} WHERE guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("DELETE FROM command_uses WHERE actor_id = $1")
+            .bind(g)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres.
+    #[tokio::test]
+    async fn only_roles_with_a_permit_are_guarded() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 6_490_000_000 + std::process::id() as i64;
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO permits (guild_id, name, rank, perms) VALUES ($1, 'Mods', 1, '{ban}') RETURNING id",
+        )
+        .bind(g)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (weak,): (i64,) = sqlx::query_as(
+            "INSERT INTO permits (guild_id, name, rank, whitelist) VALUES ($1, 'Links', 1, '{links}') RETURNING id",
+        )
+        .bind(g)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // The D16 attack: one narrow anti-nuke whitelist is enough to guard the role.
+        let (narrow,): (i64,) = sqlx::query_as(
+            "INSERT INTO permits (guild_id, name, rank, whitelist) VALUES ($1, 'Deleters', 1, '{wl_channel_delete}') RETURNING id",
+        )
+        .bind(g)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for (p, r) in [(id, 7), (weak, 8), (weak, 7), (narrow, 9)] {
+            sqlx::query(
+                "INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1, $2, $3)",
+            )
+            .bind(p)
+            .bind(g)
+            .bind(r)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut got = permit_roles_in(&pool, g, &[5, 7, 8, 9]).await.unwrap();
+        got.sort();
+        // 7 is guarded through its ban permit; 8 carries only a link whitelist.
+        assert_eq!(got, vec![(7, true), (8, false), (9, true)]);
+        assert!(permit_roles_in(&pool, g + 1, &[7])
+            .await
+            .unwrap()
+            .is_empty());
+        sqlx::query("DELETE FROM permits WHERE guild_id = $1")
+            .bind(g)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn only_a_replayed_entry_has_an_age() {
+        // An entry from 2015: live, it still counts now (a fast host clock changes nothing).
+        assert_eq!(replay_age(1 << 22, false), Duration::ZERO);
+        assert!(replay_age(1 << 22, true) > HOUR);
+    }
+
+    #[test]
+    fn changes_to_locked_targets_are_found() {
+        let lock: tommybot_automod::lockdown::Snapshot = serde_json::from_value(json!({
+            "kind": null, "role_perms": [[5, 2048]], "channel_denies": [[9, 5]],
+            "join_lock": false, "invites_paused": false
+        }))
+        .unwrap();
+        let entry = |t: u16, target: &str, changes: serde_json::Value| -> AuditLogEntry {
+            serde_json::from_value(json!({
+                "action_type": t, "changes": changes, "id": "1", "user_id": "2",
+                "target_id": target, "options": {"id": "5", "type": "0"}
+            }))
+            .unwrap()
+        };
+        let perms = json!([{"key": "permissions", "old_value": "0", "new_value": "2048"}]);
+        assert_eq!(
+            lock_target(&entry(31, "5", perms.clone()), std::slice::from_ref(&lock)),
+            Some(Locked::Role {
+                id: 5,
+                old: Permissions::empty()
+            })
+        );
+        assert_eq!(
+            lock_target(&entry(31, "6", perms), std::slice::from_ref(&lock)),
+            None
+        );
+        let deny = json!([{"key": "deny", "old_value": "2048", "new_value": "0"}]);
+        assert_eq!(
+            lock_target(&entry(14, "9", deny.clone()), std::slice::from_ref(&lock)),
+            Some(Locked::Overwrite {
+                channel: 9,
+                role: 5,
+                allow: None,
+                deny: Some(Permissions::SEND_MESSAGES),
+                deleted: false
+            })
+        );
+        assert!(matches!(
+            lock_target(&entry(15, "9", deny.clone()), std::slice::from_ref(&lock)),
+            Some(Locked::Overwrite { deleted: true, .. })
+        ));
+        assert_eq!(
+            lock_target(&entry(14, "8", deny.clone()), std::slice::from_ref(&lock)),
+            None
+        );
+        assert_eq!(lock_target(&entry(14, "9", deny), &[]), None, "no lock");
+    }
+
+    #[test]
+    fn channel_access_of_a_quarantined_member_is_found() {
+        use twilight_model::channel::permission_overwrite::{
+            PermissionOverwrite as Ow, PermissionOverwriteType as K,
+        };
+        let ow = |id: u64, kind, allow: u64, deny: u64| Ow {
+            allow: Permissions::from_bits_retain(allow),
+            deny: Permissions::from_bits_retain(deny),
+            id: Id::new(id),
+            kind,
+        };
+        let p = Permissions::from_bits_retain;
+        // Their own allow, a managed role's allow, and an unrelated role's.
+        let ows = [
+            ow(7, K::Member, 1024, 2),
+            ow(3, K::Role, 2048, 0),
+            ow(4, K::Role, 8, 0),
+        ];
+        assert_eq!(
+            channel_grant(&ows, 7, &[3]),
+            Some((p(1024 | 2048), Some((p(1024), p(2)))))
+        );
+        assert_eq!(channel_grant(&ows[2..], 7, &[3]), None);
+        assert_eq!(channel_grant(&ows[1..], 7, &[3]), Some((p(2048), None)));
+        // A member overwrite that only denies grants nothing.
+        assert_eq!(channel_grant(&[ow(7, K::Member, 0, 1024)], 7, &[]), None);
+    }
+
+    #[test]
+    fn full_heat_contains_like_a_limit() {
+        let c = tommybot_antinuke::Counts { minute: 3, hour: 3 };
+        let allow = Verdict::Allow(c);
+        assert_eq!(breach(&allow, false, Action::Ban), None);
+        assert_eq!(
+            breach(&allow, true, Action::Ban).as_deref(),
+            Some("anti-nuke heat reached 100%")
+        );
+        assert!(breach(&Verdict::Quarantine(c), true, Action::Ban)
+            .unwrap()
+            .starts_with("Ban limit reached"));
     }
 
     #[test]

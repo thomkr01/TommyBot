@@ -81,10 +81,24 @@ pub async fn note(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>, heat: b
         raiders.len(),
         embed::duration(cfg.duration_secs as i64)
     ));
+    let ids: Vec<i64> = raiders.iter().map(|r| *r as i64).collect();
     app.heat_raiders
         .lock()
         .unwrap()
         .insert(gid.get(), (raiders, until));
+    // Kept for a restart (N3, `seed_windows`); a lost row ends heat panic early on one.
+    let kept = sqlx::query(
+        "INSERT INTO heat_panic (guild_id, raiders, until) VALUES ($1, $2, $3)
+         ON CONFLICT (guild_id) DO UPDATE SET raiders = $2, until = $3",
+    )
+    .bind(gid.get() as i64)
+    .bind(&ids)
+    .bind(until)
+    .execute(&app.pool)
+    .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "saving heat panic failed");
+    }
     // Heat panic is on already: a failed log must not fail the caller's punishment.
     if let Err(e) = send_log_pinging(app, gid.get(), LogKind::Panic, log, &cfg.warned_roles).await {
         tracing::warn!(?e, "heat panic log failed");
@@ -433,13 +447,19 @@ pub async fn end(app: &App, gid: Id<GuildMarker>, payload: &Value) -> Result<()>
             lockdown::unlock(app, gid, Some(&LockKind::Role)).await?;
         }
     }
-    send_log(
-        app,
-        gid.get(),
-        LogKind::Panic,
-        Log::new("Panic Mode Ended", DONE).text(&format!("{YES} **Panic mode has ended.**")),
-    )
-    .await
+    send_log(app, gid.get(), LogKind::Panic, end_log(payload)).await
+}
+
+/// Names who ended panic early from the dashboard (D74); a timed end has nobody.
+fn end_log(payload: &Value) -> Log {
+    let log = Log::new("Panic Mode Ended", DONE).text(&format!("{YES} **Panic mode has ended.**"));
+    match payload["ended_by"]
+        .as_str()
+        .and_then(|u| u.parse::<u64>().ok())
+    {
+        Some(u) => log.user("Ended by", u),
+        None => log,
+    }
 }
 
 /// Re-arms panic mode and join raids after a restart: the pending `panic_end` and `raid_end` jobs
@@ -470,6 +490,14 @@ pub async fn restore(app: &App) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_early_end_names_who_ended_it() {
+        let by = format!("{:?}", end_log(&json!({"ended_by": "42"})).build());
+        assert!(by.contains("<@42>"), "{by}");
+        let timed = format!("{:?}", end_log(&json!({})).build());
+        assert!(!timed.contains("Ended by"), "{timed}");
+    }
 
     /// Runs only when DATABASE_URL points at a scratch Postgres. The per-category re-save changes the
     /// one pending job in place, and refuses when there is none (start then undoes itself).

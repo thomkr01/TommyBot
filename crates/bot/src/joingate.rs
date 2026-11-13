@@ -95,16 +95,25 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
         }
     }
     let name = names(&[Some(&user.name), user.global_name.as_ref()]);
-    // Without an audit entry the bot counts as authorised.
-    let adder = if user.bot {
-        crate::welcome::bot_adder(app, gid, user.id).await
+    // A bot whose adder cannot be read, after one retry, is blocked; so is one whose adder's
+    // level cannot be read (D59).
+    let found = if user.bot {
+        Some(crate::welcome::bot_adder_retry(app, gid, user.id).await)
     } else {
         None
     };
-    let authorized = match adder {
-        Some(a) => app.is_immune(gid, a).await.unwrap_or(true),
+    let authorized = match &found {
+        Some(Ok(a)) => app.is_immune(gid, *a).await.unwrap_or_else(|e| {
+            tracing::warn!(?e, "checking who added a bot failed, blocking it");
+            false
+        }),
+        Some(Err(e)) => {
+            tracing::warn!(?e, "no adder for a joining bot, blocking it");
+            false
+        }
         None => true,
     };
+    let adder = found.and_then(Result::ok);
     // Only asked when the exception is on: no audit entry, or a failed lookup, means no exception.
     let vouched = match adder {
         Some(a) if cfg.joingate.exclude_trusted_bots => match app.guild_info(gid).await {

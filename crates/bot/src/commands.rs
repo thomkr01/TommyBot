@@ -3,8 +3,13 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tommybot_antinuke::Action as NukeAction;
 use tommybot_automod::lockdown::{kind_from, LockKind};
-use tommybot_core::{cases, jobs, permits, sections::MiscCfg, warn};
+use tommybot_core::{
+    cases, jobs, permits,
+    sections::{AntinukeCfg, MiscCfg},
+    warn,
+};
 use tommybot_logging::{
     embed::{self, duration, ARROW, ORANGE, RED},
     Log, LogKind,
@@ -85,13 +90,64 @@ pub(crate) async fn gated(
     if app.mod_commands_locked(gid.get()) && !actor.immune() {
         return Ok(Some("Mod commands are locked during panic mode".into()));
     }
-    if app.command_allowed(actor_id, actor, action) {
+    let cfg = app.cfg(gid.get()).await?;
+    let fallback = nuke_fallback(&cfg.antinuke, action);
+    let own = permits::command_limit(actor, action, None);
+    let Some(limit) = own.or(permits::command_limit(actor, action, fallback)) else {
+        return Ok(None);
+    };
+    let action = limit_key(own.is_some(), action);
+    let ok = app.rate_limiter.lock().unwrap().allow(
+        actor_id.get() as i64,
+        action,
+        limit,
+        std::time::Instant::now(),
+    );
+    // Kept for a restart (N3); a lost row only makes the limit forget one use.
+    let kept = sqlx::query("INSERT INTO command_uses (actor_id, action) VALUES ($1, $2)")
+        .bind(actor_id.get() as i64)
+        .bind(action)
+        .execute(&app.pool)
+        .await;
+    if let Err(e) = kept {
+        tracing::warn!(?e, "saving a command use failed");
+    }
+    if ok {
         return Ok(None);
     }
     antinuke::quarantine_actor(app, gid, actor_id, "command rate limit exceeded").await?;
+    // What the bot already did for them (bans, kicks) is undone, as for a nuke (D22).
+    if let Err(e) = antinuke::revert_breach(app, gid, actor_id, &cfg.backups).await {
+        tracing::warn!(?e, "reverting a command rate limit breach failed");
+    }
     Ok(Some(format!(
         "Command rate limit hit for `{action}`: nothing done, you have been quarantined"
     )))
+}
+
+/// The rate limiter key of a command. Anti-nuke counts bans and kicks on one card, so under its
+/// fallback limit they share one key too (D5); a permit's own limit stays per action.
+fn limit_key(own: bool, action: &str) -> &str {
+    match (own, action) {
+        (false, "ban" | "kick") => "ban+kick",
+        _ => action,
+    }
+}
+
+/// Anti-nuke's limit for the same action, for a permit without its own (D5). Anti-nuke trips when
+/// a count reaches its limit and the permit limit when one goes past it, so one less.
+fn nuke_fallback(an: &AntinukeCfg, action: &str) -> Option<permits::Limit> {
+    let card = match action {
+        "ban" => NukeAction::Ban,
+        "kick" => NukeAction::Kick,
+        "timeout" => NukeAction::Timeout,
+        _ => return None,
+    };
+    let (l, _) = an.limit(card).filter(|_| an.enabled)?;
+    Some(permits::Limit {
+        per_min: l.per_minute.saturating_sub(1),
+        per_hour: l.per_hour.saturating_sub(1),
+    })
 }
 
 /// Readable reason for a refused permit check.
@@ -897,14 +953,15 @@ pub async fn revert_cmd(
         return Ok("Cannot revert: no permit".into());
     }
     // Owner, Extra Owner and TA actions are undone only when an Owner or Extra Owner asks for it.
+    // So are TommyBot's own (automatic bans; its quarantines are never lifted here, D3).
     let owner = app.guild_info(gid).await?.owner;
-    if app.level(gid, owner, target).await?.immune() {
+    if target == app.me || app.level(gid, owner, target).await?.immune() {
         let may = matches!(actor, permits::Level::Owner | permits::Level::ExtraOwner);
         if !may {
-            return Ok(format!("Cannot revert <@{target}>: only an Owner or Extra Owner can undo what an Owner, Extra Owner or Trusted Admin did"));
+            return Ok(format!("Cannot revert <@{target}>: only an Owner or Extra Owner can undo what an Owner, Extra Owner, Trusted Admin or TommyBot did"));
         }
         if !owners {
-            return Ok(format!("<@{target}> is an Owner, Extra Owner or Trusted Admin. Nothing was reverted: run it again with `include_owners: True` to undo their actions too."));
+            return Ok(format!("<@{target}> is an Owner, Extra Owner, Trusted Admin or TommyBot. Nothing was reverted: run it again with `include_owners: True` to undo their actions too."));
         }
     }
     if let Some(msg) = gated(app, gid, actor_id, actor, "revert").await? {
@@ -930,6 +987,35 @@ mod tests {
     use super::{above_bot, timeout_chunk, Flags, Id, ModKind, MAX_TIMEOUT_S};
     use crate::confirm::Action;
     use crate::modcmds::ModCmd;
+
+    #[test]
+    fn a_permit_without_limits_takes_the_anti_nuke_limit() {
+        let on =
+            |v: serde_json::Value| -> super::AntinukeCfg { serde_json::from_value(v).unwrap() };
+        let an = on(
+            serde_json::json!({"enabled": true, "limits": {"Ban": {"per_minute": 3, "per_hour": 9}}}),
+        );
+        let l = super::nuke_fallback(&an, "kick").unwrap();
+        assert_eq!((l.per_min, l.per_hour), (2, 8), "kicks share the ban card");
+        assert!(super::nuke_fallback(&an, "purge").is_none());
+        assert_eq!(
+            super::limit_key(false, "kick"),
+            super::limit_key(false, "ban")
+        );
+        assert_eq!(
+            super::limit_key(true, "kick"),
+            "kick",
+            "a permit's own limit"
+        );
+        assert!(
+            super::nuke_fallback(&an, "timeout").is_none(),
+            "opt-in card not set"
+        );
+        assert!(
+            super::nuke_fallback(&on(serde_json::json!({})), "ban").is_none(),
+            "anti-nuke off"
+        );
+    }
 
     #[test]
     fn pending_action_survives_the_database_round_trip() {

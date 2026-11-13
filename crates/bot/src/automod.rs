@@ -202,8 +202,6 @@ async fn check_message(
         .unwrap_or((m.channel_id, None));
     let listed = |l: &WhitelistList| l.covers(m.author.id, roles, parent, category, m.webhook_id);
     let partner = wl.partner_channels.contains(&parent);
-    // Members with dangerous permissions are spam-whitelisted unless only permits count as staff.
-    let dangerous = app.staff_by_perms(&cfg, gid, roles).await;
     let now = now_ms();
     let text = filter_text(m);
     let content = text.as_str();
@@ -281,7 +279,7 @@ async fn check_message(
         suspicious_account: m.author.avatar.is_none()
             || now - account_created_ms(m.author.id.get()) < cfg.joingate.min_age_ms(),
         whitelist: Whitelist {
-            spam: partner || dangerous || listed(&wl.spam),
+            spam: partner || listed(&wl.spam),
             mention_spam: listed(&wl.mentions),
             advertising: partner || listed(&wl.invites),
             everyone: partner || listed(&wl.everyone),

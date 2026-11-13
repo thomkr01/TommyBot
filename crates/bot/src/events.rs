@@ -66,7 +66,8 @@ async fn public(app: &App, channel: Id<ChannelMarker>) -> Result<bool> {
     let c = app.http.channel(channel).await?.model().await?;
     let p = match c.guild_id {
         Some(gid) => {
-            let info = app.guild_info(gid).await?;
+            // By the permissions a lock saved: the channel is public again once it ends (D62).
+            let info = crate::lockdown::unlocked_info(app, gid).await?;
             let main = app.cfg(gid.get()).await?.lockdown.main_roles.clone();
             let perms = |r: u64| {
                 Permissions::from_bits_truncate(
@@ -366,14 +367,32 @@ pub async fn shutdown(app: &App) {
             tracing::warn!(?e, "log send failed during shutdown");
         }
     }
+    crate::welcome::flush_audit(app).await;
     app.pool.close().await;
 }
 
 async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
     // Before any await: each event runs in its own task, so an await here would let a later voice
     // update of the same member (or one after a GuildCreate) take the logger lock first.
-    if let Event::GuildCreate(g) = ev {
-        crate::welcome::seed_voice(app, g);
+    match ev {
+        Event::GuildCreate(g) => {
+            crate::welcome::seed_voice(app, g);
+            if let twilight_model::gateway::payload::incoming::GuildCreate::Available(g) = &**g {
+                for c in &g.channels {
+                    app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true);
+                }
+            }
+        }
+        // Before any await too: the delete of a channel just moved must see the move (D4).
+        Event::ChannelCreate(c) => {
+            app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), true)
+        }
+        Event::ChannelUpdate(c) => {
+            app.note_category(c.id.get(), c.parent_id.map(|p| p.get()), false)
+        }
+        Event::MemberUpdate(m) => app.forget_level(m.guild_id.get(), m.user.id.get()),
+        Event::MemberRemove(m) => app.forget_level(m.guild_id.get(), m.user.id.get()),
+        _ => {}
     }
     // A voice member's channel before this event, read as the update is recorded.
     let voice = match ev {
@@ -544,7 +563,19 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         // Anti-nuke first: the verification check can wait for the gateway delete.
         Event::GuildAuditLogEntryCreate(e) => {
-            let nuke = antinuke::on_audit(app, &e.0).await;
+            // The catch-up after a reconnect may have handled this entry already (D20).
+            let g = e.0.guild_id.map(|g| g.get());
+            let inflight = g.and_then(|g| crate::welcome::saw_audit(app, g, e.0.id.get()));
+            let new = g.is_none() || inflight.is_some();
+            let nuke = if new {
+                antinuke::on_audit(app, &e.0).await
+            } else {
+                Ok(())
+            };
+            if let (true, Some(g)) = (new, g) {
+                crate::welcome::handled_audit(app, g, &e.0).await;
+            }
+            drop(inflight);
             let ban = crate::bansync::on_ban(app, &e.0).await;
             let unban = crate::bansync::on_unban(app, &e.0).await;
             let allow = crate::raiders::on_unban(app, &e.0).await;

@@ -145,12 +145,13 @@ pub enum NukeStep {
     Panic,
 }
 
+/// Quarantine On Limit off skips only the quarantine: a nuke still counts towards panic (D43).
 pub fn nuke_plan(auto_quarantine: bool) -> Vec<NukeStep> {
     use NukeStep::*;
     if auto_quarantine {
         vec![Contain, Revert, Report, Panic]
     } else {
-        vec![Revert, Report]
+        vec![Revert, Report, Panic]
     }
 }
 
@@ -222,9 +223,9 @@ mod tests {
     }
 
     #[test]
-    fn nuke_reverts_without_panic_and_reports_before_panic() {
+    fn nuke_reports_before_panic_and_panics_without_quarantine() {
         use NukeStep::*;
-        assert_eq!(nuke_plan(false), vec![Revert, Report]);
+        assert_eq!(nuke_plan(false), vec![Revert, Report, Panic]);
         assert_eq!(nuke_plan(true), vec![Contain, Revert, Report, Panic]);
     }
 

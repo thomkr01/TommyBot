@@ -13,7 +13,6 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use tommybot_antinuke::{describe, plan, ChannelImg, Image, OverwriteImg, RoleImg};
 use tommybot_core::{jobs, sections::BackupsCfg};
 use tommybot_logging::perm_names;
@@ -178,22 +177,6 @@ pub(crate) fn live_image(guild: i64, roles: &Value, channels: &Value) -> Image {
     img
 }
 
-/// Live ids a restore never deletes: the quarantine role and the log channels (as the bot does).
-fn keep_set(config: &Value) -> HashSet<u64> {
-    let mut keep: HashSet<u64> = HashSet::new();
-    let logging = &config["logging"];
-    let ids = std::iter::once(&config["antinuke"]["quarantine_role"])
-        .chain(std::iter::once(&logging["fallback"]))
-        .chain(
-            logging["routes"]
-                .as_object()
-                .into_iter()
-                .flat_map(|m| m.values()),
-        );
-    keep.extend(ids.filter_map(|v| v.as_str()?.parse::<u64>().ok()));
-    keep
-}
-
 async fn preview(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i64, i64)>) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
     let image = owned_image(&st, guild, id).await?;
@@ -207,7 +190,8 @@ async fn preview(State(st): State<AppState>, s: Sess, Path((guild, id)): Path<(i
             .await?,
     );
     let live = live_image(guild, &roles, &channels);
-    let lines = describe(&plan(&image, &live, &keep_set(&config), false), &live);
+    let keep = tommybot_core::sections::restore_keep(&st.db, guild, &config).await?;
+    let lines = describe(&plan(&image, &live, &keep, false), &live);
     Ok(Json(json!({"lines": lines})))
 }
 
@@ -254,10 +238,13 @@ async fn panic_start(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>
 /// Moves the pending `panic_end` job to now, so the bot ends panic mode with the unlock settings it stored.
 async fn panic_end(State(st): State<AppState>, s: Sess, Path(guild): Path<i64>) -> Res {
     require(&st, &s, guild, Level::Admin, true).await?;
+    // Who ended it goes into the panic log: a Trusted Admin may end it, not change it (D74).
     let moved = sqlx::query(
-        "UPDATE scheduled_jobs SET run_at = now() WHERE guild_id = $1 AND kind = 'panic_end'",
+        "UPDATE scheduled_jobs SET run_at = now(), payload = payload || jsonb_build_object('ended_by', $2::text)
+         WHERE guild_id = $1 AND kind = 'panic_end'",
     )
     .bind(guild)
+    .bind(s.user_id.to_string())
     .execute(&st.db)
     .await?;
     if moved.rows_affected() == 0 {
@@ -307,13 +294,5 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn keep_set_holds_quarantine_role_and_log_channels() {
-        let cfg = json!({"antinuke": {"quarantine_role": "7"},
-            "logging": {"fallback": "8", "routes": {"panic": "9"}}});
-        assert_eq!(keep_set(&cfg), HashSet::from([7, 8, 9]));
-        assert!(keep_set(&json!({})).is_empty());
     }
 }

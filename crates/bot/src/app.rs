@@ -168,11 +168,27 @@ pub struct App {
     pub panic: Mutex<PanicTracker>,
     pub panic_heat: Mutex<PanicTracker>,
     pub panic_runs: Mutex<HashMap<u64, PanicRun>>,
-    /// Heat panic: accounts that tripped it and when it ends (unix secs). Lost on restart, it is short.
+    /// Heat panic: accounts that tripped it and when it ends (unix secs). Saved in `heat_panic`.
     pub heat_raiders: Mutex<HashMap<u64, (HashSet<u64>, i64)>>,
     pub(crate) guilds: Mutex<HashMap<Id<GuildMarker>, Arc<crate::hierarchy::GuildInfo>>>,
     /// Category (None: no category) of each channel created or deleted, until its audit entry arrives.
     pub channel_parents: Mutex<HashMap<u64, Option<u64>>>,
+    /// Permit levels [`App::whitelisted`] read in the last [`LEVEL_TTL`].
+    pub(crate) levels: Mutex<LevelCache>,
+    /// Newest audit entry id seen per guild, so a new gateway session can fetch what it missed (D20).
+    pub last_audit: Mutex<HashMap<u64, u64>>,
+    /// The last 1000 audit entry ids seen per guild: live and catch-up handle each once (D20).
+    pub audit_recent: Mutex<HashMap<u64, std::collections::VecDeque<u64>>>,
+    /// Newest handled audit id per guild not yet written to `audit_seen` (`welcome::flush_audit`).
+    pub audit_done: Mutex<HashMap<u64, u64>>,
+    /// `last_audit` as it stood when `Ready` came in: where the catch-up starts (D20).
+    pub audit_floor: Mutex<HashMap<u64, u64>>,
+    /// Audit ids being handled now: `flush_audit` saves nothing past the oldest (D20).
+    pub audit_inflight: Mutex<HashMap<u64, std::collections::BTreeMap<u64, Instant>>>,
+    /// Start of a gap whose catch-up has not succeeded: saved and re-read until it does (D20).
+    pub audit_pinned: Mutex<HashMap<u64, u64>>,
+    /// Each channel's category as last seen, and when it last moved to another (D4).
+    pub category_moves: Mutex<HashMap<u64, (Option<u64>, crate::hierarchy::CategoryMove)>>,
     /// Nukers whose quarantine and revert is running; true when more of their actions came in
     /// meanwhile, so the run reverts once more before it ends.
     pub nuke_runs: Mutex<crate::antinuke::NukeRuns>,
@@ -191,6 +207,16 @@ pub struct App {
     pub voice_raids: Mutex<HashMap<u64, tommybot_automod::voice::VoiceRaidDetector>>,
     /// NSFW image scan queue, model and score cache.
     pub nsfw: crate::nsfw::Scanner,
+}
+
+/// How long a whitelist lookup is reused (D77). Short: a role change clears it anyway.
+const LEVEL_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+pub(crate) struct LevelCache {
+    map: HashMap<(u64, u64), (Level, Instant)>,
+    /// Moves on every forget, so a lookup started before it is not cached.
+    generation: u64,
 }
 
 /// Parsed configs per guild. A load that read the database before a newer save was announced must not
@@ -278,6 +304,14 @@ impl App {
             heat_raiders: Default::default(),
             guilds: Default::default(),
             channel_parents: Default::default(),
+            category_moves: Default::default(),
+            last_audit: Default::default(),
+            audit_recent: Default::default(),
+            audit_done: Default::default(),
+            audit_floor: Default::default(),
+            audit_inflight: Default::default(),
+            audit_pinned: Default::default(),
+            levels: Default::default(),
             nuke_runs: Default::default(),
             lock_ops: Default::default(),
             thread_parents: Default::default(),
@@ -324,26 +358,45 @@ impl App {
         Ok(self.level(guild, owner, user).await?.immune())
     }
 
-    /// Exempt from one system via the permit whitelist (immune levels are exempt from all).
+    /// Exempt from one system via the permit whitelist (immune levels are exempt from all). A nuke
+    /// asks this for every audit entry, so the level is kept for [`LEVEL_TTL`] (D77): a member
+    /// update clears it, and a read that raced that clear is not kept.
     pub async fn whitelisted(
         &self,
         guild: Id<GuildMarker>,
         user: Id<UserMarker>,
         flag: &str,
     ) -> Result<bool> {
-        let owner = self.guild_info(guild).await?.owner;
-        Ok(self.level(guild, owner, user).await?.whitelisted(flag))
+        let key = (guild.get(), user.get());
+        let (hit, generation) = {
+            let c = self.levels.lock().unwrap();
+            let hit = c.map.get(&key).filter(|e| e.1.elapsed() < LEVEL_TTL);
+            (hit.map(|e| e.0.clone()), c.generation)
+        };
+        let level = match hit {
+            Some(l) => l,
+            None => {
+                let owner = self.guild_info(guild).await?.owner;
+                let l = self.level(guild, owner, user).await?;
+                let mut c = self.levels.lock().unwrap();
+                if c.generation == generation {
+                    // shortcut: cleared whole past the cap, it only costs lookups.
+                    if c.map.len() > 10_000 {
+                        c.map.clear();
+                    }
+                    c.map.insert(key, (l.clone(), Instant::now()));
+                }
+                l
+            }
+        };
+        Ok(level.whitelisted(flag))
     }
 
-    /// Records a command use against the permit's limit; `false` means the actor breached it.
-    pub fn command_allowed(&self, actor: Id<UserMarker>, level: &Level, action: &str) -> bool {
-        permits::command_allowed(
-            &mut self.rate_limiter.lock().unwrap(),
-            actor.get() as i64,
-            level,
-            action,
-            std::time::Instant::now(),
-        )
+    /// A member's roles (and so their level) changed: drop the cached level.
+    pub fn forget_level(&self, guild: u64, user: u64) {
+        let mut c = self.levels.lock().unwrap();
+        c.generation += 1;
+        c.map.remove(&(guild, user));
     }
 
     pub async fn cfg(&self, guild: u64) -> Result<Arc<GuildCfg>> {

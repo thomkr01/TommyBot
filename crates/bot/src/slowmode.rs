@@ -15,9 +15,8 @@ use tommybot_logging::{
 use twilight_http::request::AuditLogReason;
 use twilight_model::{
     channel::Message,
-    guild::Permissions,
     id::{
-        marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, UserMarker},
         Id,
     },
 };
@@ -57,12 +56,11 @@ pub async fn feed(
     now: i64,
 ) -> Option<AutoSlowmodeCfg> {
     let slow = &am.auto_slowmode;
-    let roles = m.member.as_ref().map_or(&[][..], |mem| &mem.roles);
     if !slow.enabled
         || !am.anti_spam
         || m.author.bot
         || m.webhook_id.is_some()
-        || exempt(app, gid, m.author.id, roles).await
+        || exempt(app, gid, m.author.id).await
     {
         return None;
     }
@@ -76,25 +74,11 @@ pub async fn feed(
         .then(|| slow.clone())
 }
 
-async fn exempt(
-    app: &App,
-    gid: Id<GuildMarker>,
-    user: Id<UserMarker>,
-    roles: &[Id<RoleMarker>],
-) -> bool {
-    const BITS: u64 = Permissions::ADMINISTRATOR
-        .union(Permissions::MANAGE_MESSAGES)
-        .union(Permissions::MANAGE_CHANNELS)
-        .bits();
-    // A failed lookup counts as exempt: no slowmode is better than a wrong one.
-    app.guild_info(gid).await.map_or(true, |info| {
-        info.owner == user
-            || roles
-                .iter()
-                .copied()
-                .chain([gid.cast()])
-                .any(|r| info.role_perms.get(&r).is_some_and(|p| p & BITS != 0))
-    })
+/// Staff by TommyBot's permits only (Owner, Extra Owner, Trusted Admin or the automod permit),
+/// never by a role's Discord permissions. A failed lookup counts the message: during a raid these
+/// lookups hit 429s, and a slowmode that only goes up costs staff little.
+pub(crate) async fn exempt(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
+    app.whitelisted(gid, user, "automod").await.unwrap_or(false)
 }
 
 /// A slowmode only goes up, never down.

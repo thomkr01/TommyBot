@@ -26,7 +26,7 @@ pub struct AntinukeCfg {
     pub quarantine_hold: bool,
     /// Quarantine whoever changes the vanity URL and put the old code back.
     pub vanity_guard: bool,
-    /// Off: a reached limit is only logged and reverted.
+    /// Off: a reached limit is only logged, reverted and counted towards panic mode.
     pub auto_quarantine: bool,
     /// Punish giving dangerous permissions to any role.
     pub strict_mode: bool,
@@ -38,7 +38,8 @@ pub struct AntinukeCfg {
     pub monitor_channel_perms: bool,
     /// May change a quarantined member's roles.
     pub quarantine_whitelist: Vec<Id<UserMarker>>,
-    /// Channels created or deleted in these categories never count (ticket bots).
+    /// Channels a bot creates or deletes in these categories never count (ticket bots), unless the
+    /// channel moved in from elsewhere in the last hour.
     pub ticket_categories: Vec<Id<ChannelMarker>>,
 }
 
@@ -648,7 +649,8 @@ pub struct MiscCfg {
     pub show_reason_on_auto: bool,
     /// Delete the member's last 100 messages when automod punishes them.
     pub purge_last_100: bool,
-    /// Only owners, trusted admins and permit holders count as staff.
+    /// No effect: staff are only ever owners, Extra Owners, Trusted Admins and permit holders,
+    /// never a role's Discord permissions. Still read so old configs parse; not shown anywhere.
     pub staff_only_permitted: bool,
     pub warn_base_points: i32,
     /// Apply `warn_actions` once a member's warn points reach them.
@@ -928,9 +930,80 @@ impl RaiderCategory {
     pub const ALL: [RaiderCategory; 4] = [Self::Nuke, Self::Raid, Self::Scam, Self::Spam];
 }
 
+/// Live ids a backup restore must never delete: what the bot made or set up and a nuke does not
+/// make (N2): the quarantine role, the log channels, the ticket category, log channel and open
+/// tickets' channels, anti-nuke's ticket categories, the verification channel and roles, and the
+/// permit roles (Auto Setup's roles among them). They can be newer than the backup. A fixed list:
+/// any other config field (most are Editor level) must not shield a nuker's role or channel.
+/// Shared by the bot's restore and the dashboard's preview.
+pub async fn restore_keep(
+    pool: &sqlx::PgPool,
+    guild: i64,
+    config: &serde_json::Value,
+) -> sqlx::Result<std::collections::HashSet<u64>> {
+    let mut keep = config_ids(config);
+    let open: Vec<i64> = sqlx::query_scalar(
+        "SELECT channel_id FROM tickets WHERE guild_id = $1 AND closed_at IS NULL AND channel_id IS NOT NULL",
+    )
+    .bind(guild)
+    .fetch_all(pool)
+    .await?;
+    let permits = crate::permits::permit_roles(pool, guild).await?;
+    keep.extend(open.into_iter().chain(permits).map(|i| i as u64));
+    Ok(keep)
+}
+
+/// The config fields `restore_keep` keeps: an id, a list of ids, or a map's values.
+const KEEP_FIELDS: [&str; 10] = [
+    "/antinuke/quarantine_role",
+    "/antinuke/ticket_categories",
+    "/logging/fallback",
+    "/logging/routes",
+    "/logging/events",
+    "/logging/custom",
+    "/tickets/category",
+    "/tickets/log_channel",
+    "/verification/channel",
+    "/verification/roles",
+];
+
+fn config_ids(config: &serde_json::Value) -> std::collections::HashSet<u64> {
+    use serde_json::Value as V;
+    let id = |v: &V| v.as_str().and_then(|s| s.parse::<u64>().ok());
+    let mut out = std::collections::HashSet::new();
+    for f in KEEP_FIELDS {
+        match config.pointer(f) {
+            Some(V::Array(a)) => out.extend(a.iter().filter_map(|v| {
+                // A custom log is an object with its channel.
+                id(v).or_else(|| v.get("channel").and_then(id))
+            })),
+            Some(V::Object(o)) => out.extend(o.values().filter_map(id)),
+            Some(v) => out.extend(id(v)),
+            None => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restore_keeps_only_the_named_config_ids() {
+        let keep = config_ids(&json!({
+            "antinuke": {"quarantine_role": "11", "ticket_categories": ["12"]},
+            "logging": {"fallback": "13", "routes": {"mod_command": "14"}, "events": {"message_delete": "15"},
+                        "custom": [{"channel": "16", "events": []}]},
+            "tickets": {"category": "17", "log_channel": "18"},
+            "verification": {"channel": "19", "roles": ["20"]},
+            // Any other field, even an id list, shields nothing.
+            "automod": {"exempt_roles": ["1570002257523511317"]},
+            "sticky": {"roles": ["21"]},
+            "misc": {"timeout": "600"}
+        }));
+        assert_eq!(keep, (11..=20).collect());
+    }
     use serde_json::{json, Value};
 
     #[test]
@@ -1198,6 +1271,7 @@ mod tests {
             NukeAction::GuildUpdate,
             NukeAction::VoiceDisconnect,
             NukeAction::VoiceMove,
+            NukeAction::ThreadDelete,
         ] {
             assert!(c.limit(a).is_none(), "{a:?}");
             let on: AntinukeCfg =

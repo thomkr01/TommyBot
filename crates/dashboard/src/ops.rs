@@ -673,6 +673,8 @@ async fn revert(
     .fetch_all(&st.db)
     .await?;
     immune.extend(st.discord.guild_owner(guild).await?.parse::<i64>().ok());
+    // TommyBot's own rows (automatic bans, cleared bot roles) count as an owner's (D3).
+    immune.extend(st.discord.bot_id().await?.parse::<i64>().ok());
     let (mut done, mut failed, mut skipped, mut reinvite, mut protected) =
         (0, vec![], vec![], vec![], vec![]);
     for (id, actor, raw) in rows {
@@ -689,7 +691,8 @@ async fn revert(
             }
         };
         match &inv {
-            Inverse::Unquarantine { .. } => {
+            // Only the bot writes RolePerms (a nuking bot's cleared role): putting it back frees it.
+            Inverse::Unquarantine { .. } | Inverse::RolePerms { .. } => {
                 skipped.push(id);
                 continue;
             }
