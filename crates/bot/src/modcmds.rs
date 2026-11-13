@@ -628,7 +628,7 @@ pub async fn run(
                     &roles,
                 )
                 .await?;
-                // Roles with Administrator or other dangerous permissions count as staff too,
+                // Restoring roles with Administrator or other dangerous permissions needs an owner or TA too,
                 // judged by what they held before a role lock stripped them.
                 let perms = crate::lockdown::unlocked_role_perms(app, gid).await?;
                 let dangerous = roles.iter().any(|r| {

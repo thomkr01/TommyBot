@@ -319,7 +319,8 @@ async fn opened_last_hour(
     .await?)
 }
 
-/// Quarantined, and the newest quarantine case is staff's with a reason. Automatic quarantines
+/// Quarantined, and the newest quarantine case since this quarantine began is staff's with a
+/// reason (an older, lifted case does not count). Automatic quarantines
 /// (the bot's own cases) and staff quarantines without a reason told the member nothing.
 async fn quarantined_with_reason(
     app: &App,
@@ -327,10 +328,12 @@ async fn quarantined_with_reason(
     user: Id<UserMarker>,
 ) -> Result<bool> {
     Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM quarantines WHERE guild_id = $1 AND user_id = $2)
-            AND coalesce((SELECT mod_id <> $3 AND coalesce(reason, '') <> '' FROM cases
-                          WHERE guild_id = $1 AND user_id = $2 AND kind = 'quarantine'
-                          ORDER BY case_no DESC LIMIT 1), false)",
+        "SELECT coalesce((SELECT c.mod_id <> $3 AND coalesce(c.reason, '') <> ''
+                          FROM quarantines q JOIN cases c
+                            ON c.guild_id = q.guild_id AND c.user_id = q.user_id
+                           AND c.kind = 'quarantine' AND c.created_at >= q.created_at
+                          WHERE q.guild_id = $1 AND q.user_id = $2
+                          ORDER BY c.case_no DESC LIMIT 1), false)",
     )
     .bind(gid.get() as i64)
     .bind(user.get() as i64)
@@ -701,11 +704,17 @@ mod tests {
                     .unwrap();
             }
         };
-        case(9, Some("spamming"), 1).await;
+        case(crate::bansync::tests::ME, Some("anti-nuke"), 1).await;
+        case(9, Some("spamming"), 2).await;
         send_mail(&t.app, &dm("let me out"), gid).await.unwrap();
         assert_eq!(said("were given the reason"), 1);
-        // A later automatic quarantine (the bot's case) told them nothing.
-        case(crate::bansync::tests::ME, Some("anti-nuke"), 2).await;
+        // That staff case is from an earlier, lifted quarantine: the current one is the bot's,
+        // which told them nothing.
+        sqlx::query("UPDATE cases SET created_at = now() - interval '1 day' WHERE guild_id = $1 AND case_no = 2")
+            .bind(gid.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
         send_mail(&t.app, &dm("why am I quarantined?"), gid).await.unwrap();
         assert_eq!(said(&format!("POST /guilds/{gid}/channels")), 1, "ticket opened");
         assert_eq!(said("Quarantined"), 1);

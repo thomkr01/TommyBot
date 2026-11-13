@@ -892,27 +892,31 @@ async fn an_autorole_bot_after_a_rejoin_quarantine_is_undone_not_punished() {
     t.cleanup().await;
 }
 
-/// D15 review: the grace covers only the first bot change and only plain roles. An Administrator
-/// role, or a second change in the window, quarantines the bot as before.
+/// D15 review: the grace covers any number of bot changes in the window, but only plain roles.
+/// An Administrator role or a permit role quarantines the bot as before.
 #[tokio::test]
-async fn the_rejoin_grace_never_covers_admin_roles_or_a_second_change() {
+async fn the_rejoin_grace_covers_plain_roles_only() {
     let Some(t) = T::new(162).await else { return };
     let an = json!({"enabled": true, "quarantine_role": Q.to_string()});
     server(&t, 0, json!({ "antinuke": an })).await;
     const ADMIN: u64 = 507;
-    let [u, v, admin_bot, twice_bot] = [1, 2, 3, 4].map(|n| t.base * 10 + n);
+    const PERMIT: u64 = 511;
+    let [u, v, w, admin_bot, auto_bot, level_bot, permit_bot] =
+        [1, 2, 3, 4, 5, 6, 7].map(|n| t.base * 10 + n);
+    let bots = [admin_bot, auto_bot, level_bot, permit_bot];
     t.set(|m| {
         let g = t.g(0).get();
-        m.roles.get_mut(&g).unwrap().push((ADMIN, false, 8, 6));
-        m.bots.extend([admin_bot, twice_bot]);
-        for x in [u, v] {
+        m.roles.get_mut(&g).unwrap().extend([(ADMIN, false, 8, 6), (PERMIT, false, 0, 7)]);
+        m.bots.extend(bots);
+        for x in [u, v, w].into_iter().chain(bots) {
             m.members.insert((g, x), vec![]);
         }
-        for b in [admin_bot, twice_bot] {
-            m.members.insert((g, b), vec![]);
-        }
     });
-    for x in [u, v] {
+    t.exec("INSERT INTO permits (id, guild_id, name, perms) VALUES ($1 + 1, $1, 'Helpers', '{warn}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 511)")
+        .await;
+    for x in [u, v, w] {
         row(&t, 0, x, &[ROLE as i64]).await;
         crate::joingate::on_join(&t.app, &joined(&t, x), false)
             .await
@@ -930,10 +934,14 @@ async fn the_rejoin_grace_never_covers_admin_roles_or_a_second_change() {
     };
     give(admin_bot, u, ADMIN).await;
     assert!(saved(&t, 0, admin_bot).await.is_some(), "Administrator is no autorole");
-    give(twice_bot, v, AUTOROLE).await;
-    assert_eq!(saved(&t, 0, twice_bot).await, None, "the first plain role is graced");
-    give(twice_bot, v, AUTOROLE).await;
-    assert!(saved(&t, 0, twice_bot).await.is_some(), "a second change is not");
+    give(auto_bot, v, AUTOROLE).await;
+    give(level_bot, v, AUTOROLE).await;
+    give(auto_bot, v, AUTOROLE).await;
+    for b in [auto_bot, level_bot] {
+        assert_eq!(saved(&t, 0, b).await, None, "plain roles are graced, however many");
+    }
+    give(permit_bot, w, PERMIT).await;
+    assert!(saved(&t, 0, permit_bot).await.is_some(), "a permit role is no autorole");
     t.cleanup().await;
 }
 
@@ -997,22 +1005,37 @@ async fn a_rejoin_while_the_bot_was_down_is_quarantined_at_startup() {
             m.members.insert((t.g(0).get(), u), vec![ROLE]);
         }
     });
-    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false)
+    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false, None)
         .await
         .unwrap();
     assert_eq!(roles(&t, 0, back), Some(vec![Q]), "rejoined while down");
     assert_eq!(roles(&t, 0, freed), Some(vec![ROLE]), "released by hand");
     assert_eq!(roles(&t, 0, held_live), Some(vec![ROLE]), "same membership");
     assert_eq!(saved(&t, 0, back).await, Some(vec![ROLE as i64]), "saved list kept");
-    // During a raid the check waits in a job instead of reading members.
+    // A second run (a restart's job next to GuildCreate) quarantines and logs nobody again.
+    let logged = t.calls("Rejoined the server while quarantined");
+    let edits = t.calls(&format!("PATCH /guilds/{}/members/{back}", t.g(0)));
+    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false, None)
+        .await
+        .unwrap();
+    assert_eq!(t.calls("Rejoined the server while quarantined"), logged);
+    assert_eq!(t.calls(&format!("PATCH /guilds/{}/members/{back}", t.g(0))), edits);
+    // During a raid the check waits in one job instead of reading members, at most 30 minutes.
     let raid = tommybot_automod::join::RaidDetector::restored(0, i64::MAX, String::new());
     t.app.raids.lock().unwrap().insert(t.g(0).get(), raid);
     let reads = t.calls(&format!("GET /guilds/{}/members", t.g(0)));
-    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false)
+    for _ in 0..2 {
+        crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false, None)
+            .await
+            .unwrap();
+    }
+    assert_eq!(t.calls(&format!("GET /guilds/{}/members", t.g(0))), reads);
+    let long_ago = crate::app::now_secs() - 1801;
+    crate::joingate::requarantine_missed(&t.app, t.g(0), &[], false, Some(long_ago))
         .await
         .unwrap();
     t.app.raids.lock().unwrap().clear();
-    assert_eq!(t.calls(&format!("GET /guilds/{}/members", t.g(0))), reads);
+    assert!(t.calls(&format!("GET /guilds/{}/members", t.g(0))) > reads, "ran anyway");
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'requarantine_missed'")
         .bind(t.g(0).get() as i64)
         .fetch_one(&t.app.pool)
@@ -1155,5 +1178,124 @@ async fn other_bot_grants_that_skip_verification_are_all_taken_back() {
     row(&t, 0, y, &[]).await;
     crate::verify::given::on_audit(&t.app, &give(y, VERIFIED)).await.unwrap();
     assert_eq!(roles(&t, 0, y), Some(vec![Q]));
+    t.cleanup().await;
+}
+
+/// D58 round 3: a role opening the verified channels by base permission (the usual setup with
+/// no overwrites) or Send Messages where @everyone only reads is taken back, and so is a bot's
+/// member overwrite; a role opening nothing costs no member read. Grants made while TommyBot was
+/// down are found at GuildCreate. With Quarantine Hold off, a held member is judged here.
+#[tokio::test]
+async fn bot_access_that_skips_verification_is_taken_back_by_base_overwrite_and_at_startup() {
+    let Some(t) = T::new(174).await else { return };
+    const MEMBER: u64 = 512;
+    const PINGS: u64 = 513;
+    const TALK: u64 = 514;
+    const SENDS: u64 = 515;
+    let (view, send) = (1024u64, 2048u64);
+    let [u, p, vfd, s1, s2, s3, a, b, c, z, bot, human] =
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(|n| t.base * 100 + n);
+    let an = json!({"enabled": true, "quarantine_role": Q.to_string(), "quarantine_hold": false});
+    for i in 0..3 {
+        server(&t, i, json!({"verification": web_verification(), "antinuke": an})).await;
+    }
+    let chan = |g: u64, id: &str, ows: Vec<Value>| {
+        json!([{"id": id, "type": 0, "guild_id": g.to_string(), "name": "c", "position": 0,
+                "permission_overwrites": ows}])
+    };
+    let ow = |id: u64, allow: u64, deny: u64| {
+        json!({"id": id.to_string(), "type": 0, "allow": allow.to_string(), "deny": deny.to_string()})
+    };
+    t.set(|m| {
+        m.bots.push(bot);
+        // Server 0: @everyone has no View; the verified role has it in its base permissions.
+        let g = t.g(0).get();
+        let r = m.roles.get_mut(&g).unwrap();
+        r.retain(|x| x.0 != VERIFIED);
+        r.extend([(VERIFIED, false, view, 4), (MEMBER, false, view, 6), (PINGS, false, 0, 7)]);
+        m.channels.insert(g, chan(g, "711", vec![]));
+        for x in [u, p] {
+            m.members.insert((g, x), vec![]);
+        }
+        m.members.insert((g, vfd), vec![VERIFIED]);
+        // Server 1: @everyone reads but cannot write; verified members write.
+        let g = t.g(1).get();
+        let r = m.roles.get_mut(&g).unwrap();
+        r.retain(|x| x.0 != g);
+        r.extend([(g, false, view | send, 0), (TALK, false, 0, 6), (SENDS, false, send, 7)]);
+        m.channels.insert(g, chan(g, "712", vec![ow(g, 0, send), ow(VERIFIED, send, 0), ow(TALK, send, 0)]));
+        for x in [s1, s2, s3] {
+            m.members.insert((g, x), vec![]);
+        }
+        // Server 2: grants made while TommyBot was down, newest first.
+        let g = t.g(2).get();
+        for x in [a, b, c] {
+            m.members.insert((g, x), vec![VERIFIED]);
+        }
+        m.members.insert((g, z), vec![Q, VERIFIED]);
+        let add = |id: u64, actor: u64, target: u64| {
+            json!({"id": id.to_string(), "action_type": 25, "guild_id": g.to_string(),
+                   "target_id": target.to_string(), "user_id": actor.to_string(), "reason": null,
+                   "changes": [{"key": "$add", "new_value": [{"id": VERIFIED.to_string(), "name": "v"}]}]})
+        };
+        m.audit.insert(g, vec![add(9, ME, c), add(8, bot, a), add(7, human, b), add(6, bot, c)]);
+    });
+    let give = |i: u64, target: u64, role: u64| {
+        let mut e = role_added(&t, bot, target, role);
+        e.guild_id = Some(t.g(i));
+        e
+    };
+    let given = |e: AuditLogEntry| {
+        let t = &t;
+        async move { crate::verify::given::on_audit(&t.app, &e).await.unwrap() }
+    };
+    let reads = |i: u64, x: u64| t.calls(&format!("GET /guilds/{}/members/{x} ", t.g(i)));
+    // Base View: an ordinary "Member" autorole verifies nobody.
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![MEMBER]);
+    });
+    given(give(0, u, MEMBER)).await;
+    assert_eq!(roles(&t, 0, u), Some(vec![]));
+    // A role that opens nothing: no member read at all.
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), p), vec![PINGS]);
+    });
+    given(give(0, p, PINGS)).await;
+    assert_eq!((roles(&t, 0, p), reads(0, p)), (Some(vec![PINGS]), 0));
+    // A member verified long ago is read once, then remembered.
+    for _ in 0..2 {
+        t.set(|m| {
+        m.members.insert((t.g(0).get(), vfd), vec![VERIFIED, MEMBER]);
+    });
+        given(give(0, vfd, MEMBER)).await;
+    }
+    assert_eq!((roles(&t, 0, vfd), reads(0, vfd)), (Some(vec![VERIFIED, MEMBER]), 1));
+    // Send only: a role allowed to write there goes, one whose base Send @everyone's deny blocks stays.
+    t.set(|m| {
+        m.members.insert((t.g(1).get(), s1), vec![TALK]);
+        m.members.insert((t.g(1).get(), s2), vec![SENDS]);
+    });
+    given(give(1, s1, TALK)).await;
+    given(give(1, s2, SENDS)).await;
+    assert_eq!((roles(&t, 1, s1), roles(&t, 1, s2)), (Some(vec![]), Some(vec![SENDS])));
+    // A bot's member overwrite opening that channel is removed.
+    let over: AuditLogEntry = serde_json::from_value(json!({
+        "id": "3", "action_type": 13, "guild_id": t.g(1).to_string(), "target_id": "712",
+        "user_id": bot.to_string(), "reason": null, "options": {"id": s3.to_string(), "type": "1"},
+        "changes": [{"key": "allow", "new_value": send.to_string()}],
+    }))
+    .unwrap();
+    given(over).await;
+    assert_eq!(t.calls(&format!("DELETE /channels/712/permissions/{s3}")), 1);
+    // At GuildCreate: only a role whose newest grant came from another bot goes.
+    crate::verify::given::catch_up(&t.app, t.g(2)).await.unwrap();
+    assert_eq!(roles(&t, 2, a), Some(vec![]), "a bot verified them while TommyBot was down");
+    assert_eq!(roles(&t, 2, b), Some(vec![VERIFIED]), "staff gave it");
+    assert_eq!(roles(&t, 2, c), Some(vec![VERIFIED]), "TommyBot gave it last");
+    // Quarantine Hold off: the hold leaves a held member's role, so this check takes it.
+    row(&t, 2, z, &[]).await;
+    given(give(2, z, VERIFIED)).await;
+    assert_eq!(roles(&t, 2, z), Some(vec![Q]));
+    assert_eq!(saved(&t, 2, bot).await, None, "nobody is punished");
     t.cleanup().await;
 }

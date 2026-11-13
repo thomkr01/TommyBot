@@ -297,7 +297,16 @@ pub async fn unlocked_role_perms(
     app: &App,
     gid: Id<GuildMarker>,
 ) -> Result<std::collections::HashMap<Id<twilight_model::id::marker::RoleMarker>, u64>> {
-    let mut perms = app.guild_info(gid).await?.role_perms.clone();
+    let live = app.guild_info(gid).await?.role_perms.clone();
+    unlocked(app, gid, live).await
+}
+
+/// `perms` (live role permissions) with what the active locks saved put back.
+pub async fn unlocked(
+    app: &App,
+    gid: Id<GuildMarker>,
+    mut perms: std::collections::HashMap<Id<twilight_model::id::marker::RoleMarker>, u64>,
+) -> Result<std::collections::HashMap<Id<twilight_model::id::marker::RoleMarker>, u64>> {
     let mut saved = std::collections::HashSet::new();
     for snap in store::locks(&app.pool, gid.get()).await? {
         for (r, p) in snap.role_perms {

@@ -143,7 +143,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         crate::reply::QUARANTINE_DM => crate::reply::quarantine_dm_job(app, gid, &job.payload).await?,
         crate::reply::QUARANTINE_DM_COOLDOWN => {}
         crate::joingate::MISSED_REJOINS => {
-            crate::joingate::requarantine_missed(app, gid, &[], false).await?
+            crate::joingate::requarantine_missed(app, gid, &[], false, job.payload["first"].as_i64()).await?
         }
         "verify_deadline" => verify::deadline(app, gid, user(&job.payload)?).await?,
         "verify_blocked" => {

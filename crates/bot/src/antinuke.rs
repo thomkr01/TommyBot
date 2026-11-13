@@ -1732,10 +1732,10 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
         return quarantine_and_revert(app, gid, actor, "touched a quarantined member").await;
     }
     // An autorole bot right after a rejoin's quarantine: undone, not punished (D15, as 11-11).
-    // Only its first change, and only plain roles: a dangerous or permit role is punished as before.
+    // Any number of bots and changes in the grace, but only plain roles: a dangerous or permit
+    // role is punished as before.
     if rejoined_recently(gid, target)
         && is_bot(app, actor).await
-        && take_rejoin(gid, target)
         && plain_roles_added(app, gid, e).await
     {
         undo_role_change(app, &cfg, gid, target).await;
@@ -1807,13 +1807,6 @@ fn note_rejoin(gid: Id<GuildMarker>, user: Id<UserMarker>) {
 fn rejoined_recently(gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
     let all = REJOINED.lock().unwrap_or_else(|p| p.into_inner());
     all.get(&(gid.get(), user.get()))
-        .is_some_and(|at| at.elapsed() < REJOIN_GRACE)
-}
-
-/// Uses up the rejoin grace: true when it was still running.
-fn take_rejoin(gid: Id<GuildMarker>, user: Id<UserMarker>) -> bool {
-    let mut all = REJOINED.lock().unwrap_or_else(|p| p.into_inner());
-    all.remove(&(gid.get(), user.get()))
         .is_some_and(|at| at.elapsed() < REJOIN_GRACE)
 }
 

@@ -220,19 +220,65 @@ pub async fn on_join(app: &App, m: &MemberAdd, spammer: bool) -> Result<()> {
 /// One who joined before is in the same membership, still held or released by hand (Quarantine
 /// Whitelist, Quarantine Hold off), and is left alone. `known`: GuildCreate's members, the whole
 /// list when `complete`; otherwise the member list is paged (its own rate-limit bucket, not the
-/// one punishments use). During a raid or lock the check waits 5 minutes in a job.
+/// one punishments use). During a raid or lock the check waits in one job per guild, 5 minutes at
+/// a time and 30 minutes at most from the first wait (`first`, unix secs), then runs anyway.
+/// A failed run queues the job too. Runs one at a time per guild: a second run sees the first's
+/// `quarantine` action_log rows and skips those members, so a restart's job and GuildCreate never
+/// quarantine or log one rejoin twice.
 pub async fn requarantine_missed(
+    app: &App,
+    gid: Id<GuildMarker>,
+    known: &[twilight_model::guild::Member],
+    complete: bool,
+    first: Option<i64>,
+) -> Result<()> {
+    let lock = {
+        let mut all = MISSED_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+        all.retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+        all.entry(gid.get()).or_default().clone()
+    };
+    let _one = lock.lock().await;
+    let now = now_secs();
+    let first = first.unwrap_or(now);
+    let wait = match lockdown::raid_or_lock(app, gid).await {
+        Ok(on) => on && now - first < MAX_WAIT_SECS,
+        Err(e) => {
+            tracing::warn!(?e, "raid or lock check failed, checking missed rejoins anyway");
+            false
+        }
+    };
+    let run = async {
+        if wait {
+            return anyhow::Ok(true);
+        }
+        missed(app, gid, known, complete).await?;
+        Ok(false)
+    };
+    let requeue = match run.await {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(?e, "checking members who rejoined while the bot was down failed, retrying in a job");
+            true
+        }
+    };
+    if requeue {
+        let payload = serde_json::json!({ "first": first });
+        jobs::replace(&app.pool, gid.get() as i64, MISSED_REJOINS, payload, now + 300).await?;
+    }
+    Ok(())
+}
+
+type GuildLocks = std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<tokio::sync::Mutex<()>>>>;
+static MISSED_LOCKS: std::sync::LazyLock<GuildLocks> = std::sync::LazyLock::new(Default::default);
+const MAX_WAIT_SECS: i64 = 1800;
+
+async fn missed(
     app: &App,
     gid: Id<GuildMarker>,
     known: &[twilight_model::guild::Member],
     complete: bool,
 ) -> Result<()> {
     use sqlx::types::chrono::{DateTime, Utc};
-    if lockdown::raid_or_lock(app, gid).await? {
-        let at = now_secs() + 300;
-        jobs::enqueue(&app.pool, gid.get() as i64, MISSED_REJOINS, serde_json::json!({}), at).await?;
-        return Ok(());
-    }
     let rows: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
         "SELECT q.user_id, greatest(q.created_at, a.at) FROM quarantines q
          LEFT JOIN (SELECT target_id, max(created_at) AS at FROM action_log

@@ -142,6 +142,8 @@ pub(crate) struct Mock {
     pub(crate) fail_member_edit: bool,
     /// Channels by guild, as Discord's JSON array; `[]` when not set.
     pub(crate) channels: HashMap<u64, Value>,
+    /// Audit log entries by guild, newest first; none when not set.
+    pub(crate) audit: HashMap<u64, Vec<Value>>,
     pub(crate) log: Vec<String>,
 }
 
@@ -359,7 +361,13 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 None => err(404, 10007),
             }
         }
-        ("PUT", ["channels", _, "permissions", _]) => (204, String::new()),
+        ("PUT" | "DELETE", ["channels", _, "permissions", _]) => (204, String::new()),
+        ("GET", ["guilds", g, "audit-logs"]) => {
+            let entries = m.audit.get(&n(g)).cloned().unwrap_or_default();
+            let log = json!({"audit_log_entries": entries, "application_commands": [], "auto_moderation_rules": [],
+                "guild_scheduled_events": [], "integrations": [], "threads": [], "users": [], "webhooks": []});
+            (200, log.to_string())
+        }
         ("POST", ["guilds", g, "channels"]) => {
             let ch = json!({"id": "610", "type": 0, "guild_id": g, "name": "ticket"});
             (200, ch.to_string())
