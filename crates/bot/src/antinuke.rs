@@ -1532,33 +1532,46 @@ async fn hide_channels(
         .filter(|r| info.managed.contains(r))
         .map(|r| r.get())
         .collect();
-    let (g, u) = (gid.get() as i64, user.get() as i64);
     for c in app.http.guild_channels(gid).await?.models().await? {
         let ows = c.permission_overwrites.unwrap_or_default();
         let Some((bits, own)) = channel_grant(&ows, user.get(), &managed) else {
             continue;
         };
-        // The first save wins: a second quarantine sees the deny it put there itself.
-        sqlx::query(
-            "INSERT INTO quarantine_overwrites (guild_id, user_id, channel_id, had, allow, deny)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-        )
-        .bind(g)
-        .bind(u)
-        .bind(c.id.get() as i64)
-        .bind(own.is_some())
-        .bind(own.map_or(0, |o| o.0.bits()) as i64)
-        .bind(own.map_or(0, |o| o.1.bits()) as i64)
-        .execute(&app.pool)
-        .await?;
-        let o = PermissionOverwrite {
-            id: user.cast(),
-            kind: PermissionOverwriteType::Member,
-            allow: Some(Permissions::empty()),
-            deny: Some(own.map_or(Permissions::empty(), |o| o.1) | bits),
-        };
-        app.http.update_channel_permission(c.id, &o).await?;
+        deny_member(app, gid, user, c.id, bits, own).await?;
     }
+    Ok(())
+}
+
+/// Puts a member overwrite denying `bits` (and allowing nothing) over a quarantined member in
+/// `channel`, after saving their own overwrite `own` for unquarantine. The first save wins: a
+/// later call sees the deny an earlier one put there.
+async fn deny_member(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+    channel: Id<twilight_model::id::marker::ChannelMarker>,
+    bits: Permissions,
+    own: Option<(Permissions, Permissions)>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO quarantine_overwrites (guild_id, user_id, channel_id, had, allow, deny)
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+    )
+    .bind(gid.get() as i64)
+    .bind(user.get() as i64)
+    .bind(channel.get() as i64)
+    .bind(own.is_some())
+    .bind(own.map_or(0, |o| o.0.bits()) as i64)
+    .bind(own.map_or(0, |o| o.1.bits()) as i64)
+    .execute(&app.pool)
+    .await?;
+    let o = PermissionOverwrite {
+        id: user.cast(),
+        kind: PermissionOverwriteType::Member,
+        allow: Some(Permissions::empty()),
+        deny: Some(own.map_or(Permissions::empty(), |o| o.1) | bits),
+    };
+    app.http.update_channel_permission(channel, &o).await?;
     Ok(())
 }
 
@@ -2209,25 +2222,32 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()>
 
 /// A member overwrite that gives a quarantined member channel access is the hold's matter too
 /// (D14): undone, and the actor quarantined as for a role change. A join quarantine only undoes.
-async fn hold_overwrite(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> Result<()> {
+pub(crate) async fn hold_overwrite(
+    app: &App,
+    e: &AuditLogEntry,
+    actor: Id<UserMarker>,
+) -> Result<()> {
     let (Some(gid), Some(channel), Some(o)) = (e.guild_id, e.target_id, e.options.as_ref()) else {
         return Ok(());
     };
-    let (Some(user), Some("1")) = (o.id, o.kind.as_deref()) else {
-        return Ok(());
-    };
-    let user = user.cast::<UserMarker>();
-    let Some(old) = e.changes.iter().find_map(|c| match c {
+    let Some((old, gained)) = e.changes.iter().find_map(|c| match c {
         AuditLogChange::Allow { old, new } => {
             let (old, new) = (
                 old.unwrap_or(Permissions::empty()),
                 new.unwrap_or(Permissions::empty()),
             );
-            (!(new - old).is_empty()).then_some(old)
+            (!(new - old).is_empty()).then_some((old, new - old))
         }
         _ => None,
     }) else {
         return Ok(());
+    };
+    let user = match (o.id, o.kind.as_deref()) {
+        (Some(user), Some("1")) => user.cast::<UserMarker>(),
+        (Some(role), Some("0")) => {
+            return hold_role_overwrite(app, gid, channel.cast(), role.cast(), gained).await
+        }
+        _ => return Ok(()),
     };
     let Some(on_join) = quarantine_kind(app, gid, user).await? else {
         return Ok(());
@@ -2265,6 +2285,55 @@ async fn hold_overwrite(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>) -> 
         return Ok(());
     }
     quarantine_and_revert(app, gid, actor, "gave a quarantined member channel access").await
+}
+
+/// A managed role's overwrite (booster, a bot's role) that now grants more in a channel: the
+/// members it holds who are really quarantined get a member deny over those bits, as at contain
+/// (D14). Nobody is punished: staff set up booster channels as normal work.
+async fn hold_role_overwrite(
+    app: &App,
+    gid: Id<GuildMarker>,
+    channel: Id<twilight_model::id::marker::ChannelMarker>,
+    role: Id<RoleMarker>,
+    gained: Permissions,
+) -> Result<()> {
+    if !app.guild_info(gid).await?.managed.contains(&role) {
+        return Ok(());
+    }
+    // A quarantined member keeps their managed roles, and the saved list holds them.
+    let held: Vec<i64> = sqlx::query_scalar(
+        "SELECT user_id FROM quarantines WHERE guild_id = $1 AND NOT on_join AND $2 = ANY(saved_roles)",
+    )
+    .bind(gid.get() as i64)
+    .bind(role.get() as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    if held.is_empty() {
+        return Ok(());
+    }
+    let ows = app
+        .http
+        .channel(channel)
+        .await?
+        .model()
+        .await?
+        .permission_overwrites
+        .unwrap_or_default();
+    for u in held {
+        let user = Id::new(u as u64);
+        let own = ows
+            .iter()
+            .find(|o| o.id.get() == user.get())
+            .map(|o| (o.allow, o.deny));
+        if let Err(e) = deny_member(app, gid, user, channel, gained, own).await {
+            tracing::warn!(
+                ?e,
+                user = u,
+                "denying a quarantined member a role's new access failed"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Sets a quarantined member's roles back to what [`quarantine_roles`] leaves.

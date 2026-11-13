@@ -142,6 +142,8 @@ pub(crate) struct Mock {
     pub(crate) audit: Vec<Value>,
     /// The next this many audit log lookups fail with 500.
     pub(crate) fail_audit: u32,
+    /// Permission overwrites by channel, as a channel lookup returns them.
+    pub(crate) overwrites: HashMap<u64, Vec<Value>>,
     pub(crate) log: Vec<String>,
 }
 
@@ -307,6 +309,13 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             (200, json!(all).to_string())
         }
         ("GET", ["guilds", _, "channels"]) => (200, "[]".into()),
+        ("GET", ["channels", c]) => {
+            let ows = m.overwrites.get(&n(c)).cloned().unwrap_or_default();
+            (
+                200,
+                json!({"id": c, "type": 0, "permission_overwrites": ows}).to_string(),
+            )
+        }
         ("PATCH", ["guilds", _, "roles", _]) if m.fail_role_edit => err(403, 50013),
         ("PATCH", ["guilds", g, "roles", r]) => {
             let perms = serde_json::from_str::<Value>(body).unwrap_or_default()["permissions"]
@@ -1476,4 +1485,88 @@ async fn a_restart_reads_the_audit_entries_it_missed() {
         .execute(&t.app.pool)
         .await
         .unwrap();
+}
+
+/// D14: a managed role's overwrite that gives more access in a channel is denied to the really
+/// quarantined members who hold that role, with their own overwrite saved for unquarantine.
+#[tokio::test]
+async fn a_managed_role_overwrite_does_not_reach_a_quarantined_member() {
+    let Some(t) = T::new(22).await else {
+        return;
+    };
+    let g = t.g(0);
+    t.app.guilds.lock().unwrap().insert(
+        g,
+        Arc::new(crate::hierarchy::GuildInfo {
+            owner: Id::new(2),
+            roles: Default::default(),
+            role_perms: Default::default(),
+            managed: [Id::new(6)].into(),
+            parents: Default::default(),
+            channels: Default::default(),
+            nsfw: Default::default(),
+            bot_top: 0,
+            fetched: std::time::Instant::now(),
+        }),
+    );
+    for (u, on_join) in [(50, false), (51, true)] {
+        sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, '{6, 7}', $3)")
+            .bind(g.get() as i64)
+            .bind(u)
+            .bind(on_join)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+    }
+    let own = json!({"id": "50", "type": 1, "allow": "0", "deny": "2"});
+    t.set(|m| {
+        m.overwrites.insert(30, vec![own]);
+    });
+    let entry = |role: &str| -> AuditLogEntry {
+        serde_json::from_value(json!({
+            "action_type": 13, "id": "1", "user_id": "9", "target_id": "30", "guild_id": g.to_string(),
+            "options": {"id": role, "type": "0"},
+            "changes": [{"key": "allow", "new_value": "1024"}]
+        }))
+        .unwrap()
+    };
+    crate::antinuke::hold_overwrite(&t.app, &entry("7"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions"),
+        0,
+        "not a managed role"
+    );
+    crate::antinuke::hold_overwrite(&t.app, &entry("6"), Id::new(9))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PUT /channels/30/permissions/50"), 1);
+    assert_eq!(
+        t.calls("PUT /channels/30/permissions/51"),
+        0,
+        "a join quarantine"
+    );
+    assert!(
+        t.calls(r#""deny":"1026""#) == 1,
+        "their deny and the new bits"
+    );
+    let saved: (bool, i64, i64) = sqlx::query_as(
+        "SELECT had, allow, deny FROM quarantine_overwrites WHERE guild_id = $1 AND user_id = 50",
+    )
+    .bind(g.get() as i64)
+    .fetch_one(&t.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(saved, (true, 0, 2));
+    for q in [
+        "DELETE FROM quarantines WHERE guild_id = $1",
+        "DELETE FROM quarantine_overwrites WHERE guild_id = $1",
+    ] {
+        sqlx::query(q)
+            .bind(g.get() as i64)
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+    }
 }
