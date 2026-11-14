@@ -485,6 +485,9 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
                 .position(|r| r["role"] == role && r["permit"] == permit)
                 .ok_or(ApiError::NotFound)?;
             roles.remove(at);
+            // A role Discord hands out (Onboarding, linked, subscription) cannot get its permit back.
+            let added = json!({"custom": [{"roles": [role]}]});
+            crate::api::permit_roles_ok(st, guild, &added, &json!({})).await?;
             let role: i64 = role.parse().map_err(|_| ApiError::NotFound)?;
             let n = sqlx::query(
                 "insert into permit_roles (permit_id, guild_id, role_id)
@@ -1413,6 +1416,13 @@ mod tests {
         crate::api::g3_handler_tests::seed_user(&st, 12, false);
         crate::api::g3_handler_tests::seed_user(&st, 14, false);
         crate::api::g3_handler_tests::seed_user(&st, 13, true);
+        // Role 20 comes back: a plain role, no Onboarding (Q5).
+        {
+            let mut m = st.discord.memo.lock().unwrap();
+            let now = std::time::Instant::now();
+            m.insert(format!("/guilds/{g}/roles"), (now, Some(json!([]))));
+            m.insert(format!("/guilds/{g}/onboarding"), (now, None));
+        }
         let keep = |e: &'static str| keep_staff(&st, &s, g, &c, Some(e));
         let _ = keep("ta:12").await.unwrap();
         let _ = keep("role:20:Admins").await.unwrap();
