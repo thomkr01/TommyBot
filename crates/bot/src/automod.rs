@@ -20,7 +20,7 @@ use twilight_model::{
     channel::Message,
     gateway::payload::incoming::MessageCreate,
     id::{
-        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker, UserMarker},
         Id,
     },
 };
@@ -1150,11 +1150,13 @@ pub async fn sync_discord_rule(app: &App, guild: u64) {
         let cfg = app.cfg(guild).await?;
         let f = &cfg.automod.filters;
         if f.words.use_discord_automod {
+            let roles = word_exempt_roles(app, guild).await?;
             let rule = app
                 .api
-                .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice())
+                .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice(), &roles)
                 .await?;
-            // The rule as written from TommyBot's own config.
+            // The rule as written from TommyBot's own config and permits: the sync owns every
+            // field that decides a hit, so approving what Discord returns is right.
             if let Some(rule) = rule {
                 tommybot_automod::discord_api::approve_rule(
                     &app.pool,
@@ -1177,6 +1179,27 @@ pub async fn sync_discord_rule(app: &App, guild: u64) {
     }
 }
 
+/// The roles Discord's keyword rule exempts: those whose permits are exempt from the word filter
+/// (`words` or `all`), as TommyBot's own filter exempts them, and that still exist and may carry a
+/// permit. Owner, EO and TA are users, not roles, so Discord cannot exempt them.
+async fn word_exempt_roles(app: &App, guild: u64) -> Result<Vec<String>> {
+    let gid = Id::new(guild);
+    let info = app.guild_info(gid).await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id
+         WHERE p.guild_id = $1 AND p.whitelist && '{words,all}' ORDER BY r.role_id",
+    )
+    .bind(guild as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    Ok(ids
+        .into_iter()
+        .filter_map(|r| Id::<RoleMarker>::new_checked(r as u64))
+        .filter(|r| info.roles.contains_key(r) && !info.unpermittable.contains(r))
+        .map(|r| r.to_string())
+        .collect())
+}
+
 /// Someone changed or deleted the bot's keyword rule in Discord: it is synced back (at most once a
 /// minute per guild, so a rule Discord stores differently cannot loop). The bot's own update
 /// matches the lists and changes nothing.
@@ -1197,14 +1220,12 @@ pub(crate) async fn on_rule_change(
     if !f.words.use_discord_automod {
         return;
     }
-    let meta = &rule.trigger_metadata;
-    let same = rule_matches(
-        &blacklist_words(f),
-        f.words.regex.as_slice(),
-        rule.enabled,
-        meta.keyword_filter.as_deref().unwrap_or_default(),
-        meta.regex_patterns.as_deref().unwrap_or_default(),
-    );
+    // A failed read counts as changed: the sync below reads again and logs a failure.
+    let same = match word_exempt_roles(app, guild).await {
+        Ok(roles) => serde_json::to_value(rule)
+            .is_ok_and(|r| rule_matches(&blacklist_words(f), f.words.regex.as_slice(), &roles, &r)),
+        Err(_) => false,
+    };
     if !deleted && same {
         return;
     }

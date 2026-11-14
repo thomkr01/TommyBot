@@ -793,23 +793,31 @@ async fn guard_permit_roles(
             tracing::warn!(?err, "taking a permit role back failed");
         }
     }
+    let names: Vec<String> = roles.iter().map(|r| format!("<@&{}>", r.0)).collect();
+    let mut set: Vec<i64> = roles.iter().map(|r| r.0).collect();
+    set.sort();
+    let key = (gid.get(), actor.get(), set);
+    // Only weak permits (a link whitelist, say) are taken back too, but punish nobody: they hold
+    // no moderation, dashboard or anti-nuke rights (Thomas, 11-13; bots get no exception).
+    let weak = !roles.iter().any(|r| r.1);
+    if !weak && owner_dm_due(&mut OWNER_DMS.lock().unwrap(), key.clone()) {
+        let name = crate::reply::md(&crate::verify::guild_name(app, gid).await);
+        let text = format!(
+            "**{name}**: <@{actor}> keeps giving {}, a role with a staff permit. TommyBot took it back {OWNER_DM_AFTER} times: only an Owner, Extra Owner or Trusted Admin gives permit roles. Move the permit to a staff role that only staff hand out. If the permit is meant for that bot itself, put it on the bot's own bot role (the role Discord made for it) as a bot permit.",
+            names.join(", ")
+        );
+        crate::reply::dm_owner(app, gid, &text).await;
+    }
     if unsure {
         let what = "gave a member a role that carries a permit";
         return unsure_log(app, gid, actor, Some(target.cast()), what).await;
     }
-    // Only weak permits (a link whitelist, say) are taken back too, but punish nobody: they hold
-    // no moderation, dashboard or anti-nuke rights (Thomas, 11-13; bots get no exception).
-    let weak = !roles.iter().any(|r| r.1);
     if !punish || weak {
-        let names: Vec<String> = roles.iter().map(|r| format!("<@&{}>", r.0)).collect();
         let why = if !punish {
             "Anti-nuke is off"
         } else {
             "The permits are weak"
         };
-        let mut set: Vec<i64> = roles.iter().map(|r| r.0).collect();
-        set.sort();
-        let key = (gid.get(), actor.get(), set);
         let Some(repeats) = take_back_log_due(&mut TAKE_BACKS.lock().unwrap(), key, Instant::now())
         else {
             return Ok(());
@@ -840,6 +848,24 @@ async fn guard_permit_roles(
         "gave a member a role that carries a permit",
     )
     .await
+}
+
+/// After this many take-backs of one (guild, actor, role set) with a staff permit, the owner gets
+/// one DM (Thomas, Q6: staff permits only).
+const OWNER_DM_AFTER: u32 = 5;
+/// Take-backs per (guild, actor, sorted role set).
+type TakeBackCounts = HashMap<(u64, u64, Vec<i64>), u32>;
+static OWNER_DMS: std::sync::LazyLock<std::sync::Mutex<TakeBackCounts>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Counts a take-back; true once, at the [`OWNER_DM_AFTER`]th. In memory: a restart may DM again.
+fn owner_dm_due(m: &mut TakeBackCounts, key: (u64, u64, Vec<i64>)) -> bool {
+    if m.len() > 10_000 {
+        m.clear();
+    }
+    let n = m.entry(key).or_insert(0);
+    *n = n.saturating_add(1);
+    *n == OWNER_DM_AFTER
 }
 
 /// How often a take-back of one (guild, actor, role set) is logged; repeats in between are counted.
@@ -1109,6 +1135,7 @@ pub async fn enforce_permits(app: &App, m: &MemberUpdate) -> Result<()> {
         info.owner.get() as i64,
         m.user.id.get() as i64,
         &roles,
+        m.user.bot,
     )
     .await?;
     if level != permits::Level::None {
@@ -2540,6 +2567,18 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>, punish: bool)
     // normal work, not a nuke (Thomas, 11-11).
     if on_join {
         if e.action_type == A::MemberRoleUpdate {
+            // Q2 (Thomas 11-14): a verify permit verifies by hand, as at the button.
+            let v = &cfg.verification;
+            if v.enabled
+                && roles_added(e).any(|r| v.roles.contains(&r))
+                && crate::verify::given::may_verify(app, gid, actor).await
+            {
+                // A failed grant falls back to the undo: the member stays held, not half verified.
+                match crate::verify::grant(app, gid, target, v).await {
+                    Ok(()) => return Ok(()),
+                    Err(err) => tracing::warn!(?err, "verifying by hand failed, undoing"),
+                }
+            }
             undo_role_change(app, &cfg, gid, target).await;
             if !punish {
                 let names: Vec<String> = roles_added(e).map(|r| format!("<@&{r}>")).collect();
@@ -2705,10 +2744,13 @@ async fn hold_whitelisted(
     gid: Id<GuildMarker>,
     actor: Id<UserMarker>,
 ) -> (bool, bool) {
-    if cfg.antinuke.quarantine_whitelist.contains(&actor) {
-        return (true, false);
-    }
-    match app.whitelisted(gid, actor, "quarantine").await {
+    let listed = async {
+        anyhow::Ok(
+            app.quarantine_listed(cfg, gid, actor).await?
+                || app.whitelisted(gid, actor, "quarantine").await?,
+        )
+    };
+    match listed.await {
         Ok(w) => (w, false),
         Err(e) => {
             tracing::warn!(
@@ -3464,6 +3506,19 @@ mod tests {
         let later = t0 + TAKE_BACK_LOG_EVERY;
         assert_eq!(take_back_log_due(&mut m, key(), later), Some(Some((2, t0))));
         assert_eq!(take_back_log_due(&mut m, key(), later), None);
+    }
+
+    /// Q6: the owner is DMed once, at the fifth take-back of one (guild, actor, role set).
+    #[test]
+    fn the_owner_dm_comes_once_after_five_take_backs() {
+        let mut m = HashMap::new();
+        let key = || (1, 2, vec![3]);
+        let due: Vec<bool> = (0..7).map(|_| owner_dm_due(&mut m, key())).collect();
+        assert_eq!(due, [false, false, false, false, true, false, false]);
+        assert!(
+            !owner_dm_due(&mut m, (1, 2, vec![4])),
+            "another set counts alone"
+        );
     }
 
     #[test]

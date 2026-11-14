@@ -50,7 +50,7 @@ pub async fn not_collectable(
         .copied()
         .chain(saved.unwrap_or_default())
         .collect();
-    Ok(permits::resolve(pool, guild, owner, user, &all).await? != Level::None)
+    Ok(permits::resolve(pool, guild, owner, user, &all, false).await? != Level::None)
 }
 
 /// One evidence row.

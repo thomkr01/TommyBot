@@ -521,16 +521,22 @@ pub async fn top_permit(
     .await
 }
 
-/// Resolves a member's level from the DB. `roles` are the member's role ids.
+/// Resolves a member's level from the DB. `roles` are the member's role ids. A `bot` account is
+/// never Extra Owner or Trusted Admin, even if listed: only users (Thomas, Q4 11-14); the permits
+/// on its roles (a bot permit) still count. The guild owner is never a bot.
 pub async fn resolve(
     pool: &sqlx::PgPool,
     guild_id: i64,
     owner_id: UserId,
     user_id: UserId,
     roles: &[i64],
+    bot: bool,
 ) -> anyhow::Result<Level> {
     if user_id == owner_id {
         return Ok(Level::Owner);
+    }
+    if bot {
+        return Ok(custom(top_permit(pool, guild_id, roles).await?));
     }
     let (eo,): (bool,) = sqlx::query_as(
         "SELECT EXISTS(SELECT 1 FROM extra_owners WHERE guild_id=$1 AND user_id=$2)",
@@ -552,8 +558,12 @@ pub async fn resolve(
     if ta {
         return Ok(Level::TrustedAdmin);
     }
-    let row = top_permit(pool, guild_id, roles).await?;
-    Ok(row.map_or(Level::None, |(rank, perms, whitelist, limits)| {
+    Ok(custom(top_permit(pool, guild_id, roles).await?))
+}
+
+/// A [`top_permit`] row as its [`Level`].
+fn custom(row: Option<(i32, Vec<String>, Vec<String>, serde_json::Value)>) -> Level {
+    row.map_or(Level::None, |(rank, perms, whitelist, limits)| {
         // Malformed entries are dropped one by one so a bad action does not void the rest.
         let limits = limits
             .as_object()
@@ -567,7 +577,7 @@ pub async fn resolve(
             whitelist,
             limits,
         }
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -783,7 +793,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let got = resolve(&pool, gid, 1, 2, &[77]).await;
+        let got = resolve(&pool, gid, 1, 2, &[77], false).await;
         sqlx::query("DELETE FROM permits WHERE guild_id=$1")
             .bind(gid)
             .execute(&pool)

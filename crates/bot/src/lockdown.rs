@@ -1270,6 +1270,7 @@ mod tests {
             roles: Default::default(),
             role_perms: [(Id::new(5), 1 << 10), (Id::new(6), 0)].into(),
             managed: Default::default(),
+            unpermittable: Default::default(),
             parents: Default::default(),
             channels: Default::default(),
             nsfw: Default::default(),

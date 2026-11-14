@@ -535,6 +535,46 @@ async fn a_native_rule_acts_only_in_an_approved_state() {
     t.cleanup().await;
 }
 
+/// Q1 (Thomas 11-14): a guild that adds the bot later, or comes back after its data was purged,
+/// gets the rules it has then approved once at GuildCreate.
+#[tokio::test]
+async fn a_guild_back_after_the_purge_gets_its_rules_approved_once() {
+    let Some(t) = T::new(747).await else { return };
+    let g = t.g(0).get();
+    let cfg = json!({"discord_automod": {"actions": {"77": ["timeout"]}}});
+    t.server_config(0, t.owner(), cfg.clone()).await;
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"])]);
+    });
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    let approved = || t.count("SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1");
+    assert_eq!(approved().await, 2, "rule 77 and the done marker");
+    tommybot_core::db::purge_guild(&t.app.pool, g as i64)
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 0);
+    // Back with a rule changed while the bot was away: approved as it is now.
+    t.server_config(0, t.owner(), cfg).await;
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["y"])]);
+    });
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 2);
+    crate::native::on_native_hit(&t.app, &native_hit(g, 77, t.base + 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        t.calls("PATCH"),
+        1,
+        "acts on the rule approved at the return"
+    );
+    t.cleanup().await;
+}
+
 /// A trusted entry approves the fetched rule only if no gateway update came after it; a failed
 /// fetch is logged and approves nothing. GuildCreate drops the rules held from the old session.
 #[tokio::test]
@@ -858,6 +898,38 @@ async fn synced_words_still_count_locally() {
     let _ = on_message(&t.app, &post(&t, "100", t.base + 6, "darn it")).await;
     assert_eq!(t.calls("DELETE /channels/7/messages/100"), 1);
     done(t).await;
+}
+
+/// Q3: Discord's keyword rule exempts the roles of permits exempt from the word filter (`words`
+/// or `all`), not other permits' roles, a deleted role, or a linked role that cannot carry a
+/// permit (Q5).
+#[tokio::test]
+async fn the_keyword_rule_exempts_the_word_permit_roles() {
+    let Some(t) = T::new(744).await else { return };
+    t.server_config(0, t.owner(), json!({})).await;
+    t.app.invalidate_guild(t.g(0));
+    let g = t.g(0).get();
+    t.set(|m| {
+        let r = |id| (id, false, 0, 1);
+        m.roles
+            .insert(g, vec![(g, false, 0, 0), r(601), r(602), r(603), r(604)]);
+        m.role_tags.insert(604, json!({"guild_connections": null}));
+        m.members.insert((g, crate::test_support::ME), vec![]);
+    });
+    t.exec(
+        "INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES
+           ($1 + 1, $1, 'Words', '{}', '{words}'), ($1 + 2, $1, 'All', '{}', '{all}'),
+           ($1 + 3, $1, 'Mods', '{ban}', '{links}')",
+    )
+    .await;
+    t.exec(
+        "INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES
+           ($1 + 1, $1, 601), ($1 + 2, $1, 602), ($1 + 3, $1, 603), ($1 + 1, $1, 604),
+           ($1 + 1, $1, 605)",
+    )
+    .await;
+    assert_eq!(word_exempt_roles(&t.app, g).await.unwrap(), ["601", "602"]);
+    t.cleanup().await;
 }
 
 /// With the auto timeouts off a heat strike is logged as a strike, never as a timeout.

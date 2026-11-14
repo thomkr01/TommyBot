@@ -440,6 +440,43 @@ pub(crate) async fn users_only(st: &AppState, new: &Value, old: &Value) -> Resul
     Ok(())
 }
 
+/// Q5 (Thomas 11-14): a role Discord hands out by itself (Onboarding, linked roles, server
+/// subscriptions) cannot carry a permit, or anyone could take the permit. Checks the roles `new`
+/// (a permits value) adds over `old`; a bot's own role stays allowed (a bot permit). A failed
+/// lookup refuses.
+pub(crate) async fn permit_roles_ok(
+    st: &AppState,
+    guild: i64,
+    new: &Value,
+    old: &Value,
+) -> Result<(), ApiError> {
+    let roles = |v: &Value| -> Vec<String> {
+        let custom = v["custom"].as_array().into_iter().flatten();
+        let ids = custom.filter_map(|p| p["roles"].as_array()).flatten();
+        ids.filter_map(|r| r.as_str().map(String::from)).collect()
+    };
+    let had = roles(old);
+    let added: Vec<String> = roles(new)
+        .into_iter()
+        .filter(|r| !had.contains(r))
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+    let bad = st.discord.unpermittable_roles(guild).await.map_err(|e| {
+        tracing::warn!(?e, guild, "permit role check failed");
+        ApiError::BadRequest(
+            "could not check that the permit roles are not handed out by Discord itself (Onboarding, linked roles, subscriptions), so the change was refused. Try again.".into(),
+        )
+    })?;
+    match added.iter().find_map(|r| Some((r, bad.get(r)?))) {
+        Some((r, why)) => Err(ApiError::BadRequest(format!(
+            "<@&{r}> cannot carry a permit: {why}, so anyone could get the permit. Put the permit on a staff role that only staff hand out."
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The quarantine role and main roles the section adds (`roles::unfit`, the bot's rule too).
 /// Ids already stored are left alone, as in [`check_ids`].
 async fn check_held_roles(
@@ -572,6 +609,7 @@ pub async fn put_permits(
         &json!({"permits": &old}),
     )
     .await?;
+    permit_roles_ok(&st, guild, &b.value, &old).await?;
     store::write_permits(&mut tx, guild, &b.value).await?;
     keep_exemptions(&mut tx, guild, level, &old).await?;
     let (_, config) = store::current(&st.db, guild).await?;
@@ -754,6 +792,7 @@ pub async fn rollback(
                 "only the server owner can roll back the Extra Owners list",
             ));
         }
+        permit_roles_ok(&st, guild, p, &cur).await?;
         store::write_permits(&mut tx, guild, p).await?;
         keep_exemptions(&mut tx, guild, level, &cur).await?;
     }
@@ -1018,6 +1057,7 @@ pub async fn import(
         ));
     }
     if new["permits"] != now["permits"] {
+        permit_roles_ok(&st, guild, &new["permits"], &now["permits"]).await?;
         store::write_permits(&mut tx, guild, &new["permits"]).await?;
         keep_exemptions(&mut tx, guild, level, &now["permits"]).await?;
     }
@@ -1875,6 +1915,15 @@ pub(crate) mod g3_handler_tests {
         sqlx::query("insert into guild_config (guild_id, version, config, created_at) values ($1, 1, $2, now() - interval '1 hour')")
             .bind(g).bind(old).execute(&st.db).await.unwrap();
         put_version(&st, g, 2, json!({})).await;
+        // The rollback adds role 21 back: plain roles, no Onboarding (Q5).
+        {
+            let mut m = st.discord.memo.lock().unwrap();
+            m.insert(
+                format!("/guilds/{g}/roles"),
+                (Instant::now(), Some(json!([]))),
+            );
+            m.insert(format!("/guilds/{g}/onboarding"), (Instant::now(), None));
+        }
         let r = rollback(
             State(st.clone()),
             s.clone(),
@@ -2064,6 +2113,68 @@ pub(crate) mod g3_handler_tests {
         .await;
         assert!(bad(&r, "bot role"), "{r:?}");
         assert_eq!(tas(&st, g).await, vec![31]);
+        cleanup(&st, g).await;
+    }
+
+    /// Q5 (Thomas 11-14): a Permits save cannot put a permit on a linked, subscription or
+    /// Onboarding role; a bot's own role and a plain role still save; a failed lookup refuses.
+    #[tokio::test]
+    async fn a_role_discord_hands_out_cannot_carry_a_permit() {
+        let Some((st, s, g)) = setup(9_891_000_000).await else {
+            return;
+        };
+        let roles = json!([
+            {"id": "40", "tags": {"guild_connections": null}},
+            {"id": "41", "tags": {"subscription_listing_id": "9"}},
+            {"id": "42", "tags": {"bot_id": "5"}},
+            {"id": "43"}, {"id": "44"},
+        ]);
+        let onboarding = json!({"prompts": [{"options": [{"role_ids": ["44"]}]}]});
+        let seed = |path: String, v: Option<Value>| {
+            let mut m = st.discord.memo.lock().unwrap();
+            m.insert(path, (Instant::now(), v));
+        };
+        seed(format!("/guilds/{g}/roles"), Some(roles));
+        let save = |v: i32, role: &str| {
+            let (st, s) = (st.clone(), s.clone());
+            let custom = json!([{"name": "Mods", "perms": ["ban"], "roles": [role]}]);
+            async move {
+                put_permits(
+                    State(st),
+                    s,
+                    Path(g),
+                    body(json!({"expected_version": v, "value": {"eo": [], "ta": [], "custom": custom}})),
+                )
+                .await
+            }
+        };
+        let bad = |r: &Res, what: &str| match r {
+            Err(ApiError::BadRequest(m)) => m.contains(what),
+            _ => false,
+        };
+        let r = save(0, "44").await;
+        assert!(
+            bad(&r, "could not check"),
+            "the Onboarding lookup failed: {r:?}"
+        );
+        seed(format!("/guilds/{g}/onboarding"), Some(onboarding));
+        let r = save(0, "40").await;
+        assert!(bad(&r, "linked role"), "{r:?}");
+        let r = save(0, "41").await;
+        assert!(bad(&r, "subscription"), "{r:?}");
+        let r = save(0, "44").await;
+        assert!(bad(&r, "Onboarding"), "{r:?}");
+        let r = save(0, "42").await;
+        assert!(r.is_ok(), "a bot permit: {r:?}");
+        // Without Onboarding (404) a plain role saves.
+        seed(format!("/guilds/{g}/onboarding"), None);
+        let r = save(1, "43").await;
+        assert!(r.is_ok(), "{r:?}");
+        sqlx::query("delete from permits where guild_id = $1")
+            .bind(g)
+            .execute(&st.db)
+            .await
+            .unwrap();
         cleanup(&st, g).await;
     }
 }

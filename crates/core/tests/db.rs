@@ -202,19 +202,37 @@ async fn permits_resolve_levels() {
     permit(&p, g, "high", 4, &["ban"], 202).await;
 
     assert_eq!(
-        permits::resolve(&p, g, owner, owner, &[]).await.unwrap(),
+        permits::resolve(&p, g, owner, owner, &[], false)
+            .await
+            .unwrap(),
         Level::Owner
     );
     assert_eq!(
-        permits::resolve(&p, g, owner, 12, &[]).await.unwrap(),
+        permits::resolve(&p, g, owner, 12, &[], false)
+            .await
+            .unwrap(),
         Level::ExtraOwner
     );
     assert_eq!(
-        permits::resolve(&p, g, owner, 13, &[]).await.unwrap(),
+        permits::resolve(&p, g, owner, 13, &[], false)
+            .await
+            .unwrap(),
         Level::TrustedAdmin
     );
+    // Q4: a bot listed as EO or TA gets neither, only the permit on its own role.
+    assert_eq!(
+        permits::resolve(&p, g, owner, 13, &[], true).await.unwrap(),
+        Level::None
+    );
+    let Level::Custom { rank, .. } = permits::resolve(&p, g, owner, 12, &[100], true)
+        .await
+        .unwrap()
+    else {
+        panic!("expected the bot permit");
+    };
+    assert_eq!(rank, 5);
 
-    let Level::Custom { rank, perms, .. } = permits::resolve(&p, g, owner, 14, &[100, 999])
+    let Level::Custom { rank, perms, .. } = permits::resolve(&p, g, owner, 14, &[100, 999], false)
         .await
         .unwrap()
     else {
@@ -225,7 +243,7 @@ async fn permits_resolve_levels() {
         (5, vec!["ban".to_owned(), "kick".to_owned()])
     );
 
-    let Level::Custom { rank, perms, .. } = permits::resolve(&p, g, owner, 15, &[201, 202])
+    let Level::Custom { rank, perms, .. } = permits::resolve(&p, g, owner, 15, &[201, 202], false)
         .await
         .unwrap()
     else {
@@ -247,11 +265,15 @@ async fn permits_resolve_levels() {
     assert_eq!(top.1, vec!["ban".to_owned()]);
 
     assert_eq!(
-        permits::resolve(&p, g, owner, 16, &[999]).await.unwrap(),
+        permits::resolve(&p, g, owner, 16, &[999], false)
+            .await
+            .unwrap(),
         Level::None
     );
     assert_eq!(
-        permits::resolve(&p, g, owner, 16, &[]).await.unwrap(),
+        permits::resolve(&p, g, owner, 16, &[], false)
+            .await
+            .unwrap(),
         Level::None
     );
     cleanup(&p, g).await;

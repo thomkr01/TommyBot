@@ -24,6 +24,9 @@ pub struct GuildInfo {
     pub role_perms: HashMap<Id<RoleMarker>, u64>,
     /// Bot, booster and integration roles: Discord hands these out itself.
     pub managed: HashSet<Id<RoleMarker>>,
+    /// Linked roles and server subscription or purchase roles: Discord gives them, so they carry
+    /// no permit (Q5). Onboarding roles are not marked by Discord and are refused at save only.
+    pub unpermittable: HashSet<Id<RoleMarker>>,
     /// Channel -> its category (threads are not listed).
     pub parents: HashMap<Id<ChannelMarker>, Id<ChannelMarker>>,
     /// Every channel but threads.
@@ -86,6 +89,17 @@ impl App {
             bot_top: top_position(&roles, &me.roles),
             role_perms: all.iter().map(|r| (r.id, r.permissions.bits())).collect(),
             managed: all.iter().filter(|r| r.managed).map(|r| r.id).collect(),
+            unpermittable: all
+                .iter()
+                .filter(|r| {
+                    r.tags.as_ref().is_some_and(|t| {
+                        t.guild_connections
+                            || t.available_for_purchase
+                            || t.subscription_listing_id.is_some()
+                    })
+                })
+                .map(|r| r.id)
+                .collect(),
             parents,
             channels: all_channels.iter().map(|c| c.id).collect(),
             nsfw: all_channels
@@ -120,6 +134,7 @@ impl App {
             roles: HashMap::new(),
             role_perms: HashMap::new(),
             managed: HashSet::new(),
+            unpermittable: HashSet::new(),
             parents: HashMap::new(),
             channels: HashSet::new(),
             nsfw: HashSet::new(),

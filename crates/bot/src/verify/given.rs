@@ -585,9 +585,27 @@ async fn hold_takes_it(
     if !on_join && !cfg.antinuke.quarantine_hold {
         return Ok(false);
     }
-    let listed = cfg.antinuke.quarantine_whitelist.contains(&actor)
+    let listed = app.quarantine_listed(cfg, gid, actor).await?
         || app.whitelisted(gid, actor, "quarantine").await?;
-    Ok(!listed)
+    // A verify permit verifies out of a join quarantine (Q2): the hold leaves that to it.
+    Ok(!listed && !(on_join && cfg.verification.enabled && may_verify(app, gid, actor).await))
+}
+
+/// A person (not a bot) with a verify or quarantine permit, or Owner, EO or TA: may verify a
+/// member by hand (Thomas, 13:53 and Q2). A failed lookup counts as not.
+pub(crate) async fn may_verify(app: &App, gid: Id<GuildMarker>, actor: Id<UserMarker>) -> bool {
+    let ok = async {
+        if is_bot(app, actor).await? {
+            return anyhow::Ok(false);
+        }
+        let owner = app.guild_info(gid).await?.owner;
+        let l = app.level(gid, owner, actor).await?;
+        Ok(l.has("verify") || l.has("quarantine"))
+    };
+    ok.await.unwrap_or_else(|e| {
+        tracing::warn!(?e, "verify permit lookup failed");
+        false
+    })
 }
 
 /// Removes what the bot gave an unverified member that verification would give: a role in

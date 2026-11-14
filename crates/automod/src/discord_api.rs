@@ -195,15 +195,18 @@ impl Api {
     }
 
     /// Create or update our keyword rule so it blocks exactly `words`. An empty list disables it.
+    /// The bot owns the whole rule (Thomas, Q3): `exempt_roles` are the roles whose permits are
+    /// exempt from the word filter, no channel is exempt, and the full trigger is sent.
     /// The rule as Discord returns it, or `None` when there was nothing to write.
     pub async fn sync_keyword_rule(
         &self,
         guild: u64,
         words: &[String],
         regex: &[String],
+        exempt_roles: &[String],
     ) -> Result<Option<Value>> {
         let rules = self.list_rules(guild).await?;
-        let body = keyword_rule_body(words, regex);
+        let body = keyword_rule_body(words, regex, exempt_roles);
         let rule = match rules.iter().find(|r| r.name == KEYWORD_RULE) {
             Some(r) => {
                 self.send(
@@ -473,28 +476,28 @@ fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) {
     )
 }
 
-/// The keyword rule Discord holds is the one the bot would send for these lists (order and case
-/// aside), switched on as the bot sets it.
+/// The keyword rule Discord holds (its JSON, or twilight's model of it) is the whole rule the bot
+/// would send for these lists: trigger, actions, switch and exemptions, order and keyword case aside.
 pub fn rule_matches(
     words: &[String],
     regex: &[String],
-    enabled: bool,
-    keywords: &[String],
-    patterns: &[String],
+    exempt_roles: &[String],
+    rule: &Value,
 ) -> bool {
-    let body = keyword_rule_body(words, regex);
-    let set = |v: &Value| -> std::collections::BTreeSet<String> {
-        v.as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|x| x.as_str().map(str::to_lowercase))
-            .collect()
+    let fold = |v: &Value| {
+        let mut v = v.clone();
+        for k in ["keyword_filter", "regex_patterns"] {
+            let l = &mut v["trigger_metadata"][k];
+            *l = l
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| Some(json!(x.as_str()?.to_lowercase())))
+                .collect();
+        }
+        rule_fingerprint(&v)
     };
-    let have = |l: &[String]| l.iter().map(|x| x.to_lowercase()).collect();
-    let meta = &body["trigger_metadata"];
-    body["enabled"] == enabled
-        && set(&meta["keyword_filter"]) == have(keywords)
-        && set(&meta["regex_patterns"]) == have(patterns)
+    fold(&keyword_rule_body(words, regex, exempt_roles)) == fold(rule)
 }
 
 /// Hash of everything that decides a native rule's hits, from the rule JSON Discord returns (or
@@ -578,7 +581,7 @@ pub async fn approve_rule(
     Ok(())
 }
 
-fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
+fn keyword_rule_body(words: &[String], regex: &[String], exempt_roles: &[String]) -> Value {
     let fit = |list: &[String], ok: Vec<bool>| -> Vec<String> {
         list.iter()
             .zip(ok)
@@ -593,9 +596,11 @@ fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
         "name": KEYWORD_RULE,
         "event_type": 1,
         "trigger_type": 1,
-        "trigger_metadata": { "keyword_filter": words, "regex_patterns": regex },
+        "trigger_metadata": { "keyword_filter": words, "regex_patterns": regex, "allow_list": [] },
         "actions": [{ "type": 1 }],
         "enabled": !words.is_empty() || !regex.is_empty(),
+        "exempt_roles": exempt_roles.iter().take(20).collect::<Vec<_>>(),
+        "exempt_channels": [],
     })
 }
 
@@ -732,18 +737,47 @@ mod tests {
     #[test]
     fn keyword_rule_drops_bad_keywords_and_disables_when_empty() {
         let long = "x".repeat(61);
-        let v = keyword_rule_body(&["bad".into(), "".into(), long], &[]);
+        let v = keyword_rule_body(&["bad".into(), "".into(), long], &[], &[]);
         assert_eq!(v["trigger_metadata"]["keyword_filter"], json!(["bad"]));
         assert_eq!(v["enabled"], true);
-        assert_eq!(keyword_rule_body(&[], &[])["enabled"], false);
+        assert_eq!(keyword_rule_body(&[], &[], &[])["enabled"], false);
         let w = ["Bad".to_string(), "x".repeat(61)];
-        assert!(rule_matches(&w, &[], true, &["bad".into()], &[]));
+        let roles = ["7".to_string()];
+        // As Discord returns it: an id, metadata on each action, keywords lowercased.
+        let held = json!({
+            "id": "1", "guild_id": "2", "name": KEYWORD_RULE, "creator_id": "3", "event_type": 1,
+            "trigger_type": 1, "enabled": true,
+            "trigger_metadata": {"keyword_filter": ["bad"], "regex_patterns": [], "allow_list": []},
+            "actions": [{"type": 1, "metadata": {}}], "exempt_roles": ["7"], "exempt_channels": [],
+        });
+        assert!(rule_matches(&w, &[], &roles, &held));
+        let changed = |k: &str, v: Value| {
+            let mut r = held.clone();
+            r[k] = v;
+            !rule_matches(&w, &[], &roles, &r)
+        };
+        assert!(changed("enabled", json!(false)), "switched off");
         assert!(
-            !rule_matches(&w, &[], false, &["bad".into()], &[]),
-            "switched off"
+            changed("trigger_metadata", json!({"keyword_filter": []})),
+            "keywords removed"
         );
-        assert!(!rule_matches(&w, &[], true, &[], &[]), "keywords removed");
-        let r = keyword_rule_body(&[], &["b[a4]d".into()]);
+        assert!(changed(
+            "trigger_metadata",
+            json!({"keyword_filter": ["bad"], "allow_list": ["b"]})
+        ));
+        assert!(
+            changed("exempt_roles", json!(["7", "8"])),
+            "a role exempted in Discord"
+        );
+        assert!(
+            changed("exempt_channels", json!(["9"])),
+            "a channel exempted in Discord"
+        );
+        assert!(changed(
+            "actions",
+            json!([{"type": 1}, {"type": 3, "metadata": {"duration_seconds": 60}}])
+        ));
+        let r = keyword_rule_body(&[], &["b[a4]d".into()], &[]);
         assert_eq!(r["trigger_metadata"]["regex_patterns"], json!(["b[a4]d"]));
         assert_eq!(r["enabled"], true);
     }

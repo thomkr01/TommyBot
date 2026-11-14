@@ -180,6 +180,44 @@ impl Discord {
         Ok(v)
     }
 
+    /// Why each role Discord itself hands out cannot carry a permit (Thomas, Q5): linked roles,
+    /// server subscription or purchase roles (their tags), and the roles Onboarding prompts give.
+    /// A guild without Onboarding (404) has none of those; any other failed lookup is an error.
+    pub async fn unpermittable_roles(
+        &self,
+        guild: i64,
+    ) -> Result<std::collections::HashMap<String, &'static str>> {
+        let mut out = std::collections::HashMap::new();
+        let roles = self.memo_get(format!("/guilds/{guild}/roles")).await?;
+        for r in roles.iter().filter_map(|v| v.as_array()).flatten() {
+            let tags = &r["tags"];
+            // Discord sends these flags as `null` when set, and leaves them out when not.
+            let why = if tags.get("guild_connections").is_some() {
+                "it is a linked role, which Discord gives for a connected account"
+            } else if tags.get("subscription_listing_id").is_some()
+                || tags.get("available_for_purchase").is_some()
+            {
+                "it is a server subscription or purchase role, which Discord gives to anyone who pays"
+            } else {
+                continue;
+            };
+            out.insert(r["id"].as_str().unwrap_or_default().to_string(), why);
+        }
+        let onboarding = self.memo_get(format!("/guilds/{guild}/onboarding")).await?;
+        let prompts = onboarding
+            .iter()
+            .filter_map(|o| o["prompts"].as_array())
+            .flatten();
+        let options = prompts.filter_map(|p| p["options"].as_array()).flatten();
+        for id in options.filter_map(|o| o["role_ids"].as_array()).flatten() {
+            if let Some(id) = id.as_str() {
+                out.entry(id.to_string())
+                    .or_insert("Discord Onboarding gives it to anyone who picks that answer");
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn guild_owner(&self, guild: i64) -> Result<String> {
         let g = self.memo_get(format!("/guilds/{guild}")).await?;
         g.as_ref()

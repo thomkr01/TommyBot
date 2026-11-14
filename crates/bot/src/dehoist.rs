@@ -101,6 +101,7 @@ pub(crate) async fn rename(
         info.owner.get() as i64,
         uid.get() as i64,
         &ids,
+        false,
     );
     if matches!(level.await?, Level::Owner | Level::ExtraOwner) {
         return Ok(Some("owner or Extra Owner"));

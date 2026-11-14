@@ -168,7 +168,8 @@ pub(crate) async fn on_guild_create(app: &App, gid: Id<GuildMarker>) -> Result<(
 /// Thomas 2026-11-13 23:33 "Godkjenn dem en gang ved start": rules that exist at the first fetch
 /// after the update to permit-checked rules are approved once, unless an audit entry showed a
 /// change without a permit. The row with rule id 0 marks the guild as done. A guild that adds the
-/// bot later gets its rules approved once too (to be confirmed by Thomas, Q1).
+/// bot later, or comes back after the purge deleted its marker, gets its rules approved once at
+/// that GuildCreate too (Thomas 11-14, Q1).
 async fn first_start(app: &App, gid: Id<GuildMarker>, rules: &[Value]) -> Result<()> {
     let g = gid.get() as i64;
     for r in rules {

@@ -43,6 +43,8 @@ pub(crate) struct Mock {
     pub(crate) timeouts: HashMap<(u64, u64), String>,
     /// Managed role -> the bot it belongs to (its tags.bot_id).
     pub(crate) bot_roles: HashMap<u64, u64>,
+    /// Role -> its tags as Discord's JSON, over `bot_roles` (linked or subscription roles).
+    pub(crate) role_tags: HashMap<u64, Value>,
     /// Log and DM messages fail with 403.
     pub(crate) fail_message: bool,
     /// Log and DM messages fail with 502.
@@ -258,7 +260,13 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             let all = m.roles.get(&n(g)).cloned().unwrap_or_default();
             let all: Vec<Value> = all
                 .iter()
-                .map(|r| role(*r, m.bot_roles.get(&r.0)))
+                .map(|r| {
+                    let mut v = role(*r, m.bot_roles.get(&r.0));
+                    if let Some(t) = m.role_tags.get(&r.0) {
+                        v["tags"] = t.clone();
+                    }
+                    v
+                })
                 .collect();
             (200, json!(all).to_string())
         }

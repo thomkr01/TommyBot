@@ -340,25 +340,48 @@ impl App {
         }
     }
 
-    /// Permit level of a member; a user who is not in the server has none.
+    /// Permit level of a member; a user who is not in the server has none. A bot is never EO or
+    /// TA (Q4). A role Discord hands out by itself (Onboarding aside, Q5) carries no permit here.
     pub async fn level(
         &self,
         guild: Id<GuildMarker>,
         owner: Id<UserMarker>,
         user: Id<UserMarker>,
     ) -> Result<Level> {
-        let roles: Vec<i64> = crate::http_err::member(&self.http, guild, user)
-            .await?
-            .map(|m| m.roles.iter().map(|r| r.get() as i64).collect())
-            .unwrap_or_default();
+        let member = crate::http_err::member(&self.http, guild, user).await?;
+        let bot = member.as_ref().is_some_and(|m| m.user.bot);
+        // shortcut: only a cached guild info filters, so a lookup never fails or waits on it.
+        let cached = self.guilds.lock().unwrap().get(&guild).cloned();
+        let roles: Vec<i64> = member
+            .iter()
+            .flat_map(|m| &m.roles)
+            .filter(|r| cached.as_ref().is_none_or(|i| !i.unpermittable.contains(r)))
+            .map(|r| r.get() as i64)
+            .collect();
         permits::resolve(
             &self.pool,
             guild.get() as i64,
             owner.get() as i64,
             user.get() as i64,
             &roles,
+            bot,
         )
         .await
+    }
+
+    /// On the quarantine whitelist and not a bot: only users are (Thomas 11-13, Q4). A bot listed
+    /// there from before gets no exemption; its bot permit's `quarantine` flag still counts.
+    pub async fn quarantine_listed(
+        &self,
+        cfg: &GuildCfg,
+        guild: Id<GuildMarker>,
+        user: Id<UserMarker>,
+    ) -> Result<bool> {
+        if !cfg.antinuke.quarantine_whitelist.contains(&user) {
+            return Ok(false);
+        }
+        let member = crate::http_err::member(&self.http, guild, user).await?;
+        Ok(!member.is_some_and(|m| m.user.bot))
     }
 
     pub fn mod_commands_locked(&self, guild: u64) -> bool {

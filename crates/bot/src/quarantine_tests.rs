@@ -2010,3 +2010,126 @@ async fn a_late_undo_skips_a_role_changed_again() {
     assert_eq!(t.calls(&format!("POST /channels/{LOGS}/messages")), 1);
     t.cleanup().await;
 }
+
+/// Q2 (Thomas 11-14): a person with a verify permit who gives a join-quarantined member the
+/// verification role verifies them, as the button does, with anti-nuke on and off. Without the
+/// permit the role is taken back as before.
+#[tokio::test]
+async fn a_verify_permit_verifies_a_join_quarantined_member_by_hand() {
+    let Some(t) = T::new(745).await else { return };
+    let mut v = web_verification();
+    v["quarantine_on_join"] = json!(true);
+    for (i, on) in [(0, true), (1, false)] {
+        let an = json!({"enabled": on, "quarantine_role": Q.to_string()});
+        server(&t, i, json!({"antinuke": an, "verification": v})).await;
+    }
+    t.exec("INSERT INTO permits (id, guild_id, name, perms) VALUES ($1 + 1, $1, 'Verifiers', '{verify}'), ($1 + 2, $1 + 1, 'Verifiers', '{verify}')")
+        .await;
+    // 501 = ROLE
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 501), ($1 + 2, $1 + 1, 501)")
+        .await;
+    let (staff, nobody, u, u2) = (
+        t.base * 10 + 1,
+        t.base * 10 + 2,
+        t.base * 10 + 3,
+        t.base * 10 + 4,
+    );
+    for i in [0, 1] {
+        let g = t.g(i);
+        for m in [u, u2] {
+            sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, '{}', true)")
+                .bind(g.get() as i64)
+                .bind(m as i64)
+                .execute(&t.app.pool)
+                .await
+                .unwrap();
+        }
+        t.set(|m| {
+            m.members.insert((g.get(), staff), vec![ROLE]);
+            m.members.insert((g.get(), nobody), vec![]);
+            m.members.insert((g.get(), u), vec![Q, VERIFIED]);
+            m.members.insert((g.get(), u2), vec![Q, VERIFIED]);
+        });
+        let mut e = role_added(&t, staff, u, VERIFIED);
+        e.guild_id = Some(g);
+        crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+        assert_eq!(roles(&t, i, u), Some(vec![VERIFIED]), "{i}: verified");
+        assert_eq!(
+            saved(&t, i, u).await,
+            None,
+            "{i}: the join quarantine is over"
+        );
+        assert_eq!(
+            saved(&t, i, staff).await,
+            None,
+            "{i}: staff not quarantined"
+        );
+        let mut e = role_added(&t, nobody, u2, VERIFIED);
+        e.guild_id = Some(g);
+        crate::antinuke::on_audit(&t.app, &e).await.unwrap();
+        assert_eq!(
+            roles(&t, i, u2),
+            Some(vec![Q]),
+            "{i}: no permit, taken back"
+        );
+    }
+    t.cleanup().await;
+}
+
+/// Q4 and Q5 (Thomas 11-14): a bot listed as Trusted Admin or on the quarantine whitelist gets
+/// neither trust, only the permit on its own role; a linked role carries no permit at runtime.
+#[tokio::test]
+async fn a_listed_bot_gets_no_user_trust_and_a_linked_role_no_permit() {
+    let Some(t) = T::new(746).await else { return };
+    let (bot, user, linked) = (t.base * 10 + 1, t.base * 10 + 2, t.base * 10 + 3);
+    let qw = json!([bot.to_string(), user.to_string()]);
+    server(
+        &t,
+        0,
+        json!({"antinuke": {"quarantine_role": Q.to_string(), "quarantine_whitelist": qw}}),
+    )
+    .await;
+    let g = t.g(0);
+    t.set(|m| {
+        m.bots.push(bot);
+        m.role_tags
+            .insert(AUTOROLE, json!({"guild_connections": null}));
+        m.members.insert((g.get(), bot), vec![ROLE]);
+        m.members.insert((g.get(), user), vec![]);
+        m.members.insert((g.get(), linked), vec![AUTOROLE]);
+    });
+    sqlx::query("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $2), ($1, $3)")
+        .bind(g.get() as i64)
+        .bind(bot as i64)
+        .bind(user as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    // 501 = ROLE (the bot's role), 504 = AUTOROLE (linked)
+    t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1 + 1, $1, 'Bot', '{}', '{quarantine}'), ($1 + 2, $1, 'Linked', '{ban}', '{}')")
+        .await;
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 501), ($1 + 2, $1, 504)")
+        .await;
+    let owner = t.app.guild_info(g).await.unwrap().owner;
+    let level = |u: u64| t.app.level(g, owner, Id::new(u));
+    let b = level(bot).await.unwrap();
+    assert!(!b.immune(), "a listed bot is no Trusted Admin");
+    assert!(b.whitelisted("quarantine"), "its bot permit still counts");
+    assert!(level(user).await.unwrap().immune(), "a listed user is");
+    assert_eq!(
+        level(linked).await.unwrap(),
+        tommybot_core::permits::Level::None
+    );
+    let cfg = t.app.cfg(g.get()).await.unwrap();
+    assert!(!t
+        .app
+        .quarantine_listed(&cfg, g, Id::new(bot))
+        .await
+        .unwrap());
+    assert!(t
+        .app
+        .quarantine_listed(&cfg, g, Id::new(user))
+        .await
+        .unwrap());
+    t.cleanup().await;
+}
