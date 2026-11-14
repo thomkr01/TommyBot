@@ -436,7 +436,9 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();
     assert_eq!(t.calls("PATCH"), 0, "no action after an untrusted change");
     crate::native::rule_changed(gid.get(), 77);
-    crate::native::on_rule_audit(&t.app, &edit(4, t.owner()))
+    // A fresh entry: the gateway update just now is its own, not a later change.
+    let now = ((crate::automod::now_ms() - 1_420_070_400_000) as u64) << 22;
+    crate::native::on_rule_audit(&t.app, &edit(now, t.owner()))
         .await
         .unwrap();
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();
@@ -475,8 +477,8 @@ fn rule_edit(guild: u64, id: u64, actor: u64) -> twilight_model::guild::audit_lo
 }
 
 /// Plan item 1: the bot acts on a native rule only in a state a trusted person approved. Rules that
-/// exist at the first fetch are approved once; a change with no audit entry (the bot lacks View
-/// Audit Log) stops actions until a trusted change. A failed fetch acts on nothing.
+/// exist at GuildCreate are approved once, also when the log fails; a hit approves nothing. A
+/// change with no audit entry (the bot lacks View Audit Log) stops actions until a trusted change.
 #[tokio::test]
 async fn a_native_rule_acts_only_in_an_approved_state() {
     let Some(t) = T::new(741).await else { return };
@@ -484,22 +486,30 @@ async fn a_native_rule_acts_only_in_an_approved_state() {
     t.server_config(
         0,
         t.owner(),
-        json!({"discord_automod": {"actions": {"77": ["timeout"]}}}),
+        json!({"discord_automod": {"actions": {"77": ["timeout"]}},
+               "logging": {"routes": {"auto_mod": "88"}}}),
     )
     .await;
     t.set(|m| {
         m.rules.insert(g, vec![native_rule(g, &["x"])]);
         m.fail_rules = true;
+        m.fail_channels.push(88);
     });
     let hit = |user: u64| {
         let app = &t.app;
         async move { crate::native::on_native_hit(app, &native_hit(g, 77, user)).await }
     };
-    hit(t.base + 1).await.unwrap();
-    assert_eq!(t.calls("PATCH"), 0, "a failed fetch takes no action");
+    assert!(crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .is_err());
     t.set(|m| m.fail_rules = false);
+    hit(t.base + 1).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 0, "a hit approves nothing");
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
     hit(t.base + 2).await.unwrap();
-    assert_eq!(t.calls("PATCH"), 1, "approved once at the first fetch");
+    assert_eq!(t.calls("PATCH"), 1, "approved once at GuildCreate");
     assert_eq!(
         t.count(
             "SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1 AND approved_by = 0"
@@ -522,6 +532,70 @@ async fn a_native_rule_acts_only_in_an_approved_state() {
         .unwrap();
     hit(t.base + 4).await.unwrap();
     assert_eq!(t.calls("PATCH"), 2, "acts again after the owner's change");
+    t.cleanup().await;
+}
+
+/// A trusted entry approves the fetched rule only if no gateway update came after it; a failed
+/// fetch is logged and approves nothing. GuildCreate drops the rules held from the old session.
+#[tokio::test]
+async fn a_trusted_entry_approves_only_its_own_state() {
+    let Some(t) = T::new(743).await else { return };
+    let g = t.g(0).get();
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"]}},
+               "logging": {"routes": {"auto_mod": "88"}}}),
+    )
+    .await;
+    t.app.log_public.lock().unwrap().insert(
+        twilight_model::id::Id::new(88),
+        (false, std::time::Instant::now()),
+    );
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"])]);
+    });
+    let approved = || {
+        t.count("SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = 77")
+    };
+    // An entry from a minute ago, and a gateway update just now: a later change.
+    let old = ((crate::automod::now_ms() - 60_000 - 1_420_070_400_000) as u64) << 22;
+    crate::native::rule_changed(g, 77);
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, old, t.owner()))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 0, "left for the later change's entry");
+    // A fresh entry, its fetch fails.
+    let fresh = ((crate::automod::now_ms() - 1_420_070_400_000) as u64) << 22;
+    t.set(|m| m.fail_rules = true);
+    crate::native::rule_changed(g, 77);
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, fresh, t.owner()))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 0, "a failed fetch approves nothing");
+    assert_eq!(t.calls("POST /channels/88/messages"), 1, "and is logged");
+    t.set(|m| m.fail_rules = false);
+    crate::native::rule_changed(g, 77);
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, fresh + 1, t.owner()))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 1, "its own state is approved");
+    crate::native::on_native_hit(&t.app, &native_hit(g, 77, t.base + 1))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PATCH"), 1);
+    // A new session missed a change: GuildCreate drops the held state, the hit fetches it.
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["y"])]);
+    });
+    t.exec("INSERT INTO automod_rule_approved (guild_id, rule_id, fingerprint, approved_by) VALUES ($1, 0, '', 0)").await;
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    crate::native::on_native_hit(&t.app, &native_hit(g, 77, t.base + 2))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "the missed change is not approved");
     t.cleanup().await;
 }
 
@@ -559,7 +633,9 @@ async fn first_start_skips_a_rule_changed_without_a_permit() {
     crate::native::on_rule_audit(&t.app, &rule_edit(g, 1, t.base + 5))
         .await
         .unwrap();
-    // A hit of rule 78 makes the first fetch.
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
     crate::native::on_native_hit(&t.app, &native_hit(g, 78, t.base + 1))
         .await
         .unwrap();

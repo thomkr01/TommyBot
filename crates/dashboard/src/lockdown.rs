@@ -13,7 +13,10 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tommybot_automod::{
-    discord_api::{approve_rule, rule_body, BotAction, DiscordAutomodCfg, MentionScope, RuleSpec},
+    discord_api::{
+        approve_rule, rule_body, rule_fingerprint, BotAction, DiscordAutomodCfg, MentionScope,
+        RuleSpec,
+    },
     lockdown::{kind_from, tshoot, Fix, LockKind, Overwrite, Problem, RoleInfo, Snapshot},
 };
 use tommybot_core::jobs;
@@ -614,8 +617,24 @@ async fn set_enabled(
             Some(json!({"enabled": b.enabled})),
         )
         .await?;
-    // An Editor switched it, so the bot acts on the rule as it is now.
-    approve_rule(&st.db, guild, &now, s.user_id).await?;
+    // The switch approves the rule only if nothing else changed since its approval: otherwise it
+    // would approve a change made in Discord that nobody here reviewed.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT fingerprint FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = $2",
+    )
+    .bind(guild)
+    .bind(rule.parse::<i64>().unwrap_or(0))
+    .fetch_optional(&st.db)
+    .await?;
+    let only_switched = [true, false].iter().any(|&on| {
+        let mut was = now.clone();
+        was["enabled"] = json!(on);
+        stored.as_deref() == Some(rule_fingerprint(&was).as_str())
+    });
+    if only_switched {
+        approve_rule(&st.db, guild, &now, s.user_id).await?;
+        trust_rule(&st, guild, &rule).await?;
+    }
     audit(
         &st,
         &s,
@@ -630,6 +649,11 @@ async fn set_enabled(
         ),
     )
     .await?;
+    if !only_switched {
+        return Err(ApiError::Busy(
+            "The switch is set, but the rule was changed outside the dashboard. Open it, review it and save it: until then TommyBot takes no action on its hits.",
+        ));
+    }
     Ok(Json(json!({"ok": true})))
 }
 
@@ -792,10 +816,26 @@ mod tests {
             .unwrap();
         let fp = tommybot_automod::discord_api::rule_fingerprint;
         assert_eq!(approved().await, (fp(&made), owner));
-        let _ = update_rule(State(st), s, Path((g, "55".into())), Json(spec()))
+        let _ = update_rule(
+            State(st.clone()),
+            s.clone(),
+            Path((g, "55".into())),
+            Json(spec()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approved().await, (fp(&edited), owner));
+        // The switch approves only when nothing else changed: Discord returns `edited`.
+        let switch = |on| Json(EnabledBody { enabled: on });
+        let path = || Path((g, "55".into()));
+        let _ = set_enabled(State(st.clone()), s.clone(), path(), switch(false))
             .await
             .unwrap();
         assert_eq!(approved().await, (fp(&edited), owner));
+        approve_rule(&db, g, &made, 1).await.unwrap();
+        let r = set_enabled(State(st.clone()), s.clone(), path(), switch(false)).await;
+        assert!(matches!(r, Err(ApiError::Busy(_))), "changed outside");
+        assert_eq!(approved().await, (fp(&made), 1), "not approved");
         for t in [
             "automod_rule_approved",
             "automod_rule_untrusted",

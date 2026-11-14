@@ -3,7 +3,10 @@
 use anyhow::Result;
 use serde_json::Value;
 use tommybot_logging::{embed, embed::ORANGE, LogKind};
-use twilight_model::id::{marker::GuildMarker, Id};
+use twilight_model::{
+    guild::Member,
+    id::{marker::GuildMarker, Id},
+};
 
 use crate::app::App;
 
@@ -47,8 +50,9 @@ fn qw_ids(doc: &Value) -> Vec<i64> {
 }
 
 /// GuildCreate: takes bots that are already Extra Owner, Trusted Admin or on the quarantine whitelist
-/// off those lists, as one config version, then logs it and DMs the owner. A failed lookup keeps the id.
-pub(crate) async fn drop_bots(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+/// off those lists, as one config version, then logs it and DMs the owner. `members` is the
+/// GuildCreate's member list; ids not in it are looked up. A failed lookup keeps the id.
+pub(crate) async fn drop_bots(app: &App, gid: Id<GuildMarker>, members: &[Member]) -> Result<()> {
     let g = gid.get() as i64;
     let mut listed: Vec<i64> = sqlx::query_scalar(
         "SELECT user_id FROM extra_owners WHERE guild_id = $1 UNION SELECT user_id FROM trusted_admins WHERE guild_id = $1",
@@ -66,11 +70,30 @@ pub(crate) async fn drop_bots(app: &App, gid: Id<GuildMarker>) -> Result<()> {
     listed.sort();
     listed.dedup();
     let mut bots = vec![];
+    let mut unread = vec![];
     for id in listed {
-        match is_bot(app, id).await {
+        let known = members.iter().find(|m| m.user.id.get() as i64 == id);
+        let bot = match known {
+            Some(m) => Ok(m.user.bot),
+            None => is_bot(app, id).await,
+        };
+        match bot {
             Ok(true) => bots.push(id),
             Ok(false) => {}
-            Err(e) => tracing::warn!(?e, id, %gid, "bot check failed, the id stays listed"),
+            Err(e) => {
+                tracing::warn!(?e, id, %gid, "bot check failed, the id stays listed");
+                unread.push(format!("<@{id}>"));
+            }
+        }
+    }
+    if !unread.is_empty() {
+        let text = format!(
+            "Could not check if {} are bots, so they stay listed. Only users can be Extra Owner, Trusted Admin or on the quarantine whitelist; the check runs again at the next start.",
+            unread.join(", ")
+        );
+        let log = embed::Log::new("🤖 Bot check failed", ORANGE).text(&text);
+        if let Err(e) = crate::events::send_log(app, gid.get(), LogKind::AntiNuke, log).await {
+            tracing::warn!(?e, %gid, "bot check log failed");
         }
     }
     if bots.is_empty() {
@@ -194,12 +217,29 @@ mod tests {
             .unwrap();
         }
         t.set(|m| {
-            m.bots.extend([bot, bot2]);
+            // `bot` is known only from the GuildCreate payload.
+            m.bots.push(bot2);
             m.text_channels.insert(LOGS, (g as u64, false));
             m.members
                 .insert((g as u64, crate::test_support::ME), vec![]);
         });
-        drop_bots(&t.app, t.g(0)).await.unwrap();
+        let member = |id: u64, is_bot: bool| -> Member {
+            serde_json::from_value(json!({
+                "roles": [], "deaf": false, "mute": false, "flags": 0,
+                "joined_at": "2026-01-01T00:00:00.000000+00:00",
+                "user": {"id": id.to_string(), "username": "x", "discriminator": "0",
+                         "avatar": null, "bot": is_bot},
+            }))
+            .unwrap()
+        };
+        let members = [member(user, false), member(bot, true)];
+        drop_bots(&t.app, t.g(0), &members).await.unwrap();
+        assert_eq!(
+            t.calls(&format!("GET /users/{bot}")),
+            0,
+            "read from the payload"
+        );
+        assert_eq!(t.calls(&format!("GET /users/{user}")), 0);
         let users = |table: &'static str| {
             let pool = t.app.pool.clone();
             async move {
@@ -230,7 +270,7 @@ mod tests {
         assert_eq!(t.calls(&format!("POST /channels/{LOGS}/messages")), 1);
         assert_eq!(t.calls("POST /users/@me/channels"), 1, "the owner is DMed");
         // Nothing left: a second GuildCreate writes no version.
-        drop_bots(&t.app, t.g(0)).await.unwrap();
+        drop_bots(&t.app, t.g(0), &[]).await.unwrap();
         let n = t.count("SELECT count(*) FROM guild_config WHERE guild_id = $1");
         assert_eq!(n.await, 2);
         t.cleanup().await;
@@ -240,16 +280,23 @@ mod tests {
     async fn a_failed_lookup_keeps_the_id_listed() {
         let Some(t) = T::new(942).await else { return };
         let bot = t.base * 10 + 2;
-        t.server_config(0, t.owner(), json!({})).await;
+        let logs = json!({"routes": {"anti_nuke": LOGS.to_string()}});
+        t.server_config(0, t.owner(), json!({ "logging": logs }))
+            .await;
         t.exec("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $1 * 10 + 2)")
             .await;
+        let g = t.g(0).get();
         t.set(|m| {
             m.bots.push(bot);
             m.fail_user = true;
+            m.text_channels.insert(LOGS, (g, false));
+            m.members.insert((g, crate::test_support::ME), vec![]);
         });
-        drop_bots(&t.app, t.g(0)).await.unwrap();
+        drop_bots(&t.app, t.g(0), &[]).await.unwrap();
         let n = t.count("SELECT count(*) FROM trusted_admins WHERE guild_id = $1");
         assert_eq!(n.await, 1);
+        let logged = t.calls(&format!("POST /channels/{LOGS}/messages"));
+        assert_eq!(logged, 1, "the failed check is logged");
         t.cleanup().await;
     }
 }

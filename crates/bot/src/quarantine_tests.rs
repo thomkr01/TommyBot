@@ -310,6 +310,7 @@ async fn a_failed_undo_still_quarantines_the_actor() {
     t.set(|m| {
         m.fail_role_edit = true;
         m.members.insert((t.g(0).get(), actor), vec![ROLE]);
+        m.roles.get_mut(&t.g(0).get()).unwrap()[2].2 = 8; // ROLE, as the actor left it
     });
     let e: AuditLogEntry = serde_json::from_value(json!({
         "id": "1", "action_type": 31, "guild_id": t.g(0).to_string(), "target_id": ROLE.to_string(),
@@ -1745,6 +1746,7 @@ async fn an_unreadable_actor_is_undone_but_not_punished() {
         m.members.insert((g.get(), actor), vec![ROLE]);
         m.members.insert((g.get(), member), vec![BOOST]);
         m.fail_member = true;
+        m.roles.get_mut(&g.get()).unwrap()[2].2 = 8; // ROLE, as the actor left it
     });
     let entry = |action: u8, target: u64, changes: Value| -> AuditLogEntry {
         serde_json::from_value(json!({
@@ -1938,5 +1940,73 @@ async fn anti_nuke_off_strict_mode_undoes_unpunished() {
     assert_eq!(role_perms(&t, ROLE), 0, "the grant is undone");
     assert_eq!(roles(&t, 0, actor), Some(vec![ROLE]), "not quarantined");
     assert_eq!(saved(&t, 0, actor).await, None);
+    t.cleanup().await;
+}
+
+/// Review 11-14 (E): with anti-nuke off, a kick of a quarantined member cannot be undone, so no
+/// "undone" alert is logged.
+#[tokio::test]
+async fn anti_nuke_off_logs_no_undo_for_a_kick() {
+    let Some(t) = T::new(284).await else { return };
+    let an = json!({"enabled": false, "quarantine_hold": true, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let (u, actor) = (t.base * 10 + 1, t.base * 10 + 2);
+    row(&t, 0, u, &[]).await;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), actor), vec![]);
+    });
+    let kick: AuditLogEntry = serde_json::from_value(json!({
+        "id": "4", "action_type": 20, "guild_id": t.g(0).to_string(), "target_id": u.to_string(),
+        "user_id": actor.to_string(), "reason": null, "changes": [],
+    }))
+    .unwrap();
+    crate::antinuke::on_audit(&t.app, &kick).await.unwrap();
+    assert_eq!(t.calls(&format!("POST /channels/{LOGS}/messages")), 0);
+    t.cleanup().await;
+}
+
+/// Review 11-14 (F): with anti-nuke off, roles given to a join-quarantined member are taken back
+/// and that is logged.
+#[tokio::test]
+async fn anti_nuke_off_logs_roles_taken_from_an_unverified_member() {
+    let Some(t) = T::new(285).await else { return };
+    let an = json!({"enabled": false, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let (u, actor) = (t.base * 10 + 1, t.base * 10 + 2);
+    sqlx::query("INSERT INTO quarantines (guild_id, user_id, saved_roles, on_join) VALUES ($1, $2, '{}', true)")
+        .bind(t.g(0).get() as i64)
+        .bind(u as i64)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), u), vec![Q, AUTOROLE]);
+        m.members.insert((t.g(0).get(), actor), vec![]);
+    });
+    crate::antinuke::on_audit(&t.app, &role_added(&t, actor, u, AUTOROLE))
+        .await
+        .unwrap();
+    assert_eq!(roles(&t, 0, u), Some(vec![Q]), "taken back");
+    assert_eq!(t.calls(&format!("POST /channels/{LOGS}/messages")), 1);
+    t.cleanup().await;
+}
+
+/// Review 11-14 (H): a late undo does not set back a role a later change already replaced; the
+/// skip is logged.
+#[tokio::test]
+async fn a_late_undo_skips_a_role_changed_again() {
+    let Some(t) = T::new(286).await else { return };
+    let an = json!({"enabled": false, "strict_mode": true, "quarantine_role": Q.to_string()});
+    server(&t, 0, json!({ "antinuke": an })).await;
+    let actor = t.base * 10 + 1;
+    t.set(|m| {
+        m.members.insert((t.g(0).get(), actor), vec![]);
+        m.roles.get_mut(&t.g(0).get()).unwrap()[2].2 = 4; // a later change made it Ban Members
+    });
+    crate::antinuke::on_audit(&t.app, &admin_given(&t, actor, ROLE))
+        .await
+        .unwrap();
+    assert_eq!(role_perms(&t, ROLE), 4, "the later change stays");
+    assert_eq!(t.calls(&format!("POST /channels/{LOGS}/messages")), 1);
     t.cleanup().await;
 }
