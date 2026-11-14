@@ -43,6 +43,8 @@ pub(crate) struct Mock {
     pub(crate) timeouts: HashMap<(u64, u64), String>,
     /// Managed role -> the bot it belongs to (its tags.bot_id).
     pub(crate) bot_roles: HashMap<u64, u64>,
+    /// Role -> its tags as Discord's JSON, over `bot_roles` (linked or subscription roles).
+    pub(crate) role_tags: HashMap<u64, Value>,
     /// Log and DM messages fail with 403.
     pub(crate) fail_message: bool,
     /// Log and DM messages fail with 502.
@@ -65,6 +67,12 @@ pub(crate) struct Mock {
     pub(crate) channels: HashMap<u64, Value>,
     /// Audit log entries by guild, newest first; `audit` when not set.
     pub(crate) audit_by_guild: HashMap<u64, Vec<Value>>,
+    /// Native AutoMod rules by guild, as Discord's JSON.
+    pub(crate) rules: HashMap<u64, Vec<Value>>,
+    /// AutoMod rule lookups fail with 500.
+    pub(crate) fail_rules: bool,
+    /// Onboarding by guild, as Discord's JSON; 404 (none set up) when not set.
+    pub(crate) onboarding: HashMap<u64, Value>,
     pub(crate) log: Vec<String>,
 }
 
@@ -233,14 +241,41 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
             j["bot"] = json!(m.bots.iter().any(|b| b.to_string() == *u));
             (200, j.to_string())
         }
+        ("GET", ["guilds", _, "auto-moderation", ..]) if m.fail_rules => err(500, 0),
+        ("GET", ["guilds", g, "auto-moderation", "rules"]) => (
+            200,
+            json!(m.rules.get(&n(g)).cloned().unwrap_or_default()).to_string(),
+        ),
+        ("GET", ["guilds", g, "auto-moderation", "rules", r]) => {
+            match m
+                .rules
+                .get(&n(g))
+                .into_iter()
+                .flatten()
+                .find(|x| x["id"] == *r)
+            {
+                Some(x) => (200, x.to_string()),
+                None => err(404, 10066),
+            }
+        }
         ("GET", ["guilds", g, "roles"]) => {
             let all = m.roles.get(&n(g)).cloned().unwrap_or_default();
             let all: Vec<Value> = all
                 .iter()
-                .map(|r| role(*r, m.bot_roles.get(&r.0)))
+                .map(|r| {
+                    let mut v = role(*r, m.bot_roles.get(&r.0));
+                    if let Some(t) = m.role_tags.get(&r.0) {
+                        v["tags"] = t.clone();
+                    }
+                    v
+                })
                 .collect();
             (200, json!(all).to_string())
         }
+        ("GET", ["guilds", g, "onboarding"]) => match m.onboarding.get(&n(g)) {
+            Some(o) => (200, o.to_string()),
+            None => err(404, 10004),
+        },
         ("GET", ["guilds", g, "channels"]) => match m.channels.get(&n(g)) {
             Some(c) => (200, c.to_string()),
             None => (200, "[]".into()),
@@ -530,8 +565,10 @@ impl T {
             "DELETE FROM raider_actions WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM raider_allow WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM automod_rule_untrusted WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM automod_rule_approved WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM guild_left WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM unpermittable_roles WHERE guild_id BETWEEN $1 AND $1 + 9",
         ] {
             self.exec(sql).await;
         }

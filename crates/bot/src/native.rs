@@ -1,6 +1,7 @@
 //! Bot-side actions for Discord's native AutoMod rules, with mention scopes.
 use anyhow::Result;
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use tommybot_automod::{
     discord_api::{self, BotAction},
     join::Action,
@@ -13,7 +14,7 @@ use twilight_model::{
     gateway::payload::incoming::AutoModerationActionExecution,
     guild::{
         audit_log::{AuditLogEntry, AuditLogEventType},
-        auto_moderation::AutoModerationActionType,
+        auto_moderation::{AutoModerationActionType, AutoModerationRule},
     },
     id::{marker::GuildMarker, Id},
 };
@@ -69,6 +70,191 @@ fn held(guild: u64, rule: u64) -> bool {
         .unwrap()
         .get(&(guild, rule))
         .is_some_and(|t| crate::automod::now_ms() - t < HOLD_MS)
+}
+
+/// Latest fingerprint of each rule by (guild, rule), from gateway events and fetches.
+static RULES: std::sync::LazyLock<std::sync::Mutex<HashMap<(u64, u64), String>>> =
+    std::sync::LazyLock::new(Default::default);
+/// Guilds whose rules were fetched since start.
+static FILLED: std::sync::LazyLock<std::sync::Mutex<HashSet<u64>>> =
+    std::sync::LazyLock::new(Default::default);
+/// (guild, rule, fingerprint) already logged as not approved.
+static NOT_APPROVED: std::sync::LazyLock<std::sync::Mutex<HashSet<(u64, u64, String)>>> =
+    std::sync::LazyLock::new(Default::default);
+/// One fetch at a time, so the first-start approval runs once per guild.
+static FILL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn remember(guild: u64, rule: &Value) -> Option<String> {
+    let id = rule["id"].as_str()?.parse().ok()?;
+    let fp = discord_api::rule_fingerprint(rule);
+    RULES.lock().unwrap().insert((guild, id), fp.clone());
+    Some(fp)
+}
+
+/// The gateway's rule create or update: its state as Discord holds it now.
+pub(crate) fn rule_seen(rule: &AutoModerationRule) {
+    if let Ok(v) = serde_json::to_value(rule) {
+        remember(rule.guild_id.get(), &v);
+    }
+}
+
+pub(crate) async fn rule_deleted(app: &App, rule: &AutoModerationRule) -> Result<()> {
+    let (g, r) = (rule.guild_id.get(), rule.id.get());
+    RULES.lock().unwrap().remove(&(g, r));
+    sqlx::query("DELETE FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = $2")
+        .bind(g as i64)
+        .bind(r as i64)
+        .execute(&app.pool)
+        .await?;
+    Ok(())
+}
+
+/// The rule's current fingerprint: from memory, or fetched with all the guild's rules when
+/// missing. `None` when Discord has no such rule.
+async fn current(app: &App, gid: Id<GuildMarker>, rule: u64) -> Result<Option<String>> {
+    let g = gid.get();
+    let get = || {
+        FILLED
+            .lock()
+            .unwrap()
+            .contains(&g)
+            .then(|| RULES.lock().unwrap().get(&(g, rule)).cloned())?
+    };
+    if let Some(fp) = get() {
+        return Ok(Some(fp));
+    }
+    let _one = FILL.lock().await;
+    if let Some(fp) = get() {
+        return Ok(Some(fp));
+    }
+    fill(app, gid).await?;
+    Ok(get())
+}
+
+/// Fetches the guild's rules into [`RULES`]. The caller holds [`FILL`].
+async fn fill(app: &App, gid: Id<GuildMarker>) -> Result<Vec<Value>> {
+    let rules = app.http.auto_moderation_rules(gid).await?.models().await?;
+    let rules: Vec<Value> = rules
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<_, _>>()?;
+    for r in &rules {
+        remember(gid.get(), r);
+    }
+    FILLED.lock().unwrap().insert(gid.get());
+    Ok(rules)
+}
+
+/// GuildCreate: a new session may have missed rule events, so the guild's rules are read again at
+/// the next hit. While the first-start approval is still to do, it runs now, not at a hit.
+pub(crate) async fn on_guild_create(app: &App, gid: Id<GuildMarker>) -> Result<()> {
+    let g = gid.get();
+    let _one = FILL.lock().await;
+    FILLED.lock().unwrap().remove(&g);
+    RULES.lock().unwrap().retain(|k, _| k.0 != g);
+    let done: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = 0)",
+    )
+    .bind(g as i64)
+    .fetch_one(&app.pool)
+    .await?;
+    if done {
+        return Ok(());
+    }
+    let rules = fill(app, gid).await?;
+    first_start(app, gid, &rules).await
+}
+
+/// Thomas 2026-11-13 23:33 "Godkjenn dem en gang ved start": rules that exist at the first fetch
+/// after the update to permit-checked rules are approved once, unless an audit entry showed a
+/// change without a permit. The row with rule id 0 marks the guild as done. A guild that adds the
+/// bot later, or comes back after the purge deleted its marker, gets its rules approved once at
+/// that GuildCreate too (Thomas 11-14, Q1).
+async fn first_start(app: &App, gid: Id<GuildMarker>, rules: &[Value]) -> Result<()> {
+    let g = gid.get() as i64;
+    for r in rules {
+        let Some(id) = r["id"].as_str().and_then(|i| i.parse::<i64>().ok()) else {
+            continue;
+        };
+        let added = sqlx::query(
+            "INSERT INTO automod_rule_approved (guild_id, rule_id, fingerprint, approved_by)
+             SELECT $1, $2, $3, 0
+             WHERE NOT EXISTS (SELECT 1 FROM automod_rule_untrusted
+                               WHERE guild_id = $1 AND rule_id = $2 AND NOT trusted)
+             ON CONFLICT (guild_id, rule_id) DO NOTHING",
+        )
+        .bind(g)
+        .bind(id)
+        .bind(discord_api::rule_fingerprint(r))
+        .execute(&app.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        if added {
+            let log = Log::new("Discord AutoMod Rule Approved", ORANGE)
+                .line(
+                    "Rule",
+                    &format!("{} (`{id}`)", r["name"].as_str().unwrap_or_default()),
+                )
+                .line(
+                    "Why",
+                    "Approved at the update to permit-checked rules. TommyBot acts on its hits while it stays as it is now",
+                );
+            // A log failure must not keep the guild from its done marker.
+            if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+                tracing::warn!(?e, %gid, "AutoMod rule approval log failed");
+            }
+        }
+    }
+    sqlx::query(
+        "INSERT INTO automod_rule_approved (guild_id, rule_id, fingerprint, approved_by)
+         VALUES ($1, 0, '', 0) ON CONFLICT DO NOTHING",
+    )
+    .bind(g)
+    .execute(&app.pool)
+    .await?;
+    Ok(())
+}
+
+/// Whether the rule is now as a trusted person approved it. A failed fetch counts as not.
+async fn approved(app: &App, gid: Id<GuildMarker>, rule: u64) -> Result<bool> {
+    let fp = match current(app, gid, rule).await {
+        Ok(Some(fp)) => fp,
+        Ok(None) => return Ok(false),
+        Err(err) => {
+            tracing::warn!(?err, "fetching the Discord AutoMod rules failed");
+            return Ok(false);
+        }
+    };
+    let ok: Option<String> = sqlx::query_scalar(
+        "SELECT fingerprint FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = $2",
+    )
+    .bind(gid.get() as i64)
+    .bind(rule as i64)
+    .fetch_optional(&app.pool)
+    .await?;
+    if ok.as_deref() == Some(fp.as_str()) {
+        return Ok(true);
+    }
+    let first = {
+        let mut m = NOT_APPROVED.lock().unwrap();
+        if m.len() > 10_000 {
+            m.clear();
+        }
+        m.insert((gid.get(), rule, fp))
+    };
+    if first {
+        let log = Log::new("Discord AutoMod Rule Not Approved", ORANGE)
+            .line("Rule", &format!("`{rule}`"))
+            .line(
+                "Action",
+                "TommyBot takes no action on this rule's hits: it is not as a person with a permit approved it. An Owner, Extra Owner, Trusted Admin or a permit with dashboard edit must save it in the dashboard or change it in Discord",
+            );
+        if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+            tracing::warn!(?e, %gid, "AutoMod rule not approved log failed");
+        }
+    }
+    Ok(false)
 }
 
 /// Who may change what a native rule triggers: Owner, EO, TA or a dashboard-edit permit, the same
@@ -144,6 +330,10 @@ pub(crate) async fn on_rule_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
             .await?
             .rows_affected()
                 == 1;
+            // Approved before `seen_audit`, so the hold covers the fetch.
+            if won && ok && !changed_after(gid.get(), rule.get(), e.id.get()) {
+                approve_fetched(app, gid, rule.get(), actor.get()).await?;
+            }
             seen_audit(gid.get(), rule.get());
             if won && !ok {
                 let log = Log::new("Discord AutoMod Rule Changed Without A Permit", ORANGE)
@@ -161,6 +351,54 @@ pub(crate) async fn on_rule_audit(app: &App, e: &AuditLogEntry) -> Result<()> {
     Ok(())
 }
 
+/// A gateway rule update this long after an entry's time is a later change. The entry's own
+/// update comes sooner; the margin covers gateway delay and clock skew.
+const LATER_MS: i64 = 5_000;
+
+/// Whether a gateway update of the rule came after audit entry `entry` (its snowflake time). The
+/// fetched state is then that later change's, left for its own entry.
+fn changed_after(guild: u64, rule: u64, entry: u64) -> bool {
+    let at = ((entry >> 22) + 1_420_070_400_000) as i64;
+    CHANGED
+        .lock()
+        .unwrap()
+        .get(&(guild, rule))
+        .is_some_and(|t| *t > at + LATER_MS)
+}
+
+/// Approves the rule as Discord holds it now. A failed fetch leaves it unapproved and is logged.
+async fn approve_fetched(app: &App, gid: Id<GuildMarker>, rule: u64, actor: u64) -> Result<()> {
+    let fetched = async {
+        let now = app
+            .http
+            .auto_moderation_rule(gid, Id::new(rule))
+            .await?
+            .model()
+            .await?;
+        anyhow::Ok(serde_json::to_value(&now)?)
+    };
+    match fetched.await {
+        Ok(now) => {
+            remember(gid.get(), &now);
+            discord_api::approve_rule(&app.pool, gid.get() as i64, &now, actor as i64).await?;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "fetching a changed Discord AutoMod rule failed");
+            let log = Log::new("Discord AutoMod Rule Not Approved", ORANGE)
+                .user("Changed by", actor)
+                .line("Rule", &format!("`{rule}`"))
+                .line(
+                    "Action",
+                    "TommyBot could not read the rule from Discord, so it is not approved and its hits get no TommyBot action. Save it in the dashboard or change it in Discord again",
+                );
+            if let Err(e) = send_log(app, gid.get(), LogKind::AutoMod, log).await {
+                tracing::warn!(?e, %gid, "AutoMod rule fetch failure log failed");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Bot-side actions for a native rule; the rule's block-message event fires once per hit.
 pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Result<()> {
     if e.action.kind != AutoModerationActionType::BlockMessage {
@@ -171,7 +409,10 @@ pub async fn on_native_hit(app: &App, e: &AutoModerationActionExecution) -> Resu
     let Some(actions) = cfg.discord_automod.actions.get(&e.rule_id.to_string()) else {
         return Ok(());
     };
-    if held(gid.get(), e.rule_id.get()) || untrusted(app, gid, e.rule_id.get()).await? {
+    if held(gid.get(), e.rule_id.get())
+        || untrusted(app, gid, e.rule_id.get()).await?
+        || !approved(app, gid, e.rule_id.get()).await?
+    {
         return Ok(());
     }
     // Before counting: a whitelisted member's hits must not fill a scope for the next member.

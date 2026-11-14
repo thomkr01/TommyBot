@@ -7,6 +7,9 @@ use tommybot_automod::lockdown::VIEW_CHANNEL;
 /// How long owner and member lookups are reused, so page loads do not drain the bot's rate limit.
 const MEMO_TTL: Duration = Duration::from_secs(30);
 const ADMINISTRATOR: u64 = 1 << 3;
+/// [`Discord::unpermittable_roles`]'s reason for a role an Onboarding prompt gives.
+pub(crate) const ONBOARDING_WHY: &str =
+    "Discord Onboarding gives it to anyone who picks that answer";
 
 #[derive(Clone)]
 pub struct Discord {
@@ -180,6 +183,39 @@ impl Discord {
         Ok(v)
     }
 
+    /// Why each role Discord itself hands out cannot carry a permit (Thomas, Q5): linked roles,
+    /// server subscription or purchase roles (their tags), and the roles Onboarding prompts give.
+    /// A guild without Onboarding (404) has none of those; any other failed lookup is an error.
+    pub async fn unpermittable_roles(
+        &self,
+        guild: i64,
+    ) -> Result<std::collections::HashMap<String, &'static str>> {
+        let mut out = std::collections::HashMap::new();
+        let roles = self.memo_get(format!("/guilds/{guild}/roles")).await?;
+        for r in roles.iter().filter_map(|v| v.as_array()).flatten() {
+            let tags = &r["tags"];
+            // Discord sends these flags as `null` when set, and leaves them out when not.
+            let why = if tags.get("guild_connections").is_some() {
+                "it is a linked role, which Discord gives for a connected account"
+            } else if tags.get("subscription_listing_id").is_some()
+                || tags.get("available_for_purchase").is_some()
+            {
+                "it is a server subscription or purchase role, which Discord gives to anyone who pays"
+            } else {
+                continue;
+            };
+            out.insert(r["id"].as_str().unwrap_or_default().to_string(), why);
+        }
+        let onboarding = self.memo_get(format!("/guilds/{guild}/onboarding")).await?;
+        let ids = onboarding
+            .iter()
+            .flat_map(tommybot_core::permits::onboarding_roles);
+        for id in ids {
+            out.entry(id.to_string()).or_insert(ONBOARDING_WHY);
+        }
+        Ok(out)
+    }
+
     pub async fn guild_owner(&self, guild: i64) -> Result<String> {
         let g = self.memo_get(format!("/guilds/{guild}")).await?;
         g.as_ref()
@@ -277,6 +313,14 @@ impl Discord {
                 .filter_map(|r| r.as_str().map(String::from))
                 .collect()
         }))
+    }
+
+    /// Whether the member is a bot account, from the same memoized lookup as [`Discord::member`].
+    pub async fn member_is_bot(&self, guild: i64, user: &str) -> Result<bool> {
+        let m = self
+            .memo_get(format!("/guilds/{guild}/members/{user}"))
+            .await?;
+        Ok(m.is_some_and(|m| m["user"]["bot"].as_bool() == Some(true)))
     }
 
     /// Whether `ch` is in `guild` and hidden from @everyone, the bot's rule for log channels.

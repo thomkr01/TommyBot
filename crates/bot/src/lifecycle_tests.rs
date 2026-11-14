@@ -45,6 +45,7 @@ fn bot_on_top(t: &T, i: u64) {
         roles: Default::default(),
         role_perms: Default::default(),
         managed: Default::default(),
+        unpermittable: Default::default(),
         parents: Default::default(),
         channels: Default::default(),
         nsfw: Default::default(),

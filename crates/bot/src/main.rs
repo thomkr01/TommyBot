@@ -46,6 +46,7 @@ mod targets;
 mod test_support;
 mod tickets;
 mod timeout_roles;
+mod users_only;
 mod verify;
 mod voice_nuke;
 mod voice_raid;

@@ -451,9 +451,10 @@ pub async fn web_blocked(
     send_log(app, gid.get(), LogKind::Verification, log).await
 }
 
-/// [`grant`] for a member verifying themselves. Someone in a real quarantine (anti-nuke, a rate
-/// limit, staff, the Raider List) must not get out by passing verification; only a join one lifts.
-async fn self_grant(
+/// [`grant`] for a member verifying themselves, or a verify permit verifying them by hand (Q2).
+/// Someone in a real quarantine (anti-nuke, a rate limit, staff, the Raider List) must not get out
+/// by passing verification; only a join one lifts. Read again here, right before the grant.
+pub(crate) async fn self_grant(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,

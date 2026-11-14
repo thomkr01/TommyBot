@@ -709,6 +709,7 @@ mod tests {
             bot_top: roles[&id(10)],
             role_perms: HashMap::from([(id(21), tommybot_antinuke::DANGEROUS_PERMS & (1 << 2))]),
             managed: HashSet::from([id(22)]),
+            unpermittable: HashSet::new(),
             parents: HashMap::new(),
             channels: HashSet::new(),
             nsfw: HashSet::new(),

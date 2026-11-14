@@ -766,12 +766,13 @@ pub(crate) async fn punish(
             let Some(m) = crate::http_err::member(&app.http, gid, uid).await? else {
                 return Ok(());
             };
+            let bot = m.user.bot;
             let old = m.nick.or(m.user.global_name).unwrap_or(m.user.name);
             let names = (old.as_str(), RENAMED);
             let done = crate::dehoist::rename(
                 app,
                 gid,
-                uid,
+                (uid, bot),
                 &m.roles,
                 names,
                 "Join Gate: username filter",

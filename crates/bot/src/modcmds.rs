@@ -620,12 +620,14 @@ pub async fn run(
                 if matches!(cmd, ModCmd::Verify { .. }) && !on_join && !actor.has("quarantine") {
                     return plain(format!("Cannot verify <@{t}>: they are quarantined for another reason, which needs the `quarantine` permit"));
                 }
+                let member = crate::http_err::member(&app.http, gid, target).await?;
                 let held = permits::resolve(
                     &app.pool,
                     gid.get() as i64,
                     owner.get() as i64,
                     t as i64,
                     &roles,
+                    member.is_some_and(|m| m.user.bot),
                 )
                 .await?;
                 // Restoring roles with Administrator or other dangerous permissions needs an owner or TA too,

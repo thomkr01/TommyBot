@@ -144,6 +144,7 @@ async fn dispatch(app: &App, job: &Job) -> Result<()> {
         }
         "appeal_accept" => crate::appeals::accept_job(app, gid, &job.payload).await?,
         "owner_check" => crate::owner::owner_check_job(app, gid).await?,
+        "keyword_rule_sync" => crate::automod::rule_sync_job(app, gid.get()).await,
         "delete_message" => crate::reply::run_delete(app, &job.payload).await?,
         "confirm_expire" => crate::confirm::run_expire(app, &job.payload).await?,
         "raid_punish" => crate::joingate::punish_job(app, gid, &job.payload).await?,

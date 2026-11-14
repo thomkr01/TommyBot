@@ -195,15 +195,19 @@ impl Api {
     }
 
     /// Create or update our keyword rule so it blocks exactly `words`. An empty list disables it.
+    /// The bot owns the whole rule (Thomas, Q3): `exempt_roles` are the roles whose permits are
+    /// exempt from the word filter, no channel is exempt, and the full trigger is sent.
+    /// The rule as Discord returns it, or `None` when there was nothing to write.
     pub async fn sync_keyword_rule(
         &self,
         guild: u64,
         words: &[String],
         regex: &[String],
-    ) -> Result<()> {
+        exempt_roles: &[String],
+    ) -> Result<Option<Value>> {
         let rules = self.list_rules(guild).await?;
-        let body = keyword_rule_body(words, regex);
-        match rules.iter().find(|r| r.name == KEYWORD_RULE) {
+        let body = keyword_rule_body(words, regex, exempt_roles);
+        let rule = match rules.iter().find(|r| r.name == KEYWORD_RULE) {
             Some(r) => {
                 self.send(
                     self.http.patch(format!(
@@ -214,7 +218,7 @@ impl Api {
                 )
                 .await?
             }
-            None if words.is_empty() && regex.is_empty() => return Ok(()),
+            None if words.is_empty() && regex.is_empty() => return Ok(None),
             None => {
                 self.send(
                     self.http
@@ -224,7 +228,7 @@ impl Api {
                 .await?
             }
         };
-        Ok(())
+        Ok(Some(rule))
     }
 
     pub async fn set_rule_enabled(&self, guild: u64, rule: &str, enabled: bool) -> Result<()> {
@@ -472,31 +476,124 @@ fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) {
     )
 }
 
-/// The keyword rule Discord holds is the one the bot would send for these lists (order and case
-/// aside), switched on as the bot sets it.
+/// The keyword rule Discord holds (its JSON, or twilight's model of it) is the whole rule the bot
+/// would send for these lists: trigger, actions, switch and exemptions, order, repeats and keyword
+/// case aside.
 pub fn rule_matches(
     words: &[String],
     regex: &[String],
-    enabled: bool,
-    keywords: &[String],
-    patterns: &[String],
+    exempt_roles: &[String],
+    rule: &Value,
 ) -> bool {
-    let body = keyword_rule_body(words, regex);
-    let set = |v: &Value| -> std::collections::BTreeSet<String> {
-        v.as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|x| x.as_str().map(str::to_lowercase))
-            .collect()
+    let fold = |v: &Value| {
+        let mut v = v.clone();
+        // Discord folds keyword case, never regex case; a repeated entry decides nothing.
+        for (k, lower) in [("keyword_filter", true), ("regex_patterns", false)] {
+            let l = &mut v["trigger_metadata"][k];
+            let mut list: Vec<String> = l
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x.as_str())
+                .map(|x| {
+                    if lower {
+                        x.to_lowercase()
+                    } else {
+                        x.to_string()
+                    }
+                })
+                .collect();
+            list.sort();
+            list.dedup();
+            *l = json!(list);
+        }
+        rule_fingerprint(&v)
     };
-    let have = |l: &[String]| l.iter().map(|x| x.to_lowercase()).collect();
-    let meta = &body["trigger_metadata"];
-    body["enabled"] == enabled
-        && set(&meta["keyword_filter"]) == have(keywords)
-        && set(&meta["regex_patterns"]) == have(patterns)
+    fold(&keyword_rule_body(words, regex, exempt_roles)) == fold(rule)
 }
 
-fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
+/// Hash of everything that decides a native rule's hits, from the rule JSON Discord returns (or
+/// twilight's model of it). Lists are sorted and a missing field reads as empty, so neither order
+/// nor form changes it.
+pub fn rule_fingerprint(v: &Value) -> String {
+    let sorted = |x: &Value| -> Vec<String> {
+        let mut l: Vec<String> = x
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| s.as_str().map_or_else(|| s.to_string(), String::from))
+            .collect();
+        l.sort();
+        l
+    };
+    let m = &v["trigger_metadata"];
+    let mut actions: Vec<String> = v["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| {
+            let md = &a["metadata"];
+            json!([
+                a["type"].as_u64(),
+                md["channel_id"].as_str().unwrap_or_default(),
+                md["custom_message"].as_str().unwrap_or_default(),
+                md["duration_seconds"].as_u64().unwrap_or(0),
+            ])
+            .to_string()
+        })
+        .collect();
+    actions.sort();
+    let canon = json!([
+        v["name"].as_str().unwrap_or_default(),
+        v["event_type"].as_u64(),
+        v["trigger_type"].as_u64(),
+        sorted(&m["keyword_filter"]),
+        sorted(&m["regex_patterns"]),
+        sorted(&m["allow_list"]),
+        sorted(&m["presets"]),
+        m["mention_total_limit"].as_u64().unwrap_or(0),
+        m["mention_raid_protection_enabled"]
+            .as_bool()
+            .unwrap_or(false),
+        actions,
+        v["enabled"].as_bool().unwrap_or(false),
+        sorted(&v["exempt_roles"]),
+        sorted(&v["exempt_channels"]),
+    ]);
+    use sha2::Digest;
+    sha2::Sha256::digest(canon.to_string())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `rule` (Discord's JSON) as `by` approved it: the bot acts on its hits while it stays so. `by`
+/// is 0 for the one approval at the update to permit-checked rules.
+pub async fn approve_rule(
+    db: &sqlx::PgPool,
+    guild: i64,
+    rule: &Value,
+    by: i64,
+) -> sqlx::Result<()> {
+    let Some(id) = rule["id"].as_str().and_then(|i| i.parse::<i64>().ok()) else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO automod_rule_approved (guild_id, rule_id, fingerprint, approved_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (guild_id, rule_id) DO UPDATE
+           SET fingerprint = $3, approved_by = $4, at = now()",
+    )
+    .bind(guild)
+    .bind(id)
+    .bind(rule_fingerprint(rule))
+    .bind(by)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+fn keyword_rule_body(words: &[String], regex: &[String], exempt_roles: &[String]) -> Value {
     let fit = |list: &[String], ok: Vec<bool>| -> Vec<String> {
         list.iter()
             .zip(ok)
@@ -511,9 +608,11 @@ fn keyword_rule_body(words: &[String], regex: &[String]) -> Value {
         "name": KEYWORD_RULE,
         "event_type": 1,
         "trigger_type": 1,
-        "trigger_metadata": { "keyword_filter": words, "regex_patterns": regex },
+        "trigger_metadata": { "keyword_filter": words, "regex_patterns": regex, "allow_list": [] },
         "actions": [{ "type": 1 }],
         "enabled": !words.is_empty() || !regex.is_empty(),
+        "exempt_roles": exempt_roles.iter().take(20).collect::<Vec<_>>(),
+        "exempt_channels": [],
     })
 }
 
@@ -650,19 +749,88 @@ mod tests {
     #[test]
     fn keyword_rule_drops_bad_keywords_and_disables_when_empty() {
         let long = "x".repeat(61);
-        let v = keyword_rule_body(&["bad".into(), "".into(), long], &[]);
+        let v = keyword_rule_body(&["bad".into(), "".into(), long], &[], &[]);
         assert_eq!(v["trigger_metadata"]["keyword_filter"], json!(["bad"]));
         assert_eq!(v["enabled"], true);
-        assert_eq!(keyword_rule_body(&[], &[])["enabled"], false);
+        assert_eq!(keyword_rule_body(&[], &[], &[])["enabled"], false);
         let w = ["Bad".to_string(), "x".repeat(61)];
-        assert!(rule_matches(&w, &[], true, &["bad".into()], &[]));
+        let roles = ["7".to_string()];
+        // As Discord returns it: an id, metadata on each action, keywords lowercased.
+        let held = json!({
+            "id": "1", "guild_id": "2", "name": KEYWORD_RULE, "creator_id": "3", "event_type": 1,
+            "trigger_type": 1, "enabled": true,
+            "trigger_metadata": {"keyword_filter": ["bad"], "regex_patterns": [], "allow_list": []},
+            "actions": [{"type": 1, "metadata": {}}], "exempt_roles": ["7"], "exempt_channels": [],
+        });
+        assert!(rule_matches(&w, &[], &roles, &held));
+        let changed = |k: &str, v: Value| {
+            let mut r = held.clone();
+            r[k] = v;
+            !rule_matches(&w, &[], &roles, &r)
+        };
+        assert!(changed("enabled", json!(false)), "switched off");
         assert!(
-            !rule_matches(&w, &[], false, &["bad".into()], &[]),
-            "switched off"
+            changed("trigger_metadata", json!({"keyword_filter": []})),
+            "keywords removed"
         );
-        assert!(!rule_matches(&w, &[], true, &[], &[]), "keywords removed");
-        let r = keyword_rule_body(&[], &["b[a4]d".into()]);
+        assert!(changed(
+            "trigger_metadata",
+            json!({"keyword_filter": ["bad"], "allow_list": ["b"]})
+        ));
+        assert!(
+            changed("exempt_roles", json!(["7", "8"])),
+            "a role exempted in Discord"
+        );
+        assert!(
+            changed("exempt_channels", json!(["9"])),
+            "a channel exempted in Discord"
+        );
+        let mut twice = held.clone();
+        twice["trigger_metadata"]["keyword_filter"] = json!(["bad", "BAD"]);
+        assert!(
+            rule_matches(&w, &[], &roles, &twice),
+            "a repeat decides nothing"
+        );
+        let re = |held_re: &str| {
+            let mut r = held.clone();
+            r["trigger_metadata"]["regex_patterns"] = json!([held_re]);
+            rule_matches(&w, &["(?i)Ab".to_string()], &roles, &r)
+        };
+        assert!(re("(?i)Ab") && !re("(?i)ab"), "regex case counts");
+        assert!(changed(
+            "actions",
+            json!([{"type": 1}, {"type": 3, "metadata": {"duration_seconds": 60}}])
+        ));
+        let r = keyword_rule_body(&[], &["b[a4]d".into()], &[]);
         assert_eq!(r["trigger_metadata"]["regex_patterns"], json!(["b[a4]d"]));
         assert_eq!(r["enabled"], true);
+    }
+
+    #[test]
+    fn fingerprint_ignores_order_and_form_but_not_content() {
+        let a = json!({
+            "id": "5", "name": "r", "event_type": 1, "trigger_type": 1, "enabled": true,
+            "trigger_metadata": {"keyword_filter": ["a", "b"], "allow_list": []},
+            "actions": [{"type": 1, "metadata": {}}, {"type": 3, "metadata": {"duration_seconds": 60}}],
+            "exempt_roles": ["2", "1"], "exempt_channels": [], "creator_id": "9",
+        });
+        let b = json!({
+            "id": "5", "name": "r", "event_type": 1, "trigger_type": 1, "enabled": true,
+            "trigger_metadata": {"keyword_filter": ["b", "a"], "regex_patterns": []},
+            "actions": [{"type": 3, "metadata": {"duration_seconds": 60}}, {"type": 1}],
+            "exempt_roles": ["1", "2"], "creator_id": "8",
+        });
+        assert_eq!(rule_fingerprint(&a), rule_fingerprint(&b));
+        for (k, v) in [
+            ("name", json!("s")),
+            ("enabled", json!(false)),
+            ("exempt_channels", json!(["3"])),
+            ("trigger_metadata", json!({"keyword_filter": ["a", "c"]})),
+            ("actions", json!([{"type": 1}])),
+        ] {
+            let mut c = a.clone();
+            c[k] = v;
+            assert_ne!(rule_fingerprint(&a), rule_fingerprint(&c), "{k}");
+        }
     }
 }

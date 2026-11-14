@@ -431,7 +431,7 @@ async fn report(
     let days = me
         .joined_at
         .map_or(0, |t| (now_secs() - t.as_secs()) / 86_400);
-    let roles = member_roles(app, gid, user).await?;
+    let (roles, bot) = member_roles(app, gid, user).await?;
     let r = raiders::Report {
         guild: gid.get() as i64,
         owner: guild.owner_id.get() as i64,
@@ -443,6 +443,7 @@ async fn report(
         members: guild.approximate_member_count.unwrap_or(0),
         days_with_bot: days,
         roles: &roles,
+        bot,
         protected: [
             app.me.get() as i64,
             app.bot_owner.map_or(0, |b| b.get() as i64),

@@ -528,17 +528,25 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::GuildUpdate(g) => {
             app.invalidate_guild(g.id);
-            crate::owner::owner_seen(app, g.id, g.owner_id).await?
+            crate::owner::owner_seen(app, g.id, g.owner_id).await?;
+            if let Err(e) = app.sync_unpermittable(g.id).await {
+                tracing::warn!(?e, "reading the roles Discord hands out failed");
+            }
         }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::AutoModerationRuleCreate(r) => {
-            crate::native::rule_changed(r.0.guild_id.get(), r.0.id.get())
+            crate::native::rule_changed(r.0.guild_id.get(), r.0.id.get());
+            crate::native::rule_seen(&r.0);
         }
         Event::AutoModerationRuleUpdate(r) => {
             crate::native::rule_changed(r.0.guild_id.get(), r.0.id.get());
+            crate::native::rule_seen(&r.0);
             crate::automod::on_rule_change(app, &r.0, false).await
         }
-        Event::AutoModerationRuleDelete(r) => crate::automod::on_rule_change(app, &r.0, true).await,
+        Event::AutoModerationRuleDelete(r) => {
+            crate::automod::on_rule_change(app, &r.0, true).await;
+            crate::native::rule_deleted(app, &r.0).await?
+        }
         Event::GuildDelete(g) => crate::welcome::on_guild_delete(app, g).await?,
         Event::Ready(r) => crate::welcome::on_ready(app, r).await?,
         Event::MemberUpdate(m) if m.user.id == app.me => app.invalidate_guild(m.guild_id),

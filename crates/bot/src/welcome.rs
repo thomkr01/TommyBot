@@ -148,16 +148,16 @@ impl Drop for InFlight<'_> {
 }
 
 /// After anti-nuke handled an entry: records it in `audit_handled`, so no catch-up runs it again
-/// (a distinct row per entry, no shared row lock), then `done_audit`. Not recorded when
-/// anti-nuke did nothing with it: anti-nuke off, or the bot's own entry.
+/// (a distinct row per entry, no shared row lock), then `done_audit`. Not recorded for the bot's
+/// own entry, which anti-nuke skips. With anti-nuke off the guards still undo (11-13), so a
+/// replay must not set back a change made after it.
 pub async fn handled_audit(
     app: &App,
     guild: u64,
     e: &twilight_model::guild::audit_log::AuditLogEntry,
 ) {
     let id = e.id.get();
-    let on = app.cfg(guild).await.is_ok_and(|c| c.antinuke.enabled);
-    if !on || e.user_id == Some(app.me) {
+    if e.user_id == Some(app.me) {
         return done_audit(app, guild, id);
     }
     let kept = sqlx::query(
@@ -459,6 +459,17 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
             ?e,
             "checking verification roles given while the bot was down failed"
         );
+    }
+    // After the re-quarantine, so its lookups do not hold that up.
+    if let Err(e) = crate::users_only::drop_bots(app, g.id, &g.members).await {
+        tracing::warn!(?e, "removing bots from the user-only lists failed");
+    }
+    // After the re-quarantine too; the roles stored at the last start filter until then.
+    if let Err(e) = app.sync_unpermittable(g.id).await {
+        tracing::warn!(?e, "reading the roles Discord hands out failed");
+    }
+    if let Err(e) = crate::native::on_guild_create(app, g.id).await {
+        tracing::warn!(?e, "reading the Discord AutoMod rules failed");
     }
     let fresh = g
         .joined_at

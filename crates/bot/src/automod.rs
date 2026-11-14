@@ -20,7 +20,7 @@ use twilight_model::{
     channel::Message,
     gateway::payload::incoming::MessageCreate,
     id::{
-        marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker, UserMarker},
         Id,
     },
 };
@@ -1150,9 +1150,32 @@ pub async fn sync_discord_rule(app: &App, guild: u64) {
         let cfg = app.cfg(guild).await?;
         let f = &cfg.automod.filters;
         if f.words.use_discord_automod {
-            app.api
-                .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice())
+            let roles = word_exempt_roles(app, guild).await?;
+            if let Some(cut) = newly_cut(guild, &roles) {
+                let log = Log::new("Discord AutoMod Exemptions Cut", ORANGE)
+                    .text(&format!(
+                        "Discord exempts at most {MAX_EXEMPT_ROLES} roles from a rule, so the keyword rule leaves out the lowest-ranked permit roles exempt from the word filter. TommyBot's own word filter still exempts them."
+                    ))
+                    .line("Left out", &cut.iter().map(|r| format!("<@&{r}>")).collect::<Vec<_>>().join(", "));
+                if let Err(e) = send_log(app, guild, LogKind::AutoMod, log).await {
+                    tracing::warn!(?e, guild, "could not log the cut exemptions");
+                }
+            }
+            let rule = app
+                .api
+                .sync_keyword_rule(guild, &blacklist_words(f), f.words.regex.as_slice(), &roles)
                 .await?;
+            // The rule as written from TommyBot's own config and permits: the sync owns every
+            // field that decides a hit, so approving what Discord returns is right.
+            if let Some(rule) = rule {
+                tommybot_automod::discord_api::approve_rule(
+                    &app.pool,
+                    guild as i64,
+                    &rule,
+                    app.me.get() as i64,
+                )
+                .await?;
+            }
         }
         anyhow::Ok(())
     };
@@ -1166,9 +1189,50 @@ pub async fn sync_discord_rule(app: &App, guild: u64) {
     }
 }
 
+/// Discord's cap on a rule's exempt roles.
+const MAX_EXEMPT_ROLES: usize = 20;
+
+/// The roles past [`MAX_EXEMPT_ROLES`] when they differ from the ones last reported for `guild`.
+fn newly_cut(guild: u64, roles: &[String]) -> Option<Vec<String>> {
+    static LAST: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<u64, Vec<String>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let cut = roles.get(MAX_EXEMPT_ROLES..).unwrap_or_default().to_vec();
+    let mut last = LAST.lock().unwrap();
+    if last.get(&guild).map_or(cut.is_empty(), |l| *l == cut) {
+        return None;
+    }
+    last.insert(guild, cut.clone());
+    (!cut.is_empty()).then_some(cut)
+}
+
+/// The roles Discord's keyword rule exempts: those whose permits are exempt from the word filter
+/// (`words` or `all`), as TommyBot's own filter exempts them, and that still exist and may carry a
+/// permit, highest permit rank first (Discord takes only [`MAX_EXEMPT_ROLES`]). Owner, EO and TA
+/// are users, not roles, so Discord cannot exempt them.
+async fn word_exempt_roles(app: &App, guild: u64) -> Result<Vec<String>> {
+    let gid = Id::new(guild);
+    let info = app.guild_info(gid).await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT r.role_id FROM permit_roles r JOIN permits p ON p.id = r.permit_id
+         WHERE p.guild_id = $1 AND p.whitelist && '{words,all}' AND NOT EXISTS (
+           SELECT 1 FROM unpermittable_roles u WHERE u.guild_id = $1 AND u.role_id = r.role_id)
+         GROUP BY r.role_id ORDER BY max(p.rank) DESC, r.role_id",
+    )
+    .bind(guild as i64)
+    .fetch_all(&app.pool)
+    .await?;
+    Ok(ids
+        .into_iter()
+        .filter_map(|r| Id::<RoleMarker>::new_checked(r as u64))
+        .filter(|r| info.roles.contains_key(r) && !info.unpermittable.contains(r))
+        .map(|r| r.to_string())
+        .collect())
+}
+
 /// Someone changed or deleted the bot's keyword rule in Discord: it is synced back (at most once a
-/// minute per guild, so a rule Discord stores differently cannot loop). The bot's own update
-/// matches the lists and changes nothing.
+/// minute per guild, so a rule Discord stores differently cannot loop; a change inside the minute
+/// gets one sync at its end). The bot's own update matches the lists and changes nothing.
 pub(crate) async fn on_rule_change(
     app: &App,
     rule: &twilight_model::guild::auto_moderation::AutoModerationRule,
@@ -1186,30 +1250,60 @@ pub(crate) async fn on_rule_change(
     if !f.words.use_discord_automod {
         return;
     }
-    let meta = &rule.trigger_metadata;
-    let same = rule_matches(
-        &blacklist_words(f),
-        f.words.regex.as_slice(),
-        rule.enabled,
-        meta.keyword_filter.as_deref().unwrap_or_default(),
-        meta.regex_patterns.as_deref().unwrap_or_default(),
-    );
+    // A failed read counts as changed: the sync below reads again and logs a failure.
+    let same = match word_exempt_roles(app, guild).await {
+        Ok(roles) => serde_json::to_value(rule)
+            .is_ok_and(|r| rule_matches(&blacklist_words(f), f.words.regex.as_slice(), &roles, &r)),
+        Err(_) => false,
+    };
     if !deleted && same {
         return;
     }
+    if let Some(wait_ms) = rule_sync_gate(guild, now_ms(), false) {
+        // One sync at the window's end, so the last change in it is not left standing.
+        let queued = sqlx::query(
+            "INSERT INTO scheduled_jobs (guild_id, kind, payload, run_at)
+             SELECT $1, 'keyword_rule_sync', '{}', now() + make_interval(secs => $2)
+             WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE guild_id = $1 AND kind = 'keyword_rule_sync')",
+        )
+        .bind(guild as i64)
+        .bind(wait_ms as f64 / 1000.0)
+        .execute(&app.pool)
+        .await;
+        if let Err(e) = queued {
+            tracing::warn!(?e, guild, "queueing the keyword rule sync failed");
+        }
+        return;
+    }
+    sync_discord_rule(app, guild).await;
+}
+
+/// Window between two syncs of the keyword rule after a Discord-side change.
+const RULE_SYNC_GAP_MS: i64 = 60_000;
+
+/// None: a sync may run now (recorded). Some(ms): one ran less than [`RULE_SYNC_GAP_MS`] ago,
+/// and the window ends in `ms`.
+/// `force` records a sync whatever the window (the held sync runs on time even with clock skew).
+fn rule_sync_gate(guild: u64, now: i64, force: bool) -> Option<i64> {
     static LAST: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, i64>>> =
         std::sync::LazyLock::new(Default::default);
-    let now = now_ms();
+    let mut last = LAST.lock().unwrap();
+    if let Some(&t) = last
+        .get(&guild)
+        .filter(|&&t| !force && now - t < RULE_SYNC_GAP_MS)
     {
-        let mut last = LAST.lock().unwrap();
-        if last.get(&guild).is_some_and(|&t| now - t < 60_000) {
-            return;
-        }
-        if last.len() > 10_000 {
-            last.clear();
-        }
-        last.insert(guild, now);
+        return Some(t + RULE_SYNC_GAP_MS - now);
     }
+    if last.len() > 10_000 {
+        last.clear();
+    }
+    last.insert(guild, now);
+    None
+}
+
+/// Job `keyword_rule_sync`: the sync a change inside the window was held for. It opens a new window.
+pub(crate) async fn rule_sync_job(app: &App, guild: u64) {
+    rule_sync_gate(guild, now_ms(), true);
     sync_discord_rule(app, guild).await;
 }
 
@@ -1264,6 +1358,34 @@ pub(crate) async fn action_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_sync_gate_holds_a_change_for_the_window_end() {
+        let g = 9_100_000_001;
+        assert_eq!(rule_sync_gate(g, 1_000, false), None);
+        assert_eq!(rule_sync_gate(g, 21_000, false), Some(40_000));
+        assert_eq!(rule_sync_gate(g, 61_000, true), None, "the held sync runs");
+        assert_eq!(
+            rule_sync_gate(g, 62_000, false),
+            Some(59_000),
+            "and opens a new window"
+        );
+        assert_eq!(rule_sync_gate(g, 121_000, false), None);
+    }
+
+    #[test]
+    fn exemptions_past_the_cap_are_reported_once() {
+        let g = 9_100_000_002;
+        let roles = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>();
+        assert_eq!(newly_cut(g, &roles(20)), None);
+        assert_eq!(
+            newly_cut(g, &roles(22)),
+            Some(vec!["20".into(), "21".into()])
+        );
+        assert_eq!(newly_cut(g, &roles(22)), None, "once");
+        assert_eq!(newly_cut(g, &roles(20)), None);
+        assert_eq!(newly_cut(g, &roles(21)), Some(vec!["20".into()]));
+    }
 
     #[test]
     fn with_msg_adds_the_trigger_once() {

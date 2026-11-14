@@ -169,8 +169,9 @@ async fn collect(
     if user == app.me || Some(user) == app.bot_owner {
         return Ok(false);
     }
-    let roles = match roles {
-        Some(r) => r,
+    // Just joined: the member is not read, so only the saved roles count and the bot flag is unknown.
+    let (roles, bot) = match roles {
+        Some(r) => (r, false),
         None => member_roles(app, src.gid, user).await?,
     };
     let (g, o, u) = (
@@ -178,7 +179,7 @@ async fn collect(
         src.owner.get() as i64,
         user.get() as i64,
     );
-    if raiders::not_collectable(&app.pool, g, o, u, &roles).await? {
+    if raiders::not_collectable(&app.pool, g, o, u, &roles, bot).await? {
         return Ok(false);
     }
     detail.members = Some(src.members);
@@ -198,12 +199,17 @@ async fn collect(
 }
 
 /// The member's roles; none when they are not in the server. Other errors return Err.
-async fn member_roles(app: &App, gid: Id<GuildMarker>, user: Id<UserMarker>) -> Result<Vec<i64>> {
-    Ok(http_err::member(&app.http, gid, user)
-        .await?
+/// The member's role ids and whether they are a bot account (none and false when not here).
+async fn member_roles(
+    app: &App,
+    gid: Id<GuildMarker>,
+    user: Id<UserMarker>,
+) -> Result<(Vec<i64>, bool)> {
+    let m = http_err::member(&app.http, gid, user).await?;
+    let roles = m
         .iter()
-        .flat_map(|m| m.roles.iter().map(|r| r.get() as i64))
-        .collect())
+        .flat_map(|m| m.roles.iter().map(|r| r.get() as i64));
+    Ok((roles.collect(), m.as_ref().is_some_and(|m| m.user.bot)))
 }
 
 /// Writes the evidence and its entry, then applies the auto-listing rule. True when the evidence

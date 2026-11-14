@@ -344,19 +344,32 @@ pub async fn handle(app: &App, i: &Interaction) -> Result<bool> {
                 .chars()
                 .map(|b| b == '1')
                 .collect();
-            let saved = save(app, gid, actor.get(), &["whitelist", "antinuke"], |doc| {
-                if !may_edit(&level, "whitelist") {
-                    return Err("You may not change the whitelist".into());
+            let quarantine = ok[3] && picked.get(3) == Some(&true);
+            let no = match quarantine {
+                true => {
+                    let what = "on the quarantine whitelist";
+                    crate::users_only::refuse(app, &[id as i64], what).await
                 }
-                for t in (0..TYPES.len()).filter(|t| ok[*t]) {
-                    let v = vec![json!(id.to_string())];
-                    let want = picked.get(t).copied().unwrap_or(false);
-                    let p = path(t, kind).expect("allowed type has a path");
-                    apply(doc, &p, if want { Edit::Add(v) } else { Edit::Remove(v) });
+                false => None,
+            };
+            let saved = match no {
+                Some(no) => Err(no),
+                None => {
+                    save(app, gid, actor.get(), &["whitelist", "antinuke"], |doc| {
+                        if !may_edit(&level, "whitelist") {
+                            return Err("You may not change the whitelist".into());
+                        }
+                        for t in (0..TYPES.len()).filter(|t| ok[*t]) {
+                            let v = vec![json!(id.to_string())];
+                            let want = picked.get(t).copied().unwrap_or(false);
+                            let p = path(t, kind).expect("allowed type has a path");
+                            apply(doc, &p, if want { Edit::Add(v) } else { Edit::Remove(v) });
+                        }
+                        Ok(())
+                    })
+                    .await?
                 }
-                Ok(())
-            })
-            .await?;
+            };
             match saved {
                 Ok(doc) => {
                     let now = current(&GuildCfg::parse(&doc), kind, id);

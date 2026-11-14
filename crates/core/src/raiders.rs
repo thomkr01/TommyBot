@@ -19,13 +19,15 @@ pub const NOTE_MAX: usize = 400;
 
 /// Evidence about `user` may not come from `guild`: the server opted out, or the user is its owner,
 /// an extra owner, a trusted admin or holds a permit. A contained staff member is most likely a
-/// hacked account, and quarantine took their roles, so the roles it saved count too.
+/// hacked account, and quarantine took their roles, so the roles it saved count too. `bot`: the
+/// user is a bot account, which is never Extra Owner or Trusted Admin (Q4).
 pub async fn not_collectable(
     pool: &PgPool,
     guild: i64,
     owner: i64,
     user: i64,
     roles: &[i64],
+    bot: bool,
 ) -> Result<bool> {
     let opted_out: Option<bool> = sqlx::query_scalar(
         "SELECT (config->'raider_list'->>'no_collect')::boolean FROM guild_config
@@ -50,7 +52,7 @@ pub async fn not_collectable(
         .copied()
         .chain(saved.unwrap_or_default())
         .collect();
-    Ok(permits::resolve(pool, guild, owner, user, &all).await? != Level::None)
+    Ok(permits::resolve(pool, guild, owner, user, &all, bot).await? != Level::None)
 }
 
 /// One evidence row.
@@ -155,6 +157,8 @@ pub struct Report<'a> {
     pub members: u64,
     pub days_with_bot: i64,
     pub roles: &'a [i64],
+    /// The reported user is a bot account.
+    pub bot: bool,
     /// The bot and the bot owner, never reported.
     pub protected: [i64; 2],
 }
@@ -167,7 +171,7 @@ pub async fn report(pool: &PgPool, r: &Report<'_>) -> Result<Result<(), String>>
         return Ok(Err(no));
     }
     if r.protected.contains(&r.user)
-        || not_collectable(pool, r.guild, r.owner, r.user, r.roles).await?
+        || not_collectable(pool, r.guild, r.owner, r.user, r.roles, r.bot).await?
     {
         return Ok(Err("The Raider List does not take reports about this account from this server (its staff, an opted-out server, TommyBot or its owner).".into()));
     }
@@ -290,6 +294,7 @@ mod tests {
             members: 500,
             days_with_bot: 30,
             roles: &[],
+            bot: false,
             protected: [1, 2],
         };
         // A moderator contained by anti-nuke: the permit role is only in the saved roles.

@@ -278,7 +278,7 @@ fn user_ids(v: &str) -> Vec<i64> {
 }
 
 /// `statics 10 ?add/?remove USER`: writes the `trusted_admins` table the dashboard permits page uses.
-async fn edit_trusted_admins(
+pub(crate) async fn edit_trusted_admins(
     app: &App,
     gid: Id<GuildMarker>,
     (level_user, level): (u64, &Level),
@@ -298,6 +298,11 @@ async fn edit_trusted_admins(
     let ids = user_ids(v);
     if ids.is_empty() {
         return Ok("Give at least one user mention or ID".into());
+    }
+    if !matches!(op, Op::Remove(..)) {
+        if let Some(no) = crate::users_only::refuse(app, &ids, "a Trusted Admin").await {
+            return Ok(no);
+        }
     }
     let sql = if matches!(op, Op::Remove(..)) {
         "delete from trusted_admins where guild_id = $1 and user_id = any($2)"

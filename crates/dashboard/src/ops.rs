@@ -449,6 +449,12 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
             if !list.contains(&id) {
                 return Err(ApiError::NotFound);
             }
+            // A bot is refused here as in any save of these lists: only users (Thomas 11-13).
+            let w = match kind {
+                "qw" => json!({"antinuke": {"quarantine_whitelist": [rest]}}),
+                k => json!({"permits": {k: [rest]}}),
+            };
+            crate::api::users_only(st, &w, &json!({})).await?;
             list.retain(|u| *u != id);
             if table.is_empty() {
                 // The quarantine whitelist lives in the config, so this keep is a config change.
@@ -479,6 +485,9 @@ async fn keep_staff(st: &AppState, s: &Sess, guild: i64, c: &Value, entry: Optio
                 .position(|r| r["role"] == role && r["permit"] == permit)
                 .ok_or(ApiError::NotFound)?;
             roles.remove(at);
+            // A role Discord hands out (Onboarding, linked, subscription) cannot get its permit back.
+            let added = json!({"custom": [{"roles": [role]}]});
+            crate::api::permit_roles_ok(st, guild, &added, &json!({})).await?;
             let role: i64 = role.parse().map_err(|_| ApiError::NotFound)?;
             let n = sqlx::query(
                 "insert into permit_roles (permit_id, guild_id, role_id)
@@ -1404,9 +1413,33 @@ mod tests {
         );
         assert!(!rows[2].detail.contains("previous owner"));
         let c = json!({});
+        crate::api::g3_handler_tests::seed_user(&st, 12, false);
+        crate::api::g3_handler_tests::seed_user(&st, 14, false);
+        crate::api::g3_handler_tests::seed_user(&st, 13, true);
+        // Role 20 comes back: a plain role, no Onboarding (Q5).
+        {
+            let mut m = st.discord.memo.lock().unwrap();
+            let now = std::time::Instant::now();
+            m.insert(format!("/guilds/{g}/roles"), (now, Some(json!([]))));
+            m.insert(format!("/guilds/{g}/onboarding"), (now, None));
+        }
         let keep = |e: &'static str| keep_staff(&st, &s, g, &c, Some(e));
         let _ = keep("ta:12").await.unwrap();
+        // The kept permit role reaches the bot (its keyword rule exemptions) as a config change.
+        let mut l = sqlx::postgres::PgListener::connect_with(&st.db)
+            .await
+            .unwrap();
+        l.listen("config_changed").await.unwrap();
         let _ = keep("role:20:Admins").await.unwrap();
+        let heard = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let n = l.recv().await.unwrap();
+                if n.payload().starts_with(&format!("{g}:")) {
+                    break;
+                }
+            }
+        });
+        assert!(heard.await.is_ok(), "config_changed sent");
         let _ = keep("qw:14").await.unwrap();
         let qw: Value = sqlx::query_scalar("select config->'antinuke'->'quarantine_whitelist' from guild_config where guild_id = $1 order by version desc limit 1")
             .bind(g).fetch_one(&st.db).await.unwrap();
@@ -1449,6 +1482,12 @@ mod tests {
             keep_staff(&st, &other, g, &json!({}), Some("ta:13")).await,
             Err(ApiError::Forbidden(_))
         ));
+        // 13 is a bot: keeping it as TA is refused, so it stays paused (Thomas 11-13).
+        let r = keep("ta:13").await;
+        assert!(
+            matches!(&r, Err(ApiError::BadRequest(m)) if m.contains("bot role")),
+            "{r:?}"
+        );
         let _ = keep("done").await.unwrap();
         assert!(
             handover_check(&st, g).await.unwrap().is_empty(),

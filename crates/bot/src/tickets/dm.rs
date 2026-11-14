@@ -637,6 +637,7 @@ mod tests {
             roles: Default::default(),
             role_perms: Default::default(),
             managed: Default::default(),
+            unpermittable: Default::default(),
             parents: Default::default(),
             channels: [Id::new(CAT)].into(),
             nsfw: Default::default(),

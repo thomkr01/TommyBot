@@ -13,7 +13,10 @@ use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tommybot_automod::{
-    discord_api::{rule_body, BotAction, DiscordAutomodCfg, MentionScope, RuleSpec},
+    discord_api::{
+        approve_rule, rule_body, rule_fingerprint, BotAction, DiscordAutomodCfg, MentionScope,
+        RuleSpec,
+    },
     lockdown::{kind_from, tshoot, Fix, LockKind, Overwrite, Problem, RoleInfo, Snapshot},
 };
 use tommybot_core::jobs;
@@ -436,6 +439,7 @@ async fn create_rule(
         .await?;
     let id = made["id"].as_str().unwrap_or_default();
     trust_rule(&st, guild, id).await?;
+    approve_rule(&st.db, guild, &made, s.user_id).await?;
     set_bot_actions(&st, &s, guild, id, &spec).await?;
     audit(
         &st,
@@ -531,10 +535,12 @@ async fn update_rule(
 ) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
     let b = body(&spec)?;
-    st.discord
+    let now = st
+        .discord
         .call(Method::PATCH, &rule_path(guild, &rule)?, Some(b))
         .await?;
     trust_rule(&st, guild, &rule).await?;
+    approve_rule(&st.db, guild, &now, s.user_id).await?;
     set_bot_actions(&st, &s, guild, &rule, &spec).await?;
     audit(
         &st,
@@ -603,13 +609,32 @@ async fn set_enabled(
     Json(b): Json<EnabledBody>,
 ) -> Res {
     require(&st, &s, guild, Level::Editor, false).await?;
-    st.discord
+    let now = st
+        .discord
         .call(
             Method::PATCH,
             &rule_path(guild, &rule)?,
             Some(json!({"enabled": b.enabled})),
         )
         .await?;
+    // The switch approves the rule only if nothing else changed since its approval: otherwise it
+    // would approve a change made in Discord that nobody here reviewed.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT fingerprint FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = $2",
+    )
+    .bind(guild)
+    .bind(rule.parse::<i64>().unwrap_or(0))
+    .fetch_optional(&st.db)
+    .await?;
+    let only_switched = [true, false].iter().any(|&on| {
+        let mut was = now.clone();
+        was["enabled"] = json!(on);
+        stored.as_deref() == Some(rule_fingerprint(&was).as_str())
+    });
+    if only_switched {
+        approve_rule(&st.db, guild, &now, s.user_id).await?;
+        trust_rule(&st, guild, &rule).await?;
+    }
     audit(
         &st,
         &s,
@@ -624,6 +649,11 @@ async fn set_enabled(
         ),
     )
     .await?;
+    if !only_switched {
+        return Err(ApiError::Busy(
+            "The switch is set, but the rule was changed outside the dashboard. Open it, review it and save it: until then TommyBot takes no action on its hits.",
+        ));
+    }
     Ok(Json(json!({"ok": true})))
 }
 
@@ -704,6 +734,121 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+    }
+
+    /// Runs only when DATABASE_URL points at a scratch Postgres. An Editor's create and edit
+    /// approve the rule as Discord returns it, so the bot acts on that state.
+    #[tokio::test]
+    async fn editor_saves_approve_the_rule_discord_returns() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let db = tommybot_core::db::connect(&url).await.unwrap();
+        let g = 9_870_000_000 + std::process::id() as i64;
+        let owner = g + 1;
+        let rule = |words: Value| {
+            json!({"id": "55", "guild_id": g.to_string(), "name": "r", "event_type": 1,
+                   "trigger_type": 1, "trigger_metadata": {"keyword_filter": words},
+                   "actions": [{"type": 1}], "enabled": true, "exempt_roles": [], "exempt_channels": []})
+        };
+        let (made, edited) = (rule(json!(["a"])), rule(json!(["b"])));
+        let (m, e) = (made.clone(), edited.clone());
+        let mock = Router::new()
+            .route(
+                "/guilds/{g}",
+                get(move || async move { Json(json!({"owner_id": owner.to_string()})) }),
+            )
+            .route(
+                "/guilds/{g}/auto-moderation/rules",
+                post(move || async move { Json(m) }),
+            )
+            .route(
+                "/guilds/{g}/auto-moderation/rules/{r}",
+                axum::routing::patch(move || async move { Json(e) }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, mock).await });
+        let st = AppState {
+            db: db.clone(),
+            discord: crate::discord::Discord {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                bot_token: String::new(),
+                redirect_uri: String::new(),
+                api,
+                memo: Default::default(),
+            },
+            secure: false,
+            totp: Default::default(),
+            rate: Default::default(),
+            ips: Default::default(),
+            vpn_logged: Default::default(),
+        };
+        let s = Sess {
+            id: String::new(),
+            user_id: owner,
+            username: "t".into(),
+            access_token: String::new(),
+            stepped_up: true,
+            csrf: String::new(),
+        };
+        let approved = || async {
+            sqlx::query_as::<_, (String, i64)>(
+                "SELECT fingerprint, approved_by FROM automod_rule_approved
+                 WHERE guild_id = $1 AND rule_id = 55",
+            )
+            .bind(g)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let spec = || RuleSpec {
+            name: "r".into(),
+            trigger: "keyword".into(),
+            keywords: vec!["a".into()],
+            block_message: true,
+            ..Default::default()
+        };
+        let _ = create_rule(State(st.clone()), s.clone(), Path(g), Json(spec()))
+            .await
+            .unwrap();
+        let fp = tommybot_automod::discord_api::rule_fingerprint;
+        assert_eq!(approved().await, (fp(&made), owner));
+        let _ = update_rule(
+            State(st.clone()),
+            s.clone(),
+            Path((g, "55".into())),
+            Json(spec()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approved().await, (fp(&edited), owner));
+        // The switch approves only when nothing else changed: Discord returns `edited`.
+        let switch = |on| Json(EnabledBody { enabled: on });
+        let path = || Path((g, "55".into()));
+        let _ = set_enabled(State(st.clone()), s.clone(), path(), switch(false))
+            .await
+            .unwrap();
+        assert_eq!(approved().await, (fp(&edited), owner));
+        approve_rule(&db, g, &made, 1).await.unwrap();
+        let r = set_enabled(State(st.clone()), s.clone(), path(), switch(false)).await;
+        assert!(matches!(r, Err(ApiError::Busy(_))), "changed outside");
+        assert_eq!(approved().await, (fp(&made), 1), "not approved");
+        for t in [
+            "automod_rule_approved",
+            "automod_rule_untrusted",
+            "guild_config",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {t} WHERE guild_id = $1"
+            )))
+            .bind(g)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
     }
 
     /// Migrating only turns the sync on and keeps the local lists (thread and reaction names read

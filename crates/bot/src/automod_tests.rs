@@ -369,6 +369,10 @@ async fn native_hits_of_whitelisted_members_do_not_fill_a_scope() {
         }}),
     )
     .await;
+    t.set(|m| {
+        m.rules
+            .insert(gid.get(), vec![native_rule(gid.get(), &["x"])]);
+    });
     let hit =
         |user: u64| -> twilight_model::gateway::payload::incoming::AutoModerationActionExecution {
             serde_json::from_value(json!({
@@ -400,6 +404,10 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
         json!({"discord_automod": {"actions": {"77": ["timeout"]}}}),
     )
     .await;
+    t.set(|m| {
+        m.rules
+            .insert(gid.get(), vec![native_rule(gid.get(), &["x"])]);
+    });
     let edit = |id: u64, actor: u64| -> twilight_model::guild::audit_log::AuditLogEntry {
         serde_json::from_value(json!({
             "id": id.to_string(), "action_type": 141, "guild_id": gid.to_string(), "target_id": "77",
@@ -428,11 +436,256 @@ async fn a_rule_changed_without_a_permit_triggers_nothing_until_a_trusted_change
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();
     assert_eq!(t.calls("PATCH"), 0, "no action after an untrusted change");
     crate::native::rule_changed(gid.get(), 77);
-    crate::native::on_rule_audit(&t.app, &edit(4, t.owner()))
+    // A fresh entry: the gateway update just now is its own, not a later change.
+    let now = ((crate::automod::now_ms() - 1_420_070_400_000) as u64) << 22;
+    crate::native::on_rule_audit(&t.app, &edit(now, t.owner()))
         .await
         .unwrap();
     crate::native::on_native_hit(&t.app, &hit).await.unwrap();
     assert!(t.calls("PATCH") >= 1, "acts again after the owner's change");
+    t.cleanup().await;
+}
+
+/// Native rule 77 as Discord's JSON, blocking `words`.
+fn native_rule(guild: u64, words: &[&str]) -> Value {
+    json!({
+        "id": "77", "guild_id": guild.to_string(), "name": "r", "creator_id": "5",
+        "event_type": 1, "trigger_type": 1, "trigger_metadata": {"keyword_filter": words},
+        "actions": [{"type": 1}], "enabled": true, "exempt_roles": [], "exempt_channels": [],
+    })
+}
+
+fn native_hit(
+    guild: u64,
+    rule: u64,
+    user: u64,
+) -> twilight_model::gateway::payload::incoming::AutoModerationActionExecution {
+    serde_json::from_value(json!({
+        "guild_id": guild.to_string(), "action": {"type": 1}, "rule_id": rule.to_string(),
+        "rule_trigger_type": 1, "user_id": user.to_string(), "content": "x",
+        "matched_keyword": null, "matched_content": null,
+    }))
+    .unwrap()
+}
+
+fn rule_edit(guild: u64, id: u64, actor: u64) -> twilight_model::guild::audit_log::AuditLogEntry {
+    serde_json::from_value(json!({
+        "id": id.to_string(), "action_type": 141, "guild_id": guild.to_string(),
+        "target_id": "77", "user_id": actor.to_string(), "reason": null, "changes": [],
+    }))
+    .unwrap()
+}
+
+/// Plan item 1: the bot acts on a native rule only in a state a trusted person approved. Rules that
+/// exist at GuildCreate are approved once, also when the log fails; a hit approves nothing. A
+/// change with no audit entry (the bot lacks View Audit Log) stops actions until a trusted change.
+#[tokio::test]
+async fn a_native_rule_acts_only_in_an_approved_state() {
+    let Some(t) = T::new(741).await else { return };
+    let g = t.g(0).get();
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"]}},
+               "logging": {"routes": {"auto_mod": "88"}}}),
+    )
+    .await;
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"])]);
+        m.fail_rules = true;
+        m.fail_channels.push(88);
+    });
+    let hit = |user: u64| {
+        let app = &t.app;
+        async move { crate::native::on_native_hit(app, &native_hit(g, 77, user)).await }
+    };
+    assert!(crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .is_err());
+    t.set(|m| m.fail_rules = false);
+    hit(t.base + 1).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 0, "a hit approves nothing");
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    hit(t.base + 2).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "approved once at GuildCreate");
+    assert_eq!(
+        t.count(
+            "SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1 AND approved_by = 0"
+        )
+        .await,
+        2,
+        "rule 77 and the guild's done marker"
+    );
+    // Someone changes the rule in Discord; no audit entry comes.
+    let changed = native_rule(g, &["y"]);
+    t.set(|m| {
+        m.rules.insert(g, vec![changed.clone()]);
+    });
+    crate::native::rule_seen(&serde_json::from_value(changed).unwrap());
+    hit(t.base + 3).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "no action on a state nobody approved");
+    // The owner's change in Discord approves the rule as it is now.
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, 1, t.owner()))
+        .await
+        .unwrap();
+    hit(t.base + 4).await.unwrap();
+    assert_eq!(t.calls("PATCH"), 2, "acts again after the owner's change");
+    t.cleanup().await;
+}
+
+/// Q1 (Thomas 11-14): a guild that adds the bot later, or comes back after its data was purged,
+/// gets the rules it has then approved once at GuildCreate.
+#[tokio::test]
+async fn a_guild_back_after_the_purge_gets_its_rules_approved_once() {
+    let Some(t) = T::new(747).await else { return };
+    let g = t.g(0).get();
+    let cfg = json!({"discord_automod": {"actions": {"77": ["timeout"]}}});
+    t.server_config(0, t.owner(), cfg.clone()).await;
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"])]);
+    });
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    let approved = || t.count("SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1");
+    assert_eq!(approved().await, 2, "rule 77 and the done marker");
+    tommybot_core::db::purge_guild(&t.app.pool, g as i64)
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 0);
+    // Back with a rule changed while the bot was away: approved as it is now.
+    t.server_config(0, t.owner(), cfg).await;
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["y"])]);
+    });
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 2);
+    crate::native::on_native_hit(&t.app, &native_hit(g, 77, t.base + 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        t.calls("PATCH"),
+        1,
+        "acts on the rule approved at the return"
+    );
+    t.cleanup().await;
+}
+
+/// A trusted entry approves the fetched rule only if no gateway update came after it; a failed
+/// fetch is logged and approves nothing. GuildCreate drops the rules held from the old session.
+#[tokio::test]
+async fn a_trusted_entry_approves_only_its_own_state() {
+    let Some(t) = T::new(743).await else { return };
+    let g = t.g(0).get();
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"]}},
+               "logging": {"routes": {"auto_mod": "88"}}}),
+    )
+    .await;
+    t.app.log_public.lock().unwrap().insert(
+        twilight_model::id::Id::new(88),
+        (false, std::time::Instant::now()),
+    );
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"])]);
+    });
+    let approved = || {
+        t.count("SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = 77")
+    };
+    // An entry from a minute ago, and a gateway update just now: a later change.
+    let old = ((crate::automod::now_ms() - 60_000 - 1_420_070_400_000) as u64) << 22;
+    crate::native::rule_changed(g, 77);
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, old, t.owner()))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 0, "left for the later change's entry");
+    // A fresh entry, its fetch fails.
+    let fresh = ((crate::automod::now_ms() - 1_420_070_400_000) as u64) << 22;
+    t.set(|m| m.fail_rules = true);
+    crate::native::rule_changed(g, 77);
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, fresh, t.owner()))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 0, "a failed fetch approves nothing");
+    assert_eq!(t.calls("POST /channels/88/messages"), 1, "and is logged");
+    t.set(|m| m.fail_rules = false);
+    crate::native::rule_changed(g, 77);
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, fresh + 1, t.owner()))
+        .await
+        .unwrap();
+    assert_eq!(approved().await, 1, "its own state is approved");
+    crate::native::on_native_hit(&t.app, &native_hit(g, 77, t.base + 1))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PATCH"), 1);
+    // A new session missed a change: GuildCreate drops the held state, the hit fetches it.
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["y"])]);
+    });
+    t.exec("INSERT INTO automod_rule_approved (guild_id, rule_id, fingerprint, approved_by) VALUES ($1, 0, '', 0)").await;
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    crate::native::on_native_hit(&t.app, &native_hit(g, 77, t.base + 2))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "the missed change is not approved");
+    t.cleanup().await;
+}
+
+/// The bot hashes twilight's model of a rule, the dashboard and the sync Discord's JSON.
+#[test]
+fn twilight_and_discord_json_give_one_fingerprint() {
+    let raw = json!({
+        "id": "77", "guild_id": "1", "name": "r", "creator_id": "5", "event_type": 1,
+        "trigger_type": 1, "enabled": true, "exempt_roles": ["3"], "exempt_channels": [],
+        "trigger_metadata": {"keyword_filter": ["a"], "regex_patterns": [], "allow_list": []},
+        "actions": [{"type": 1, "metadata": {}}, {"type": 2, "metadata": {"channel_id": "4"}}],
+    });
+    let model: twilight_model::guild::auto_moderation::AutoModerationRule =
+        serde_json::from_value(raw.clone()).unwrap();
+    let fp = tommybot_automod::discord_api::rule_fingerprint;
+    assert_eq!(fp(&raw), fp(&serde_json::to_value(model).unwrap()));
+}
+
+/// The first-start approval skips a rule an audit entry shows was changed without a permit.
+#[tokio::test]
+async fn first_start_skips_a_rule_changed_without_a_permit() {
+    let Some(t) = T::new(742).await else { return };
+    let g = t.g(0).get();
+    t.server_config(
+        0,
+        t.owner(),
+        json!({"discord_automod": {"actions": {"77": ["timeout"], "78": ["timeout"]}}}),
+    )
+    .await;
+    let mut other = native_rule(g, &["z"]);
+    other["id"] = json!("78");
+    t.set(|m| {
+        m.rules.insert(g, vec![native_rule(g, &["x"]), other]);
+    });
+    crate::native::on_rule_audit(&t.app, &rule_edit(g, 1, t.base + 5))
+        .await
+        .unwrap();
+    crate::native::on_guild_create(&t.app, t.g(0))
+        .await
+        .unwrap();
+    crate::native::on_native_hit(&t.app, &native_hit(g, 78, t.base + 1))
+        .await
+        .unwrap();
+    assert_eq!(t.calls("PATCH"), 1, "rule 78 was approved");
+    assert_eq!(
+        t.count("SELECT count(*) FROM automod_rule_approved WHERE guild_id = $1 AND rule_id = 77")
+            .await,
+        0,
+        "rule 77 was not"
+    );
     t.cleanup().await;
 }
 
@@ -645,6 +898,38 @@ async fn synced_words_still_count_locally() {
     let _ = on_message(&t.app, &post(&t, "100", t.base + 6, "darn it")).await;
     assert_eq!(t.calls("DELETE /channels/7/messages/100"), 1);
     done(t).await;
+}
+
+/// Q3: Discord's keyword rule exempts the roles of permits exempt from the word filter (`words`
+/// or `all`), not other permits' roles, a deleted role, or a linked role that cannot carry a
+/// permit (Q5).
+#[tokio::test]
+async fn the_keyword_rule_exempts_the_word_permit_roles() {
+    let Some(t) = T::new(744).await else { return };
+    t.server_config(0, t.owner(), json!({})).await;
+    t.app.invalidate_guild(t.g(0));
+    let g = t.g(0).get();
+    t.set(|m| {
+        let r = |id| (id, false, 0, 1);
+        m.roles
+            .insert(g, vec![(g, false, 0, 0), r(601), r(602), r(603), r(604)]);
+        m.role_tags.insert(604, json!({"guild_connections": null}));
+        m.members.insert((g, crate::test_support::ME), vec![]);
+    });
+    t.exec(
+        "INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES
+           ($1 + 1, $1, 'Words', '{}', '{words}'), ($1 + 2, $1, 'All', '{}', '{all}'),
+           ($1 + 3, $1, 'Mods', '{ban}', '{links}')",
+    )
+    .await;
+    t.exec(
+        "INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES
+           ($1 + 1, $1, 601), ($1 + 2, $1, 602), ($1 + 3, $1, 603), ($1 + 1, $1, 604),
+           ($1 + 1, $1, 605)",
+    )
+    .await;
+    assert_eq!(word_exempt_roles(&t.app, g).await.unwrap(), ["601", "602"]);
+    t.cleanup().await;
 }
 
 /// With the auto timeouts off a heat strike is logged as a strike, never as a timeout.
