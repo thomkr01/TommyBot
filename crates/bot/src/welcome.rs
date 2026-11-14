@@ -464,6 +464,10 @@ pub async fn on_guild_create(app: &App, ev: &GuildCreate) -> Result<()> {
     if let Err(e) = crate::users_only::drop_bots(app, g.id, &g.members).await {
         tracing::warn!(?e, "removing bots from the user-only lists failed");
     }
+    // After the re-quarantine too; the roles stored at the last start filter until then.
+    if let Err(e) = app.sync_unpermittable(g.id).await {
+        tracing::warn!(?e, "reading the roles Discord hands out failed");
+    }
     if let Err(e) = crate::native::on_guild_create(app, g.id).await {
         tracing::warn!(?e, "reading the Discord AutoMod rules failed");
     }

@@ -159,7 +159,7 @@ async fn who(
         owner.get() as i64,
         user.get() as i64,
         &ids,
-        false, // bots returned above
+        bot,
     )
     .await?;
     Ok((!matches!(level, permits::Level::None), name))

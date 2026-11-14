@@ -2077,7 +2077,8 @@ async fn a_verify_permit_verifies_a_join_quarantined_member_by_hand() {
 }
 
 /// Q4 and Q5 (Thomas 11-14): a bot listed as Trusted Admin or on the quarantine whitelist gets
-/// neither trust, only the permit on its own role; a linked role carries no permit at runtime.
+/// neither trust, only the permit on its own role; a linked role and an Onboarding role carry no
+/// permit in any lookup once read (GuildCreate, GuildUpdate), and that is logged once.
 #[tokio::test]
 async fn a_listed_bot_gets_no_user_trust_and_a_linked_role_no_permit() {
     let Some(t) = T::new(746).await else { return };
@@ -2097,6 +2098,11 @@ async fn a_listed_bot_gets_no_user_trust_and_a_linked_role_no_permit() {
         m.members.insert((g.get(), bot), vec![ROLE]);
         m.members.insert((g.get(), user), vec![]);
         m.members.insert((g.get(), linked), vec![AUTOROLE]);
+        m.members.insert((g.get(), linked + 1), vec![VERIFIED]);
+        m.onboarding.insert(
+            g.get(),
+            json!({"prompts": [{"options": [{"role_ids": [VERIFIED.to_string()]}]}]}),
+        );
     });
     sqlx::query("INSERT INTO trusted_admins (guild_id, user_id) VALUES ($1, $2), ($1, $3)")
         .bind(g.get() as i64)
@@ -2108,9 +2114,26 @@ async fn a_listed_bot_gets_no_user_trust_and_a_linked_role_no_permit() {
     // 501 = ROLE (the bot's role), 504 = AUTOROLE (linked)
     t.exec("INSERT INTO permits (id, guild_id, name, perms, whitelist) VALUES ($1 + 1, $1, 'Bot', '{}', '{quarantine}'), ($1 + 2, $1, 'Linked', '{ban}', '{}')")
         .await;
-    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 501), ($1 + 2, $1, 504)")
+    t.exec("INSERT INTO permit_roles (permit_id, guild_id, role_id) VALUES ($1 + 1, $1, 501), ($1 + 2, $1, 504), ($1 + 2, $1, 503)")
         .await;
     let owner = t.app.guild_info(g).await.unwrap().owner;
+    let ignored = "A permit is on a role Discord hands out";
+    assert!(
+        t.app
+            .level(g, owner, Id::new(linked))
+            .await
+            .unwrap()
+            .has("ban"),
+        "not read yet"
+    );
+    t.app.sync_unpermittable(g).await.unwrap();
+    t.app.sync_unpermittable(g).await.unwrap();
+    assert_eq!(t.calls(ignored), 1, "logged once");
+    assert_eq!(
+        t.app.level(g, owner, Id::new(linked + 1)).await.unwrap(),
+        tommybot_core::permits::Level::None,
+        "an Onboarding role"
+    );
     let level = |u: u64| t.app.level(g, owner, Id::new(u));
     let b = level(bot).await.unwrap();
     assert!(!b.immune(), "a listed bot is no Trusted Admin");

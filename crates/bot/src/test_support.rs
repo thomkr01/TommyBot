@@ -71,6 +71,8 @@ pub(crate) struct Mock {
     pub(crate) rules: HashMap<u64, Vec<Value>>,
     /// AutoMod rule lookups fail with 500.
     pub(crate) fail_rules: bool,
+    /// Onboarding by guild, as Discord's JSON; 404 (none set up) when not set.
+    pub(crate) onboarding: HashMap<u64, Value>,
     pub(crate) log: Vec<String>,
 }
 
@@ -270,6 +272,10 @@ fn route(m: &mut Mock, method: &str, target: &str, reason: String, body: &str) -
                 .collect();
             (200, json!(all).to_string())
         }
+        ("GET", ["guilds", g, "onboarding"]) => match m.onboarding.get(&n(g)) {
+            Some(o) => (200, o.to_string()),
+            None => err(404, 10004),
+        },
         ("GET", ["guilds", g, "channels"]) => match m.channels.get(&n(g)) {
             Some(c) => (200, c.to_string()),
             None => (200, "[]".into()),
@@ -562,6 +568,7 @@ impl T {
             "DELETE FROM automod_rule_approved WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM guild_left WHERE guild_id BETWEEN $1 AND $1 + 9",
             "DELETE FROM owner_handovers WHERE guild_id BETWEEN $1 AND $1 + 9",
+            "DELETE FROM unpermittable_roles WHERE guild_id BETWEEN $1 AND $1 + 9",
         ] {
             self.exec(sql).await;
         }

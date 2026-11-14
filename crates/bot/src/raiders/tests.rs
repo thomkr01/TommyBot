@@ -648,9 +648,13 @@ async fn staff_lifting_a_list_action_allows_the_user_and_purge_keeps_the_list() 
         .unwrap()
     };
     on_unban(&t.app, &entry(ME, u)).await.unwrap();
-    assert!(!exempt(&t.app, t.g(0), u, Some(&[][..])).await.unwrap());
+    assert!(!exempt(&t.app, t.g(0), u, Some((&[][..], false)))
+        .await
+        .unwrap());
     on_unban(&t.app, &entry(77, u)).await.unwrap();
-    assert!(exempt(&t.app, t.g(0), u, Some(&[][..])).await.unwrap());
+    assert!(exempt(&t.app, t.g(0), u, Some((&[][..], false)))
+        .await
+        .unwrap());
     // The dashboard unbans as the bot: the staff member who recorded it just before is the cause.
     sqlx::query("INSERT INTO action_log (guild_id, actor_id, action, target_id) VALUES ($1, 78, 'unban', $2)")
         .bind(t.g(0).get() as i64)

@@ -85,12 +85,13 @@ pub(crate) async fn allowed(app: &App, gid: Id<GuildMarker>, user: u64) -> Resul
 }
 
 /// Never acted on here: the bot, the bot owner, the owner, extra owners, trusted admins, the
-/// anti-nuke whitelist, and whoever staff let back in. `roles` when the caller has them already.
+/// anti-nuke whitelist, and whoever staff let back in. `member` (role ids, bot account) when the
+/// caller has it already.
 pub(super) async fn exempt(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
-    roles: Option<&[i64]>,
+    member: Option<(&[i64], bool)>,
 ) -> Result<bool> {
     if allowed(app, gid, user.get()).await? {
         return Ok(true);
@@ -98,10 +99,10 @@ pub(super) async fn exempt(
     let owner = live_owner(app, gid)
         .await?
         .context("the server is not visible")?;
-    let level = match roles {
-        Some(r) => {
+    let level = match member {
+        Some((r, bot)) => {
             let (g, o, u) = (gid.get() as i64, owner.get() as i64, user.get() as i64);
-            permits::resolve(&app.pool, g, o, u, r, false).await?
+            permits::resolve(&app.pool, g, o, u, r, bot).await?
         }
         None => app.level(gid, owner, user).await?,
     };
@@ -277,10 +278,10 @@ pub(super) async fn alert_member(
     app: &App,
     gid: Id<GuildMarker>,
     user: Id<UserMarker>,
-    roles: &[i64],
+    (roles, bot): (&[i64], bool),
     entry: &Entry,
 ) -> Result<()> {
-    if exempt(app, gid, user, Some(roles)).await? {
+    if exempt(app, gid, user, Some((roles, bot))).await? {
         return Ok(());
     }
     let fresh = sqlx::query(

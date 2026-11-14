@@ -341,7 +341,7 @@ impl App {
     }
 
     /// Permit level of a member; a user who is not in the server has none. A bot is never EO or
-    /// TA (Q4). A role Discord hands out by itself (Onboarding aside, Q5) carries no permit here.
+    /// TA (Q4). A role Discord hands out by itself carries no permit ([`permits::top_permit`], Q5).
     pub async fn level(
         &self,
         guild: Id<GuildMarker>,
@@ -350,12 +350,9 @@ impl App {
     ) -> Result<Level> {
         let member = crate::http_err::member(&self.http, guild, user).await?;
         let bot = member.as_ref().is_some_and(|m| m.user.bot);
-        // shortcut: only a cached guild info filters, so a lookup never fails or waits on it.
-        let cached = self.guilds.lock().unwrap().get(&guild).cloned();
         let roles: Vec<i64> = member
             .iter()
             .flat_map(|m| &m.roles)
-            .filter(|r| cached.as_ref().is_none_or(|i| !i.unpermittable.contains(r)))
             .map(|r| r.get() as i64)
             .collect();
         permits::resolve(

@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tommybot_core::limits;
+use tommybot_core::{limits, permits};
 
 pub(crate) type Res = Result<Json<Value>, ApiError>;
 
@@ -469,6 +469,18 @@ pub(crate) async fn permit_roles_ok(
             "could not check that the permit roles are not handed out by Discord itself (Onboarding, linked roles, subscriptions), so the change was refused. Try again.".into(),
         )
     })?;
+    // Fresher than the bot's last read: every permit lookup skips these roles (Q5).
+    for (source, onboarding) in [
+        (permits::FROM_TAGS, false),
+        (permits::FROM_ONBOARDING, true),
+    ] {
+        let ids: Vec<i64> = bad
+            .iter()
+            .filter(|(_, why)| (**why == crate::discord::ONBOARDING_WHY) == onboarding)
+            .filter_map(|(r, _)| r.parse().ok())
+            .collect();
+        permits::set_unpermittable(&st.db, guild, source, &ids).await?;
+    }
     match added.iter().find_map(|r| Some((r, bad.get(r)?))) {
         Some((r, why)) => Err(ApiError::BadRequest(format!(
             "<@&{r}> cannot carry a permit: {why}, so anyone could get the permit. Put the permit on a staff role that only staff hand out."

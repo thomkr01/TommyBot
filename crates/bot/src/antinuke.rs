@@ -800,10 +800,10 @@ async fn guard_permit_roles(
     // Only weak permits (a link whitelist, say) are taken back too, but punish nobody: they hold
     // no moderation, dashboard or anti-nuke rights (Thomas, 11-13; bots get no exception).
     let weak = !roles.iter().any(|r| r.1);
-    if !weak && owner_dm_due(&mut OWNER_DMS.lock().unwrap(), key.clone()) {
+    if !weak && owner_dm_due(&mut OWNER_DMS.lock().unwrap(), (gid.get(), actor.get())) {
         let name = crate::reply::md(&crate::verify::guild_name(app, gid).await);
         let text = format!(
-            "**{name}**: <@{actor}> keeps giving {}, a role with a staff permit. TommyBot took it back {OWNER_DM_AFTER} times: only an Owner, Extra Owner or Trusted Admin gives permit roles. Move the permit to a staff role that only staff hand out. If the permit is meant for that bot itself, put it on the bot's own bot role (the role Discord made for it) as a bot permit.",
+            "**{name}**: <@{actor}> keeps giving out roles with a staff permit (last: {}). TommyBot took them back {OWNER_DM_AFTER} times: only an Owner, Extra Owner or Trusted Admin gives permit roles. If <@{actor}> should give these roles, make them an Extra Owner or Trusted Admin; else keep the permit on a staff role that only staff hand out. A bot (a reaction-role or level bot, say) cannot give permit roles: move the permit off the roles it hands out.",
             names.join(", ")
         );
         crate::reply::dm_owner(app, gid, &text).await;
@@ -850,22 +850,35 @@ async fn guard_permit_roles(
     .await
 }
 
-/// After this many take-backs of one (guild, actor, role set) with a staff permit, the owner gets
-/// one DM (Thomas, Q6: staff permits only).
+/// After this many take-backs by one (guild, actor) with a staff permit, the owner gets one DM
+/// (Thomas, Q6: staff permits only).
 const OWNER_DM_AFTER: u32 = 5;
-/// Take-backs per (guild, actor, sorted role set).
-type TakeBackCounts = HashMap<(u64, u64, Vec<i64>), u32>;
-static OWNER_DMS: std::sync::LazyLock<std::sync::Mutex<TakeBackCounts>> =
+/// Take-backs per (guild, actor), and the pairs whose owner was DMed already.
+#[derive(Default)]
+struct OwnerDms {
+    counts: HashMap<(u64, u64), u32>,
+    // shortcut: grows by one per DM sent and is never pruned; DMs are rare, prune if that changes.
+    sent: std::collections::HashSet<(u64, u64)>,
+}
+static OWNER_DMS: std::sync::LazyLock<std::sync::Mutex<OwnerDms>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Counts a take-back; true once, at the [`OWNER_DM_AFTER`]th. In memory: a restart may DM again.
-fn owner_dm_due(m: &mut TakeBackCounts, key: (u64, u64, Vec<i64>)) -> bool {
-    if m.len() > 10_000 {
-        m.clear();
+/// Counts a take-back; true once per (guild, actor), at the [`OWNER_DM_AFTER`]th. The size cap
+/// clears only the counts, so it never sends again. In memory: a restart may DM again.
+fn owner_dm_due(m: &mut OwnerDms, key: (u64, u64)) -> bool {
+    if m.sent.contains(&key) {
+        return false;
     }
-    let n = m.entry(key).or_insert(0);
+    if m.counts.len() > 10_000 {
+        m.counts.clear();
+    }
+    let n = m.counts.entry(key).or_insert(0);
     *n = n.saturating_add(1);
-    *n == OWNER_DM_AFTER
+    if *n < OWNER_DM_AFTER {
+        return false;
+    }
+    m.counts.remove(&key);
+    m.sent.insert(key)
 }
 
 /// How often a take-back of one (guild, actor, role set) is logged; repeats in between are counted.
@@ -2574,7 +2587,8 @@ async fn hold(app: &App, e: &AuditLogEntry, actor: Id<UserMarker>, punish: bool)
                 && crate::verify::given::may_verify(app, gid, actor).await
             {
                 // A failed grant falls back to the undo: the member stays held, not half verified.
-                match crate::verify::grant(app, gid, target, v).await {
+                // The guard reads the quarantine again: a real one since the read above holds.
+                match crate::verify::self_grant(app, gid, target, v).await {
                     Ok(()) => return Ok(()),
                     Err(err) => tracing::warn!(?err, "verifying by hand failed, undoing"),
                 }
@@ -3508,17 +3522,17 @@ mod tests {
         assert_eq!(take_back_log_due(&mut m, key(), later), None);
     }
 
-    /// Q6: the owner is DMed once, at the fifth take-back of one (guild, actor, role set).
+    /// Q6: the owner is DMed once, at the fifth take-back by one (guild, actor), whatever roles.
     #[test]
     fn the_owner_dm_comes_once_after_five_take_backs() {
-        let mut m = HashMap::new();
-        let key = || (1, 2, vec![3]);
-        let due: Vec<bool> = (0..7).map(|_| owner_dm_due(&mut m, key())).collect();
+        let mut m = OwnerDms::default();
+        let due: Vec<bool> = (0..7).map(|_| owner_dm_due(&mut m, (1, 2))).collect();
         assert_eq!(due, [false, false, false, false, true, false, false]);
-        assert!(
-            !owner_dm_due(&mut m, (1, 2, vec![4])),
-            "another set counts alone"
-        );
+        assert!(!owner_dm_due(&mut m, (1, 3)), "another actor counts alone");
+        // The size cap clears the counts, never the sent ones.
+        m.counts.extend((0..10_001).map(|i| ((9, i), 1)));
+        assert!(!owner_dm_due(&mut m, (9, 0)));
+        assert!((0..5).all(|_| !owner_dm_due(&mut m, (1, 2))), "never again");
     }
 
     #[test]

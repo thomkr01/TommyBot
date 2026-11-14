@@ -68,7 +68,15 @@ pub(crate) async fn check(
         }
         last.insert(key, new.clone());
     }
-    let r = rename(app, gid, user.id, roles, (name, &new), "Auto-dehoist").await;
+    let r = rename(
+        app,
+        gid,
+        (user.id, user.bot),
+        roles,
+        (name, &new),
+        "Auto-dehoist",
+    )
+    .await;
     if !matches!(r, Ok(None)) {
         app.dehoisted.lock().unwrap().remove(&key);
     }
@@ -84,7 +92,7 @@ pub(crate) const CAPPED: &str = "rename cap reached";
 pub(crate) async fn rename(
     app: &App,
     gid: Id<GuildMarker>,
-    uid: Id<UserMarker>,
+    (uid, bot): (Id<UserMarker>, bool),
     roles: &[Id<RoleMarker>],
     (old, new): (&str, &str),
     reason: &str,
@@ -101,7 +109,7 @@ pub(crate) async fn rename(
         info.owner.get() as i64,
         uid.get() as i64,
         &ids,
-        false,
+        bot,
     );
     if matches!(level.await?, Level::Owner | Level::ExtraOwner) {
         return Ok(Some("owner or Extra Owner"));

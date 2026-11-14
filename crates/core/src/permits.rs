@@ -505,7 +505,7 @@ pub async fn roles_with(pool: &sqlx::PgPool, guild_id: i64, perm: &str) -> sqlx:
 
 /// The member's permit: the highest-ranked one among `roles` (ties: the oldest), as
 /// (rank, perms, whitelist, limits). Only that permit counts, never a union of several; the bot
-/// and the dashboard both read it here (D72).
+/// and the dashboard both read it here (D72). A role in `unpermittable_roles` carries none (Q5).
 pub async fn top_permit(
     pool: &sqlx::PgPool,
     guild_id: i64,
@@ -513,12 +513,76 @@ pub async fn top_permit(
 ) -> sqlx::Result<Option<(i32, Vec<String>, Vec<String>, serde_json::Value)>> {
     sqlx::query_as(
         "SELECT p.rank, p.perms, p.whitelist, p.limits FROM permits p JOIN permit_roles r ON r.permit_id = p.id
-         WHERE p.guild_id = $1 AND r.role_id = ANY($2) ORDER BY p.rank DESC, p.id LIMIT 1",
+         WHERE p.guild_id = $1 AND r.role_id = ANY($2) AND NOT EXISTS (
+           SELECT 1 FROM unpermittable_roles u WHERE u.guild_id = $1 AND u.role_id = r.role_id)
+         ORDER BY p.rank DESC, p.id LIMIT 1",
     )
     .bind(guild_id)
     .bind(roles)
     .fetch_optional(pool)
     .await
+}
+
+/// `unpermittable_roles.source` for linked, subscription and purchase roles (their tags).
+pub const FROM_TAGS: &str = "tags";
+/// `unpermittable_roles.source` for roles an Onboarding prompt gives.
+pub const FROM_ONBOARDING: &str = "onboarding";
+
+/// Replaces the guild's roles from `source` that Discord hands out by itself (Thomas, Q5): every
+/// permit lookup ([`top_permit`]) skips them.
+pub async fn set_unpermittable(
+    pool: &sqlx::PgPool,
+    guild_id: i64,
+    source: &str,
+    roles: &[i64],
+) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM unpermittable_roles WHERE guild_id = $1 AND source = $2 AND role_id <> ALL($3)",
+    )
+    .bind(guild_id)
+    .bind(source)
+    .bind(roles)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO unpermittable_roles (guild_id, role_id, source)
+         SELECT $1, unnest($3::bigint[]), $2 ON CONFLICT DO NOTHING",
+    )
+    .bind(guild_id)
+    .bind(source)
+    .bind(roles)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}
+
+/// Stored unpermittable roles that carry a permit and were not reported yet, marked reported now.
+pub async fn unreported_unpermittable(
+    pool: &sqlx::PgPool,
+    guild_id: i64,
+) -> sqlx::Result<Vec<i64>> {
+    let mut ids: Vec<i64> = sqlx::query_scalar(
+        "UPDATE unpermittable_roles u SET reported = true
+         WHERE guild_id = $1 AND NOT reported AND EXISTS (
+           SELECT 1 FROM permit_roles r JOIN permits p ON p.id = r.permit_id
+           WHERE p.guild_id = $1 AND r.role_id = u.role_id)
+         RETURNING role_id",
+    )
+    .bind(guild_id)
+    .fetch_all(pool)
+    .await?;
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// The roles an Onboarding prompt gives, from Discord's `GET /guilds/{id}/onboarding` JSON.
+pub fn onboarding_roles(v: &serde_json::Value) -> Vec<i64> {
+    let prompts = v["prompts"].as_array().into_iter().flatten();
+    let options = prompts.filter_map(|p| p["options"].as_array()).flatten();
+    let ids = options.filter_map(|o| o["role_ids"].as_array()).flatten();
+    ids.filter_map(|id| id.as_str()?.parse().ok()).collect()
 }
 
 /// Resolves a member's level from the DB. `roles` are the member's role ids. A `bot` account is

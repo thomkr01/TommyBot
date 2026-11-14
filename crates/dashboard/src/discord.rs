@@ -7,6 +7,9 @@ use tommybot_automod::lockdown::VIEW_CHANNEL;
 /// How long owner and member lookups are reused, so page loads do not drain the bot's rate limit.
 const MEMO_TTL: Duration = Duration::from_secs(30);
 const ADMINISTRATOR: u64 = 1 << 3;
+/// [`Discord::unpermittable_roles`]'s reason for a role an Onboarding prompt gives.
+pub(crate) const ONBOARDING_WHY: &str =
+    "Discord Onboarding gives it to anyone who picks that answer";
 
 #[derive(Clone)]
 pub struct Discord {
@@ -204,16 +207,11 @@ impl Discord {
             out.insert(r["id"].as_str().unwrap_or_default().to_string(), why);
         }
         let onboarding = self.memo_get(format!("/guilds/{guild}/onboarding")).await?;
-        let prompts = onboarding
+        let ids = onboarding
             .iter()
-            .filter_map(|o| o["prompts"].as_array())
-            .flatten();
-        let options = prompts.filter_map(|p| p["options"].as_array()).flatten();
-        for id in options.filter_map(|o| o["role_ids"].as_array()).flatten() {
-            if let Some(id) = id.as_str() {
-                out.entry(id.to_string())
-                    .or_insert("Discord Onboarding gives it to anyone who picks that answer");
-            }
+            .flat_map(tommybot_core::permits::onboarding_roles);
+        for id in ids {
+            out.entry(id.to_string()).or_insert(ONBOARDING_WHY);
         }
         Ok(out)
     }
@@ -315,6 +313,14 @@ impl Discord {
                 .filter_map(|r| r.as_str().map(String::from))
                 .collect()
         }))
+    }
+
+    /// Whether the member is a bot account, from the same memoized lookup as [`Discord::member`].
+    pub async fn member_is_bot(&self, guild: i64, user: &str) -> Result<bool> {
+        let m = self
+            .memo_get(format!("/guilds/{guild}/members/{user}"))
+            .await?;
+        Ok(m.is_some_and(|m| m["user"]["bot"].as_bool() == Some(true)))
     }
 
     /// Whether `ch` is in `guild` and hidden from @everyone, the bot's rule for log channels.

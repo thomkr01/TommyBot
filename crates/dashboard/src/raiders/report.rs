@@ -72,6 +72,7 @@ pub(super) async fn report(
         members,
         days_with_bot: days,
         roles: &roles,
+        bot: st.discord.member_is_bot(guild, &user.to_string()).await?,
         protected: [
             id(st.discord.bot_id().await?)?,
             id(st.discord.bot_owner().await?)?,

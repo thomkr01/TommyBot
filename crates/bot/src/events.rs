@@ -528,7 +528,10 @@ async fn run(app: &App, ev: &Event, extra: Extra) -> Result<()> {
         }
         Event::GuildUpdate(g) => {
             app.invalidate_guild(g.id);
-            crate::owner::owner_seen(app, g.id, g.owner_id).await?
+            crate::owner::owner_seen(app, g.id, g.owner_id).await?;
+            if let Err(e) = app.sync_unpermittable(g.id).await {
+                tracing::warn!(?e, "reading the roles Discord hands out failed");
+            }
         }
         Event::GuildCreate(g) => crate::welcome::on_guild_create(app, g).await?,
         Event::AutoModerationRuleCreate(r) => {

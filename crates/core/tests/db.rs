@@ -27,6 +27,7 @@ async fn cleanup(p: &PgPool, g: i64) {
         "permit_roles",
         "permits",
         "quarantines",
+        "unpermittable_roles",
     ] {
         let sql = format!("DELETE FROM {t} WHERE guild_id = $1");
         sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
@@ -275,6 +276,53 @@ async fn permits_resolve_levels() {
             .await
             .unwrap(),
         Level::None
+    );
+    cleanup(&p, g).await;
+}
+
+/// Q5: a role Discord hands out (linked, subscription, Onboarding) carries no permit in any
+/// lookup, and a permit on one is reported once.
+#[tokio::test]
+async fn unpermittable_roles_carry_no_permit() {
+    let Some(p) = pool().await else { return };
+    let g = gid(60);
+    cleanup(&p, g).await;
+    permit(&p, g, "high", 4, &["ban"], 301).await;
+    permit(&p, g, "low", 1, &["kick"], 302).await;
+    permits::set_unpermittable(&p, g, permits::FROM_ONBOARDING, &[301, 303])
+        .await
+        .unwrap();
+    permits::set_unpermittable(&p, g, permits::FROM_TAGS, &[301])
+        .await
+        .unwrap();
+    let top = permits::top_permit(&p, g, &[301, 302]).await.unwrap();
+    assert_eq!(top.unwrap().1, vec!["kick".to_owned()], "301 is skipped");
+    assert_eq!(
+        permits::resolve(&p, g, 1, 2, &[301], true).await.unwrap(),
+        Level::None
+    );
+    assert_eq!(
+        permits::unreported_unpermittable(&p, g).await.unwrap(),
+        [301]
+    );
+    assert!(
+        permits::unreported_unpermittable(&p, g)
+            .await
+            .unwrap()
+            .is_empty(),
+        "once"
+    );
+    // Off Onboarding, still tagged: still skipped. Off both: the permit counts again.
+    permits::set_unpermittable(&p, g, permits::FROM_ONBOARDING, &[])
+        .await
+        .unwrap();
+    assert_eq!(permits::top_permit(&p, g, &[301]).await.unwrap(), None);
+    permits::set_unpermittable(&p, g, permits::FROM_TAGS, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        permits::top_permit(&p, g, &[301]).await.unwrap().unwrap().0,
+        4
     );
     cleanup(&p, g).await;
 }

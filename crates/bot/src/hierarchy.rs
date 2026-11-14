@@ -13,6 +13,8 @@ use twilight_model::{
     },
 };
 
+use tommybot_core::permits;
+
 use crate::app::App;
 
 const TTL: Duration = Duration::from_secs(300);
@@ -25,7 +27,7 @@ pub struct GuildInfo {
     /// Bot, booster and integration roles: Discord hands these out itself.
     pub managed: HashSet<Id<RoleMarker>>,
     /// Linked roles and server subscription or purchase roles: Discord gives them, so they carry
-    /// no permit (Q5). Onboarding roles are not marked by Discord and are refused at save only.
+    /// no permit (Q5; [`App::sync_unpermittable`] stores them with Onboarding's).
     pub unpermittable: HashSet<Id<RoleMarker>>,
     /// Channel -> its category (threads are not listed).
     pub parents: HashMap<Id<ChannelMarker>, Id<ChannelMarker>>,
@@ -112,6 +114,47 @@ impl App {
         });
         self.guilds.lock().unwrap().insert(gid, info.clone());
         Ok(info)
+    }
+
+    /// Q5 (Thomas 11-14), at GuildCreate and GuildUpdate: stores the roles Discord hands out by
+    /// itself (linked, subscription and purchase roles, and Onboarding's), which carry no permit
+    /// in any lookup, and logs once each such role that has a permit. A failed Onboarding read
+    /// keeps the Onboarding roles stored before.
+    pub async fn sync_unpermittable(&self, gid: Id<GuildMarker>) -> Result<()> {
+        let g = gid.get() as i64;
+        let tags: Vec<i64> = (self.guild_info(gid).await?.unpermittable.iter())
+            .map(|r| r.get() as i64)
+            .collect();
+        permits::set_unpermittable(&self.pool, g, permits::FROM_TAGS, &tags).await?;
+        let onboarding = match self.http.guild_onboarding(gid).await {
+            Ok(r) => serde_json::from_slice(&r.bytes().await?)
+                .map(|v| permits::onboarding_roles(&v))
+                .map_err(anyhow::Error::from),
+            // No Onboarding set up.
+            Err(e) if crate::http_err::gone(&e) => Ok(vec![]),
+            Err(e) => Err(e.into()),
+        };
+        if let Ok(ids) = &onboarding {
+            permits::set_unpermittable(&self.pool, g, permits::FROM_ONBOARDING, ids).await?;
+        }
+        let held = permits::unreported_unpermittable(&self.pool, g).await?;
+        if !held.is_empty() {
+            let names: Vec<String> = held.iter().map(|r| format!("<@&{r}>")).collect();
+            let log = tommybot_logging::Log::new("Anti Nuke", tommybot_logging::embed::ALERT)
+                .text("**A permit is on a role Discord hands out**")
+                .line("Roles", &names.join(", "))
+                .line(
+                    "Effect",
+                    "the permit is ignored for these roles: Discord gives them through Onboarding, a linked role or a server subscription, so anyone could get the permit. It counts again once the role is no longer handed out that way; else put the permit on a staff role that only staff hand out.",
+                );
+            if let Err(e) =
+                crate::events::send_log(self, gid.get(), tommybot_logging::LogKind::AntiNuke, log)
+                    .await
+            {
+                tracing::warn!(?e, %gid, "ignored permit log failed");
+            }
+        }
+        onboarding.map(drop)
     }
 
     pub fn invalidate_guild(&self, gid: Id<GuildMarker>) {

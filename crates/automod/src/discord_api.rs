@@ -477,7 +477,8 @@ fn on_discord(words: &[String], regex: &[String]) -> (Vec<bool>, Vec<bool>) {
 }
 
 /// The keyword rule Discord holds (its JSON, or twilight's model of it) is the whole rule the bot
-/// would send for these lists: trigger, actions, switch and exemptions, order and keyword case aside.
+/// would send for these lists: trigger, actions, switch and exemptions, order, repeats and keyword
+/// case aside.
 pub fn rule_matches(
     words: &[String],
     regex: &[String],
@@ -486,14 +487,25 @@ pub fn rule_matches(
 ) -> bool {
     let fold = |v: &Value| {
         let mut v = v.clone();
-        for k in ["keyword_filter", "regex_patterns"] {
+        // Discord folds keyword case, never regex case; a repeated entry decides nothing.
+        for (k, lower) in [("keyword_filter", true), ("regex_patterns", false)] {
             let l = &mut v["trigger_metadata"][k];
-            *l = l
+            let mut list: Vec<String> = l
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|x| Some(json!(x.as_str()?.to_lowercase())))
+                .filter_map(|x| x.as_str())
+                .map(|x| {
+                    if lower {
+                        x.to_lowercase()
+                    } else {
+                        x.to_string()
+                    }
+                })
                 .collect();
+            list.sort();
+            list.dedup();
+            *l = json!(list);
         }
         rule_fingerprint(&v)
     };
@@ -773,6 +785,18 @@ mod tests {
             changed("exempt_channels", json!(["9"])),
             "a channel exempted in Discord"
         );
+        let mut twice = held.clone();
+        twice["trigger_metadata"]["keyword_filter"] = json!(["bad", "BAD"]);
+        assert!(
+            rule_matches(&w, &[], &roles, &twice),
+            "a repeat decides nothing"
+        );
+        let re = |held_re: &str| {
+            let mut r = held.clone();
+            r["trigger_metadata"]["regex_patterns"] = json!([held_re]);
+            rule_matches(&w, &["(?i)Ab".to_string()], &roles, &r)
+        };
+        assert!(re("(?i)Ab") && !re("(?i)ab"), "regex case counts");
         assert!(changed(
             "actions",
             json!([{"type": 1}, {"type": 3, "metadata": {"duration_seconds": 60}}])

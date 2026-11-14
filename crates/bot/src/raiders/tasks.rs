@@ -100,7 +100,7 @@ pub async fn check_job(app: &App, gid: Id<GuildMarker>, p: &Value) -> Result<()>
         return Ok(());
     };
     let roles: Vec<i64> = m.roles.iter().map(|r| r.get() as i64).collect();
-    alert_member(app, gid, user, &roles, &entry).await
+    alert_member(app, gid, user, (&roles, m.user.bot), &entry).await
 }
 
 /// `raider_scan`: once when a server turns the list on, every member is checked, alert only.
@@ -132,7 +132,7 @@ pub async fn scan_job(app: &App, gid: Id<GuildMarker>) -> Result<()> {
         {
             if let Some(entry) = listed(app, c, m.user.id).await? {
                 let roles: Vec<i64> = m.roles.iter().map(|r| r.get() as i64).collect();
-                alert_member(app, gid, m.user.id, &roles, &entry).await?;
+                alert_member(app, gid, m.user.id, (&roles, m.user.bot), &entry).await?;
             }
         }
         match page.last() {

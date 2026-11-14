@@ -1425,7 +1425,21 @@ mod tests {
         }
         let keep = |e: &'static str| keep_staff(&st, &s, g, &c, Some(e));
         let _ = keep("ta:12").await.unwrap();
+        // The kept permit role reaches the bot (its keyword rule exemptions) as a config change.
+        let mut l = sqlx::postgres::PgListener::connect_with(&st.db)
+            .await
+            .unwrap();
+        l.listen("config_changed").await.unwrap();
         let _ = keep("role:20:Admins").await.unwrap();
+        let heard = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let n = l.recv().await.unwrap();
+                if n.payload().starts_with(&format!("{g}:")) {
+                    break;
+                }
+            }
+        });
+        assert!(heard.await.is_ok(), "config_changed sent");
         let _ = keep("qw:14").await.unwrap();
         let qw: Value = sqlx::query_scalar("select config->'antinuke'->'quarantine_whitelist' from guild_config where guild_id = $1 order by version desc limit 1")
             .bind(g).fetch_one(&st.db).await.unwrap();
